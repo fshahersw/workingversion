@@ -15,6 +15,7 @@ import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/
 import { Route as AuthLogoutRouteImport } from './routes/auth.logout'
 import { Route as AuthLoginRouteImport } from './routes/auth.login'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
+import { Route as ApiUploadRouteImport } from './routes/api/upload'
 import { Route as ApiSummarizeRouteImport } from './routes/api/summarize'
 import { Route as ApiQuickAskRouteImport } from './routes/api/quick-ask'
 import { Route as ApiOrchestrateRouteImport } from './routes/api/orchestrate'
@@ -88,6 +89,11 @@ const AuthCallbackRoute = AuthCallbackRouteImport.update({
   id: '/callback',
   path: '/callback',
   getParentRoute: () => AuthRoute,
+} as any)
+const ApiUploadRoute = ApiUploadRouteImport.update({
+  id: '/api/upload',
+  path: '/api/upload',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const ApiSummarizeRoute = ApiSummarizeRouteImport.update({
   id: '/api/summarize',
@@ -339,6 +345,7 @@ export interface FileRoutesByFullPath {
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
+  '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
@@ -389,6 +396,7 @@ export interface FileRoutesByTo {
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
+  '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
@@ -442,6 +450,7 @@ export interface FileRoutesById {
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
+  '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
@@ -496,6 +505,7 @@ export interface FileRouteTypes {
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
+    | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
@@ -546,6 +556,7 @@ export interface FileRouteTypes {
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
+    | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
@@ -598,6 +609,7 @@ export interface FileRouteTypes {
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
+    | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
@@ -643,6 +655,7 @@ export interface RootRouteChildren {
   ApiOrchestrateRoute: typeof ApiOrchestrateRoute
   ApiQuickAskRoute: typeof ApiQuickAskRoute
   ApiSummarizeRoute: typeof ApiSummarizeRoute
+  ApiUploadRoute: typeof ApiUploadRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
   ApiPileAskRoute: typeof ApiPileAskRoute
   ApiPileOcrRoute: typeof ApiPileOcrRoute
@@ -704,6 +717,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/auth/callback'
       preLoaderRoute: typeof AuthCallbackRouteImport
       parentRoute: typeof AuthRoute
+    }
+    '/api/upload': {
+      id: '/api/upload'
+      path: '/api/upload'
+      fullPath: '/api/upload'
+      preLoaderRoute: typeof ApiUploadRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/api/summarize': {
       id: '/api/summarize'
@@ -1163,6 +1183,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiOrchestrateRoute: ApiOrchestrateRoute,
   ApiQuickAskRoute: ApiQuickAskRoute,
   ApiSummarizeRoute: ApiSummarizeRoute,
+  ApiUploadRoute: ApiUploadRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
   ApiPileAskRoute: ApiPileAskRoute,
   ApiPileOcrRoute: ApiPileOcrRoute,

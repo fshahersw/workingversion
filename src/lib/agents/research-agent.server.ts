@@ -81,6 +81,12 @@ function scopeBlock(input: OrchestrateInput): string {
   return `MATTER SCOPE\nThe attorney scoped this session to: ${input.matter.label} (matter_id: ${input.matter.matter_id}). Default docket/document searches to this matter unless the question clearly concerns others.\n\n`;
 }
 
+function attachmentsBlock(input: OrchestrateInput): string {
+  const files = (input.attachments ?? []).filter(Boolean);
+  if (!files.length) return "";
+  return `UPLOADED FILES\nThe attorney uploaded these files into your code sandbox this session, readable by run_python via their relative filename: ${files.join(", ")}. When the question concerns their contents (parse, compute, chart, summarize, convert), open them with run_python (e.g. pandas.read_csv/read_excel, open()) rather than guessing.\n\n`;
+}
+
 export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Promise<void> {
   const runId = crypto.randomUUID();
   const runStart = Date.now();
@@ -102,7 +108,9 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // thanks -> full 18-call tool loop". Conservative by design: only an
     // unmistakable social/meta phrasing with no legal signal lands here.
     const rawDecision = classifyEffort(input.query, memory.tail.length);
-    if (rawDecision.mode === "conversational") {
+    // An explicit Fast/Think selection means the attorney wants the tool loop —
+    // skip the no-tool conversational path even for greeting-shaped inputs.
+    if (rawDecision.mode === "conversational" && !input.forceMode) {
       emit("mode", { mode: "conversational", reason: rawDecision.reason });
       agentLog("run_start", { run: runId, engine: "conversational", q: trunc(input.query, 200) });
       let convo = "";
@@ -157,9 +165,10 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // here (a resolved follow-up is a real question). FAST = tighter budget,
     // THINK = the validated full loop, ambiguous defaults to THINK.
     const decision = classifyEffort(resolved.query, history.length);
-    const mode: EffortMode = decision.mode === "conversational" ? "fast" : decision.mode;
+    const autoMode: EffortMode = decision.mode === "conversational" ? "fast" : decision.mode;
+    const mode: EffortMode = input.forceMode ?? autoMode;
     const cfg = modeConfig(mode);
-    emit("mode", { mode, reason: decision.reason });
+    emit("mode", { mode, reason: input.forceMode ? `${mode} mode (selected)` : decision.reason });
 
     emit("round", {
       round: 1,
@@ -198,7 +207,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
           {
             model: RESEARCH_MODEL,
             system: researchAgentPrompt(),
-            user: `${scopeBlock(input)}${historyPreamble}${contextBlock ? `${contextBlock}\n\n---\n\n` : ""}QUESTION\n${resolved.query}\n\nResearch this with your tools (narrate one line before each batch, call them in parallel where independent), then write the final answer for the attorney.`,
+            user: `${scopeBlock(input)}${attachmentsBlock(input)}${historyPreamble}${contextBlock ? `${contextBlock}\n\n---\n\n` : ""}QUESTION\n${resolved.query}\n\nResearch this with your tools (narrate one line before each batch, call them in parallel where independent), then write the final answer for the attorney.`,
             tools: RESEARCH_TOOLS,
             maxTokens: 2000,
             maxSteps: cfg.maxSteps,

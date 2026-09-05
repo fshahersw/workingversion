@@ -252,7 +252,11 @@ export function useChat(sessionId: string) {
   messagesRef.current = messages;
 
   const send = useCallback(
-    async (text: string, matter?: MatterScope | null) => {
+    async (
+      text: string,
+      matter?: MatterScope | null,
+      opts?: { mode?: "auto" | "fast" | "think"; attachments?: string[] },
+    ) => {
       if (busy || !text.trim()) return;
       const uid = crypto.randomUUID();
       const aid = crypto.randomUUID();
@@ -357,6 +361,8 @@ export function useChat(sessionId: string) {
             ...(matter
               ? { matter_id: matter.matterId, matter_label: matter.label }
               : {}),
+            ...(opts?.mode && opts.mode !== "auto" ? { mode: opts.mode } : {}),
+            ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
           },
           (evt) => {
             if (evt.event === "delta") {

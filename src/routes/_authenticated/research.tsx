@@ -116,7 +116,8 @@ function ResearchPage() {
   );
 
   const sendScoped = useCallback(
-    (text: string) => send(text, matter),
+    (text: string, opts?: { mode?: "auto" | "fast" | "think"; attachments?: string[] }) =>
+      send(text, matter, opts),
     [send, matter],
   );
 

@@ -73,6 +73,12 @@ export type OrchestrateInput = {
   signal?: AbortSignal;
   /** When set, the session is scoped to one matter's corpus/docket. */
   matter?: { matter_id: string; label: string };
+  /** Attorney-selected effort mode. Overrides the automatic classifier and
+   *  bypasses the conversational short-circuit (an explicit choice wins). */
+  forceMode?: "fast" | "think";
+  /** Filenames the attorney uploaded into the code-interpreter sandbox this
+   *  session — available to run_python by name. */
+  attachments?: string[];
 };
 
 /**

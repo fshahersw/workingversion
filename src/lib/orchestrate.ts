@@ -81,6 +81,10 @@ export function streamOrchestrate(
     stream?: boolean;
     matter_id?: string;
     matter_label?: string;
+    /** Attorney-selected effort. "auto" (default) lets the classifier decide. */
+    mode?: "auto" | "fast" | "think";
+    /** Filenames already uploaded into the sandbox this session. */
+    attachments?: string[];
   },
   onEvent: (e: SSEEvent) => void,
   signal?: AbortSignal,
@@ -118,6 +122,49 @@ export function streamQuickAsk(
   );
 }
 
+
+/** Read a File as raw base64 (no data: prefix). */
+function fileToB64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read failed"));
+    reader.onload = () => {
+      const res = String(reader.result ?? "");
+      resolve(res.replace(/^data:[^;]*;base64,/, ""));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Upload a file into the code-interpreter sandbox; resolves to the sanitized
+ *  name the sandbox stored it under (reference it in run_python by that name). */
+export async function uploadFile(
+  file: File,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; name: string; error?: string }> {
+  try {
+    const b64 = await fileToB64(file);
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${SUPABASE_ANON}`,
+      },
+      body: JSON.stringify({ name: file.name, b64, mime: file.type }),
+      signal,
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      name?: string;
+      error?: string;
+    };
+    if (!res.ok || !data.ok)
+      return { ok: false, name: file.name, error: data.error ?? `HTTP ${res.status}` };
+    return { ok: true, name: data.name ?? file.name };
+  } catch (err) {
+    return { ok: false, name: file.name, error: err instanceof Error ? err.message : "upload failed" };
+  }
+}
 
 export async function fetchFollowups(
   query: string,

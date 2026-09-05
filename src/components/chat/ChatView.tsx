@@ -4,9 +4,14 @@ import {
   ArrowUp,
   Loader2,
   Mic,
+  Paperclip,
   ShieldCheck,
   Square,
   SquarePen,
+  X,
+  Zap,
+  Brain,
+  Sparkles,
 } from "lucide-react";
 import {
   useCallback,
@@ -21,6 +26,7 @@ import { MatterScopePicker } from "@/components/matters/MatterScopePicker";
 import { factCheck, kindLabel, unverified } from "@/lib/fact-check";
 import { sentencesForRef } from "@/lib/highlight";
 import { useDictation } from "@/lib/use-dictation";
+import { uploadFile } from "@/lib/orchestrate";
 import type { MatterScope, Message } from "@/lib/chat-types";
 import { AgentTimeline } from "./AgentTimeline";
 import { ConversationHistory } from "./ConversationHistory";
@@ -31,6 +37,19 @@ import { ReasoningStream } from "./ReasoningStream";
 import { AnswerActions } from "./AnswerActions";
 import { WorkspaceRail } from "./WorkspaceRail";
 
+
+type ComposerMode = "auto" | "fast" | "think";
+
+const MODE_OPTIONS: {
+  id: ComposerMode;
+  label: string;
+  icon: typeof Zap;
+  hint: string;
+}[] = [
+  { id: "auto", label: "Auto", icon: Sparkles, hint: "Let the agent pick depth" },
+  { id: "fast", label: "Fast", icon: Zap, hint: "Quick answer, fewer sources" },
+  { id: "think", label: "Think", icon: Brain, hint: "Deep research, full tool loop" },
+];
 
 const MIN_LEFT = 45;
 const MAX_LEFT = 75;
@@ -51,7 +70,10 @@ export function ChatView({
 }: {
   messages: Message[];
   busy: boolean;
-  onSend: (text: string) => void;
+  onSend: (
+    text: string,
+    opts?: { mode?: "auto" | "fast" | "think"; attachments?: string[] },
+  ) => void;
   onNewChat: () => void;
   sessionId: string;
   matter: MatterScope | null;
@@ -391,9 +413,9 @@ export function ChatView({
               <ChatComposer
                 value={composer}
                 onChange={setComposer}
-                onSubmit={(t) => {
+                onSubmit={(t, opts) => {
                   setComposer("");
-                  onSend(t);
+                  onSend(t, opts);
                 }}
 
                 busy={busy}
@@ -523,7 +545,7 @@ function ChatComposer({
 }: {
   value: string;
   onChange: (v: string) => void;
-  onSubmit: (v: string) => void;
+  onSubmit: (v: string, opts: { mode: ComposerMode; attachments: string[] }) => void;
   busy: boolean;
   onNewChat: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -532,6 +554,38 @@ function ChatComposer({
   onOpenConversation: (id: string) => void;
   conversationId: string | null;
 }) {
+  const [mode, setMode] = useState<ComposerMode>("auto");
+  // Files uploaded into the sandbox this session; referenced by name in run_python.
+  const [files, setFiles] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const submit = useCallback(
+    (v: string) => {
+      if (!v.trim() || busy) return;
+      onSubmit(v, { mode, attachments: files });
+    },
+    [onSubmit, mode, files, busy],
+  );
+
+  const handleFiles = useCallback(async (list: FileList | null) => {
+    if (!list || !list.length) return;
+    setUploadError(null);
+    setUploading(true);
+    try {
+      for (const file of Array.from(list)) {
+        const res = await uploadFile(file);
+        if (res.ok) {
+          setFiles((prev) => (prev.includes(res.name) ? prev : [...prev, res.name]));
+        } else {
+          setUploadError(`${file.name}: ${res.error ?? "upload failed"}`);
+        }
+      }
+    } finally {
+      setUploading(false);
+    }
+  }, []);
   const dictation = useDictation((text) => {
     const sep = value && !value.endsWith(" ") ? " " : "";
     const next = value + sep + text;
@@ -591,11 +645,49 @@ function ChatComposer({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (!value.trim() || busy) return;
-        onSubmit(value);
+        submit(value);
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (!busy) void handleFiles(e.dataTransfer?.files ?? null);
       }}
       className="relative flex w-full flex-col rounded-lg border border-border bg-card/95 shadow-[0_8px_28px_-14px_rgba(31,42,94,0.22)] backdrop-blur-md transition-all focus-within:border-primary/40 focus-within:shadow-[0_12px_32px_-16px_rgba(31,42,94,0.28)]"
     >
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          void handleFiles(e.target.files);
+          e.target.value = ""; // allow re-selecting the same file
+        }}
+      />
+      {files.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 px-2.5 pt-2">
+          {files.map((name) => (
+            <span
+              key={name}
+              className="inline-flex max-w-[14rem] items-center gap-1 rounded-md border border-border/70 bg-muted/50 py-0.5 pl-2 pr-1 text-[11.5px] text-foreground/80"
+            >
+              <Paperclip className="h-3 w-3 shrink-0 text-brand-navy/60" />
+              <span className="truncate">{name}</span>
+              <button
+                type="button"
+                onClick={() => setFiles((prev) => prev.filter((f) => f !== name))}
+                className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                aria-label={`Remove ${name}`}
+                title="Remove"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex items-end gap-1.5 px-2.5 pt-2">
         <textarea
           ref={textareaRef}
@@ -604,8 +696,7 @@ function ChatComposer({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              if (!value.trim() || busy) return;
-              onSubmit(value);
+              submit(value);
             }
           }}
           rows={1}
@@ -633,13 +724,29 @@ function ChatComposer({
         </button>
       </div>
       <div className="mt-1 flex items-center gap-1 border-t border-border/60 px-2 py-1.5">
+        <ModeToggle mode={mode} onChange={setMode} disabled={busy} />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={busy || uploading}
+          title="Upload file(s) — usable by the code interpreter"
+          aria-label="Upload files"
+          className="flex h-8 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-brand-navy disabled:opacity-50"
+        >
+          {uploading ? (
+            <Loader2 className="h-[15px] w-[15px] animate-spin" />
+          ) : (
+            <Paperclip className="h-[15px] w-[15px]" strokeWidth={1.85} />
+          )}
+          <span className="hidden sm:inline">Upload</span>
+        </button>
+        <span className="mx-0.5 h-4 w-px bg-border/70" />
+        <MicButton dictation={dictation} />
         <MatterScopePicker
           value={matter}
           onChange={onMatterChange}
           disabled={busy}
         />
-        <span className="mx-0.5 h-4 w-px bg-border/70" />
-        <MicButton dictation={dictation} />
         <button
           type="button"
           onClick={onNewChat}
@@ -654,12 +761,54 @@ function ChatComposer({
           onOpen={onOpenConversation}
         />
       </div>
-      {dictation.error && (
+      {(dictation.error || uploadError) && (
         <div className="pb-2 text-center text-[11px] text-destructive">
-          {dictation.error}
+          {uploadError ?? dictation.error}
         </div>
       )}
     </form>
+  );
+}
+
+function ModeToggle({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: ComposerMode;
+  onChange: (m: ComposerMode) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5"
+      role="radiogroup"
+      aria-label="Research mode"
+    >
+      {MODE_OPTIONS.map((opt) => {
+        const Icon = opt.icon;
+        const active = mode === opt.id;
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            disabled={disabled}
+            onClick={() => onChange(opt.id)}
+            title={opt.hint}
+            className={`flex h-7 items-center gap-1 rounded px-2 text-[12px] font-medium transition-colors disabled:opacity-50 ${
+              active
+                ? "bg-card text-brand-navy shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Icon className="h-3.5 w-3.5" strokeWidth={2} />
+            <span className="hidden sm:inline">{opt.label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

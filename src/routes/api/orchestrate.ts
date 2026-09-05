@@ -21,6 +21,8 @@ export const Route = createFileRoute("/api/orchestrate")({
           memory?: unknown;
           matter_id?: string;
           matter_label?: string;
+          mode?: string;
+          attachments?: string[];
         } = {};
         try {
           body = (await request.json()) as typeof body;
@@ -31,6 +33,11 @@ export const Route = createFileRoute("/api/orchestrate")({
         if (!query) return new Response("query is required", { status: 400 });
         const matterId = (body.matter_id ?? "").trim();
         const matterLabel = (body.matter_label ?? "").trim();
+        // "auto" (or anything else) leaves the automatic classifier in charge.
+        const forceMode = body.mode === "fast" || body.mode === "think" ? body.mode : undefined;
+        const attachments = Array.isArray(body.attachments)
+          ? body.attachments.filter((a): a is string => typeof a === "string" && a.length > 0).slice(0, 20)
+          : undefined;
 
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
@@ -53,6 +60,8 @@ export const Route = createFileRoute("/api/orchestrate")({
                   history: body.history,
                   memory: body.memory,
                   signal: request.signal,
+                  ...(forceMode ? { forceMode } : {}),
+                  ...(attachments && attachments.length ? { attachments } : {}),
                   ...(matterId
                     ? {
                         matter: {

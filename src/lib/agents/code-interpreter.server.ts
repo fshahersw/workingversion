@@ -154,6 +154,19 @@ export async function writeFile(path: string, text: string): Promise<void> {
   seenFiles.add(norm(path)); // an upload, not a run_python output — don't surface it
 }
 
+/** Write a BINARY file (base64 payload) into the sandbox. The writeFiles tool
+ *  is text-only, so decode via run_python. Use for uploads like xlsx/pdf/images.
+ *  RELATIVE path only (absolute paths are rejected as traversal). */
+export async function writeFileB64(path: string, b64: string): Promise<void> {
+  await baseline();
+  const p = norm(path);
+  // base64 has no quotes/newlines from btoa, so a triple-quoted literal is safe.
+  const code = `import base64\nopen(${JSON.stringify(p)},'wb').write(base64.b64decode("""${b64}"""))\nprint('WROTE',${JSON.stringify(p)})`;
+  const { text, isError } = await invokeOnce(code);
+  if (isError) throw new Error(`writeFileB64 failed: ${text.slice(0, 200)}`);
+  seenFiles.add(p); // an upload, not an output
+}
+
 /** Download a file from the sandbox as base64 (binary-safe), via run_python — the
  *  dedicated readFiles tool's arg shape is unreliable and this handles binary
  *  (xlsx/docx/pdf/png) cleanly. Returns null if the file is missing. */
