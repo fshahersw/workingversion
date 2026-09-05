@@ -18,6 +18,7 @@ type Action =
   | { type: "sse"; id: string; evt: SSEEvent }
   | { type: "delta_flush"; id: string; text: string }
   | { type: "thinking"; id: string; text: string }
+  | { type: "reasoning"; id: string; text: string }
   | { type: "followups"; id: string; followups: string[] }
   | { type: "hydrate"; messages: Message[] }
   | { type: "reset" };
@@ -61,6 +62,12 @@ function reduce(state: Message[], a: Action): Message[] {
       return state.map((m) =>
         m.id === a.id && m.role === "assistant"
           ? { ...m, thinking: (m.thinking ?? "") + a.text }
+          : m,
+      );
+    case "reasoning":
+      return state.map((m) =>
+        m.id === a.id && m.role === "assistant"
+          ? { ...m, reasoning: (m.reasoning ?? "") + a.text }
           : m,
       );
     case "sse":
@@ -278,6 +285,26 @@ export function useChat(sessionId: string) {
         }
       };
 
+      // Same RAF batching for the model's live reasoning stream.
+      let reasonBuf = "";
+      let reasonScheduled = false;
+      const flushReason = () => {
+        reasonScheduled = false;
+        if (!reasonBuf) return;
+        const t = reasonBuf;
+        reasonBuf = "";
+        dispatch({ type: "reasoning", id: aid, text: t });
+      };
+      const scheduleReason = () => {
+        if (reasonScheduled) return;
+        reasonScheduled = true;
+        if (typeof requestAnimationFrame !== "undefined") {
+          requestAnimationFrame(flushReason);
+        } else {
+          setTimeout(flushReason, 40);
+        }
+      };
+
       try {
         // First turn (or a memory the server has not built yet): fall back to
         // the last couple of turns verbatim so context is never empty.
@@ -331,6 +358,14 @@ export function useChat(sessionId: string) {
               }
               return;
             }
+            if (evt.event === "reasoning") {
+              const d = (evt.data ?? {}) as { text?: string };
+              if (d.text) {
+                reasonBuf += d.text;
+                scheduleReason();
+              }
+              return;
+            }
             if (evt.event === "memory") {
               const d = (evt.data ?? {}) as { memory?: unknown };
               if (d.memory) memoryRef.current = d.memory;
@@ -340,12 +375,14 @@ export function useChat(sessionId: string) {
             // so ordering with writer_start / done is preserved.
             if (buf) flush();
             if (thinkBuf) flushThink();
+            if (reasonBuf) flushReason();
             dispatch({ type: "sse", id: aid, evt });
           },
           ac.signal,
         );
         if (buf) flush();
         if (thinkBuf) flushThink();
+        if (reasonBuf) flushReason();
 
         // Persist the completed turn (best-effort; never blocks the UI).
         const finished = messagesRef.current;

@@ -26,6 +26,7 @@ import { AgentTimeline } from "./AgentTimeline";
 import { ConversationHistory } from "./ConversationHistory";
 import { AnswerMarkdown } from "./AnswerMarkdown";
 import { ThinkingStream } from "./ThinkingStream";
+import { ReasoningStream } from "./ReasoningStream";
 import { AnswerActions } from "./AnswerActions";
 import { WorkspaceRail } from "./WorkspaceRail";
 
@@ -745,10 +746,20 @@ function AssistantMessage({
           sourceCount={(msg.sources ?? []).length}
         />
       )}
+      <ReasoningStream
+        text={msg.reasoning ?? ""}
+        active={msg.status === "thinking" || msg.status === "writing"}
+      />
       <ThinkingStream
         text={msg.thinking ?? ""}
         active={msg.status === "thinking"}
       />
+      {msg.status === "writing" && !msg.answer.trim() && (
+        <div className="mb-3 flex items-center gap-2 text-[12.5px] text-foreground/60">
+          <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-brand-orange" />
+          <span>Composing your answer&hellip;</span>
+        </div>
+      )}
       <div className="prose prose-neutral max-w-none text-foreground [&_code]:break-all [&_pre]:whitespace-pre-wrap">
         <AnswerMarkdown
           text={msg.answer}

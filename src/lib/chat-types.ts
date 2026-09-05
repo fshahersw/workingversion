@@ -184,6 +184,8 @@ export type Message = {
   answer: string;
   /** Live, streamed research narration ("thinking steps") shown before the answer. */
   thinking?: string;
+  /** The model's actual adaptive-thinking reasoning, streamed live (frontier feel). */
+  reasoning?: string;
   status: "thinking" | "writing" | "done" | "error";
   error?: string;
   collapseTimeline?: boolean;

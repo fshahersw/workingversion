@@ -113,6 +113,7 @@ async function streamOneTurn(
     signal?: AbortSignal;
   },
   onText: (delta: string) => void,
+  onReasoning?: (delta: string) => void,
 ): Promise<StreamTurn> {
   const body: Record<string, unknown> = {
     system: req.cache ? [{ text: req.system }, { cachePoint: { type: "default" } }] : [{ text: req.system }],
@@ -228,7 +229,10 @@ async function streamOneTurn(
             b = { kind: "reasoning", text: "", signature: "" };
             blocks.set(idx, b);
           }
-          if (typeof rc["text"] === "string") b.text += rc["text"];
+          if (typeof rc["text"] === "string") {
+            b.text += rc["text"];
+            onReasoning?.(String(rc["text"]));
+          }
           if (typeof rc["signature"] === "string") b.signature = String(rc["signature"]);
         }
         continue;
@@ -324,6 +328,7 @@ export async function streamConverseToolLoop(
   },
   handlers: {
     onText?: (delta: string) => void;
+    onReasoning?: (delta: string) => void;
     onAnswer?: (delta: string) => void;
     onSynthesisStart?: () => void;
     onStep?: (s: { step: number; ms: number; stopReason: string; toolCalls: string[]; cacheReadTokens: number; cacheWriteTokens: number }) => void;
@@ -399,6 +404,7 @@ export async function streamConverseToolLoop(
       (delta) => {
         turnText += delta;
       },
+      handlers.onReasoning,
     );
     handlers.onStep?.({ step: steps + 1, ms: Date.now() - t0, stopReason: turn.stopReason, toolCalls: turn.toolUses.map((t) => t.name), cacheReadTokens: turn.usage.cacheRead, cacheWriteTokens: turn.usage.cacheWrite });
     if (turn.text) lastText = turn.text;
@@ -478,6 +484,7 @@ export async function streamConverseToolLoop(
       ...(opts.signal ? { signal: opts.signal } : {}),
     },
     handlers.onAnswer ?? (() => {}),
+    handlers.onReasoning,
   );
   handlers.onStep?.({ step: steps + 1, ms: Date.now() - synthStart, stopReason: `synthesis:${synth.stopReason}`, toolCalls: [], cacheReadTokens: synth.usage.cacheRead, cacheWriteTokens: synth.usage.cacheWrite });
 

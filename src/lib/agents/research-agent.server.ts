@@ -224,6 +224,9 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
           {
             // Per-step status lines stream live as visible "thinking".
             onText: (text) => emit("thinking", { round: 1, agent: "research", text }),
+            // The model's actual adaptive-thinking reasoning streams live on its own
+            // channel — fills the otherwise-silent synthesis gap (the frontier feel).
+            onReasoning: (text) => emit("reasoning", { round: 1, agent: "research", text }),
             // Research done → mark the agent done and flip the UI to the answer.
             onSynthesisStart: () => {
               emit("agent_done", { round: 1, agent: "research", summary: "", count: hits, citations: [...refs] });
