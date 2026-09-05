@@ -1,0 +1,57 @@
+{
+  "contract_version": "1.0",
+  "idempotency_key": "golden-sample-2024-06-30-0001",
+  "matter": {
+    "slug": "example-mdl-3199",
+    "short_name": "Example Products Liability",
+    "caption": "In re: Example Products Liability Litigation",
+    "docket_number": "1:24-md-03199",
+    "court": "District of Example",
+    "mdl_number": "3199",
+    "judge": "Hon. A. Judge",
+    "date_filed": "2024-02-27",
+    "courtlistener_docket_id": 68000001,
+    "stage": "pretrial"
+  },
+  "dockets": [
+    {
+      "source": "main",
+      "docket_number": "1:24-md-03199",
+      "courtlistener_docket_id": 68000001
+    },
+    {
+      "source": "jpml",
+      "docket_number": "MDL No. 3199",
+      "courtlistener_docket_id": 68000002
+    }
+  ],
+  "batch": {
+    "mode": "full",
+    "filename_inference": false,
+    "submitted_by": "etl@seegerweiss.example"
+  },
+  "files": [
+    {
+      "file_name": "main-00001-000.pdf",
+      "size_bytes": 1137
+    },
+    {
+      "file_name": "main-00001-001.pdf",
+      "size_bytes": 601
+    },
+    {
+      "file_name": "main-00014-000.pdf",
+      "size_bytes": 2071
+    },
+    {
+      "file_name": "jpml-00003-000.pdf",
+      "size_bytes": 884
+    }
+  ],
+  "totals": {
+    "document_slots": 7,
+    "pdf_files": 4,
+    "total_pages": 12,
+    "total_bytes": 4693
+  }
+}

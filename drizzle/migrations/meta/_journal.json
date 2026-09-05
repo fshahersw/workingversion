@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1788265173429,
+      "tag": "0000_calendar_sync_cron",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788265209225,
+      "tag": "0001_lock_cron_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788379681266,
+      "tag": "0002_create_review_tables",
+      "breakpoints": true
+    }
+  ]
+}

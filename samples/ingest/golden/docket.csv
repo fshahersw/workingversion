@@ -1,0 +1,8 @@
+record_id,docket_source,entry_number,entry_label,attachment_number,filed_date,description,document_title,doc_type,availability,file_name,page_count,size_bytes,sha256,is_sealed,recap_pdf_url,pacer_pdf_url,pacer_price_usd
+sw-0001,main,1,1,0,2024-03-11,"COMPLAINT against all Defendants, filed by Plaintiffs. (Attachments: # 1 Civil Cover Sheet)",Complaint,pleading,free_pdf,main-00001-000.pdf,3,1137,0a07ffb5059e877c43804dbc77fbdc038a81968622d1273858393a8ba5bb9635,,https://storage.courtlistener.com/recap/gov.uscourts.example.1/gov.uscourts.example.1.1.0.pdf,,
+sw-0002,main,1,1-1,1,2024-03-11,Civil Cover Sheet,Civil Cover Sheet,exhibit,free_pdf,main-00001-001.pdf,1,601,aec72056fea27a0f6ffd7a485fa591317509d227c315d6995d571bd1fda3314e,,,,
+sw-0003,main,7,7,0,2024-04-02,TEXT ORDER granting the parties' joint request for an initial conference. No PDF issued.,Text Order,order,text_only,,,,,,,,
+sw-0004,main,12,12,0,2024-04-18,SEALED MOTION for protective order.,Sealed Motion,motion,sealed,,,,,true,,,
+sw-0005,main,14,14,0,2024-05-06,"CASE MANAGEMENT ORDER NO. 1 governing leadership, service, and preservation.",Case Management Order No. 1,case_management,free_pdf,main-00014-000.pdf,6,2071,e0a8e91e817a1490bd7ac9549d90ffe1cc0e976ce6000d4388a80110b43e9a9c,,,,
+sw-0006,main,22,22,0,2024-06-20,TRANSCRIPT of status conference held 06/12/2024. Available from PACER only.,Status Conference Transcript,transcript,pacer_link,,,,,,,https://ecf.example.uscourts.gov/doc1/000000000,3.00
+sw-0007,jpml,3,JPML 3,0,2024-02-27,TRANSFER ORDER centralizing 14 actions in the District of Example. (MDL No. 3199),JPML Transfer Order,mdl,free_pdf,jpml-00003-000.pdf,2,884,01e8a98abc8046d5cd423bbf27e9a4550980c0979d4ae636ff24c2415697866e,,,,

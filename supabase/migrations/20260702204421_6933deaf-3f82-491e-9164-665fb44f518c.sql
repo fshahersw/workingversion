@@ -1,0 +1,1 @@
+ALTER TABLE public.news_headlines ADD COLUMN IF NOT EXISTS image_url text;

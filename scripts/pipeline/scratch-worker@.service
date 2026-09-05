@@ -1,0 +1,21 @@
+[Unit]
+Description=Scratch Docling worker %i (queue set by the env file)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %i is "text-1", "ocr-1", ... — the prefix before the dash selects the queue.
+# Pin the ocr-* units to the GPU host; text-* units run fine on CPU.
+User=etl
+WorkingDirectory=/opt/swtesting
+EnvironmentFile=/etc/swtesting/etl.env
+ExecStart=/bin/sh -c 'exec /usr/bin/python3 scripts/pipeline/scratch_worker.py \
+  --queue "$(echo %i | cut -d- -f1)" --poll 5 --worker-id w%i'
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/swtesting/scratch-worker-%i.log
+StandardError=append:/var/log/swtesting/scratch-worker-%i.log
+
+[Install]
+WantedBy=multi-user.target

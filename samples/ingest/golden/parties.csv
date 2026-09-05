@@ -1,0 +1,3 @@
+party_role,party_name,representation,attorney_name,attorney_designations,attorney_email,firm_name,firm_address
+Plaintiff,Jane Doe,represented by,Christopher A. Seeger,LEAD ATTORNEY,cseeger@example.com,Seeger Weiss LLP,"55 Challenger Road, Ridgefield Park, NJ 07660"
+Defendant,"Example Pharma, Inc.",represented by,Pat Counsel,,pcounsel@example.com,Defense Firm LLP,"1 Market Street, San Francisco, CA 94105"

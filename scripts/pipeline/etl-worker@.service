@@ -1,0 +1,19 @@
+[Unit]
+Description=Corpus ETL batch worker %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust to your checkout / user on the ETL host.
+User=etl
+WorkingDirectory=/opt/swtesting
+EnvironmentFile=/etc/swtesting/etl.env
+ExecStart=/usr/bin/python3 scripts/pipeline/run_batch.py --poll 20 --worker-id w%i
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/swtesting/etl-worker-%i.log
+StandardError=append:/var/log/swtesting/etl-worker-%i.log
+
+[Install]
+WantedBy=multi-user.target
