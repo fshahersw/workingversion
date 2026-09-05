@@ -372,6 +372,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             query: resolved.query,
             digest: answerText,
             sources,
+            verifyClaims: mode === "think", // Think/Research get the adversarial citation audit
             ...(docReq.pages ? { pages: docReq.pages } : {}),
             ...(input.signal ? { signal: input.signal } : {}),
             onProgress: (m) => agentLog("report_progress", { run: runId, msg: m }),

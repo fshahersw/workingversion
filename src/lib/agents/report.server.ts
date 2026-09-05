@@ -68,14 +68,17 @@ function outlineText(sections: ReportSection[]): string {
   return sections.map((s, i) => `${i + 1}. ${s.header} — ${s.focus}`).join("\n");
 }
 
-async function planReport(query: string, digest: string, maxSections: number, signal?: AbortSignal): Promise<{ title: string; sections: ReportSection[] } | null> {
+async function planReport(query: string, digest: string, maxSections: number, pages: number | undefined, signal?: AbortSignal): Promise<{ title: string; sections: ReportSection[] } | null> {
+  const sizing = pages
+    ? `The report must fit ~${pages} page(s), so plan ${Math.min(3, maxSections)}-${maxSections} sections.`
+    : `Use ONLY as many sections as the request genuinely needs (a narrow question: 3; a broad, multi-part question: up to ${maxSections}). Size the plan to the scope of the request, not a fixed length.`;
   try {
     const res = await bedrockChat({
       model: PLAN_MODEL,
       system: `${temporalContext()}\nYou plan the structure of a litigation report for a plaintiffs' mass tort firm. Sections MUST be mutually exclusive: no two sections may cover the same doctrine or repeat foundational material — each owns a distinct slice. Mark AT MOST ONE section diagram:true. ${BANNED}`,
       messages: [
         userText(
-          `REQUEST\n${query}\n\nRESEARCH DIGEST\n${digest.slice(0, 6000)}\n\nPlan ${Math.min(3, maxSections)}-${maxSections} tight, NON-OVERLAPPING sections with content-driven headers, covering exactly what the attorney asked for, in logical order. Fewer, distinct sections beat many overlapping ones.`,
+          `REQUEST\n${query}\n\nRESEARCH DIGEST\n${digest.slice(0, 6000)}\n\n${sizing} Give each a content-driven header, in logical order. Fewer, distinct sections beat many overlapping ones.`,
         ),
       ],
       tools: [PLAN_TOOL],
@@ -125,6 +128,66 @@ async function draftSection(
 
 const substance = (s: string) => s.replace(/[#\s*|_`-]/g, "").length;
 
+/** Integrity gate (always-on, deterministic): strip any [S#] marker that does
+ *  not map to a gathered source, so the report never carries a dangling cite. */
+function integrityGate(body: string, sources: Source[]): { body: string; orphans: string[] } {
+  const valid = new Set(sources.map((s) => s.ref));
+  const orphans = new Set<string>();
+  const cleaned = body.replace(/\[S(\d+)\]/g, (m, n: string) => {
+    const ref = `S${n}`;
+    if (valid.has(ref)) return m;
+    orphans.add(ref);
+    return "";
+  });
+  return { body: cleaned, orphans: [...orphans] };
+}
+
+const GROUND_TOOL: BedrockToolDef = {
+  name: "citation_audit",
+  description: "Report any claim in the draft that its cited source does not actually support.",
+  input_schema: {
+    type: "object",
+    properties: {
+      issues: {
+        type: "array",
+        description: "Only genuinely unsupported or mis-cited claims. Empty if every cited claim is supported.",
+        items: {
+          type: "object",
+          properties: {
+            ref: { type: "string", description: "The [S#] cited (e.g. S3)." },
+            claim: { type: "string", description: "Short quote of the unsupported claim." },
+            problem: { type: "string", description: "Why the source doesn't support it (not stated / says otherwise / wrong source)." },
+          },
+          required: ["claim", "problem"],
+        },
+      },
+    },
+    required: ["issues"],
+  },
+};
+
+/** Claim grounding (Think/Research only): a model re-reads the report against the
+ *  source texts and flags clauses the cited source doesn't support. Best-effort. */
+async function groundClaims(body: string, sources: Source[], signal?: AbortSignal): Promise<string> {
+  try {
+    const res = await bedrockChat({
+      model: REPORT_MODEL,
+      system: `${temporalContext()}\nYou are a strict citation auditor for a law firm. For each [S#]-cited claim in the REPORT, verify it against the matching SOURCE text below. Flag ONLY claims the cited source does not actually support (or that cite the wrong source). Do not nitpick phrasing; flag substantive unsupported assertions. If everything checks out, return an empty issues list.`,
+      messages: [userText(`SOURCES\n${sourcesBlock(sources)}\n\nREPORT\n${body.slice(0, 40000)}`)],
+      tools: [GROUND_TOOL],
+      toolChoice: { name: "citation_audit" },
+      maxTokens: 1500,
+      ...(signal ? { signal } : {}),
+    });
+    const issues = (res.toolCalls[0]?.input as { issues?: { ref?: string; claim?: string; problem?: string }[] } | undefined)?.issues ?? [];
+    if (!issues.length) return "";
+    const lines = issues.slice(0, 8).map((i) => `- ${i.ref ? i.ref + ": " : ""}${(i.claim || "").slice(0, 160)} — ${(i.problem || "").slice(0, 160)}`);
+    return `\n\n> **Verification notes (automated citation audit — confirm before filing):**\n${lines.join("\n")}`;
+  } catch {
+    return "";
+  }
+}
+
 /** Append a Sources list mapping every cited [S#] to its citation + URL, and a
  *  citation-check note for any reporter-style case cites in the body. */
 async function verifyAndAppend(body: string, sources: Source[], signal?: AbortSignal): Promise<string> {
@@ -166,16 +229,20 @@ export async function buildReportMarkdown(args: {
   digest: string;
   sources: Source[];
   pages?: number;
+  /** Think/Research mode runs the extra adversarial claim-grounding audit. */
+  verifyClaims?: boolean;
   signal?: AbortSignal;
   onProgress?: (msg: string) => void;
 }): Promise<{ title: string; markdown: string; sections: number } | null> {
-  const { query, digest, sources, pages, signal, onProgress } = args;
-  const targetPages = pages && pages > 0 ? pages : 6;
-  const maxSections = clamp(Math.round(targetPages * 0.6) + 1, 3, 8);
-  const wordBudget = Math.max(Math.round((targetPages * WORDS_PER_PAGE) / maxSections), 200);
+  const { query, digest, sources, pages, verifyClaims, signal, onProgress } = args;
+  const hasPages = !!pages && pages > 0;
+  // With a page count, scale sections to it; otherwise let the plan size to the
+  // request's scope (up to 8) with a moderate per-section budget.
+  const maxSections = hasPages ? clamp(Math.round((pages as number) * 0.6) + 1, 3, 8) : 8;
+  const wordBudget = hasPages ? Math.max(Math.round(((pages as number) * WORDS_PER_PAGE) / maxSections), 200) : 480;
 
-  onProgress?.(`Planning ~${targetPages}-page report (${maxSections} sections max)…`);
-  const plan = await planReport(query, digest, maxSections, signal);
+  onProgress?.(hasPages ? `Planning ~${pages}-page report…` : "Planning report (sized to the request)…");
+  const plan = await planReport(query, digest, maxSections, hasPages ? pages : undefined, signal);
   if (!plan) return null;
 
   const outline = outlineText(plan.sections);
@@ -196,10 +263,23 @@ export async function buildReportMarkdown(args: {
     }),
   );
 
-  const body = refined.map((b) => b.trim()).filter(Boolean).join("\n\n");
+  let body = refined.map((b) => b.trim()).filter(Boolean).join("\n\n");
   if (substance(body) < 200) return null;
 
-  onProgress?.("Building sources list + verifying citations…");
-  const markdown = await verifyAndAppend(body, sources, signal);
+  // Integrity gate (always): drop [S#] markers with no matching source.
+  const gate = integrityGate(body, sources);
+  body = gate.body;
+
+  // Claim grounding (Think/Research): adversarial audit of cited claims.
+  if (verifyClaims) {
+    onProgress?.("Auditing citations against sources…");
+    body += await groundClaims(body, sources, signal);
+  }
+
+  onProgress?.("Building sources list…");
+  let markdown = await verifyAndAppend(body, sources, signal);
+  if (gate.orphans.length) {
+    markdown += `\n\n> Note: ${gate.orphans.length} citation marker(s) referenced sources not in the record and were removed.`;
+  }
   return { title: plan.title, markdown, sections: plan.sections.length };
 }
