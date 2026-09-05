@@ -19,6 +19,7 @@ import {
   lookupCitations,
 } from "./courtlistener.server";
 import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
+import { runPython } from "./code-interpreter.server";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const trunc = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : v);
@@ -135,6 +136,17 @@ const ECFR_TOOL: ToolDef = {
   },
 };
 
+const RUN_PYTHON_TOOL: ToolDef = {
+  name: "run_python",
+  description:
+    "Run Python in a secure sandbox (pandas, numpy, matplotlib, python-dateutil preinstalled; NO internet). Use for exact CALCULATIONS the answer must not get wrong: settlement allocation / net-to-claimant waterfalls (use decimal.Decimal for money), limitations/repose date math (dateutil.relativedelta), aggregating or de-duping data you paste inline (pandas), statistics, and numeric sanity checks. Put the input data DIRECTLY in the code — the sandbox cannot fetch anything — and print() what you need back. Do NOT use it for legal reasoning, retrieval, or web access.",
+  input_schema: {
+    type: "object",
+    properties: { code: { type: "string", description: "Python source to execute. Include input data inline; print() the results." } },
+    required: ["code"],
+  },
+};
+
 /** The full flat tool list the single agent sees. */
 export const RESEARCH_TOOLS: ToolDef[] = [
   ...AGENT_TOOLS.legal_research, // search_authorities + 7 category web-search tools
@@ -146,6 +158,7 @@ export const RESEARCH_TOOLS: ToolDef[] = [
   FDA_SEARCH_TOOL,
   FED_REGISTER_TOOL,
   ECFR_TOOL,
+  RUN_PYTHON_TOOL,
   ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
 ];
 
@@ -395,6 +408,25 @@ async function ecfrSearchTool(input: Record<string, unknown>, book: SourceBook):
   return { text: `eCFR (${hits.length}):\n${lines.join("\n")}`, hits: hits.length, refs };
 }
 
+async function runPythonTool(input: Record<string, unknown>): Promise<ToolOutcome> {
+  const code = str(input["code"]);
+  if (code.trim().length < 2) return { text: "run_python needs a code string.", hits: 0, refs: [] };
+  let res;
+  try {
+    res = await runPython(code);
+  } catch (err) {
+    return { text: `run_python failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  const out = res.text.trim();
+  const imgNote = res.images.length ? `\n[${res.images.length} chart(s) generated]` : "";
+  if (res.isError) return { text: `Python error:\n${trunc(out || "(no output)", 3000)}`, hits: 0, refs: [] };
+  return {
+    text: out ? `Output:\n${trunc(out, 4000)}${imgNote}` : `(ran with no printed output)${imgNote}`,
+    hits: 0,
+    refs: [],
+  };
+}
+
 /** One executor for every tool the single agent can call. */
 export async function executeResearchTool(
   name: string,
@@ -409,6 +441,7 @@ export async function executeResearchTool(
   if (name === "fda_search") return fdaSearchTool(input, book);
   if (name === "federal_register_search") return fedRegSearchTool(input, book);
   if (name === "ecfr_search") return ecfrSearchTool(input, book);
+  if (name === "run_python") return runPythonTool(input);
   // search_authorities, the category web tools, and every db_* tool.
   return executeTool(name, input, book);
 }
