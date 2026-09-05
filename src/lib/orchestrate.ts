@@ -1,10 +1,10 @@
 // SSE client for the Seeger Weiss litigation orchestrate endpoint.
-export const SUPABASE_URL = "https://tbasvydiknulgtnsqvfp.supabase.co";
 export const SUPABASE_ANON =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRiYXN2eWRpa251bGd0bnNxdmZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMzIxNjksImV4cCI6MjA5NzkwODE2OX0.ZxC8v10ya0T8YyoqxwA4FAVxSROOUUXlzonUc0rwgxw";
 
 import { litigationContext, SW_PROMPT_SUGGESTIONS } from "./system-prompt";
 import { classifyIntent, type RetrievalHints } from "./research-intent";
+import type { Attachment } from "./chat-types";
 
 /** Compact per-query frame. The full persona + citation contract now travel as
  *  top-level body fields (system_prompt / citation_contract) instead of being
@@ -83,8 +83,8 @@ export function streamOrchestrate(
     matter_label?: string;
     /** Attorney-selected effort. "auto" (default) lets the classifier decide. */
     mode?: "auto" | "fast" | "think";
-    /** Filenames already uploaded into the sandbox this session. */
-    attachments?: string[];
+    /** Files uploaded into the sandbox this session (with extracted content). */
+    attachments?: Attachment[];
   },
   onEvent: (e: SSEEvent) => void,
   signal?: AbortSignal,
@@ -136,12 +136,13 @@ function fileToB64(file: File): Promise<string> {
   });
 }
 
-/** Upload a file into the code-interpreter sandbox; resolves to the sanitized
- *  name the sandbox stored it under (reference it in run_python by that name). */
+/** Upload a file into the code-interpreter sandbox. The server extracts text
+ *  natively and returns an Attachment (name, kind, meta, injected contextText,
+ *  hasFullText). Reference it by name in run_python / read_document. */
 export async function uploadFile(
   file: File,
   signal?: AbortSignal,
-): Promise<{ ok: boolean; name: string; error?: string }> {
+): Promise<{ ok: true; attachment: Attachment } | { ok: false; name: string; error: string }> {
   try {
     const b64 = await fileToB64(file);
     const res = await fetch("/api/upload", {
@@ -153,14 +154,24 @@ export async function uploadFile(
       body: JSON.stringify({ name: file.name, b64, mime: file.type }),
       signal,
     });
-    const data = (await res.json().catch(() => ({}))) as {
+    const data = (await res.json().catch(() => ({}))) as Partial<Attachment> & {
       ok?: boolean;
-      name?: string;
       error?: string;
     };
-    if (!res.ok || !data.ok)
+    if (!res.ok || !data.ok || !data.name)
       return { ok: false, name: file.name, error: data.error ?? `HTTP ${res.status}` };
-    return { ok: true, name: data.name ?? file.name };
+    return {
+      ok: true,
+      attachment: {
+        name: data.name,
+        kind: data.kind ?? "text",
+        size: data.size ?? file.size,
+        meta: data.meta ?? {},
+        contextText: data.contextText ?? "",
+        hasFullText: Boolean(data.hasFullText),
+        chars: data.chars ?? 0,
+      },
+    };
   } catch (err) {
     return { ok: false, name: file.name, error: err instanceof Error ? err.message : "upload failed" };
   }
@@ -196,33 +207,7 @@ export async function fetchPromptSuggestions(): Promise<
   return SW_PROMPT_SUGGESTIONS;
 }
 
-export async function transcribeAudio(
-  blob: Blob,
-  signal?: AbortSignal,
-): Promise<string> {
-  const buf = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-  }
-  const audio_base64 = btoa(binary);
-  const mime_type = blob.type || "audio/webm";
-  const res = await fetch(`${SUPABASE_URL}/functions/v1/transcribe`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: SUPABASE_ANON,
-      Authorization: `Bearer ${SUPABASE_ANON}`,
-    },
-    body: JSON.stringify({ audio_base64, mime_type }),
-    signal,
-  });
-  if (!res.ok) {
-    throw new Error(`Transcription failed (${res.status})`);
-  }
-  const data = (await res.json()) as { text?: string; error?: string };
-  if (data.error) throw new Error(data.error);
-  return (data.text ?? "").trim();
-}
+// Dictation is handled OS-level by the firm dictation helper (hold Right Alt →
+// Amazon Transcribe Streaming → typed into the focused field). The web app no
+// longer records audio or calls a transcription backend, so the old Supabase
+// transcribe function was removed.

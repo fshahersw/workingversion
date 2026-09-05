@@ -8,6 +8,7 @@ import {
   type Msg,
   type ToolDef,
 } from "./anthropic.server";
+import type { Attachment } from "@/lib/chat-types";
 import {
   AGENT_ORDER,
   routerPrompt,
@@ -76,9 +77,10 @@ export type OrchestrateInput = {
   /** Attorney-selected effort mode. Overrides the automatic classifier and
    *  bypasses the conversational short-circuit (an explicit choice wins). */
   forceMode?: "fast" | "think";
-  /** Filenames the attorney uploaded into the code-interpreter sandbox this
-   *  session — available to run_python by name. */
-  attachments?: string[];
+  /** Files the attorney uploaded into the code-interpreter sandbox this session
+   *  (with natively-extracted content) — available to run_python / read_document
+   *  by name, and injected into the model context via contextText. */
+  attachments?: Attachment[];
 };
 
 /**

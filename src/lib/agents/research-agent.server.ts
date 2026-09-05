@@ -82,9 +82,17 @@ function scopeBlock(input: OrchestrateInput): string {
 }
 
 function attachmentsBlock(input: OrchestrateInput): string {
-  const files = (input.attachments ?? []).filter(Boolean);
+  const files = (input.attachments ?? []).filter((a) => a && a.name);
   if (!files.length) return "";
-  return `UPLOADED FILES\nThe attorney uploaded these files into your code sandbox this session, readable by run_python via their relative filename: ${files.join(", ")}. When the question concerns their contents (parse, compute, chart, summarize, convert), open them with run_python (e.g. pandas.read_csv/read_excel, open()) rather than guessing.\n\n`;
+  const parts = files.map((a) => {
+    const header = `--- ${a.name} (${a.kind}${a.chars ? `, ${a.chars} chars` : ""}) ---`;
+    const tail = a.hasFullText
+      ? `\n[Only a preview is shown above. Call read_document("${a.name}", "<keywords>") to pull specific passages from the full document.]`
+      : "";
+    return `${header}\n${a.contextText || "(no text extracted)"}${tail}`;
+  });
+  const names = files.map((a) => a.name).join(", ");
+  return `UPLOADED FILES\nThe attorney uploaded ${files.length} file(s) this session: ${names}. Their content is provided below (and the raw files are in your code sandbox for run_python computation; large docs are searchable via read_document). Use this content directly when the question concerns these files.\n\n${parts.join("\n\n")}\n\n`;
 }
 
 export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Promise<void> {

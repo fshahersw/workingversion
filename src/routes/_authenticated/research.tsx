@@ -11,13 +11,10 @@ import {
   FileCheck,
   Flag,
   HeartHandshake,
-  Loader2,
   Lock,
-  Mic,
   Scale,
   Shuffle,
   ShieldCheck,
-  Square,
   Users,
 } from "lucide-react";
 
@@ -26,15 +23,16 @@ import { AppShell } from "@/components/app-shell";
 import { ChatView } from "@/components/chat/ChatView";
 import { ConversationHistory } from "@/components/chat/ConversationHistory";
 import {
-  ModeToggle,
+  ModeDropdown,
   useUploads,
   UploadButton,
   FileChips,
+  initialMode,
+  persistMode,
   type ComposerMode,
 } from "@/components/chat/composer-kit";
-import type { MatterScope } from "@/lib/chat-types";
+import type { Attachment, MatterScope } from "@/lib/chat-types";
 import { useChat } from "@/lib/use-chat";
-import { useDictation } from "@/lib/use-dictation";
 import {
   fetchPromptSuggestions,
   SW_PROMPT_SUGGESTIONS,
@@ -122,7 +120,7 @@ function ResearchPage() {
   );
 
   const sendScoped = useCallback(
-    (text: string, opts?: { mode?: "auto" | "fast" | "think"; attachments?: string[] }) =>
+    (text: string, opts?: { mode?: "auto" | "fast" | "think"; attachments?: Attachment[] }) =>
       send(text, matter, opts),
     [send, matter],
   );
@@ -231,32 +229,23 @@ function HeroComposer({
 }: {
   onSubmit: (
     t: string,
-    opts?: { mode?: ComposerMode; attachments?: string[] },
+    opts?: { mode?: ComposerMode; attachments?: Attachment[] },
   ) => void;
   disabled: boolean;
   initialValue?: string;
   onOpenConversation: (id: string) => void;
 }) {
   const [v, setV] = useState(initialValue);
-  const [mode, setMode] = useState<ComposerMode>("auto");
+  const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
+  const setMode = useCallback((m: ComposerMode) => {
+    setModeRaw(m);
+    persistMode(m);
+  }, []);
   const { files, uploading, uploadError, handleFiles, removeFile } = useUploads();
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (initialValue) setV(initialValue);
   }, [initialValue]);
-
-  const dictation = useDictation((text) => {
-    const sep = v && !v.endsWith(" ") ? " " : "";
-    const next = v + sep + text;
-    setV(next);
-    requestAnimationFrame(() => {
-      const el = ref.current;
-      if (el) {
-        el.focus();
-        el.setSelectionRange(next.length, next.length);
-      }
-    });
-  });
 
   useEffect(() => {
     const el = ref.current;
@@ -303,13 +292,7 @@ function HeroComposer({
               }
             }}
             rows={2}
-            placeholder={
-              dictation.isRecording
-                ? "Listening…"
-                : dictation.isTranscribing
-                  ? "Transcribing…"
-                  : "Ask about MDLs, bellwethers, causation experts, recalls, or settlements…"
-            }
+            placeholder="Ask about MDLs, bellwethers, causation experts, recalls, or settlements…"
             className="block max-h-[200px] min-h-[52px] w-full resize-none bg-transparent px-1 py-1.5 text-[15px] leading-[1.5] text-foreground placeholder:text-muted-foreground/80 focus:outline-none"
           />
           <button
@@ -322,44 +305,16 @@ function HeroComposer({
           </button>
         </div>
         <div className="mt-1.5 flex items-center gap-1 border-t border-border/60 px-2 py-1.5">
-          <ModeToggle mode={mode} onChange={setMode} disabled={disabled} />
+          <ModeDropdown mode={mode} onChange={setMode} disabled={disabled} />
           <UploadButton onFiles={handleFiles} uploading={uploading} disabled={disabled} />
-          <span className="mx-0.5 h-4 w-px bg-border/70" />
-          <button
-            type="button"
-            onClick={dictation.toggle}
-            disabled={dictation.isTranscribing}
-            aria-label={
-              dictation.isRecording ? "Stop dictation" : "Start dictation"
-            }
-            title={dictation.isRecording ? "Stop dictation" : "Start dictation"}
-            className={[
-              "relative grid h-8 w-8 place-items-center rounded-md transition-colors",
-              dictation.isRecording
-                ? "bg-red-50 text-red-600 hover:bg-red-100"
-                : "text-muted-foreground hover:bg-muted hover:text-brand-navy",
-              dictation.isTranscribing ? "opacity-60" : "",
-            ].join(" ")}
-          >
-            {dictation.isTranscribing ? (
-              <Loader2 className="h-[15px] w-[15px] animate-spin" />
-            ) : dictation.isRecording ? (
-              <>
-                <Square className="h-[12px] w-[12px] fill-current" strokeWidth={0} />
-                <span className="pointer-events-none absolute right-1.5 top-1.5 h-1.5 w-1.5 animate-ping rounded-full bg-red-500" />
-              </>
-            ) : (
-              <Mic className="h-[15px] w-[15px]" strokeWidth={1.85} />
-            )}
-          </button>
           <ConversationHistory activeId={null} onOpen={onOpenConversation} />
           <span className="ml-auto hidden text-[10.5px] text-muted-foreground/70 sm:block">
             Enter to send · Shift+Enter for a new line
           </span>
         </div>
-        {(dictation.error || uploadError) && (
+        {uploadError && (
           <div className="px-3 pb-2 text-center text-[11px] text-destructive">
-            {uploadError ?? dictation.error}
+            {uploadError}
           </div>
         )}
       </div>

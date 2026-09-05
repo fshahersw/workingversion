@@ -3,9 +3,7 @@ import {
   AlertCircle,
   ArrowUp,
   Loader2,
-  Mic,
   ShieldCheck,
-  Square,
   SquarePen,
 } from "lucide-react";
 import {
@@ -19,13 +17,14 @@ import {
 
 import { factCheck, kindLabel, unverified } from "@/lib/fact-check";
 import { sentencesForRef } from "@/lib/highlight";
-import { useDictation } from "@/lib/use-dictation";
-import type { MatterScope, Message } from "@/lib/chat-types";
+import type { Attachment, MatterScope, Message } from "@/lib/chat-types";
 import {
-  ModeToggle,
+  ModeDropdown,
   useUploads,
   UploadButton,
   FileChips,
+  initialMode,
+  persistMode,
   type ComposerMode,
 } from "./composer-kit";
 import { AgentTimeline } from "./AgentTimeline";
@@ -58,7 +57,7 @@ export function ChatView({
   busy: boolean;
   onSend: (
     text: string,
-    opts?: { mode?: ComposerMode; attachments?: string[] },
+    opts?: { mode?: ComposerMode; attachments?: Attachment[] },
   ) => void;
   onNewChat: () => void;
   sessionId: string;
@@ -526,14 +525,18 @@ function ChatComposer({
 }: {
   value: string;
   onChange: (v: string) => void;
-  onSubmit: (v: string, opts: { mode: ComposerMode; attachments: string[] }) => void;
+  onSubmit: (v: string, opts: { mode: ComposerMode; attachments: Attachment[] }) => void;
   busy: boolean;
   onNewChat: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onOpenConversation: (id: string) => void;
   conversationId: string | null;
 }) {
-  const [mode, setMode] = useState<ComposerMode>("auto");
+  const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
+  const setMode = useCallback((m: ComposerMode) => {
+    setModeRaw(m);
+    persistMode(m);
+  }, []);
   const { files, uploading, uploadError, handleFiles, removeFile } = useUploads();
 
   const submit = useCallback(
@@ -543,18 +546,6 @@ function ChatComposer({
     },
     [onSubmit, mode, files, busy],
   );
-  const dictation = useDictation((text) => {
-    const sep = value && !value.endsWith(" ") ? " " : "";
-    const next = value + sep + text;
-    onChange(next);
-    requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      if (el) {
-        el.focus();
-        el.setSelectionRange(next.length, next.length);
-      }
-    });
-  });
 
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -627,13 +618,7 @@ function ChatComposer({
           }}
           rows={1}
           disabled={busy}
-          placeholder={
-            dictation.isRecording
-              ? "Listening…"
-              : dictation.isTranscribing
-                ? "Transcribing…"
-                : "Ask a follow-up about MDLs, bellwethers, or precedent…"
-          }
+          placeholder="Ask a follow-up about MDLs, bellwethers, or precedent…"
           className="block max-h-[220px] min-h-[44px] w-full min-w-0 resize-none bg-transparent px-1.5 py-1.5 text-[14px] leading-[1.55] placeholder:text-muted-foreground/80 focus:outline-none"
         />
         <button
@@ -650,10 +635,9 @@ function ChatComposer({
         </button>
       </div>
       <div className="mt-1 flex items-center gap-1 border-t border-border/60 px-2 py-1.5">
-        <ModeToggle mode={mode} onChange={setMode} disabled={busy} />
+        <ModeDropdown mode={mode} onChange={setMode} disabled={busy} />
         <UploadButton onFiles={handleFiles} uploading={uploading} disabled={busy} />
         <span className="mx-0.5 h-4 w-px bg-border/70" />
-        <MicButton dictation={dictation} />
         <button
           type="button"
           onClick={onNewChat}
@@ -668,46 +652,12 @@ function ChatComposer({
           onOpen={onOpenConversation}
         />
       </div>
-      {(dictation.error || uploadError) && (
+      {uploadError && (
         <div className="pb-2 text-center text-[11px] text-destructive">
-          {uploadError ?? dictation.error}
+          {uploadError}
         </div>
       )}
     </form>
-  );
-}
-
-function MicButton({
-  dictation,
-}: {
-  dictation: ReturnType<typeof useDictation>;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={dictation.toggle}
-      disabled={dictation.isTranscribing}
-      aria-label={dictation.isRecording ? "Stop dictation" : "Start dictation"}
-      title={dictation.isRecording ? "Stop dictation" : "Start dictation"}
-      className={[
-        "relative grid h-8 w-8 place-items-center rounded-md transition-colors",
-        dictation.isRecording
-          ? "bg-red-50 text-red-600 hover:bg-red-100"
-          : "text-muted-foreground hover:bg-muted hover:text-brand-navy",
-        dictation.isTranscribing ? "opacity-60" : "",
-      ].join(" ")}
-    >
-      {dictation.isTranscribing ? (
-        <Loader2 className="h-[15px] w-[15px] animate-spin" />
-      ) : dictation.isRecording ? (
-        <>
-          <Square className="h-[12px] w-[12px] fill-current" strokeWidth={0} />
-          <span className="pointer-events-none absolute right-1.5 top-1.5 h-1.5 w-1.5 animate-ping rounded-full bg-red-500" />
-        </>
-      ) : (
-        <Mic className="h-[15px] w-[15px]" strokeWidth={1.85} />
-      )}
-    </button>
   );
 }
 

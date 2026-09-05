@@ -4,7 +4,7 @@ import {
   fetchFollowups,
   type SSEEvent,
 } from "@/lib/orchestrate";
-import type { Artifact, MatterScope, Message, Round, Source } from "@/lib/chat-types";
+import type { Artifact, Attachment, MatterScope, Message, Round, Source } from "@/lib/chat-types";
 import {
   loadConversation,
   saveFollowups,
@@ -255,7 +255,7 @@ export function useChat(sessionId: string) {
     async (
       text: string,
       matter?: MatterScope | null,
-      opts?: { mode?: "auto" | "fast" | "think"; attachments?: string[] },
+      opts?: { mode?: "auto" | "fast" | "think"; attachments?: Attachment[] },
     ) => {
       if (busy || !text.trim()) return;
       const uid = crypto.randomUUID();

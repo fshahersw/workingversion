@@ -222,3 +222,17 @@ export type MatterScope = {
   matterId: string;
   label: string;
 };
+
+/** A file the attorney uploaded into the code-interpreter sandbox. Text is
+ *  extracted natively on upload; `contextText` is injected into the model
+ *  (full for small files, preview+outline for large), and when `hasFullText`
+ *  the complete text stays in the sandbox for the read_document retrieval tool. */
+export type Attachment = {
+  name: string;
+  kind: string; // table | pdf | docx | pptx | html | image | text | ...
+  size: number;
+  meta?: Record<string, unknown>;
+  contextText: string;
+  hasFullText: boolean;
+  chars?: number;
+};

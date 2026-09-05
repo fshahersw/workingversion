@@ -19,7 +19,7 @@ import {
   lookupCitations,
 } from "./courtlistener.server";
 import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
-import { runPython, collectNewArtifacts } from "./code-interpreter.server";
+import { runPython, collectNewArtifacts, readDocument } from "./code-interpreter.server";
 import type { Artifact } from "@/lib/chat-types";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
@@ -148,6 +148,20 @@ const RUN_PYTHON_TOOL: ToolDef = {
   },
 };
 
+const READ_DOCUMENT_TOOL: ToolDef = {
+  name: "read_document",
+  description:
+    "Retrieve passages from a file the ATTORNEY UPLOADED this session (only for uploads flagged as having a searchable full text — small uploads are already shown to you in full in the UPLOADED FILES block). Pass the exact file name plus a query of keywords; returns the best-matching passages from the full document. Use this to pull the specific parts of a long uploaded PDF/brief/report you need to answer, instead of guessing or relying on the preview.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Exact uploaded file name (as shown in UPLOADED FILES)." },
+      query: { type: "string", description: "Keywords describing the passage you need (e.g. 'causation expert Daubert')." },
+    },
+    required: ["name", "query"],
+  },
+};
+
 /** The full flat tool list the single agent sees. */
 export const RESEARCH_TOOLS: ToolDef[] = [
   ...AGENT_TOOLS.legal_research, // search_authorities + 7 category web-search tools
@@ -160,6 +174,7 @@ export const RESEARCH_TOOLS: ToolDef[] = [
   FED_REGISTER_TOOL,
   ECFR_TOOL,
   RUN_PYTHON_TOOL,
+  READ_DOCUMENT_TOOL,
   ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
 ];
 
@@ -483,6 +498,18 @@ async function runPythonTool(input: Record<string, unknown>): Promise<ToolOutcom
   };
 }
 
+async function readDocumentTool(input: Record<string, unknown>): Promise<ToolOutcome> {
+  const name = str(input["name"]);
+  const query = str(input["query"]);
+  if (!name) return { text: "read_document needs a file name.", hits: 0, refs: [] };
+  try {
+    const text = await readDocument(name, query);
+    return { text: trunc(text, 6000), hits: 0, refs: [] };
+  } catch (err) {
+    return { text: `read_document failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+}
+
 /** One executor for every tool the single agent can call. */
 export async function executeResearchTool(
   name: string,
@@ -498,6 +525,7 @@ export async function executeResearchTool(
   if (name === "federal_register_search") return fedRegSearchTool(input, book);
   if (name === "ecfr_search") return ecfrSearchTool(input, book);
   if (name === "run_python") return runPythonTool(input);
+  if (name === "read_document") return readDocumentTool(input);
   // search_authorities, the category web tools, and every db_* tool.
   return executeTool(name, input, book);
 }
