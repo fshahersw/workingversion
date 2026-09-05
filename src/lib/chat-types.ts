@@ -219,6 +219,15 @@ export type Message = {
     factsVerified: number;
     unverified: string[];
     orphanRefs: string[];
+    /** Reasoning-model citation-faithfulness verdict (when BEDROCK_JUDGE_MODEL is
+     *  configured): how many [S#]-cited claims were checked, how many the cited
+     *  sources support, and the unsupported ones. Score-only trust signal;
+     *  absent when the check is off or failed. */
+    faithfulness?: {
+      checked: number;
+      supported: number;
+      unsupported: { claim: string; refs: string[] }[];
+    };
   };
 };
 

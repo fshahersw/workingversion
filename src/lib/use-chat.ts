@@ -217,6 +217,9 @@ function applyEvent(m: Message, e: SSEEvent): Message {
           factsVerified: Number(d.factsVerified) || 0,
           unverified: (d.unverified as string[] | undefined) ?? [],
           orphanRefs: (d.orphanRefs as string[] | undefined) ?? [],
+          ...(d.faithfulness && typeof d.faithfulness === "object"
+            ? { faithfulness: d.faithfulness as NonNullable<Message["verification"]>["faithfulness"] }
+            : {}),
         },
       };
     case "artifact": {

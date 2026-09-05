@@ -684,6 +684,31 @@ function ModeBadge({ mode, reason, sources }: { mode: string; reason?: string; s
   );
 }
 
+/** Citation-faithfulness trust chip: how many [S#]-cited claims a reasoning
+ *  judge found the cited sources actually support. Green when all supported;
+ *  amber when some are unsupported (tooltip lists them). A signal, not a gate. */
+function FaithfulnessChip({
+  f,
+}: {
+  f: { checked: number; supported: number; unsupported: { claim: string; refs: string[] }[] };
+}) {
+  const clean = f.unsupported.length === 0 && f.supported >= f.checked;
+  const tone = clean ? "bg-emerald-500/70" : "bg-amber-500/70";
+  const title = f.unsupported.length
+    ? "Cited claims the source may not fully support:\n" +
+      f.unsupported
+        .map((u) => `• ${u.claim}${u.refs.length ? ` [${u.refs.join(", ")}]` : ""}`)
+        .join("\n")
+    : "Every cited claim is supported by its source (reasoning-model check).";
+  return (
+    <span className="inline-flex items-center gap-1" title={title}>
+      <span className={`h-1.5 w-1.5 rounded-full ${tone}`} />
+      {f.supported}/{f.checked} cited claims source-supported
+      {f.unsupported.length ? ` · ${f.unsupported.length} to review` : ""}
+    </span>
+  );
+}
+
 function UserMessage({ msg }: { msg: Message }) {
   return (
     <div data-user-msg={msg.id} className="mb-1.5 flex justify-end scroll-mt-4">
@@ -777,28 +802,35 @@ function AssistantMessage({
         )}
         {msg.status === "done" &&
           msg.verification &&
-          msg.verification.factsChecked > 0 && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground/70">
-              <span className="inline-flex items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" />
-                {msg.verification.factsVerified}/{msg.verification.factsChecked}{" "}
-                specifics verified against sources
-              </span>
-              {msg.verification.unverified.length +
-                msg.verification.orphanRefs.length >
-                0 && (
-                <span
-                  className="text-amber-700/80"
-                  title={[
-                    ...msg.verification.unverified,
-                    ...msg.verification.orphanRefs.map((r) => `unmatched ${r}`),
-                  ].join(" · ")}
-                >
-                  ·{" "}
-                  {msg.verification.unverified.length +
-                    msg.verification.orphanRefs.length}{" "}
-                  to confirm
+          (msg.verification.factsChecked > 0 ||
+            (msg.verification.faithfulness?.checked ?? 0) > 0) && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground/70">
+              {msg.verification.factsChecked > 0 && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" />
+                  {msg.verification.factsVerified}/{msg.verification.factsChecked}{" "}
+                  specifics verified against sources
                 </span>
+              )}
+              {msg.verification.factsChecked > 0 &&
+                msg.verification.unverified.length +
+                  msg.verification.orphanRefs.length >
+                  0 && (
+                  <span
+                    className="text-amber-700/80"
+                    title={[
+                      ...msg.verification.unverified,
+                      ...msg.verification.orphanRefs.map((r) => `unmatched ${r}`),
+                    ].join(" · ")}
+                  >
+                    ·{" "}
+                    {msg.verification.unverified.length +
+                      msg.verification.orphanRefs.length}{" "}
+                    to confirm
+                  </span>
+                )}
+              {(msg.verification.faithfulness?.checked ?? 0) > 0 && (
+                <FaithfulnessChip f={msg.verification.faithfulness!} />
               )}
             </div>
           )}

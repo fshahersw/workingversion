@@ -17,6 +17,7 @@ import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
 import { agentLog, agentError, since, trunc } from "./log.server";
 import { factCheck, unverified, kindLabel, checkCitations } from "@/lib/fact-check";
 import { coverageGaps, requeryInstruction } from "./coverage.server";
+import { checkFaithfulness, judgeEnabled } from "./faithfulness.server";
 import {
   emptyMemory,
   hasContext,
@@ -466,6 +467,22 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     const facts = factCheck(answerText, sources);
     const factsVerified = facts.filter((f) => f.verified).length;
     const cites = checkCitations(answerText, sources);
+    // Citation-faithfulness (accuracy lever): a REASONING model judges whether
+    // each [S#]-cited claim actually follows from its cited source (catching
+    // overstatement / mis-attribution / fabrication) — the valid signal for
+    // abstractive legal synthesis, where extractive contextual-grounding was
+    // unusable. Score-only — never blocks the already-streamed answer.
+    // THINK/report modes only; no-op unless BEDROCK_JUDGE_MODEL is set; null on
+    // any failure/timeout so it can never stall the turn.
+    const faithful =
+      (mode === "think" || docReq.wants) && judgeEnabled()
+        ? await checkFaithfulness({
+            question: resolved.query,
+            answer: answerText,
+            sources,
+            ...(input.signal ? { signal: input.signal } : {}),
+          })
+        : null;
     emit("verification", {
       factsChecked: facts.length,
       factsVerified,
@@ -473,6 +490,15 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
         .map((f) => `${kindLabel(f.kind)}: ${f.value}`)
         .slice(0, 10),
       orphanRefs: cites.orphans,
+      ...(faithful
+        ? {
+            faithfulness: {
+              checked: faithful.checked,
+              supported: faithful.supported,
+              unsupported: faithful.unsupported,
+            },
+          }
+        : {}),
     });
     agentLog("verification", {
       run: runId,
@@ -480,6 +506,13 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
       facts_checked: facts.length,
       facts_verified: factsVerified,
       orphan_refs: cites.orphans.length,
+      ...(faithful
+        ? {
+            faith_checked: faithful.checked,
+            faith_supported: faithful.supported,
+            faith_unsupported: faithful.unsupported.length,
+          }
+        : {}),
     });
 
     emit("done", { run_id: runId, status: "complete", rounds: 1, source_count: sources.length });
