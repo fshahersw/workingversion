@@ -186,6 +186,13 @@ function AgentRow({
   const m = agentMeta(a.agent);
   const dotColor = m.color.replace("text-", "bg-");
   const running = !settled && a.status !== "done";
+  const latest = a.tools.length ? a.tools[a.tools.length - 1] : undefined;
+  // Distinct tool labels, first-seen order, for the compact settled summary.
+  const distinct: string[] = [];
+  for (const t of a.tools) {
+    const label = toolLabel(t.tool, t.scope);
+    if (!distinct.includes(label)) distinct.push(label);
+  }
 
   return (
     <motion.div
@@ -249,31 +256,42 @@ function AgentRow({
             </span>
           )}
         </div>
-        {/* Per-call search log — the actual query each tool ran and its hit
-            count, streaming in order. This is the "watching it work" detail;
-            it collapses behind the pill once the answer starts. */}
-        {a.tools.length > 0 && (
-          <ul className="mt-1 space-y-[3px]">
-            {a.tools.map((t, i) => (
-              <li key={i} className="flex items-baseline gap-1.5 text-[10.5px] leading-snug">
-                <span className="shrink-0 text-muted-foreground/55">
-                  {toolLabel(t.tool, t.scope)}
-                </span>
-                {t.query && (
-                  <span
-                    className="min-w-0 flex-1 truncate italic text-muted-foreground/50"
-                    title={t.query}
-                  >
-                    {t.query}
+        {/* One evolving activity line while researching (the latest tool + its
+            query, crossfading as each call lands — it REPLACES, never stacks);
+            a compact distinct-tool summary once the turn settles. */}
+        {a.tools.length > 0 &&
+          (running && latest ? (
+            <div className="mt-0.5 h-[15px] overflow-hidden">
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.div
+                  key={a.tools.length}
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -5 }}
+                  transition={{ duration: 0.24, ease: EASE_OUT }}
+                  className="flex items-baseline gap-1.5 text-[10.5px] leading-[15px]"
+                >
+                  <span className="shrink-0 text-muted-foreground/55">
+                    {toolLabel(latest.tool, latest.scope)}
                   </span>
-                )}
-                {typeof t.hits === "number" && t.hits > 0 && (
-                  <span className="shrink-0 tabular-nums text-muted-foreground/45">{t.hits}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+                  {latest.query && (
+                    <span
+                      className="min-w-0 flex-1 truncate italic text-muted-foreground/45"
+                      title={latest.query}
+                    >
+                      {latest.query}
+                    </span>
+                  )}
+                </motion.div>
+              </AnimatePresence>
+            </div>
+          ) : (
+            distinct.length > 0 && (
+              <div className="mt-0.5 truncate text-[10.5px] leading-snug text-muted-foreground/45">
+                {distinct.join(" · ")}
+              </div>
+            )
+          ))}
       </div>
     </motion.div>
   );

@@ -362,9 +362,15 @@ export async function streamConverseToolLoop(
         ? researchDeadline
         : deadline;
     if (effectiveDeadline && Date.now() > effectiveDeadline) break;
-    // Separate each step's narration onto its own line in the streamed thinking.
-    if (steps > 0) handlers.onText?.("\n");
     const t0 = Date.now();
+    // Buffer this turn's text instead of streaming it straight to the reasoning
+    // channel. A research turn narrates a short status line and then calls tools;
+    // when the model decides it is done it instead writes the ANSWER as text with
+    // no tool calls. That answer must NOT leak into the reasoning stream, so we
+    // hold the text and surface it as narration only once the turn is confirmed to
+    // have called tools. A no-tool turn's draft is dropped — the clean answer comes
+    // from the synthesis turn below (streamed to the answer channel, not here).
+    let turnText = "";
     const turn = await streamOneTurn(
       {
         model: opts.model,
@@ -377,11 +383,17 @@ export async function streamConverseToolLoop(
         ...(opts.researchEffort ? { effort: opts.researchEffort } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
       },
-      handlers.onText ?? (() => {}),
+      (delta) => {
+        turnText += delta;
+      },
     );
     handlers.onStep?.({ step: steps + 1, ms: Date.now() - t0, stopReason: turn.stopReason, toolCalls: turn.toolUses.map((t) => t.name), cacheReadTokens: turn.usage.cacheRead, cacheWriteTokens: turn.usage.cacheWrite });
     if (turn.text) lastText = turn.text;
-    if (!turn.toolUses.length) break; // model stopped calling tools — done.
+    if (!turn.toolUses.length) break; // model is answering — drop the draft; synthesis writes the answer.
+
+    // Confirmed research turn: surface its short narration as one reasoning line.
+    const narration = turnText.trim();
+    if (narration) handlers.onText?.((steps > 0 ? "\n" : "") + narration);
 
     // Replay the assistant turn's content blocks VERBATIM (text, toolUse, and any
     // signed reasoningContent, in order) so a thinking block correctly precedes
