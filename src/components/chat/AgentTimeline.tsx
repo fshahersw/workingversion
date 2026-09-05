@@ -282,6 +282,11 @@ function AgentRow({
                       {latest.query}
                     </span>
                   )}
+                  {typeof latest.hits === "number" && latest.hits > 0 && (
+                    <span className="shrink-0 tabular-nums text-muted-foreground/40">
+                      {latest.hits}
+                    </span>
+                  )}
                 </motion.div>
               </AnimatePresence>
             </div>

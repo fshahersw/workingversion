@@ -128,6 +128,9 @@ export function toolLabel(tool: string, scope?: string): string {
 }
 
 export type ToolCall = {
+  /** Bedrock tool-use id — stable across the call's start + completion emits,
+   *  so the client upserts one row instead of appending two. */
+  id?: string;
   tool: string;
   query?: string;
   scope?: string;

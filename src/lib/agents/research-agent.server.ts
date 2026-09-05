@@ -148,11 +148,18 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             },
             onStep: (s) =>
               agentLog("agent_step", { run: runId, step: s.step, ms: s.ms, stop: s.stopReason, cache_read: s.cacheReadTokens, cache_write: s.cacheWriteTokens, calls: s.toolCalls.join(",") || "-" }),
-            // Emit tool_call ONCE, after execute (it carries the hits count).
-            // Emitting again in onToolUse would double every tool in the client
-            // timeline, which appends each tool_call unconditionally — the noise
-            // compounds under sub-agent fan-out. Live narration ("thinking")
-            // already conveys progress before a tool returns.
+            // A call emits tool_call TWICE with the same tool-use id: once here
+            // when it STARTS (no hits, for a live "searching…" row) and once after
+            // execute with the hit count. The client upserts by id, so the two
+            // coalesce into one row that fills in its result — no duplicate.
+            onToolUse: (call) =>
+              emit("tool_call", {
+                round: 1,
+                agent: "research",
+                id: call.id,
+                tool: call.name,
+                query: typeof call.input["query"] === "string" ? call.input["query"] : undefined,
+              }),
             execute: async (call) => {
               toolCalls++;
               const out = await executeResearchTool(call.name, call.input, book);
@@ -161,6 +168,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
               emit("tool_call", {
                 round: 1,
                 agent: "research",
+                id: call.id,
                 tool: call.name,
                 query: typeof call.input["query"] === "string" ? call.input["query"] : undefined,
                 hits: out.hits,

@@ -331,8 +331,21 @@ export async function streamConverseToolLoop(
     execute: (call: BedrockToolCall) => Promise<string>;
   },
 ): Promise<StreamToolLoopResult> {
+  // Normalize prior turns: Converse requires strictly alternating roles starting
+  // with user. Drop a leading assistant, collapse same-role repeats, and — since
+  // the current turn we append is a user message — ensure the prior block ends on
+  // an assistant turn. A malformed tail would otherwise make Converse reject the
+  // whole request with a ValidationException.
+  const prior: { role: "user" | "assistant"; content: string }[] = [];
+  for (const h of opts.history ?? []) {
+    if (!h.content?.trim()) continue;
+    if (prior.length === 0 && h.role !== "user") continue;
+    if (prior.length && prior[prior.length - 1]!.role === h.role) continue;
+    prior.push({ role: h.role, content: h.content });
+  }
+  if (prior.length && prior[prior.length - 1]!.role === "user") prior.pop();
   const messages: BedrockMsg[] = [
-    ...(opts.history ?? []).map(
+    ...prior.map(
       (h) => ({ role: h.role, content: [{ text: h.content }] }) as BedrockMsg,
     ),
     { role: "user", content: [{ text: opts.user }] },

@@ -135,7 +135,9 @@ function applyEvent(m: Message, e: SSEEvent): Message {
     case "tool_call": {
       const rn = Number(d.round);
       const agent = String(d.agent);
+      const id = d.id as string | undefined;
       const tc = {
+        id,
         tool: String(d.tool ?? ""),
         query: d.query as string | undefined,
         scope: d.scope as string | undefined,
@@ -148,9 +150,17 @@ function applyEvent(m: Message, e: SSEEvent): Message {
           status: "running" as const,
           tools: [],
         };
+        // Upsert by tool-use id: a call emits once when it STARTS (no hits) and
+        // again when it COMPLETES (with hits). Merge into one row so the timeline
+        // shows a live "searching…" state that fills in its result, not two rows.
+        const i = id ? ex.tools.findIndex((t) => t.id === id) : -1;
+        const tools =
+          i >= 0
+            ? ex.tools.map((t, j) => (j === i ? { ...t, ...tc } : t))
+            : [...ex.tools, tc];
         return {
           ...r,
-          agents: { ...r.agents, [agent]: { ...ex, tools: [...ex.tools, tc] } },
+          agents: { ...r.agents, [agent]: { ...ex, tools } },
         };
       });
     }
