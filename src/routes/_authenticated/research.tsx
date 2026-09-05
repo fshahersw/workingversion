@@ -25,7 +25,13 @@ import {
 import { AppShell } from "@/components/app-shell";
 import { ChatView } from "@/components/chat/ChatView";
 import { ConversationHistory } from "@/components/chat/ConversationHistory";
-import { MatterScopePicker } from "@/components/matters/MatterScopePicker";
+import {
+  ModeToggle,
+  useUploads,
+  UploadButton,
+  FileChips,
+  type ComposerMode,
+} from "@/components/chat/composer-kit";
 import type { MatterScope } from "@/lib/chat-types";
 import { useChat } from "@/lib/use-chat";
 import { useDictation } from "@/lib/use-dictation";
@@ -176,8 +182,6 @@ function ResearchPage() {
                   onSubmit={sendScoped}
                   disabled={busy}
                   initialValue={prefill}
-                  matter={matter}
-                  onMatterChange={setMatter}
                   onOpenConversation={openConversation}
                 />
               </div>
@@ -209,7 +213,6 @@ function ResearchPage() {
               onNewChat={reset}
               sessionId={sessionId}
               matter={matter}
-              onMatterChange={setMatter}
               onOpenConversation={openConversation}
               conversationId={conversationId}
             />
@@ -224,18 +227,19 @@ function HeroComposer({
   onSubmit,
   disabled,
   initialValue = "",
-  matter,
-  onMatterChange,
   onOpenConversation,
 }: {
-  onSubmit: (t: string) => void;
+  onSubmit: (
+    t: string,
+    opts?: { mode?: ComposerMode; attachments?: string[] },
+  ) => void;
   disabled: boolean;
   initialValue?: string;
-  matter: MatterScope | null;
-  onMatterChange: (m: MatterScope | null) => void;
   onOpenConversation: (id: string) => void;
 }) {
   const [v, setV] = useState(initialValue);
+  const [mode, setMode] = useState<ComposerMode>("auto");
+  const { files, uploading, uploadError, handleFiles, removeFile } = useUploads();
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (initialValue) setV(initialValue);
@@ -263,7 +267,7 @@ function HeroComposer({
 
   function submit() {
     if (!v.trim() || disabled) return;
-    onSubmit(v.trim());
+    onSubmit(v.trim(), { mode, attachments: files });
     setV("");
   }
 
@@ -275,7 +279,17 @@ function HeroComposer({
       }}
       className="w-full"
     >
-      <div className="rounded-lg border border-border bg-card shadow-sm transition-all focus-within:border-primary/40 focus-within:shadow-md">
+      <div
+        className="rounded-lg border border-border bg-card shadow-sm transition-all focus-within:border-primary/40 focus-within:shadow-md"
+        onDragOver={(e) => {
+          e.preventDefault();
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          if (!disabled) void handleFiles(e.dataTransfer?.files ?? null);
+        }}
+      >
+        <FileChips files={files} onRemove={removeFile} className="px-3 pt-2.5" />
         <div className="flex items-end gap-2 px-3 pt-2.5">
           <textarea
             ref={ref}
@@ -308,11 +322,8 @@ function HeroComposer({
           </button>
         </div>
         <div className="mt-1.5 flex items-center gap-1 border-t border-border/60 px-2 py-1.5">
-          <MatterScopePicker
-            value={matter}
-            onChange={onMatterChange}
-            disabled={disabled}
-          />
+          <ModeToggle mode={mode} onChange={setMode} disabled={disabled} />
+          <UploadButton onFiles={handleFiles} uploading={uploading} disabled={disabled} />
           <span className="mx-0.5 h-4 w-px bg-border/70" />
           <button
             type="button"
@@ -346,9 +357,9 @@ function HeroComposer({
             Enter to send · Shift+Enter for a new line
           </span>
         </div>
-        {dictation.error && (
+        {(dictation.error || uploadError) && (
           <div className="px-3 pb-2 text-center text-[11px] text-destructive">
-            {dictation.error}
+            {uploadError ?? dictation.error}
           </div>
         )}
       </div>
