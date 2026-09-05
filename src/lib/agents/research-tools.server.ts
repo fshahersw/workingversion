@@ -21,6 +21,7 @@ import {
 import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
 import { runPython, collectNewArtifacts, readDocument } from "./code-interpreter.server";
 import { searchMarkdownKey } from "./bda.server";
+import { generateDocument } from "./docgen.server";
 import type { Artifact, Attachment } from "@/lib/chat-types";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
@@ -163,6 +164,22 @@ const READ_DOCUMENT_TOOL: ToolDef = {
   },
 };
 
+const CREATE_DOCUMENT_TOOL: ToolDef = {
+  name: "create_document",
+  description:
+    "Produce a polished, downloadable DOCX / XLSX / PDF deliverable for the attorney (memo, report, chart pack, or spreadsheet). Provide the body as MARKDOWN: '#'/'##' headings, '-' bullets, '1.' numbered lists, and pipe tables (| Col | Col |\\n|---|---|\\n| ... |) — tables render as real Word/Excel/PDF tables, sized and styled. For a diagram, include a fenced code block tagged `dot` containing Graphviz DOT (flowcharts, timelines, org/relationship charts); it is rendered to an image and embedded. Pick format: 'pdf' for memos/reports (cover page + page numbers), 'docx' for an editable Word document, or 'xlsx' when the content is primarily tables/data. Only call this when the attorney explicitly wants a file to download — ordinary answers stay in chat.",
+  input_schema: {
+    type: "object",
+    properties: {
+      format: { type: "string", enum: ["pdf", "docx", "xlsx"], description: "Output file format." },
+      title: { type: "string", description: "Document title (used on the cover page)." },
+      content: { type: "string", description: "Markdown body (headings, tables, lists, ```dot diagrams)." },
+      filename: { type: "string", description: "Optional base filename (extension added automatically)." },
+    },
+    required: ["format", "title", "content"],
+  },
+};
+
 /** The full flat tool list the single agent sees. */
 export const RESEARCH_TOOLS: ToolDef[] = [
   ...AGENT_TOOLS.legal_research, // search_authorities + 7 category web-search tools
@@ -176,6 +193,7 @@ export const RESEARCH_TOOLS: ToolDef[] = [
   ECFR_TOOL,
   RUN_PYTHON_TOOL,
   READ_DOCUMENT_TOOL,
+  CREATE_DOCUMENT_TOOL,
   ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
 ];
 
@@ -520,6 +538,26 @@ async function readDocumentTool(input: Record<string, unknown>, attachments?: At
   }
 }
 
+async function createDocumentTool(input: Record<string, unknown>): Promise<ToolOutcome> {
+  const format = str(input["format"]) || "pdf";
+  const title = str(input["title"]) || "Document";
+  const content = str(input["content"]);
+  const filename = str(input["filename"]) || undefined;
+  if (content.trim().length < 2) return { text: "create_document needs markdown content.", hits: 0, refs: [] };
+  const res = await generateDocument(format, title, content, filename);
+  if ("error" in res) return { text: `create_document failed: ${trunc(res.error, 200)}`, hits: 0, refs: [] };
+  const artifact: Artifact = {
+    id: `doc-${++artifactSeq}-${res.name}`,
+    kind: "file",
+    name: res.name,
+    mime: res.mime,
+    dataB64: res.dataB64,
+    size: res.size,
+  };
+  const kb = Math.max(1, Math.round(res.size / 1024));
+  return { text: `Created ${res.name} (${kb} KB). The attorney can download it below.`, hits: 0, refs: [], artifacts: [artifact] };
+}
+
 /** One executor for every tool the single agent can call. */
 export async function executeResearchTool(
   name: string,
@@ -537,6 +575,7 @@ export async function executeResearchTool(
   if (name === "ecfr_search") return ecfrSearchTool(input, book);
   if (name === "run_python") return runPythonTool(input);
   if (name === "read_document") return readDocumentTool(input, attachments);
+  if (name === "create_document") return createDocumentTool(input);
   // search_authorities, the category web tools, and every db_* tool.
   return executeTool(name, input, book);
 }

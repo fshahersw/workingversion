@@ -337,6 +337,12 @@ export async function listArtifacts(): Promise<Artifact[]> {
   }
 }
 
+/** Mark a filename as already-handled so collectNewArtifacts won't re-surface
+ *  it (e.g. a file returned directly as an artifact by create_document). */
+export function markSeen(path: string): void {
+  seenFiles.add(norm(path));
+}
+
 export type NewArtifact = { name: string; size: number; dataB64: string | null };
 
 /** Find files the sandbox created since the last call (excluding uploads and
