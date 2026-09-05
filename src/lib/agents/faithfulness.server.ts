@@ -52,45 +52,86 @@ type ClaimUnit = { claim: string; refs: string[] };
 // Tokens that end in "." but are NOT sentence boundaries — legal citations,
 // reporters, courts, and honorifics. Guards the sentence splitter below.
 const ABBREV =
-  /(?:\b(?:No|Nos|v|vs|Inc|Corp|Co|Ltd|LLC|Cir|Fed|Supp|Ct|Rev|Ed|Dr|Mr|Ms|Mrs|Jr|Sr|St|Art|Sec|pp|al|Cal|Ill|Pa|Ga|Tex|Fla|Dist|Ass'n|Bros)|U\.S|F\.\d|N\.D|S\.D|E\.D|W\.D|e\.g|i\.e)\.$/i;
+  /(?:\b(?:No|Nos|v|vs|Inc|Corp|Co|Ltd|LLC|Cir|Fed|Supp|Ct|Rev|Ed|Dr|Mr|Ms|Mrs|Jr|Sr|St|Art|Sec|Civ|Crim|Proc|App|Evid|Const|Stat|pp|al|Cal|Ill|Pa|Ga|Tex|Fla|Dist|Ass'n|Bros)|U\.S|F\.\d|N\.D|S\.D|E\.D|W\.D|e\.g|i\.e)\.$/i;
 
-/** The sentence that carries the citation: the text since the previous cite,
- *  trimmed to its last sentence. Abbreviation-guarded so "U.S.", "No.", "v."
- *  don't trigger a false split. */
-function lastSentence(seg: string): string {
-  const boundary = /[.?!]\s+(?=[A-Z(])/g;
-  let start = 0;
-  for (let m = boundary.exec(seg); m !== null; m = boundary.exec(seg)) {
-    const before = seg.slice(0, m.index + 1); // through the terminator
-    if (before.endsWith(".") && ABBREV.test(before.slice(-9))) continue; // e.g. "…U.S."
-    start = m.index + m[0].length;
-  }
-  return seg.slice(start).trim();
-}
-
-/** Split the answer into (claim, [S#]) units: for each inline citation cluster
- *  (one or more adjacent [S#]), the claim is the sentence carrying it. Markdown
- *  is stripped first so headings/bullets/emphasis never leak into a claim. No
- *  model call. */
-function extractClaims(answer: string): ClaimUnit[] {
-  const text = answer
-    .replace(/```[\s\S]*?```/g, " ") // code / artifact blocks
+/** Strip markdown scaffolding so only prose sentences remain. Fenced code /
+ *  artifact blocks, emphasis / heading / quote marks, and leading list markers
+ *  are removed; TABLE ROWS are DROPPED entirely. A table cell is not a sentence,
+ *  and judging one as a claim produced false positives in calibration (a leaked
+ *  cell, and the model's own hedge, were flagged). */
+function toProse(answer: string): string {
+  const body = answer
+    .replace(/```[\s\S]*?```/g, " ") // fenced code / artifact blocks
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return true; // keep blanks as paragraph breaks
+      if (t.startsWith("|")) return false; // markdown table row
+      if ((t.match(/\|/g)?.length ?? 0) >= 2) return false; // inline table row
+      return true;
+    })
+    .join("\n");
+  return body
     .replace(/[*_`>#]/g, "") // emphasis / heading / quote marks
     .replace(/^\s*(?:[-+•]|\d+[.)])\s+/gm, ""); // leading list markers
-  const clusterRe = /\[S\d+\](?:\s*\[S\d+\])*/g;
+}
+
+/** Split prose into sentence spans, abbreviation-guarded so "U.S.", "No.", "v."
+ *  etc. never trigger a false boundary. */
+function splitSentences(text: string): string[] {
+  const boundary = /[.?!]\s+(?=[A-Z(])/g;
+  const out: string[] = [];
+  let start = 0;
+  for (let m = boundary.exec(text); m !== null; m = boundary.exec(text)) {
+    const before = text.slice(0, m.index + 1); // through the terminator
+    if (
+      before.endsWith(".") &&
+      (ABBREV.test(before.slice(-9)) || /(?:^|\s)[A-Z]\.$/.test(before.slice(-4)))
+    )
+      continue; // abbreviation, reporter, or single-letter initial — not a boundary
+    out.push(text.slice(start, m.index + 1));
+    start = m.index + m[0].length;
+  }
+  if (start < text.length) out.push(text.slice(start));
+  return out;
+}
+
+const CLAIM_RE = /\[S(\d+)\]/g;
+
+/** A candidate claim must read as a whole sentence: long enough, enough words,
+ *  and starting like a sentence (capital letter or number) — never a stray
+ *  fragment, a leading ", and …" clause, or a bare label. */
+function qualifies(claim: string): boolean {
+  if (claim.length < 24) return false;
+  if (claim.split(/\s+/).filter(Boolean).length < 5) return false;
+  return /^[A-Z0-9(]/.test(claim); // starts like a sentence
+}
+
+/** Split the answer into (claim, [S#]) units. Each unit is ONE full sentence
+ *  that carries one or more inline citations, with the [S#] markers removed and
+ *  every cited ref attached (deduped). Sentence-level — NOT sliced between
+ *  adjacent cites — so a sentence with two citations yields one clean claim, not
+ *  a mid-sentence fragment. Markdown is stripped and table rows dropped first.
+ *  No model call. Exported for the deterministic extractor test
+ *  (scripts/test-faithfulness-extract.ts). */
+export function extractClaims(answer: string): ClaimUnit[] {
   const units: ClaimUnit[] = [];
   const seen = new Set<string>();
-  let prevEnd = 0;
-  for (let m = clusterRe.exec(text); m !== null; m = clusterRe.exec(text)) {
-    const refs = [...m[0].matchAll(/\[S(\d+)\]/g)].map((x) => `S${x[1]}`);
-    let seg = lastSentence(text.slice(prevEnd, m.index)).replace(/\s+/g, " ").trim();
-    prevEnd = m.index + m[0].length;
-    if (seg.length > 400) seg = seg.slice(-400).trim(); // safety window
-    if (seg.length < 12 || !refs.length) continue;
-    const key = seg.toLowerCase();
+  for (const sentence of splitSentences(toProse(answer))) {
+    const refs = [...new Set([...sentence.matchAll(CLAIM_RE)].map((x) => `S${x[1]}`))];
+    if (!refs.length) continue;
+    let claim = sentence
+      .replace(CLAIM_RE, " ")
+      .replace(/\s+/g, " ")
+      .replace(/\s+([.,;:)\]])/g, "$1") // tidy space left before punctuation by cite removal
+      .replace(/^[^A-Za-z0-9(]+/, "") // drop leading punctuation / space
+      .trim();
+    if (claim.length > 400) claim = claim.slice(0, 400).trim(); // keep subject/verb head
+    if (!qualifies(claim)) continue;
+    const key = claim.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    units.push({ claim: trunc(seg, 400), refs });
+    units.push({ claim: trunc(claim, 400), refs });
     if (units.length >= MAX_CLAIMS) break;
   }
   return units;

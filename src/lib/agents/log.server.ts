@@ -2,7 +2,10 @@
 // Compact, greppable server-side logging for the agent loop.
 // Every line: `[agent] key=value key=value ...` so worker logs can be filtered
 // by run id, agent, or stage. Never log source bodies or credentials.
+// Each line is also tapped into the in-memory run-trace ring (trace.server.ts)
+// that backs the Run Inspector — dev-gated, bounded, never throws.
 // ============================================================================
+import { recordTrace } from "./trace.server";
 
 export function trunc(value: unknown, max = 160): string {
   const s = typeof value === "string" ? value : String(value ?? "");
@@ -27,6 +30,7 @@ export function agentLog(stage: string, fields: Fields = {}): void {
     parts.push(`${k}=${fmt(v)}`);
   }
   console.log(`[agent] ${parts.join(" ")}`);
+  recordTrace(stage, fields, "log");
 }
 
 /** Same shape, routed to console.error so failures stand out. */
@@ -37,6 +41,7 @@ export function agentError(stage: string, fields: Fields = {}): void {
     parts.push(`${k}=${fmt(v)}`);
   }
   console.error(`[agent] ${parts.join(" ")}`);
+  recordTrace(stage, fields, "error");
 }
 
 /** Milliseconds since a start marker, rounded. */

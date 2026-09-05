@@ -16,6 +16,7 @@ import { Route as AuthLogoutRouteImport } from './routes/auth.logout'
 import { Route as AuthLoginRouteImport } from './routes/auth.login'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
 import { Route as ApiUploadRouteImport } from './routes/api/upload'
+import { Route as ApiTracesRouteImport } from './routes/api/traces'
 import { Route as ApiSummarizeRouteImport } from './routes/api/summarize'
 import { Route as ApiQuickAskRouteImport } from './routes/api/quick-ask'
 import { Route as ApiOrchestrateRouteImport } from './routes/api/orchestrate'
@@ -23,6 +24,7 @@ import { Route as ApiFollowupsRouteImport } from './routes/api/followups'
 import { Route as AuthenticatedSummarizeRouteImport } from './routes/_authenticated/summarize'
 import { Route as AuthenticatedResearchRouteImport } from './routes/_authenticated/research'
 import { Route as AuthenticatedLibraryRouteImport } from './routes/_authenticated/library'
+import { Route as AuthenticatedInspectorRouteImport } from './routes/_authenticated/inspector'
 import { Route as AuthenticatedEvalRouteImport } from './routes/_authenticated/eval'
 import { Route as AuthenticatedDocsRouteImport } from './routes/_authenticated/docs'
 import { Route as AuthenticatedDiscoveryRouteImport } from './routes/_authenticated/discovery'
@@ -95,6 +97,11 @@ const ApiUploadRoute = ApiUploadRouteImport.update({
   path: '/api/upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiTracesRoute = ApiTracesRouteImport.update({
+  id: '/api/traces',
+  path: '/api/traces',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiSummarizeRoute = ApiSummarizeRouteImport.update({
   id: '/api/summarize',
   path: '/api/summarize',
@@ -128,6 +135,11 @@ const AuthenticatedResearchRoute = AuthenticatedResearchRouteImport.update({
 const AuthenticatedLibraryRoute = AuthenticatedLibraryRouteImport.update({
   id: '/library',
   path: '/library',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedInspectorRoute = AuthenticatedInspectorRouteImport.update({
+  id: '/inspector',
+  path: '/inspector',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedEvalRoute = AuthenticatedEvalRouteImport.update({
@@ -338,6 +350,7 @@ export interface FileRoutesByFullPath {
   '/discovery': typeof AuthenticatedDiscoveryRoute
   '/docs': typeof AuthenticatedDocsRoute
   '/eval': typeof AuthenticatedEvalRoute
+  '/inspector': typeof AuthenticatedInspectorRoute
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
@@ -345,6 +358,7 @@ export interface FileRoutesByFullPath {
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
+  '/api/traces': typeof ApiTracesRoute
   '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
@@ -389,6 +403,7 @@ export interface FileRoutesByTo {
   '/discovery': typeof AuthenticatedDiscoveryRoute
   '/docs': typeof AuthenticatedDocsRoute
   '/eval': typeof AuthenticatedEvalRoute
+  '/inspector': typeof AuthenticatedInspectorRoute
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
@@ -396,6 +411,7 @@ export interface FileRoutesByTo {
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
+  '/api/traces': typeof ApiTracesRoute
   '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
@@ -443,6 +459,7 @@ export interface FileRoutesById {
   '/_authenticated/discovery': typeof AuthenticatedDiscoveryRoute
   '/_authenticated/docs': typeof AuthenticatedDocsRoute
   '/_authenticated/eval': typeof AuthenticatedEvalRoute
+  '/_authenticated/inspector': typeof AuthenticatedInspectorRoute
   '/_authenticated/library': typeof AuthenticatedLibraryRoute
   '/_authenticated/research': typeof AuthenticatedResearchRoute
   '/_authenticated/summarize': typeof AuthenticatedSummarizeRoute
@@ -450,6 +467,7 @@ export interface FileRoutesById {
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
+  '/api/traces': typeof ApiTracesRoute
   '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
@@ -498,6 +516,7 @@ export interface FileRouteTypes {
     | '/discovery'
     | '/docs'
     | '/eval'
+    | '/inspector'
     | '/library'
     | '/research'
     | '/summarize'
@@ -505,6 +524,7 @@ export interface FileRouteTypes {
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
+    | '/api/traces'
     | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
@@ -549,6 +569,7 @@ export interface FileRouteTypes {
     | '/discovery'
     | '/docs'
     | '/eval'
+    | '/inspector'
     | '/library'
     | '/research'
     | '/summarize'
@@ -556,6 +577,7 @@ export interface FileRouteTypes {
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
+    | '/api/traces'
     | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
@@ -602,6 +624,7 @@ export interface FileRouteTypes {
     | '/_authenticated/discovery'
     | '/_authenticated/docs'
     | '/_authenticated/eval'
+    | '/_authenticated/inspector'
     | '/_authenticated/library'
     | '/_authenticated/research'
     | '/_authenticated/summarize'
@@ -609,6 +632,7 @@ export interface FileRouteTypes {
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
+    | '/api/traces'
     | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
@@ -655,6 +679,7 @@ export interface RootRouteChildren {
   ApiOrchestrateRoute: typeof ApiOrchestrateRoute
   ApiQuickAskRoute: typeof ApiQuickAskRoute
   ApiSummarizeRoute: typeof ApiSummarizeRoute
+  ApiTracesRoute: typeof ApiTracesRoute
   ApiUploadRoute: typeof ApiUploadRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
   ApiPileAskRoute: typeof ApiPileAskRoute
@@ -725,6 +750,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiUploadRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/traces': {
+      id: '/api/traces'
+      path: '/api/traces'
+      fullPath: '/api/traces'
+      preLoaderRoute: typeof ApiTracesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/summarize': {
       id: '/api/summarize'
       path: '/api/summarize'
@@ -772,6 +804,13 @@ declare module '@tanstack/react-router' {
       path: '/library'
       fullPath: '/library'
       preLoaderRoute: typeof AuthenticatedLibraryRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/inspector': {
+      id: '/_authenticated/inspector'
+      path: '/inspector'
+      fullPath: '/inspector'
+      preLoaderRoute: typeof AuthenticatedInspectorRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/eval': {
@@ -1042,6 +1081,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedDiscoveryRoute: typeof AuthenticatedDiscoveryRoute
   AuthenticatedDocsRoute: typeof AuthenticatedDocsRoute
   AuthenticatedEvalRoute: typeof AuthenticatedEvalRoute
+  AuthenticatedInspectorRoute: typeof AuthenticatedInspectorRoute
   AuthenticatedLibraryRoute: typeof AuthenticatedLibraryRoute
   AuthenticatedResearchRoute: typeof AuthenticatedResearchRoute
   AuthenticatedSummarizeRoute: typeof AuthenticatedSummarizeRoute
@@ -1056,6 +1096,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedDiscoveryRoute: AuthenticatedDiscoveryRoute,
   AuthenticatedDocsRoute: AuthenticatedDocsRoute,
   AuthenticatedEvalRoute: AuthenticatedEvalRoute,
+  AuthenticatedInspectorRoute: AuthenticatedInspectorRoute,
   AuthenticatedLibraryRoute: AuthenticatedLibraryRoute,
   AuthenticatedResearchRoute: AuthenticatedResearchRoute,
   AuthenticatedSummarizeRoute: AuthenticatedSummarizeRoute,
@@ -1183,6 +1224,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiOrchestrateRoute: ApiOrchestrateRoute,
   ApiQuickAskRoute: ApiQuickAskRoute,
   ApiSummarizeRoute: ApiSummarizeRoute,
+  ApiTracesRoute: ApiTracesRoute,
   ApiUploadRoute: ApiUploadRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
   ApiPileAskRoute: ApiPileAskRoute,
