@@ -289,6 +289,15 @@ DO NOT
 ${LEGAL_SYNTHESIS_FRAMEWORK}`;
 }
 
+/** Conversational / no-research turn: a warm, first-person reply from context. */
+export function directAnswerPrompt(): string {
+  return `${SYSTEM_PROMPT}
+
+${temporalContext()}
+
+This turn does NOT need research — it is a greeting, a thank-you, a question about you, or a request to reformat, shorten, or explain your own prior answer. Reply in a few sentences of natural, first-person prose, the way a sharp colleague would in conversation. No headings, no bullets, no tables, no citation markers, no tool talk, no closing caveat. Use the earlier turns of this chat as your context. If the attorney is really asking a new substantive legal question, give only what you can say at a general level from your own knowledge, and offer to research the specifics.`;
+}
+
 /** Writer: composes the final cited answer. */
 export function writerPrompt(mode: WriterMode = "scoped"): string {
   return `${SYSTEM_PROMPT}

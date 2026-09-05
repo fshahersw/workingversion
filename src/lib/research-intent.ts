@@ -101,3 +101,75 @@ export function classifyIntent(query: string): RetrievalHints {
     focus_note: hit.note,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Effort routing — how hard should this turn work?
+//
+//   conversational : greeting / thanks / "who are you" / reformat-my-last-answer
+//                    -> no tools, one warm direct reply. Fastest path.
+//   fast           : a single scoped legal lookup -> tool loop, few steps.
+//   think          : multi-part / comparative / complex -> full tool loop.
+//
+// Deliberately CONSERVATIVE about routing DOWN: a real legal question must never
+// be answered tool-less. Conversational requires an unmistakable social/meta
+// phrasing AND the absence of any legal signal; anything ambiguous defaults to
+// `think` (full tools). This is the fix for "user typed thanks -> 20 searches".
+// ---------------------------------------------------------------------------
+
+export type EffortMode = "conversational" | "fast" | "think";
+export type EffortDecision = { mode: EffortMode; confidence: number; reason: string };
+
+/** Message STARTS with a social/acknowledgement opener ("thanks, that helps",
+ *  "hey there", "great work"). Start-anchored, not whole-match, so trailing
+ *  words don't defeat it — the !hasLegal + short-length guards keep it safe. */
+const CONVERSATIONAL_RE =
+  /^\s*(?:hi|hey|hello|yo|thanks|thank you|thx|ty|ok(?:ay)?|k|got it|understood|cool|nice|great|perfect|awesome|amazing|sounds good|will do|no thanks|no thank you|nvm|never ?mind|bye|goodbye|good morning|good afternoon|good evening|cheers|appreciate)\b/i;
+
+/** Meta / reformat of the assistant's own prior answer (no new research). */
+const REFORMAT_RE =
+  /\b(shorten (that|it|this)|make (that|it|this) shorter|too long|tl;?dr|rephrase (that|it)|reword (that|it)|rewrite (that|it)|say (that|it) again|in plain (english|terms)|simplify (that|it)|bullet(ize| points| that)|who are you|what can you do|what are you|how do you work)\b/i;
+
+/** Any hint that this is a real legal-research question — blocks a down-route. */
+const LEGAL_SIGNAL_RE =
+  /\b(mdl|jpml|docket|cmo|pto|bellwether|pacer|court|circuit|opinion|ruling|holding|motion|order|settle(ment)?|class(\s|-)?(cert|action)?|rule ?\d|daubert|preemption|fda|recall|statute|limitations|repose|v\.|et al|plaintiff|defendant|deposition|complaint|filing|litigation|lawsuit|damages|injur|causation|liab|remand|removal|discovery|subpoena|expert|verdict|appeal)\b/i;
+
+/** Multi-part / comparative / strategic phrasing -> think. */
+const THINK_RE =
+  /\b(compare|contrast|versus|vs\.?|cross[- ]?reference|relationship between|analyze|analysis|assess(ment)?|comprehensive|walk me through|deep dive|breakdown|all (the|of)|every |both |strateg|implications|pros and cons|as well as|and also)\b/i;
+
+/**
+ * Classify how much effort a turn deserves. Pure heuristic, zero latency.
+ * `historyTurns` is the count of prior turns (a fresh first turn is never
+ * conversational, since there is no prior answer to reformat/acknowledge).
+ */
+export function classifyEffort(query: string, historyTurns = 0): EffortDecision {
+  const q = (query || "").trim();
+  if (!q) return { mode: "conversational", confidence: 0.9, reason: "empty" };
+  const words = q.split(/\s+/).filter(Boolean).length;
+  const questionMarks = (q.match(/\?/g) || []).length;
+  const hasLegal = LEGAL_SIGNAL_RE.test(q);
+
+  // Conversational: unmistakable social/meta/reformat, short, NO legal signal.
+  // Reformat requires prior context (something to reformat); social openers do not.
+  if (!hasLegal && words <= 12) {
+    if (CONVERSATIONAL_RE.test(q)) {
+      return { mode: "conversational", confidence: 0.95, reason: "social/acknowledgement opener" };
+    }
+    if (historyTurns > 0 && REFORMAT_RE.test(q)) {
+      return { mode: "conversational", confidence: 0.9, reason: "reformat/meta of prior answer" };
+    }
+  }
+
+  // Think: multi-part, comparative, long, or chained.
+  if (THINK_RE.test(q) || questionMarks >= 2 || words >= 28 || / \band\b .+ \band\b /i.test(q)) {
+    return { mode: "think", confidence: 0.8, reason: "multi-part / comparative / long" };
+  }
+
+  // Fast: a clear single scoped legal lookup (short, one ask, has a legal signal).
+  if (hasLegal && questionMarks <= 1 && words <= 22) {
+    return { mode: "fast", confidence: 0.7, reason: "single scoped legal lookup" };
+  }
+
+  // Default: think (full tools) — never under-serve an ambiguous real question.
+  return { mode: "think", confidence: 0.5, reason: "default (ambiguous -> full tools)" };
+}

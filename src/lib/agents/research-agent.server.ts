@@ -7,8 +7,9 @@
 // SSE event vocabulary the chat UI already renders.
 // ============================================================================
 import type { OrchestrateInput, Emit } from "./orchestrator.server";
-import { researchAgentPrompt } from "./prompts";
-import { bedrockEnabled } from "./bedrock.server";
+import { researchAgentPrompt, directAnswerPrompt } from "./prompts";
+import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
+import { classifyEffort, type EffortMode } from "@/lib/research-intent";
 import { streamConverseToolLoop } from "./bedrock-stream-tools.server";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
@@ -36,6 +37,40 @@ const RESEARCH_DEADLINE_MS = 40_000;
 const RESEARCH_EFFORT = process.env["BEDROCK_RESEARCH_EFFORT"] ?? "low";
 const SYNTHESIS_EFFORT = process.env["BEDROCK_SYNTHESIS_EFFORT"] ?? "medium";
 
+type ModeCfg = {
+  maxSteps: number;
+  callBudget: { perTool: number; total: number };
+  researchEffort: string;
+  synthesisEffort: string;
+  synthesisMaxTokens: number;
+  deadlineMs: number;
+};
+
+/** Per-mode budget/effort for the tool loop. Conversational never reaches here
+ *  (handled inline, no tools). THINK preserves the validated baseline exactly;
+ *  FAST is a tighter, lower-latency path for a single scoped lookup. */
+function modeConfig(mode: EffortMode): ModeCfg {
+  if (mode === "fast") {
+    return {
+      maxSteps: 3,
+      callBudget: { perTool: 3, total: 8 },
+      researchEffort: "low",
+      synthesisEffort: "low",
+      synthesisMaxTokens: 8000,
+      deadlineMs: 30_000,
+    };
+  }
+  // think (and any non-conversational fallback) — the validated full loop.
+  return {
+    maxSteps: MAX_STEPS,
+    callBudget: { perTool: 4, total: 18 },
+    researchEffort: RESEARCH_EFFORT,
+    synthesisEffort: SYNTHESIS_EFFORT,
+    synthesisMaxTokens: 16000,
+    deadlineMs: RESEARCH_DEADLINE_MS,
+  };
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : "Research failed.";
 }
@@ -49,13 +84,6 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
   const runId = crypto.randomUUID();
   const runStart = Date.now();
   emit("run", { run_id: runId, query: input.query });
-  emit("round", {
-    round: 1,
-    phase: "Working the record",
-    reasoning: "",
-    done: false,
-    dispatch: [{ agent: "research", focus: input.query }],
-  });
 
   const book = new SourceBook();
 
@@ -66,6 +94,46 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
   }
 
   try {
+    // --- Conversational short-circuit -------------------------------------
+    // Classify the RAW input first: a greeting / thanks / "who are you" /
+    // reformat-my-last-answer needs no research and no decontextualization
+    // (this also skips the resolve Bedrock call). The fix for "user typed
+    // thanks -> full 18-call tool loop". Conservative by design: only an
+    // unmistakable social/meta phrasing with no legal signal lands here.
+    const rawDecision = classifyEffort(input.query, memory.tail.length);
+    if (rawDecision.mode === "conversational") {
+      emit("mode", { mode: "conversational", reason: rawDecision.reason });
+      agentLog("run_start", { run: runId, engine: "conversational", q: trunc(input.query, 200) });
+      let convo = "";
+      if (bedrockEnabled()) {
+        try {
+          const hist = tailMessages(memory);
+          const res = await bedrockChat({
+            model: BEDROCK_AGENT_MODEL,
+            system: directAnswerPrompt(),
+            messages: [
+              ...hist.map((h) => ({ role: h.role, content: [{ text: h.content }] })),
+              userText(input.query),
+            ],
+            maxTokens: 700,
+            ...(input.signal ? { signal: input.signal } : {}),
+          });
+          convo = res.text;
+        } catch (err) {
+          agentError("conversational_failed", { run: runId, error: trunc(errorMessage(err), 200) });
+        }
+      }
+      if (!convo.trim()) convo = "Happy to help — what would you like to dig into?";
+      emit("delta", { text: convo });
+      emit("sources", { sources: [] });
+      emit("done", { run_id: runId, status: "complete", rounds: 0, source_count: 0 });
+      agentLog("run_done", { run: runId, status: "complete", engine: "conversational", answer_chars: convo.length, total_ms: since(runStart) });
+      const convMemory = await updateMemory(memory, input.query, convo, [], input.signal);
+      emit("memory", { memory: convMemory });
+      return;
+    }
+
+    // --- Research path (fast / think) -------------------------------------
     // Only rewrite a follow-up to standalone when there IS prior context — a
     // first turn is already standalone, so skip the extra model call. Case
     // resolution now happens inside the loop (db_find_case), so the separate
@@ -84,9 +152,26 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     const history = tailMessages(memory).map((h) => ({ role: h.role, content: h.content }));
     book.seed(memory.sources);
 
+    // Effort mode on the STANDALONE query; never fall back to conversational
+    // here (a resolved follow-up is a real question). FAST = tighter budget,
+    // THINK = the validated full loop, ambiguous defaults to THINK.
+    const decision = classifyEffort(resolved.query, history.length);
+    const mode: EffortMode = decision.mode === "conversational" ? "fast" : decision.mode;
+    const cfg = modeConfig(mode);
+    emit("mode", { mode, reason: decision.reason });
+
+    emit("round", {
+      round: 1,
+      phase: "Working the record",
+      reasoning: "",
+      done: false,
+      dispatch: [{ agent: "research", focus: input.query }],
+    });
+
     agentLog("run_start", {
       run: runId,
       engine: "single_agent",
+      mode,
       q: trunc(input.query, 200),
       history_turns: history.length,
       carried_sources: book.all().length,
@@ -115,7 +200,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             user: `${scopeBlock(input)}${historyPreamble}${contextBlock ? `${contextBlock}\n\n---\n\n` : ""}QUESTION\n${resolved.query}\n\nResearch this with your tools (narrate one line before each batch, call them in parallel where independent), then write the final answer for the attorney.`,
             tools: RESEARCH_TOOLS,
             maxTokens: 2000,
-            maxSteps: MAX_STEPS,
+            maxSteps: cfg.maxSteps,
             synthesisUser:
               "Research complete — do NOT call any more tools. Now write the final answer for the attorney, using the sources you gathered above and citing them with [S#]. Lead with the bottom line, shape the format to the question, and end on the substance (no verification/next-steps closer).",
             // Sonnet 5 adaptive thinking is ALWAYS ON and shares this budget with
@@ -124,16 +209,16 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             // (stop=max_tokens, 0 chars) — the cause of ~27% of baseline cases
             // failing. Size it generously so thinking completes AND the answer
             // fits (the writer path learned the same lesson: floor ~12k+).
-            synthesisMaxTokens: 16000,
-            callBudget: { perTool: 4, total: 18 },
-            deadlineMs: RESEARCH_DEADLINE_MS,
+            synthesisMaxTokens: cfg.synthesisMaxTokens,
+            callBudget: cfg.callBudget,
+            deadlineMs: cfg.deadlineMs,
             cache: true, // cache the system + tool-defs prefix across every turn
             // Real multi-turn context: prepend the verbatim recent turns so a
             // follow-up isn't riding on the rolling summary alone (memoryBlock
             // renders summary/entities/sources, never the tail).
             ...(history.length ? { history } : {}),
-            ...(RESEARCH_EFFORT ? { researchEffort: RESEARCH_EFFORT } : {}),
-            ...(SYNTHESIS_EFFORT ? { synthesisEffort: SYNTHESIS_EFFORT } : {}),
+            ...(cfg.researchEffort ? { researchEffort: cfg.researchEffort } : {}),
+            ...(cfg.synthesisEffort ? { synthesisEffort: cfg.synthesisEffort } : {}),
             ...(input.signal ? { signal: input.signal } : {}),
           },
           {
@@ -187,6 +272,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
         agentLog("research_loop", {
           run: runId,
           ms: since(loopStart),
+          mode,
           steps: res.steps,
           tool_calls: toolCalls,
           hits,
@@ -210,6 +296,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     agentLog("run_done", {
       run: runId,
       status: "complete",
+      mode,
       sources: sources.length,
       answer_chars: answerText.length,
       total_ms: since(runStart),
