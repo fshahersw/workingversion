@@ -146,6 +146,7 @@ function TimelineInner({
                         a={a}
                         idx={idx}
                         settled={settled}
+                        showFocus={Object.keys(r.agents).length > 1}
                       />
                     ))}
                   </AnimatePresence>
@@ -174,21 +175,17 @@ function AgentRow({
   a,
   idx,
   settled,
+  showFocus,
 }: {
   a: AgentRun;
   idx: number;
   settled?: boolean;
+  /** Show the agent's focus line — only useful when a round has several agents. */
+  showFocus?: boolean;
 }) {
   const m = agentMeta(a.agent);
   const dotColor = m.color.replace("text-", "bg-");
   const running = !settled && a.status !== "done";
-
-  // Distinct tool labels in call order, most recent last.
-  const tools: string[] = [];
-  for (const t of a.tools) {
-    const label = toolLabel(t.tool, t.scope);
-    if (!tools.includes(label)) tools.push(label);
-  }
 
   return (
     <motion.div
@@ -238,17 +235,45 @@ function AgentRow({
           >
             {m.name}
           </span>
-          {typeof a.count === "number" && a.count > 0 && (
-            <span className="text-[10px] tabular-nums text-muted-foreground/70">
-              · {a.count}
+          {showFocus && a.focus && (
+            <span
+              className="min-w-0 truncate text-[10.5px] text-muted-foreground/60"
+              title={a.focus}
+            >
+              {a.focus}
             </span>
           )}
-          {tools.length > 0 && (
-            <span className="text-[10px] tracking-tight text-muted-foreground/60">
-              {tools.join(" · ")}
+          {typeof a.count === "number" && a.count > 0 && (
+            <span className="text-[10px] tabular-nums text-muted-foreground/70">
+              · {a.count} source{a.count === 1 ? "" : "s"}
             </span>
           )}
         </div>
+        {/* Per-call search log — the actual query each tool ran and its hit
+            count, streaming in order. This is the "watching it work" detail;
+            it collapses behind the pill once the answer starts. */}
+        {a.tools.length > 0 && (
+          <ul className="mt-1 space-y-[3px]">
+            {a.tools.map((t, i) => (
+              <li key={i} className="flex items-baseline gap-1.5 text-[10.5px] leading-snug">
+                <span className="shrink-0 text-muted-foreground/55">
+                  {toolLabel(t.tool, t.scope)}
+                </span>
+                {t.query && (
+                  <span
+                    className="min-w-0 flex-1 truncate italic text-muted-foreground/50"
+                    title={t.query}
+                  >
+                    {t.query}
+                  </span>
+                )}
+                {typeof t.hits === "number" && t.hits > 0 && (
+                  <span className="shrink-0 tabular-nums text-muted-foreground/45">{t.hits}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </motion.div>
   );
