@@ -14,6 +14,7 @@ import { streamConverseToolLoop } from "./bedrock-stream-tools.server";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
 import { agentLog, agentError, since, trunc } from "./log.server";
+import { factCheck, unverified, kindLabel, checkCitations } from "@/lib/fact-check";
 import {
   emptyMemory,
   hasContext,
@@ -294,6 +295,29 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
       throw new Error("Research produced no answer (Bedrock unavailable or throttled).");
     }
     emit("sources", { sources });
+
+    // Deterministic verification (always on, no model call, no latency): confirm
+    // the specifics the model asserted (MDL/docket/dates/figures/citations) appear
+    // verbatim in the retrieved sources, and that every [S#] marker maps to a real
+    // source. Surfaces invented specifics / orphan citations as a trust signal.
+    const facts = factCheck(answerText, sources);
+    const factsVerified = facts.filter((f) => f.verified).length;
+    const cites = checkCitations(answerText, sources);
+    emit("verification", {
+      factsChecked: facts.length,
+      factsVerified,
+      unverified: unverified(facts)
+        .map((f) => `${kindLabel(f.kind)}: ${f.value}`)
+        .slice(0, 10),
+      orphanRefs: cites.orphans,
+    });
+    agentLog("verification", {
+      run: runId,
+      mode,
+      facts_checked: facts.length,
+      facts_verified: factsVerified,
+      orphan_refs: cites.orphans.length,
+    });
 
     emit("done", { run_id: runId, status: "complete", rounds: 1, source_count: sources.length });
     agentLog("run_done", {

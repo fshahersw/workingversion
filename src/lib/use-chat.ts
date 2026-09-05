@@ -202,6 +202,16 @@ function applyEvent(m: Message, e: SSEEvent): Message {
       // Streaming text is batched outside the reducer via RAF;
       // see useChat.send. We still tolerate raw deltas here.
       return { ...m, answer: m.answer + ((d.text as string) ?? "") };
+    case "verification":
+      return {
+        ...m,
+        verification: {
+          factsChecked: Number(d.factsChecked) || 0,
+          factsVerified: Number(d.factsVerified) || 0,
+          unverified: (d.unverified as string[] | undefined) ?? [],
+          orphanRefs: (d.orphanRefs as string[] | undefined) ?? [],
+        },
+      };
     case "done":
       return { ...m, status: "done", collapseTimeline: true };
     case "error":

@@ -773,6 +773,33 @@ function AssistantMessage({
             <span>{msg.error || "Something went wrong while researching."}</span>
           </div>
         )}
+        {msg.status === "done" &&
+          msg.verification &&
+          msg.verification.factsChecked > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground/70">
+              <span className="inline-flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" />
+                {msg.verification.factsVerified}/{msg.verification.factsChecked}{" "}
+                specifics verified against sources
+              </span>
+              {msg.verification.unverified.length +
+                msg.verification.orphanRefs.length >
+                0 && (
+                <span
+                  className="text-amber-700/80"
+                  title={[
+                    ...msg.verification.unverified,
+                    ...msg.verification.orphanRefs.map((r) => `unmatched ${r}`),
+                  ].join(" · ")}
+                >
+                  ·{" "}
+                  {msg.verification.unverified.length +
+                    msg.verification.orphanRefs.length}{" "}
+                  to confirm
+                </span>
+              )}
+            </div>
+          )}
         {msg.status === "done" && msg.answer.trim().length > 0 && (
           <AnswerActions
             question={question}

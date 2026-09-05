@@ -90,3 +90,28 @@ export function factCheck(answer: string, sources: Source[]): FactClaim[] {
 export function unverified(claims: FactClaim[]) {
   return claims.filter((c) => !c.verified);
 }
+
+export type CitationCheck = {
+  /** [S#] refs the answer actually cited. */
+  cited: string[];
+  /** Cited refs with NO matching retrieved source — an invented citation. */
+  orphans: string[];
+  /** Retrieved sources the answer never cited. */
+  unused: string[];
+};
+
+/** Deterministic [S#] integrity: every citation marker in the answer must map to
+ *  a real retrieved source. Tolerant of ref format (compares the numeric part). */
+export function checkCitations(answer: string, sources: Source[]): CitationCheck {
+  const refNums = new Set(
+    sources.map((s) => (s.ref ?? "").replace(/\D/g, "")).filter(Boolean),
+  );
+  const citedNums = new Set(
+    [...answer.matchAll(/\[S(\d+)\]/gi)].map((m) => m[1] as string),
+  );
+  return {
+    cited: [...citedNums].map((n) => `S${n}`),
+    orphans: [...citedNums].filter((n) => !refNums.has(n)).map((n) => `S${n}`),
+    unused: [...refNums].filter((n) => !citedNums.has(n)).map((n) => `S${n}`),
+  };
+}

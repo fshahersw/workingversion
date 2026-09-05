@@ -190,6 +190,13 @@ export type Message = {
   error?: string;
   collapseTimeline?: boolean;
   followups?: string[];
+  /** Deterministic citation/fact verification computed after synthesis. */
+  verification?: {
+    factsChecked: number;
+    factsVerified: number;
+    unverified: string[];
+    orphanRefs: string[];
+  };
 };
 
 /** Matter the research session is scoped to (null = global research). */
