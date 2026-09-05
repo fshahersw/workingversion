@@ -73,7 +73,12 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     const resolved = hasContext(memory)
       ? await resolveQuestion(input.query, memory, input.signal).catch(() => ({ query: input.query, topicShift: false }))
       : { query: input.query, topicShift: false };
-    if (resolved.topicShift) memory = { ...emptyMemory(), turns: memory.turns };
+    // A topic shift clears the rolling summary / entity ledger / sources, but
+    // KEEPS the verbatim tail: those last turns are still the immediate
+    // conversational context, and dropping them here (before `history` is
+    // computed below) is what silently defeated the tail injection whenever
+    // resolveQuestion misfired topicShift on an empty ledger.
+    if (resolved.topicShift) memory = { ...emptyMemory(), tail: memory.tail, turns: memory.turns };
 
     const memBlock = memoryBlock(memory);
     const history = tailMessages(memory).map((h) => ({ role: h.role, content: h.content }));

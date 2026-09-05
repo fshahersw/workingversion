@@ -183,9 +183,15 @@ export async function resolveQuestion(
       (parseJsonBlock(res.text, "query") as Record<string, unknown> | null) ?? null;
     if (!parsed) return fallback;
     const rewritten = trunc(s(parsed["query"]), 600);
+    // Only honor a topic shift when there WAS an established ledger to shift away
+    // from. With no entities and no summary the model has nothing to judge
+    // against and tends to false-positive topic_shift on a pronoun follow-up
+    // ("developments there") — and a false positive wipes the conversation
+    // context. When the ledger is empty, keep context (topicShift = false).
+    const hasLedger = mem.entities.length > 0 || Boolean(mem.summary);
     return {
       query: rewritten || question,
-      topicShift: Boolean(parsed["topic_shift"]),
+      topicShift: hasLedger ? Boolean(parsed["topic_shift"]) : false,
     };
   } catch (err) {
     agentError("memory_resolve_failed", { error: trunc(String(err), 160) });
@@ -247,7 +253,14 @@ export async function updateMemory(
       ...(signal ? { signal } : {}),
     });
     const parsed = parseJsonBlock(res.text, "summary") as Record<string, unknown> | null;
-    if (!parsed) return { ...mem, tail, sources: mergedSources, turns: nextTurn };
+    if (!parsed) {
+      // A successful call whose JSON we could not parse used to return silently,
+      // leaving summary/entities empty — which then made resolveQuestion misfire
+      // topicShift on the next turn. Log it so a recurring parse-miss is visible;
+      // the prior summary/entities are preserved as the fallback.
+      agentError("memory_update_parse_miss", { chars: res.text.length });
+      return { ...mem, tail, sources: mergedSources, turns: nextTurn };
+    }
 
     const rawEntities = Array.isArray(parsed["entities"])
       ? (parsed["entities"] as Record<string, unknown>[])
