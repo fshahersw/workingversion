@@ -18,6 +18,11 @@ import type { BedrockToolDef, BedrockToolCall, BedrockMsg } from "./bedrock.serv
 
 const REGION = process.env["BEDROCK_REGION"] ?? "us-east-1";
 
+/** Minimum research time (ms) that must remain before the synthesis reserve for
+ *  the comprehensiveness gate to fire — enough for the audit call plus one more
+ *  targeted tool batch. Below this, skip the gate and synthesize. */
+const GATE_MIN_MS = 10_000;
+
 function endpoint(model: string): string {
   return `https://bedrock-runtime.${REGION}.amazonaws.com/model/${encodeURIComponent(model)}/converse-stream`;
 }
@@ -284,7 +289,14 @@ async function streamOneTurn(
   return { text, toolUses, stopReason, usage, assistantContent };
 }
 
-export type StreamToolLoopResult = { narration: string; answer: string; steps: number };
+export type StreamToolLoopResult = {
+  narration: string;
+  answer: string;
+  steps: number;
+  /** True when the comprehensiveness gate injected a targeted re-query round
+   *  before synthesis (quality plan A) — for eval attribution. */
+  gateRequeried: boolean;
+};
 
 /** Streaming research loop + merged synthesis. During research the model's
  *  narration streams via onText and tool_use blocks execute in parallel; when
@@ -325,6 +337,18 @@ export async function streamConverseToolLoop(
     researchEffort?: string;
     /** Adaptive-thinking effort for the final synthesis turn. Unset = default. */
     synthesisEffort?: string;
+    /** Comprehensiveness gate (quality plan A). Consulted ONCE, when the model
+     *  first stops calling tools with a spare step and time before the synthesis
+     *  reserve: if the gathered sources leave a genuine coverage gap, return a
+     *  bounded re-query instruction (injected as a user turn) to run one more
+     *  targeted research round before synthesis; return null to synthesize now. */
+    gate?: {
+      check: (ctx: {
+        steps: number;
+        totalCalls: number;
+        researchMsLeft: number;
+      }) => Promise<string | null>;
+    };
   },
   handlers: {
     onText?: (delta: string) => void;
@@ -371,6 +395,11 @@ export async function streamConverseToolLoop(
     deadline !== undefined ? deadline - synthesisReserveMs : undefined;
   let lastText = "";
   let steps = 0;
+  // Comprehensiveness gate (quality plan A) fires at most once: gateFired guards
+  // the single consult; gateRequeried records whether it actually injected a
+  // targeted re-query round (returned to the caller for eval attribution).
+  let gateFired = false;
+  let gateRequeried = false;
 
   for (; steps < opts.maxSteps; steps++) {
     // Below the research threshold, hold to the full deadline (don't starve
@@ -408,7 +437,47 @@ export async function streamConverseToolLoop(
     );
     handlers.onStep?.({ step: steps + 1, ms: Date.now() - t0, stopReason: turn.stopReason, toolCalls: turn.toolUses.map((t) => t.name), cacheReadTokens: turn.usage.cacheRead, cacheWriteTokens: turn.usage.cacheWrite });
     if (turn.text) lastText = turn.text;
-    if (!turn.toolUses.length) break; // model is answering — drop the draft; synthesis writes the answer.
+    if (!turn.toolUses.length) {
+      // The model wants to stop researching. If a comprehensiveness gate is
+      // configured and there is budget + time for one more targeted round,
+      // consult it ONCE: a genuine coverage gap triggers a bounded re-query
+      // rather than synthesizing over a hole. Guarded so the injected re-query
+      // is actually consumed by a model turn (needs a spare step) and so the
+      // gate never runs once time/budget is already spent.
+      if (
+        opts.gate &&
+        !gateFired &&
+        steps < opts.maxSteps - 1 &&
+        totalCalls < totalCap &&
+        turn.assistantContent.length > 0
+      ) {
+        gateFired = true;
+        const researchMsLeft =
+          (researchDeadline ?? Number.POSITIVE_INFINITY) - Date.now();
+        if (researchMsLeft > GATE_MIN_MS) {
+          let instruction: string | null = null;
+          try {
+            instruction = await opts.gate.check({ steps, totalCalls, researchMsLeft });
+          } catch {
+            instruction = null;
+          }
+          if (instruction) {
+            // Replay the model's (dropped) draft turn so roles stay alternating,
+            // then steer it back to targeted research. The next iteration runs the
+            // bounded re-query round; when the model stops again the gate is spent
+            // (gateFired) and the loop proceeds to synthesis.
+            messages.push({
+              role: "assistant",
+              content: turn.assistantContent,
+            } as unknown as BedrockMsg);
+            messages.push({ role: "user", content: [{ text: instruction }] } as BedrockMsg);
+            gateRequeried = true;
+            continue;
+          }
+        }
+      }
+      break; // model is answering — drop the draft; synthesis writes the answer.
+    }
 
     // Confirmed research turn: surface its short narration as one reasoning line.
     const narration = turnText.trim();
@@ -488,5 +557,5 @@ export async function streamConverseToolLoop(
   );
   handlers.onStep?.({ step: steps + 1, ms: Date.now() - synthStart, stopReason: `synthesis:${synth.stopReason}`, toolCalls: [], cacheReadTokens: synth.usage.cacheRead, cacheWriteTokens: synth.usage.cacheWrite });
 
-  return { narration: lastText, answer: synth.text, steps };
+  return { narration: lastText, answer: synth.text, steps, gateRequeried };
 }

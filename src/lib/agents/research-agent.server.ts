@@ -16,6 +16,7 @@ import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
 import { agentLog, agentError, since, trunc } from "./log.server";
 import { factCheck, unverified, kindLabel, checkCitations } from "@/lib/fact-check";
+import { coverageGaps, requeryInstruction } from "./coverage.server";
 import {
   emptyMemory,
   hasContext,
@@ -38,6 +39,12 @@ const RESEARCH_DEADLINE_MS = 40_000;
 // per env; set a var to "" to send no effort field (pre-Phase-4 behavior).
 const RESEARCH_EFFORT = process.env["BEDROCK_RESEARCH_EFFORT"] ?? "low";
 const SYNTHESIS_EFFORT = process.env["BEDROCK_SYNTHESIS_EFFORT"] ?? "medium";
+// Comprehensiveness gate (quality plan A): after research, before synthesis, a
+// cheap Haiku pass checks the gathered sources cover every part of the question
+// and triggers ONE bounded targeted re-query round for genuine gaps. ON by
+// default for THINK + report modes (never fast/conversational); set
+// BEDROCK_COVERAGE_GATE=0 to disable so eval can A/B from one codebase.
+const COVERAGE_GATE_ON = !/^(0|off|false)$/i.test(process.env["BEDROCK_COVERAGE_GATE"] ?? "");
 
 type ModeCfg = {
   maxSteps: number;
@@ -278,6 +285,37 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             ...(history.length ? { history } : {}),
             ...(cfg.researchEffort ? { researchEffort: cfg.researchEffort } : {}),
             ...(cfg.synthesisEffort ? { synthesisEffort: cfg.synthesisEffort } : {}),
+            // Comprehensiveness gate (plan A): THINK + report modes only — a
+            // scoped FAST lookup should stay tight, not trigger extra rounds.
+            ...(COVERAGE_GATE_ON && (mode === "think" || docReq.wants)
+              ? {
+                  gate: {
+                    check: async () => {
+                      const gaps = await coverageGaps({
+                        query: resolved.query,
+                        sources: book.all(),
+                        ...(input.signal ? { signal: input.signal } : {}),
+                      });
+                      if (!gaps || gaps.covered) return null;
+                      if (!gaps.missing.length && !gaps.queries.length) return null;
+                      agentLog("coverage_gap", {
+                        run: runId,
+                        sources: book.all().length,
+                        missing: gaps.missing,
+                        queries: gaps.queries,
+                      });
+                      // Surface the coverage follow-up as a live thinking line.
+                      const label = gaps.missing.slice(0, 3).join("; ") || "open gaps";
+                      emit("thinking", {
+                        round: 1,
+                        agent: "research",
+                        text: `\nChecking coverage — following up on ${label}.`,
+                      });
+                      return requeryInstruction(gaps);
+                    },
+                  },
+                }
+              : {}),
             ...(input.signal ? { signal: input.signal } : {}),
           },
           {
@@ -345,6 +383,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
           hits,
           sources: book.all().length,
           answer_chars: answerText.length,
+          gate_requeried: res.gateRequeried,
         });
       } catch (err) {
         agentError("research_loop_failed", { run: runId, error: trunc(errorMessage(err), 200) });
