@@ -144,6 +144,28 @@ function describe(e: TraceEvent): { title: string; detail?: string; tone?: strin
     case "no_answer":
     case "research_loop_failed":
       return { title: e.stage, detail: fld(f, "error"), tone: "text-red-700" };
+    case "subagents_start":
+      return {
+        title: "Subagents dispatched",
+        detail: `${fld(f, "n")} threads · ${fld(f, "model")} · concurrency ${fld(f, "concurrency")}`,
+        tone: "text-violet-700",
+      };
+    case "subagent_done":
+      return {
+        title: `Subagent ${fld(f, "sub")}: ${fld(f, "objective") ?? ""}`,
+        detail: `${fld(f, "ok") === "true" ? "ok" : "empty"} · ${fld(f, "steps")} steps · ${fld(f, "refs")} refs · tok ${tok(Number(fld(f, "tokens_in")))} in / ${tok(Number(fld(f, "tokens_out")))} out · ${ms(Number(fld(f, "ms")))}`,
+        tone: fld(f, "ok") === "true" ? "text-slate-700" : "text-amber-700",
+      };
+    case "subagents_done":
+      return {
+        title: "Subagents complete",
+        detail: `${fld(f, "ok")}/${fld(f, "n")} ok · ${tok(Number(fld(f, "tokens_total")))} tok · ${ms(Number(fld(f, "ms")))}`,
+        tone: "text-violet-700",
+      };
+    case "subagent_failed":
+    case "subagent_plan_failed":
+    case "subagents_report_failed":
+      return { title: e.stage, detail: fld(f, "error"), tone: "text-red-700" };
     default: {
       const detail = Object.entries(f)
         .map(([k, v]) => `${k}=${String(v)}`)

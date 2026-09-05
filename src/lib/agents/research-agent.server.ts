@@ -11,6 +11,7 @@ import { researchAgentPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
 import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
 import { buildReportMarkdown } from "./report.server";
+import { planSubquestions, runSubagents, assembleFindings, subagentsEnabled } from "./subagent.server";
 import { streamConverseToolLoop } from "./bedrock-stream-tools.server";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
@@ -431,6 +432,44 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // to chat (see onAnswer). Render it into the file, then show a short friendly
     // note — the chat stays clean, the content lives in the download.
     if (docReq.wants) {
+      // Track A — light subagents for file deliverables (flag-gated via
+      // BEDROCK_SUBAGENTS, off by default). Decompose the request and run a small
+      // bounded pool of focused subagents over the SHARED book to add targeted
+      // depth, then fold their findings into the digest the report is built from.
+      // book.all() is a live reference, so buildReportMarkdown below sees the new
+      // sources automatically. Bounded + tolerant: a failure never blocks the doc.
+      if (subagentsEnabled() && answerText.trim() && !docCreated) {
+        try {
+          const specs = await planSubquestions(resolved.query, {
+            max: 3, // "light": a small pool, not the full deep-research fan-out
+            ...(input.signal ? { signal: input.signal } : {}),
+          });
+          if (specs.length >= 2) {
+            emit("thinking", {
+              round: 1,
+              agent: "research",
+              text: `\nExpanding the report with ${specs.length} parallel research threads.`,
+            });
+            const results = await runSubagents(specs, book, {
+              parentRun: runId,
+              ...(input.attachments ? { attachments: input.attachments } : {}),
+              ...(input.signal ? { signal: input.signal } : {}),
+              budget: { maxSteps: 3, deadlineMs: 40_000 }, // keep the in-flow pass light
+            });
+            const extra = assembleFindings(results);
+            if (extra.trim()) {
+              answerText = `${answerText}\n\n---\nADDITIONAL PARALLEL RESEARCH FINDINGS\n${extra}`;
+              emit("sources", { sources: book.all() });
+            }
+          }
+        } catch (err) {
+          agentError("subagents_report_failed", {
+            run: runId,
+            error: trunc(errorMessage(err), 160),
+          });
+        }
+      }
+
       let handled = false;
       if (!docCreated && answerText.trim().length > 120) {
         try {

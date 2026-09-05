@@ -1,8 +1,10 @@
 # Orchestrator-Subagent Research — Design & Cost Model
 
 Status: shared **subagent primitive BUILT + unit-tested** (`subagent.server.ts` +
-pure `subagent-plan.ts`, 2026-09-05); not yet wired into a caller. Track A (light
-file subagents) and Track B (standalone async Deep Research page) pending. Approved
+pure `subagent-plan.ts`, 2026-09-05). Track A (light file subagents) WIRED into the
+report path in `research-agent.server.ts` (flag-gated `BEDROCK_SUBAGENTS=1`, off by
+default; light budget: max 3 subagents, 3 steps, 40s). Track B (standalone async
+Deep Research page) pending. Approved
 2026-09-05 (Firas): "add light subagents for file workflows, and a standalone
 Deep Research page with its own backend, async processing, cleanly separated from
 chat." Async substrate: in-process V1 behind a swappable Executor, AgentCore

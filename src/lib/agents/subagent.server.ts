@@ -145,7 +145,14 @@ const FINDINGS_SYNTH =
 export async function runSubagent(
   spec: SubagentSpec,
   book: SourceBook,
-  opts: { parentRun: string; index: number; attachments?: Attachment[]; signal?: AbortSignal },
+  opts: {
+    parentRun: string;
+    index: number;
+    attachments?: Attachment[];
+    signal?: AbortSignal;
+    /** Tighten the loop for a "light" pass (e.g. the in-flow report path). */
+    budget?: { maxSteps?: number; deadlineMs?: number };
+  },
 ): Promise<SubagentResult> {
   const t0 = Date.now();
   let findings = "";
@@ -161,11 +168,11 @@ export async function runSubagent(
         user: contractUser(spec),
         tools: RESEARCH_TOOLS,
         maxTokens: 1500,
-        maxSteps: SUBAGENT_MAX_STEPS,
+        maxSteps: opts.budget?.maxSteps ?? SUBAGENT_MAX_STEPS,
         synthesisUser: FINDINGS_SYNTH,
         synthesisMaxTokens: 4000,
         callBudget: { perTool: 3, total: 8 },
-        deadlineMs: SUBAGENT_DEADLINE_MS,
+        deadlineMs: opts.budget?.deadlineMs ?? SUBAGENT_DEADLINE_MS,
         cache: true,
         researchEffort: "low",
         synthesisEffort: "low",
@@ -237,7 +244,12 @@ export async function runSubagent(
 export async function runSubagents(
   specs: SubagentSpec[],
   book: SourceBook,
-  opts: { parentRun: string; attachments?: Attachment[]; signal?: AbortSignal },
+  opts: {
+    parentRun: string;
+    attachments?: Attachment[];
+    signal?: AbortSignal;
+    budget?: { maxSteps?: number; deadlineMs?: number };
+  },
 ): Promise<SubagentResult[]> {
   agentLog("subagents_start", {
     run: opts.parentRun,
@@ -252,6 +264,7 @@ export async function runSubagents(
       index: i + 1,
       ...(opts.attachments ? { attachments: opts.attachments } : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.budget ? { budget: opts.budget } : {}),
     }),
   );
   agentLog("subagents_done", {
@@ -264,7 +277,8 @@ export async function runSubagents(
   return results;
 }
 
-/** True when subagents can run (Bedrock reachable). */
-export function subagentsAvailable(): boolean {
-  return bedrockEnabled();
+/** True only when subagents are ENABLED (BEDROCK_SUBAGENTS=1) and Bedrock is
+ *  reachable. Callers gate on this — the module stays inert otherwise. */
+export function subagentsEnabled(): boolean {
+  return process.env["BEDROCK_SUBAGENTS"] === "1" && bedrockEnabled();
 }
