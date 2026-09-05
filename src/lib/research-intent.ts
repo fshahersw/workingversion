@@ -127,7 +127,7 @@ export type EffortDecision = { mode: EffortMode; confidence: number; reason: str
 // entered the tool-less synthesis phase).
 // ---------------------------------------------------------------------------
 export type DocStyle = "legal" | "modern" | "minimal";
-export type DocRequest = { wants: boolean; format: "pdf" | "docx" | "xlsx"; style: DocStyle };
+export type DocRequest = { wants: boolean; format: "pdf" | "docx" | "xlsx"; style: DocStyle; pages?: number };
 
 const DOC_FORMAT_RE = /\b(pdf|word\s?doc(?:ument)?s?|docx|\.docx?|excel|spread\s?sheets?|xlsx|\.xlsx?)\b/i;
 const DOC_VERB_RE = /\b(generate|create|make|draft|produce|build|prepare|assemble|put together|write[- ]?up|export|turn .* into)\b/i;
@@ -142,7 +142,9 @@ export function detectDocRequest(query: string): DocRequest {
   let style: DocStyle = "legal";
   if (/\b(modern|sleek|contemporary)\b/i.test(q)) style = "modern";
   else if (/\b(minimal|minimalist|plain|bare[- ]?bones)\b/i.test(q)) style = "minimal";
-  return { wants, format, style };
+  const pm = q.match(/(\d{1,3})\s*[- ]?\s*pages?\b/i);
+  const pages = pm && pm[1] ? Math.min(Math.max(parseInt(pm[1], 10), 1), 40) : undefined;
+  return { wants, format, style, ...(pages ? { pages } : {}) };
 }
 
 /** Message STARTS with a social/acknowledgement opener ("thanks, that helps",
