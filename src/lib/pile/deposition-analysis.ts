@@ -449,26 +449,38 @@ export function mergeDepAnalysis(base: DepAnalysis, next: DepAnalysis): DepAnaly
     contradictions.push(c);
   }
   const normName = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  // Each pass parses ids from a fresh index base (adm-0, theme-0, …), so after
+  // merging multiple windows the same id recurs across items. Re-key every list
+  // to a unique per-category id so React keys — and the working set, which is
+  // keyed by finding id — never collide.
+  const reindex = <T extends { id: string }>(arr: T[], prefix: string): T[] =>
+    arr.map((x, i) => ({ ...x, id: `${prefix}-${i}` }));
   return {
     role: next.role || base.role,
     summary: next.summary || base.summary,
-    profile: uniq(base.profile, next.profile),
-    admissions: uniq(base.admissions, next.admissions),
-    impeachment: uniq(base.impeachment, next.impeachment),
-    themes: uniq(base.themes, next.themes),
-    objections: uniq(base.objections, next.objections),
-    chronology: uniq(base.chronology, next.chronology),
-    exhibits: [
-      ...base.exhibits,
-      ...next.exhibits.filter(
-        (e) => !base.exhibits.some((x) => normName(x.name) === normName(e.name) && displayCite(x.cite) === displayCite(e.cite)),
-      ),
-    ],
-    witnesses: [
-      ...base.witnesses,
-      ...next.witnesses.filter((w) => !base.witnesses.some((x) => normName(x.name) === normName(w.name))),
-    ],
-    contradictions,
+    profile: reindex(uniq(base.profile, next.profile), "pf"),
+    admissions: reindex(uniq(base.admissions, next.admissions), "adm"),
+    impeachment: reindex(uniq(base.impeachment, next.impeachment), "imp"),
+    themes: reindex(uniq(base.themes, next.themes), "theme"),
+    objections: reindex(uniq(base.objections, next.objections), "obj"),
+    chronology: reindex(uniq(base.chronology, next.chronology), "chrono"),
+    exhibits: reindex(
+      [
+        ...base.exhibits,
+        ...next.exhibits.filter(
+          (e) => !base.exhibits.some((x) => normName(x.name) === normName(e.name) && displayCite(x.cite) === displayCite(e.cite)),
+        ),
+      ],
+      "ex",
+    ),
+    witnesses: reindex(
+      [
+        ...base.witnesses,
+        ...next.witnesses.filter((w) => !base.witnesses.some((x) => normName(x.name) === normName(w.name))),
+      ],
+      "wit",
+    ),
+    contradictions: reindex(contradictions, "con"),
     graph: {
       nodes: [...base.graph.nodes, ...next.graph.nodes.filter((n) => !base.graph.nodes.some((x) => x.id === n.id || x.label === n.label))],
       edges: [...base.graph.edges, ...next.graph.edges.filter((e) => !base.graph.edges.some((x) => x.from === e.from && x.to === e.to && x.label === e.label))],
