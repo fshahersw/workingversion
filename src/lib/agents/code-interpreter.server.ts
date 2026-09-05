@@ -26,6 +26,27 @@ const REGION = process.env["BEDROCK_REGION"] ?? process.env["AWS_REGION"] ?? "us
 const INTERPRETER_ID = process.env["CODE_INTERPRETER_ID"] || "aws.codeinterpreter.v1";
 const SESSION_TTL_S = 1800; // 30 min absolute TTL
 const TTL_MARGIN_MS = 120_000; // recreate 2 min before the absolute TTL
+const MAX_INLINE_BYTES = 4 * 1024 * 1024; // cap base64-in-SSE payload at ~4MB
+
+// Files the caller already knows about (uploads written via writeFile, plus
+// outputs already surfaced) — so collectNewArtifacts() only ever reports files
+// the sandbox NEWLY created. Cleared whenever a fresh session is started.
+const seenFiles = new Set<string>();
+const norm = (p: string) => p.replace(/^\.\//, "").replace(/^\/+/, "");
+// The sandbox image ships with files in the working dir (package.json, etc).
+// Snapshot them into seenFiles before any user code runs so collectNewArtifacts
+// only ever reports files the user's run_python actually created.
+let baselinedFor: string | null = null;
+async function baseline(): Promise<void> {
+  try {
+    const s = await ensureSession();
+    if (baselinedFor === s.id) return;
+    for (const f of await listArtifacts()) seenFiles.add(norm(f.name));
+    baselinedFor = s.id;
+  } catch {
+    /* best effort — if this fails the tool still works, env files may surface once */
+  }
+}
 
 let _client: BedrockAgentCoreClient | null = null;
 function client(): BedrockAgentCoreClient {
@@ -55,6 +76,8 @@ async function ensureSession(): Promise<{ id: string; startedAt: number }> {
       }),
     );
     session = { id: res.sessionId ?? "", startedAt: Date.now() };
+    seenFiles.clear();
+    baselinedFor = null; // re-snapshot the new sandbox's shipped files on next use
     return session;
   })();
   try {
@@ -113,6 +136,7 @@ async function invokeOnce(code: string): Promise<CodeResult> {
 
 /** Run a snippet of Python in the sandbox. Retries once on a dead session. */
 export async function runPython(code: string): Promise<CodeResult> {
+  await baseline();
   try {
     return await invokeOnce(code);
   } catch {
@@ -124,8 +148,10 @@ export async function runPython(code: string): Promise<CodeResult> {
 /** Write a text file into the sandbox (an upload the model / run_python can read).
  *  Use a RELATIVE path (the sandbox rejects absolute paths like /tmp as traversal). */
 export async function writeFile(path: string, text: string): Promise<void> {
+  await baseline();
   const { isError, content } = await invoke("writeFiles", { content: [{ path, text }] });
   if (isError) throw new Error(`writeFile failed: ${content.map((c) => c.text ?? "").join("").slice(0, 200)}`);
+  seenFiles.add(norm(path)); // an upload, not a run_python output — don't surface it
 }
 
 /** Download a file from the sandbox as base64 (binary-safe), via run_python — the
@@ -152,6 +178,34 @@ export async function listArtifacts(): Promise<Artifact[]> {
   } catch {
     return [];
   }
+}
+
+export type NewArtifact = { name: string; size: number; dataB64: string | null };
+
+/** Find files the sandbox created since the last call (excluding uploads and
+ *  files already reported), and fetch each as base64 for download. Files above
+ *  MAX_INLINE_BYTES return dataB64=null (name/size only — inline deferred).
+ *  Best-effort: call after a successful run_python so charts saved to disk and
+ *  generated reports (xlsx/docx/pdf/csv) surface as downloadable chat artifacts. */
+export async function collectNewArtifacts(): Promise<NewArtifact[]> {
+  await baseline();
+  const files = await listArtifacts();
+  const out: NewArtifact[] = [];
+  for (const f of files) {
+    const name = norm(f.name);
+    if (seenFiles.has(name)) continue;
+    if (name.startsWith(".") || name.startsWith("__")) {
+      seenFiles.add(name); // skip dotfiles / __pycache__ etc, but don't re-scan them
+      continue;
+    }
+    seenFiles.add(name);
+    if (f.size > MAX_INLINE_BYTES) {
+      out.push({ name, size: f.size, dataB64: null });
+      continue;
+    }
+    out.push({ name, size: f.size, dataB64: await getFile(name) });
+  }
+  return out;
 }
 
 export function codeInterpreterEnabled(): boolean {

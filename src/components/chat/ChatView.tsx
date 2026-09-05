@@ -25,6 +25,7 @@ import type { MatterScope, Message } from "@/lib/chat-types";
 import { AgentTimeline } from "./AgentTimeline";
 import { ConversationHistory } from "./ConversationHistory";
 import { AnswerMarkdown } from "./AnswerMarkdown";
+import { ArtifactPanel } from "./ArtifactPanel";
 import { ThinkingStream } from "./ThinkingStream";
 import { ReasoningStream } from "./ReasoningStream";
 import { AnswerActions } from "./AnswerActions";
@@ -773,6 +774,9 @@ function AssistantMessage({
           selectedRef={selectedRef}
           streaming={msg.status === "writing"}
         />
+        {msg.artifacts && msg.artifacts.length > 0 && (
+          <ArtifactPanel artifacts={msg.artifacts} />
+        )}
         {msg.status === "error" && (
           <div className="mt-2 flex items-start gap-2 text-sm text-red-600">
             <AlertCircle className="mt-[2px] h-4 w-4 shrink-0" />

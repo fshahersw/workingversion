@@ -19,7 +19,8 @@ import {
   lookupCitations,
 } from "./courtlistener.server";
 import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
-import { runPython } from "./code-interpreter.server";
+import { runPython, collectNewArtifacts } from "./code-interpreter.server";
+import type { Artifact } from "@/lib/chat-types";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const trunc = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : v);
@@ -408,6 +409,32 @@ async function ecfrSearchTool(input: Record<string, unknown>, book: SourceBook):
   return { text: `eCFR (${hits.length}):\n${lines.join("\n")}`, hits: hits.length, refs };
 }
 
+const MIME_BY_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  svg: "image/svg+xml",
+  csv: "text/csv",
+  json: "application/json",
+  txt: "text/plain",
+  md: "text/markdown",
+  html: "text/html",
+  pdf: "application/pdf",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  zip: "application/zip",
+};
+function mimeForName(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return MIME_BY_EXT[ext] ?? "application/octet-stream";
+}
+
+let artifactSeq = 0;
+
 async function runPythonTool(input: Record<string, unknown>): Promise<ToolOutcome> {
   const code = str(input["code"]);
   if (code.trim().length < 2) return { text: "run_python needs a code string.", hits: 0, refs: [] };
@@ -418,12 +445,41 @@ async function runPythonTool(input: Record<string, unknown>): Promise<ToolOutcom
     return { text: `run_python failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
   }
   const out = res.text.trim();
-  const imgNote = res.images.length ? `\n[${res.images.length} chart(s) generated]` : "";
   if (res.isError) return { text: `Python error:\n${trunc(out || "(no output)", 3000)}`, hits: 0, refs: [] };
+
+  // Charts (matplotlib plt.show) stream back inline as base64 PNGs; files the
+  // code wrote to disk (savefig / to_excel / docx / pdf) are fetched separately.
+  const artifacts: Artifact[] = [];
+  for (const data of res.images) {
+    artifacts.push({ id: `img-${++artifactSeq}`, kind: "image", name: `chart-${artifactSeq}.png`, mime: "image/png", dataB64: data });
+  }
+  let files: Awaited<ReturnType<typeof collectNewArtifacts>> = [];
+  try {
+    files = await collectNewArtifacts();
+  } catch {
+    /* best effort — never fail the tool over artifact collection */
+  }
+  for (const f of files) {
+    artifacts.push({
+      id: `file-${++artifactSeq}-${f.name}`,
+      kind: "file",
+      name: f.name,
+      mime: mimeForName(f.name),
+      dataB64: f.dataB64 ?? undefined,
+      size: f.size,
+    });
+  }
+
+  const chartN = res.images.length;
+  const fileNames = files.map((f) => f.name);
+  const note =
+    (chartN ? `\n[${chartN} chart(s) generated]` : "") +
+    (fileNames.length ? `\n[files created: ${fileNames.join(", ")}]` : "");
   return {
-    text: out ? `Output:\n${trunc(out, 4000)}${imgNote}` : `(ran with no printed output)${imgNote}`,
+    text: out ? `Output:\n${trunc(out, 4000)}${note}` : `(ran with no printed output)${note}`,
     hits: 0,
     refs: [],
+    artifacts: artifacts.length ? artifacts : undefined,
   };
 }
 

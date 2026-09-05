@@ -4,7 +4,7 @@ import {
   fetchFollowups,
   type SSEEvent,
 } from "@/lib/orchestrate";
-import type { MatterScope, Message, Round, Source } from "@/lib/chat-types";
+import type { Artifact, MatterScope, Message, Round, Source } from "@/lib/chat-types";
 import {
   loadConversation,
   saveFollowups,
@@ -212,6 +212,14 @@ function applyEvent(m: Message, e: SSEEvent): Message {
           orphanRefs: (d.orphanRefs as string[] | undefined) ?? [],
         },
       };
+    case "artifact": {
+      const incoming = (d.artifacts as Artifact[] | undefined) ?? [];
+      if (!incoming.length) return m;
+      // Upsert by id so a re-emitted artifact replaces rather than duplicates.
+      const byId = new Map((m.artifacts ?? []).map((x) => [x.id, x]));
+      for (const a of incoming) byId.set(a.id, a);
+      return { ...m, artifacts: [...byId.values()] };
+    }
     case "done":
       return { ...m, status: "done", collapseTimeline: true };
     case "error":

@@ -175,6 +175,22 @@ export type Source = {
   content: string;
 };
 
+/** A file or chart produced by the code interpreter (run_python), surfaced in
+ *  the chat for inline display (charts) or download (created files). */
+export type Artifact = {
+  /** Stable id within a message — used for React keys and upsert dedupe. */
+  id: string;
+  kind: "image" | "file";
+  name: string;
+  /** MIME type, e.g. "image/png", "application/vnd.openxmlformats-...". */
+  mime: string;
+  /** base64 payload, inlined for small artifacts. Absent when the file was too
+   *  large to inline (then only name/size render, download deferred). */
+  dataB64?: string;
+  /** Decoded byte size, when known. */
+  size?: number;
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -182,6 +198,8 @@ export type Message = {
   rounds: Round[];
   sources: Source[];
   answer: string;
+  /** Charts + files produced by run_python during this turn. */
+  artifacts?: Artifact[];
   /** Live, streamed research narration ("thinking steps") shown before the answer. */
   thinking?: string;
   /** The model's actual adaptive-thinking reasoning, streamed live (frontier feel). */

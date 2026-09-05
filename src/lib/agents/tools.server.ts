@@ -7,7 +7,7 @@
 // search, one MCP tool each. They replaced the Supabase corpus tools and the
 // single Tavily web_search. Every result is registered as a citable [S#] source.
 // ============================================================================
-import type { Source } from "@/lib/chat-types";
+import type { Artifact, Source } from "@/lib/chat-types";
 import type { ToolDef } from "./anthropic.server";
 import type { LitAgentKey } from "./prompts";
 import {
@@ -90,7 +90,7 @@ function refNum(ref: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-export type ToolOutcome = { text: string; hits: number; refs: string[] };
+export type ToolOutcome = { text: string; hits: number; refs: string[]; artifacts?: Artifact[] };
 
 const clamp = (v: unknown, def: number, max: number) => {
   const n = Number(v);

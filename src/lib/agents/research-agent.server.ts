@@ -268,6 +268,8 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                 hits: out.hits,
               });
               emit("sources", { sources: book.all() });
+              if (out.artifacts?.length)
+                emit("artifact", { round: 1, agent: "research", artifacts: out.artifacts });
               return out.text;
             },
           },
