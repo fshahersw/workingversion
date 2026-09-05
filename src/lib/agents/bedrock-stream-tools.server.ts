@@ -18,10 +18,11 @@ import type { BedrockToolDef, BedrockToolCall, BedrockMsg } from "./bedrock.serv
 
 const REGION = process.env["BEDROCK_REGION"] ?? "us-east-1";
 
-/** Minimum research time (ms) that must remain before the synthesis reserve for
- *  the comprehensiveness gate to fire — enough for the audit call plus one more
- *  targeted tool batch. Below this, skip the gate and synthesize. */
-const GATE_MIN_MS = 10_000;
+/** Bounded one-time deadline extension granted when the comprehensiveness gate
+ *  injects a targeted re-query round, so that round + the synthesis reserve have
+ *  time even when the model stopped researching late. gateFired caps this to ONE
+ *  use, so the added latency is bounded (a <=6s audit + one more tool round). */
+const GATE_REQUERY_BUDGET_MS = 25_000;
 
 function endpoint(model: string): string {
   return `https://bedrock-runtime.${REGION}.amazonaws.com/model/${encodeURIComponent(model)}/converse-stream`;
@@ -383,7 +384,7 @@ export async function streamConverseToolLoop(
   const totalCap = opts.callBudget?.total ?? Number.POSITIVE_INFINITY;
   const callCounts = new Map<string, number>();
   let totalCalls = 0;
-  const deadline = opts.deadlineMs ? Date.now() + opts.deadlineMs : undefined;
+  let deadline = opts.deadlineMs ? Date.now() + opts.deadlineMs : undefined;
   // Reserve time before the deadline for the synthesis turn — but ONLY once the
   // agent has researched enough (minCallsBeforeReserve tool calls). Applying it
   // unconditionally truncated slow-tool, under-researched cases to 1-2 sources
@@ -391,7 +392,7 @@ export async function streamConverseToolLoop(
   // wall-clock). Below the threshold, research runs to the full deadline.
   const synthesisReserveMs = opts.synthesisReserveMs ?? 10_000;
   const minCallsBeforeReserve = opts.minCallsBeforeReserve ?? 6;
-  const researchDeadline =
+  let researchDeadline =
     deadline !== undefined ? deadline - synthesisReserveMs : undefined;
   let lastText = "";
   let steps = 0;
@@ -452,28 +453,37 @@ export async function streamConverseToolLoop(
         turn.assistantContent.length > 0
       ) {
         gateFired = true;
+        // Consult unconditionally on a voluntary stop — the audit is itself hard-
+        // capped (~6s) and fail-safe, so we no longer gate the CONSULT on remaining
+        // time (that guard closed the window before Think research ever finished).
         const researchMsLeft =
           (researchDeadline ?? Number.POSITIVE_INFINITY) - Date.now();
-        if (researchMsLeft > GATE_MIN_MS) {
-          let instruction: string | null = null;
-          try {
-            instruction = await opts.gate.check({ steps, totalCalls, researchMsLeft });
-          } catch {
-            instruction = null;
+        let instruction: string | null = null;
+        try {
+          instruction = await opts.gate.check({ steps, totalCalls, researchMsLeft });
+        } catch {
+          instruction = null;
+        }
+        if (instruction) {
+          // A gap remains though the model stopped. Grant a bounded, ONE-TIME
+          // deadline extension so the targeted re-query round + synthesis reserve
+          // have time even if research already ran long — gateFired caps it to
+          // one, so latency stays bounded.
+          if (deadline !== undefined) {
+            deadline += GATE_REQUERY_BUDGET_MS;
+            researchDeadline = deadline - synthesisReserveMs;
           }
-          if (instruction) {
-            // Replay the model's (dropped) draft turn so roles stay alternating,
-            // then steer it back to targeted research. The next iteration runs the
-            // bounded re-query round; when the model stops again the gate is spent
-            // (gateFired) and the loop proceeds to synthesis.
-            messages.push({
-              role: "assistant",
-              content: turn.assistantContent,
-            } as unknown as BedrockMsg);
-            messages.push({ role: "user", content: [{ text: instruction }] } as BedrockMsg);
-            gateRequeried = true;
-            continue;
-          }
+          // Replay the model's (dropped) draft turn so roles stay alternating,
+          // then steer it back to targeted research. The next iteration runs the
+          // bounded re-query round; when the model stops again the gate is spent
+          // (gateFired) and the loop proceeds to synthesis.
+          messages.push({
+            role: "assistant",
+            content: turn.assistantContent,
+          } as unknown as BedrockMsg);
+          messages.push({ role: "user", content: [{ text: instruction }] } as BedrockMsg);
+          gateRequeried = true;
+          continue;
         }
       }
       break; // model is answering — drop the draft; synthesis writes the answer.

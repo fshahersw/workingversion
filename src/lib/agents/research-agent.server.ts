@@ -296,6 +296,16 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                         sources: book.all(),
                         ...(input.signal ? { signal: input.signal } : {}),
                       });
+                      // Always log the consult (covered or not) so the gate's
+                      // behavior is observable — a silent pass was previously
+                      // indistinguishable from "never fired".
+                      agentLog("coverage_check", {
+                        run: runId,
+                        consulted: gaps !== null,
+                        covered: gaps?.covered ?? null,
+                        missing: gaps?.missing.length ?? 0,
+                        sources: book.all().length,
+                      });
                       if (!gaps || gaps.covered) return null;
                       if (!gaps.missing.length && !gaps.queries.length) return null;
                       agentLog("coverage_gap", {
