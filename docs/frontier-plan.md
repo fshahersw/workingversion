@@ -32,7 +32,7 @@ Source: research workflow wf_6b149ac2-2d8 (9 briefs in its journal.jsonl) + adve
 - Keep `RESEARCH_TOOLS` list STABLE across modes — mode-gating the tool *list* per-turn invalidates the prompt cache. Gate by budget/prompt, not by removing tools.
 - CONSOLIDATE the 7 category search tools (all already route to `general___WebSearch`) before adding new tools — the list is ~17; adding pushes to 30+ and degrades tool selection.
 - AgentCore Memory = LONG-TERM layer only; DynamoDB session memory stays the short-term source of truth (no split-brain). 7-day STM floor, KMS CMK, hashed actorId, manual prune sweep (LTM has no auto-TTL). PHI/work-product discipline.
-- CourtListener general REST limit is now **5/min, 50/hr, 125/day** (not 20/min) — `memoTTL` caching is load-bearing. citation-lookup throttle is separate (60 valid cites/min, 250/request).
+- CourtListener PAID tier (Firas's account): **20/min, 250/hr, 1000/day**; citation-lookup throttle is separate (60 valid cites/min, 250/request). `memoTTL` caching stays good practice.
 - Browser/Nova Act need a CONCRETE gap `fetch_page`+RECAP cannot cover (per "simplest solution first"); fetch_page remains primary. Honest deep-answer floor ~55-60s; do not promise sub-30s.
 - Each phase gets its own verification + a success metric (latency / source-count / citation-accuracy).
 

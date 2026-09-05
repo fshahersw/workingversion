@@ -18,6 +18,7 @@ import {
   courtlistenerConfigured,
   lookupCitations,
 } from "./courtlistener.server";
+import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const trunc = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : v);
@@ -89,6 +90,51 @@ const VERIFY_CITATIONS_TOOL: ToolDef = {
   },
 };
 
+const FDA_SEARCH_TOOL: ToolDef = {
+  name: "fda_search",
+  description:
+    "Query openFDA for STRUCTURED FDA data. endpoint: 'drug/enforcement' or 'device/enforcement' (recalls — classification, reason, firm, date), 'drug/event' or 'device/event' (adverse-event reports — reactions, seriousness), 'drug/label' (labeling — boxed warnings, indications). search is openFDA syntax, e.g. openfda.brand_name:\"valsartan\" or reason_for_recall:\"nitrosamine\". Use for recalls, adverse-event signals, and label/warning history in a drug or device mass tort.",
+  input_schema: {
+    type: "object",
+    properties: {
+      endpoint: {
+        type: "string",
+        enum: ["drug/event", "drug/label", "drug/enforcement", "device/event", "device/enforcement"],
+      },
+      search: { type: "string", description: 'openFDA search expression, e.g. field:"value".' },
+    },
+    required: ["endpoint", "search"],
+  },
+};
+
+const FED_REGISTER_TOOL: ToolDef = {
+  name: "federal_register_search",
+  description:
+    "Search the Federal Register for proposed/final RULES and agency notices (title, agency, date, document number, abstract, link) — the regulatory action itself (a proposed ban, a final rule, a guidance notice). Optional type (RULE | PRORULE | NOTICE) and after (YYYY-MM-DD).",
+  input_schema: {
+    type: "object",
+    properties: {
+      term: { type: "string" },
+      type: { type: "string", description: "RULE | PRORULE | NOTICE (optional)" },
+      after: { type: "string", description: "YYYY-MM-DD; only documents on/after (optional)" },
+    },
+    required: ["term"],
+  },
+};
+
+const ECFR_TOOL: ToolDef = {
+  name: "ecfr_search",
+  description:
+    "Search the current text of the Code of Federal Regulations (eCFR) — the operative regulatory TEXT (e.g. 21 CFR drug/device rules). Returns matching sections with their hierarchy and a text excerpt. Put the CFR title in the query text (e.g. '21 CFR device recall') to bias results.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: { type: "string" },
+    },
+    required: ["query"],
+  },
+};
+
 /** The full flat tool list the single agent sees. */
 export const RESEARCH_TOOLS: ToolDef[] = [
   ...AGENT_TOOLS.legal_research, // search_authorities + 7 category web-search tools
@@ -97,6 +143,9 @@ export const RESEARCH_TOOLS: ToolDef[] = [
   RECAP_DOCKET_TOOL,
   RECAP_READ_TOOL,
   VERIFY_CITATIONS_TOOL,
+  FDA_SEARCH_TOOL,
+  FED_REGISTER_TOOL,
+  ECFR_TOOL,
   ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
 ];
 
@@ -263,6 +312,89 @@ async function verifyCitationsTool(input: Record<string, unknown>, book: SourceB
   };
 }
 
+async function fdaSearchTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+  const endpoint = str(input["endpoint"]);
+  const search = str(input["search"]);
+  if (!endpoint || !search) return { text: "fda_search needs an endpoint and a search expression.", hits: 0, refs: [] };
+  let hits;
+  try {
+    hits = await memoTTL(toolCacheKey("fda_search", { endpoint, search }), TOOL_CACHE_TTL_MS, () =>
+      fdaSearch(endpoint as FdaEndpoint, search, 5),
+    );
+  } catch (err) {
+    return { text: `fda_search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  if (!hits.length) return { text: `No openFDA results for ${endpoint} "${search}".`, hits: 0, refs: [] };
+  const refs: string[] = [];
+  const lines = hits.map((h) => {
+    const src = book.add({
+      citation: h.title,
+      authority: "primary",
+      source_type: "regulatory",
+      source_url: h.url ?? undefined,
+      effective_date: h.date ?? undefined,
+      content: `${h.title} — ${h.detail}`,
+    });
+    refs.push(src.ref);
+    return `[${src.ref}] ${h.date ? `${h.date} — ` : ""}${h.title}\n    ${h.detail}`;
+  });
+  return { text: `openFDA ${endpoint} (${hits.length}):\n${lines.join("\n")}`, hits: hits.length, refs };
+}
+
+async function fedRegSearchTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+  const term = str(input["term"]);
+  if (!term) return { text: "federal_register_search needs a term.", hits: 0, refs: [] };
+  const type = str(input["type"]) || undefined;
+  const after = str(input["after"]) || undefined;
+  let hits;
+  try {
+    hits = await memoTTL(toolCacheKey("fed_register", { term, type: type ?? "", after: after ?? "" }), TOOL_CACHE_TTL_MS, () =>
+      fedRegSearch(term, { ...(type ? { type } : {}), ...(after ? { after } : {}) }),
+    );
+  } catch (err) {
+    return { text: `federal_register_search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  if (!hits.length) return { text: `No Federal Register documents for "${term}".`, hits: 0, refs: [] };
+  const refs: string[] = [];
+  const lines = hits.map((h) => {
+    const src = book.add({
+      citation: h.title,
+      authority: "primary",
+      source_type: "regulatory",
+      source_url: h.url,
+      effective_date: h.date,
+      content: `${h.type} (${h.agencies.join(", ")}) — ${h.abstract ?? h.title}`,
+    });
+    refs.push(src.ref);
+    return `[${src.ref}] ${h.date} · ${h.type}${h.agencies.length ? ` · ${h.agencies.join(", ")}` : ""}\n    ${h.title}${h.abstract ? `\n    ${h.abstract}` : ""}`;
+  });
+  return { text: `Federal Register (${hits.length}):\n${lines.join("\n")}`, hits: hits.length, refs };
+}
+
+async function ecfrSearchTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+  const query = str(input["query"]);
+  if (!query) return { text: "ecfr_search needs a query.", hits: 0, refs: [] };
+  let hits;
+  try {
+    hits = await memoTTL(toolCacheKey("ecfr", { query }), TOOL_CACHE_TTL_MS, () => ecfrSearch(query));
+  } catch (err) {
+    return { text: `ecfr_search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  if (!hits.length) return { text: `No eCFR sections for "${query}".`, hits: 0, refs: [] };
+  const refs: string[] = [];
+  const lines = hits.map((h) => {
+    const src = book.add({
+      citation: h.hierarchy || h.heading,
+      authority: "primary",
+      source_type: "regulatory",
+      content: `${h.hierarchy}: ${h.excerpt}`,
+    });
+    refs.push(src.ref);
+    return `[${src.ref}] ${h.hierarchy || h.heading}\n    ${h.excerpt}`;
+  });
+  return { text: `eCFR (${hits.length}):\n${lines.join("\n")}`, hits: hits.length, refs };
+}
+
 /** One executor for every tool the single agent can call. */
 export async function executeResearchTool(
   name: string,
@@ -274,6 +406,9 @@ export async function executeResearchTool(
   if (name === "recap_docket") return recapDocketTool(input);
   if (name === "recap_read") return recapReadTool(input, book);
   if (name === "verify_citations") return verifyCitationsTool(input, book);
+  if (name === "fda_search") return fdaSearchTool(input, book);
+  if (name === "federal_register_search") return fedRegSearchTool(input, book);
+  if (name === "ecfr_search") return ecfrSearchTool(input, book);
   // search_authorities, the category web tools, and every db_* tool.
   return executeTool(name, input, book);
 }
