@@ -768,7 +768,7 @@ function AssistantMessage({
         active={msg.status === "thinking"}
       />
       {msg.status === "writing" && !msg.answer.trim() && (
-        <div className="mb-3 flex items-center gap-2 rounded-xl border border-brand-orange/25 bg-gradient-to-b from-brand-orange-soft/25 to-transparent px-3 py-2">
+        <div className="mb-2.5 flex items-center gap-2 rounded-lg border border-brand-orange/25 bg-gradient-to-b from-brand-orange-soft/25 to-transparent px-2.5 py-1.5">
           <span className="h-[7px] w-[7px] shrink-0 animate-pulse rounded-full bg-brand-orange" />
           <span className="text-[12.5px] font-medium text-foreground/75">
             {msg.deliverable

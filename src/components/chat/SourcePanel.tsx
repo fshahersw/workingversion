@@ -199,7 +199,7 @@ export function SourcePanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[oklch(0.995_0.002_260)]">
-      <div className="flex shrink-0 items-center justify-between border-b border-border/50 px-4 py-3">
+      <div className="flex shrink-0 items-center justify-between border-b border-border/50 px-3.5 py-2.5">
         <h3 className="text-[12.5px] font-semibold tracking-tight text-brand-navy">
           Sources{" "}
           <span className="font-normal tabular-nums text-muted-foreground/60">
@@ -218,7 +218,7 @@ export function SourcePanel({
 
       <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2">
         {visible.map((b) => (
-          <section key={b} className="mb-4 last:mb-2">
+          <section key={b} className="mb-3 last:mb-2">
             <div className="flex items-center gap-1.5 pb-1 text-[10px] font-medium uppercase tracking-[0.09em] text-muted-foreground/50">
               {BUCKET_LABEL[b]}
               <span className="tabular-nums text-muted-foreground/40">
@@ -328,7 +328,7 @@ function SourceRow({
       data-ref={source.ref}
       layout
       transition={{ duration: 0.26, ease: [0.22, 0.61, 0.36, 1] }}
-      className={`group relative px-2 py-2.5 transition-colors ${
+      className={`group relative px-2 py-2 transition-colors ${
         selected ? "bg-brand-blue-soft/30" : "hover:bg-muted/30"
       }`}
     >

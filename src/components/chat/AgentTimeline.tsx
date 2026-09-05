@@ -68,7 +68,7 @@ export function AgentTimeline({
   );
 
   return (
-    <div className="mb-4 mt-2">
+    <div className="mb-3 mt-1.5">
       <AnimatePresence mode="wait" initial={false}>
         {collapsed ? (
           <motion.div
@@ -101,7 +101,7 @@ export function AgentTimeline({
                   transition={{ duration: 0.38, ease: EASE_INOUT }}
                   className="overflow-hidden"
                 >
-                  <div className="mt-2.5 rounded-xl bg-muted/25 px-3 py-3">
+                  <div className="mt-2 rounded-lg bg-muted/25 px-2.5 py-2.5">
                     <TimelineInner rounds={rounds} settled={settled} />
                   </div>
                 </motion.div>
@@ -114,7 +114,7 @@ export function AgentTimeline({
             initial={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.42, ease: EASE_INOUT }}
-            className="overflow-x-hidden rounded-xl bg-muted/25 px-3 py-3"
+            className="overflow-x-hidden rounded-lg bg-muted/25 px-2.5 py-2.5"
           >
             <TimelineInner rounds={rounds} live={!settled} settled={settled} />
           </motion.div>
@@ -145,7 +145,7 @@ function TimelineInner({
           className="absolute bottom-2 top-2 w-px bg-gradient-to-b from-border/0 via-border to-border/0"
           style={{ left: LINE_LEFT }}
         />
-        <div className="space-y-3">
+        <div className="space-y-2.5">
           <AnimatePresence initial={false}>
             {rounds.map((r, ri) => (
               <motion.div
@@ -181,7 +181,7 @@ function TimelineInner({
                 </div>
 
                 {/* Subagent rows */}
-                <div className="mt-1.5 space-y-1.5">
+                <div className="mt-1 space-y-1">
                   <AnimatePresence initial={false}>
                     {Object.values(r.agents).map((a, idx) => (
                       <AgentRow
@@ -298,7 +298,7 @@ function AgentRow({
             start and completion are one row that fills in. This is the timeline the
             attorney watches work. */}
         {a.tools.length > 0 && (
-          <ul className="wr-app-scroll mt-1 max-h-56 space-y-1 overflow-y-auto pr-1">
+          <ul className="wr-app-scroll mt-1 max-h-56 space-y-0.5 overflow-y-auto pr-1">
             {a.tools.map((t, i) => {
               const Icon = toolIcon(t.tool);
               const done = typeof t.hits === "number";

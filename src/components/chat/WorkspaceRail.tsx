@@ -127,7 +127,7 @@ export function WorkspaceRail({
                 {pins.map((p) => (
                   <div
                     key={p.id}
-                    className="group rounded-lg border border-border/60 bg-card px-3 py-2.5"
+                    className="group rounded-lg border border-border/60 bg-card px-3 py-2"
                   >
                     <p className="line-clamp-5 text-[12px] leading-[1.55] text-foreground/90">
                       {p.quote}
@@ -178,7 +178,7 @@ export function WorkspaceRail({
                 {watches.map((w) => (
                   <div
                     key={w.id}
-                    className="group rounded-lg border border-border/60 bg-card px-3 py-2.5"
+                    className="group rounded-lg border border-border/60 bg-card px-3 py-2"
                   >
                     <div className="flex items-start gap-2">
                       <div className="min-w-0 flex-1">
@@ -291,7 +291,7 @@ function TabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium transition-colors ${
+      className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
         active
           ? "bg-brand-blue-soft/50 text-brand-navy"
           : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"

@@ -11,7 +11,7 @@ export function ThinkingStream({ text, active }: { text: string; active: boolean
   if (active) {
     const current = steps[steps.length - 1] ?? "";
     return (
-      <div className="mb-3 flex items-center gap-2 rounded-xl border border-brand-orange/25 bg-gradient-to-b from-brand-orange-soft/25 to-transparent px-3 py-2">
+      <div className="mb-2.5 flex items-center gap-2 rounded-lg border border-brand-orange/25 bg-gradient-to-b from-brand-orange-soft/25 to-transparent px-2.5 py-1.5">
         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-brand-orange" strokeWidth={2.2} />
         <span className="min-w-0 flex-1 truncate text-[12.5px] leading-relaxed text-foreground/75">
           {current}
@@ -21,15 +21,15 @@ export function ThinkingStream({ text, active }: { text: string; active: boolean
   }
 
   return (
-    <details className="group mb-3 rounded-xl border border-border/60 bg-muted/20 transition-colors open:bg-muted/30">
-      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-3 py-2 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground">
+    <details className="group mb-2.5 rounded-lg border border-border/60 bg-muted/20 transition-colors open:bg-muted/30">
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground">
         <ListChecks className="h-3.5 w-3.5 text-brand-navy/50" strokeWidth={1.9} />
         Steps taken
         <span className="ml-auto text-[10px] normal-case tracking-normal opacity-50 group-open:hidden">
           {steps.length}
         </span>
       </summary>
-      <ul className="wr-app-scroll ml-1 max-h-56 list-disc space-y-1 overflow-y-auto pb-3 pl-6 pr-3 text-[12.5px] leading-relaxed text-foreground/55 marker:text-brand-navy/30">
+      <ul className="wr-app-scroll ml-1 max-h-56 list-disc space-y-1 overflow-y-auto pb-2.5 pl-6 pr-3 text-[12.5px] leading-relaxed text-foreground/55 marker:text-brand-navy/30">
         {steps.map((l, i) => (
           <li key={i}>{l}</li>
         ))}

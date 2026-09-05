@@ -4,14 +4,13 @@
 // - useUploads + UploadButton + FileChips: upload files into the code sandbox
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Brain,
   Check,
   ChevronDown,
   Loader2,
   Paperclip,
   Sparkles,
   X,
-  Zap,
+  type LucideIcon,
 } from "lucide-react";
 import { uploadFile } from "@/lib/orchestrate";
 import type { Attachment } from "@/lib/chat-types";
@@ -21,12 +20,12 @@ export type ComposerMode = "auto" | "fast" | "think";
 export const MODE_OPTIONS: {
   id: ComposerMode;
   label: string;
-  icon: typeof Zap;
+  icon: LucideIcon | null;
   hint: string;
 }[] = [
   { id: "auto", label: "Auto", icon: Sparkles, hint: "Picks depth automatically per question" },
-  { id: "fast", label: "Fast", icon: Zap, hint: "Quick, concise — fewer sources, no deep dive" },
-  { id: "think", label: "Think", icon: Brain, hint: "Deep research — more sources, verified" },
+  { id: "fast", label: "Fast", icon: null, hint: "Quick, concise — fewer sources, no deep dive" },
+  { id: "think", label: "Think", icon: null, hint: "Deep research — more sources, verified" },
 ];
 
 const MODE_STORAGE_KEY = "sw.composer.mode";
@@ -95,7 +94,7 @@ export function ModeDropdown({
             : "border-transparent text-foreground/80 hover:bg-muted"
         }`}
       >
-        <CurIcon className="h-3.5 w-3.5 text-brand-navy" strokeWidth={2} />
+        {CurIcon && <CurIcon className="h-3.5 w-3.5 text-brand-navy" strokeWidth={2} />}
         {cur.label}
         <ChevronDown
           className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
@@ -123,7 +122,11 @@ export function ModeDropdown({
                   active ? "bg-brand-blue-soft/50" : "hover:bg-muted"
                 }`}
               >
-                <Icon className="mt-[3px] h-4 w-4 shrink-0 text-brand-navy" strokeWidth={2} />
+                {Icon ? (
+                  <Icon className="mt-[3px] h-4 w-4 shrink-0 text-brand-navy" strokeWidth={2} />
+                ) : (
+                  <span className="mt-[3px] h-4 w-4 shrink-0" />
+                )}
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5 text-[13px] font-semibold text-foreground">
                     {o.label}
