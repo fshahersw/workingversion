@@ -44,16 +44,8 @@ export function answerToMarkdown(args: {
   matterLabel?: string | null;
 }): string {
   const used = usedSources(args.answer, args.sources);
-  const head = [
-    `# ${FIRM} — Research memorandum`,
-    "",
-    args.matterLabel ? `**Matter:** ${args.matterLabel}` : null,
-    `**Date:** ${new Date().toLocaleDateString()}`,
-    `**Question:** ${args.question}`,
-    "",
-    "---",
-    "",
-  ].filter(Boolean) as string[];
+  // No boilerplate memo header — the answer carries its own dynamic headings.
+  const head: string[] = [];
 
   const tail = used.length
     ? ["", "## Authorities", "", ...authorityLines(used)]
@@ -132,21 +124,7 @@ export async function downloadDocx(args: {
     );
   };
 
-  children.push(
-    new Paragraph({
-      text: `${FIRM} — Research memorandum`,
-      heading: HeadingLevel.HEADING_1,
-    }),
-  );
-  if (args.matterLabel) {
-    children.push(new Paragraph({ children: inline(`**Matter:** ${args.matterLabel}`) }));
-  }
-  children.push(
-    new Paragraph({ children: inline(`**Date:** ${new Date().toLocaleDateString()}`) }),
-    new Paragraph({ children: inline(`**Question:** ${args.question}`) }),
-    new Paragraph({ text: "" }),
-  );
-
+  // No boilerplate memo header — the answer carries its own dynamic headings.
   for (const raw of args.answer.split("\n")) {
     const line = raw.trimEnd();
     if (!line.trim()) {

@@ -10,6 +10,7 @@ import type { OrchestrateInput, Emit } from "./orchestrator.server";
 import { researchAgentPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
 import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
+import { buildReportMarkdown } from "./report.server";
 import { streamConverseToolLoop } from "./bedrock-stream-tools.server";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
@@ -204,6 +205,13 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     const docReq = detectDocRequest(resolved.query);
     if (docReq.wants && mode === "fast" && !input.forceMode) mode = "think";
     const cfg = modeConfig(mode);
+    // A report deliverable needs a deeper, richer source pool than a chat answer —
+    // widen the research budget so the parallel section drafts have enough to work with.
+    if (docReq.wants) {
+      cfg.maxSteps = Math.max(cfg.maxSteps, 7);
+      cfg.callBudget = { perTool: 5, total: 26 };
+      cfg.deadlineMs = Math.max(cfg.deadlineMs, 75_000);
+    }
     emit("mode", { mode, reason: input.forceMode ? `${mode} mode (selected)` : decision.reason });
 
     emit("round", {
@@ -248,11 +256,10 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             tools: RESEARCH_TOOLS,
             maxTokens: 2000,
             maxSteps: cfg.maxSteps,
-            synthesisUser:
-              "Research complete — do NOT call any more tools. Now write the final answer for the attorney, using the sources you gathered above and citing them with [S#]. Lead with the bottom line, shape the format to the question, and end on the substance (no verification/next-steps closer)." +
-              (docReq.wants
-                ? ` The attorney asked for a ${docReq.format.toUpperCase()} deliverable. Write the COMPLETE report now, as your answer, in clean markdown: use "## " section headings, "| pipe | tables |" for any matrices/timelines, and "- " bullet lists. The markdown you write IS the document — it will be rendered directly into the ${docReq.format.toUpperCase()}. Do NOT say you will generate a file, do NOT describe what the report will contain, and do NOT defer — write the full content in full now.`
-                : mode === "fast"
+            synthesisUser: docReq.wants
+              ? "Research complete — do NOT call any more tools. Write a DENSE research digest that a formatted report will be built from: capture every key fact, date, holding, figure, party, defendant, procedural milestone, and expert/Daubert point you found, each with its [S#] citation. Terse notes and bullet fragments are fine — completeness over prose. This is raw material, NOT the finished report: do not add a title, cover, or any 'Executive Summary'/'Bottom line' section — just get all the substance down with citations."
+              : "Research complete — do NOT call any more tools. Now write the final answer for the attorney, using the sources you gathered above and citing them with [S#]. Open with the direct answer, shape the format to the question, and end on the substance (no verification/next-steps closer)." +
+                (mode === "fast"
                   ? " This is FAST mode: keep it tight and direct — answer the question in a few well-cited sentences or a short list, no exhaustive survey."
                   : " This is THINK mode: be thorough and well-structured — cover the sub-issues, note tensions or splits, and cite precisely."),
             // Sonnet 5 adaptive thinking is ALWAYS ON and shares this budget with
@@ -357,18 +364,29 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // note — the chat stays clean, the content lives in the download.
     if (docReq.wants) {
       let handled = false;
-      if (!docCreated && answerText.trim().length > 150) {
+      if (!docCreated && answerText.trim().length > 120) {
         try {
+          // Multi-pass pipeline: plan dynamic sections -> draft them in parallel
+          // -> refine thin ones. Falls back to the digest if planning fails.
+          const report = await buildReportMarkdown({
+            query: resolved.query,
+            digest: answerText,
+            sources,
+            ...(input.signal ? { signal: input.signal } : {}),
+            onProgress: (m) => agentLog("report_progress", { run: runId, msg: m }),
+          });
+          const md = report?.markdown || answerText;
+          const title = report?.title || docTitle(resolved.query, answerText);
           const gen = await executeResearchTool(
             "create_document",
-            { format: docReq.format, title: docTitle(resolved.query, answerText), content: answerText, style: docReq.style },
+            { format: docReq.format, title, content: md, style: docReq.style },
             book,
           );
           if (gen.artifacts?.length) {
             emit("artifact", { round: 1, agent: "research", artifacts: gen.artifacts });
             emit("delta", { text: friendlyDone(docReq.format, gen.artifacts[0]!.name) });
             handled = true;
-            agentLog("doc_generated", { run: runId, format: docReq.format, name: gen.artifacts[0]!.name });
+            agentLog("doc_generated", { run: runId, format: docReq.format, name: gen.artifacts[0]!.name, sections: report?.sections ?? 0 });
           } else {
             agentError("doc_gen_empty", { run: runId, note: trunc(gen.text, 160) });
           }
