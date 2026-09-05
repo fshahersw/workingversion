@@ -2,6 +2,27 @@
 
 Source: workflow wf_3a52dbba-c95 (map+research → synthesize → adversarial critic, goAhead=true, "mostly-sound"), 2026-09-05. Branch `feat/frontier-ux`. Driven solo by the CLI executor.
 
+## Status — 2026-09-05 (updating as I build)
+
+DONE (committed on `feat/frontier-ux`):
+- `856af85` multi-turn context fix (topicShift no longer drops the tail)
+- `354161e` WS1 router (Conversational/Fast/Think) — "thanks" now ~2.5s / 0 tools
+- `ee3222e` WS2 first-person prose + writer/researcher contradiction fix
+- `eea7040` WS3 reasoning-stream plumbing (LATENT — see finding) + "Composing…" gap indicator
+- `2f55c95` WS4 per-call tool timeline (icons + running→resolved)
+- `35fab40` WS6 deterministic citation + fact verification + trust line
+- `d32f3ac` memory reliability: structured-output updateMemory (killed the parse-miss)
+
+KEY FINDING: Bedrock redacts Claude extended-thinking TEXT (signature only, 0 chars at any effort). Raw reasoning CANNOT be streamed on this stack — frontier feel comes from the tool timeline + composing indicator, not streamed reasoning. WS3 plumbing kept latent (lights up on the Anthropic-direct path).
+
+REMAINING:
+- WS5 new tools (REST-first: CourtListener v4 citation-lookup, openFDA/PubMed/FederalRegister/eCFR; then code-interpreter/browser, gated) — bigger infra, deferred.
+- WS7 prompt-caching verify (checkpoint ≥ 4096 tok) + TTFT logging (mode→model already in WS1).
+- TTFA (~36s, dominated by hidden synthesis thinking) — needs an eval A/B on synthesis effort (quality trade-off), not more streaming.
+- Visual browser smoke of the new UI (reasoning/composing/timeline/trust line).
+
+---
+
 Three user-facing modes: **Conversational / Fast / Think**. Deep-research/multi-agent dispatch is DEFERRED — nothing user-facing is labeled "Research".
 
 ## Central mode config (owned by WS1, not split with WS7)
