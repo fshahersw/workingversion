@@ -23,6 +23,38 @@ REMAINING:
 
 ---
 
+## Phase-2 build plan (frontier capabilities) — synthesized 2026-09-05
+
+Source: research workflow wf_6b149ac2-2d8 (9 briefs in its journal.jsonl) + adversarial critic. Synth agent stubbed; this is the hand-synthesized plan.
+
+**Guardrails (from the critic — honor all):**
+- AgentCore cold-start (~2-5s code-interp, browser microVM) must NEVER be a synchronous in-loop call that can blow the 40s deadline. Pre-warm a session pool; the per-tool 20s cap already backstops.
+- Keep `RESEARCH_TOOLS` list STABLE across modes — mode-gating the tool *list* per-turn invalidates the prompt cache. Gate by budget/prompt, not by removing tools.
+- CONSOLIDATE the 7 category search tools (all already route to `general___WebSearch`) before adding new tools — the list is ~17; adding pushes to 30+ and degrades tool selection.
+- AgentCore Memory = LONG-TERM layer only; DynamoDB session memory stays the short-term source of truth (no split-brain). 7-day STM floor, KMS CMK, hashed actorId, manual prune sweep (LTM has no auto-TTL). PHI/work-product discipline.
+- CourtListener general REST limit is now **5/min, 50/hr, 125/day** (not 20/min) — `memoTTL` caching is load-bearing. citation-lookup throttle is separate (60 valid cites/min, 250/request).
+- Browser/Nova Act need a CONCRETE gap `fetch_page`+RECAP cannot cover (per "simplest solution first"); fetch_page remains primary. Honest deep-answer floor ~55-60s; do not promise sub-30s.
+- Each phase gets its own verification + a success metric (latency / source-count / citation-accuracy).
+
+**Phase 1 — Litigation REST tools + consolidation (NO infra, highest value, DOING FIRST).**
+Consolidate category search; add: CourtListener **citation-lookup** (POST /api/rest/v4/citation-lookup/, Token; hardens WS6 verification), **openFDA** (api.fda.gov/{drug,device}/{event,label,enforcement}; free key → 120k/day), **Federal Register** (api/v1/documents.json; no auth), **eCFR** (api/search + versioner full-text; no auth), **PubMed** (E-utilities esearch→efetch XML; 3/s). New `*.server.ts` per source mirroring `courtlistener.server.ts` `cl()`/`qp()`; register + dispatch in `research-tools.server.ts`; all `memoTTL`-cached. Metric: verification rate ↑ (case cites confirmed), no eval tool-selection regression.
+
+**Phase 2 — UX: upload files + mode toggle (frontend, no infra).**
+Replace/demote the "All matters" button: `ChatView.tsx:634-655` (`MatterScopePicker` at :635; `MatterScopePicker.tsx` label :59/:94) → small icon chip + a paperclip AttachButton; drag-drop on the composer `<form>` (:590-596); file chips above the textarea; on submit thread extracted text into `use-chat.ts` `send()` `outboundMemory` (:336-342) as `attachments` (same channel as `carriedSources`). Add a Fast/Think/Research ModeToggle left of `:634` → `send()` param → server override of `classifyEffort`. Metric: uploaded file content reaches the writer like an [S#] source.
+
+**Phase 3 — Code interpreter `run_python` (AgentCore).**
+`@aws-sdk/client-bedrock-agentcore` (StartCodeInterpreterSession/InvokeCodeInterpreter/StopCodeInterpreterSession; does SigV4 + event-stream). Managed `aws.codeinterpreter.v1` (SANDBOX = no egress; fine for compute on gathered data; duckdb needs a PUBLIC-network custom interpreter via control-plane — defer). Cold-start-safe pool (2-4 warm, bg refresh). `executeCode` → text + base64 images. New `artifact` SSE → extend `AnswerMarkdown.tsx` mermaid `pre`-override (:68-80) with a `CodeResultBlock` (collapsed code + chart/img + download); `use-chat` `applyEvent` `case "artifact"`. Use cases: settlement/allocation math (Decimal), limitations/repose dates, pandas/matplotlib over gathered docket/AE data, file conversion, grep. Gate to Think / when-computation-needed. Metric: math+charts correct, no latency blowout (warm pool).
+
+**Phase 4 — AgentCore Memory (long-term + learned preferences).**
+Fire-and-forget `CreateEvent` after `updateMemory` (actorId=hash(cognito sub)); SUMMARIZATION + USER_PREFERENCE strategies (skip SEMANTIC — entities ledger does it; skip EPISODIC); `RetrieveMemoryRecords` once at session start → a `RECALLED FROM PRIOR SESSIONS (unverified)` block in `memoryBlock()`; preference hints appended to tone/format, capped ~300 chars (never override legal-correctness). 7-day STM, KMS, hashed actorId, prune sweep. Metric: cross-session recall works; retention verified.
+
+**Phase 5 — Browser + live view + Nova Act (MOST GATED / highest effort).**
+AgentCore Browser (`bedrock-agentcore` TS SDK `PlaywrightBrowser` + `generateWebSocketUrl` → `connectOverCDP`); live view (`generateLiveViewUrl` presign → `<BrowserLiveView>` React; DCV Web Client is vendored → Vite aliasing + WASM copy); Nova Act (Python-only, us-east-1, preview → bridge via Python subprocess OR AgentCore Runtime endpoint + `InvokeAgentRuntime`). Wrap as one `browse(url, instruction)` tool, gated to genuine JS/interactive gaps fetch_page can't handle. Metric: only fires on a real gap; live view renders. Flag: highest effort, preview-status risk.
+
+**Deferred:** gateway targets / runtime subagents-as-tools — keep specialists INLINE (cheaper, no cold start, no extra hop) unless a concrete signal (isolation, different deps, long-running, team ownership) appears (per the runtime-subagents brief).
+
+---
+
 Three user-facing modes: **Conversational / Fast / Think**. Deep-research/multi-agent dispatch is DEFERRED — nothing user-facing is labeled "Research".
 
 ## Central mode config (owned by WS1, not split with WS7)
