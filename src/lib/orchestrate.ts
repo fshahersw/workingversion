@@ -1,7 +1,7 @@
 // SSE client for the Seeger Weiss litigation orchestrate endpoint.
-export const SUPABASE_ANON =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRiYXN2eWRpa251bGd0bnNxdmZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMzIxNjksImV4cCI6MjA5NzkwODE2OX0.ZxC8v10ya0T8YyoqxwA4FAVxSROOUUXlzonUc0rwgxw";
-
+// Auth is the Cognito httpOnly session cookie (sw_id): it is auto-sent with these
+// same-origin fetches and verified by the /api/* request middleware. The legacy
+// Supabase anon bearer was removed — the app is Cognito-only now.
 import { litigationContext, SW_PROMPT_SUGGESTIONS } from "./system-prompt";
 import { classifyIntent, type RetrievalHints } from "./research-intent";
 import type { Attachment } from "./chat-types";
@@ -26,10 +26,8 @@ export async function streamSSE(
 ): Promise<void> {
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${SUPABASE_ANON}`,
-    },
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     body: JSON.stringify(body),
     signal,
   });
@@ -139,7 +137,8 @@ function fileToB64(file: File): Promise<string> {
 async function ingestPost(body: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const res = await fetch("/api/upload", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_ANON}` },
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     body: JSON.stringify(body),
     signal,
   });
@@ -207,10 +206,8 @@ export async function fetchFollowups(
   try {
     const res = await fetch("/api/followups", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${SUPABASE_ANON}`,
-      },
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
       body: JSON.stringify({ ...litigationContext(), query, answer }),
       signal,
     });
