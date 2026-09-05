@@ -41,6 +41,9 @@ export type RunSummary = {
   sources?: number;
   answerChars?: number;
   gateRequeried?: boolean;
+  /** Bedrock-billed tokens for the research loop + synthesis (excludes side
+   *  calls: coverage gate, faithfulness judge, memory). */
+  tokens?: { in: number; out: number; total: number };
   faith?: { checked: number; supported: number; unsupported: number };
   verify?: { checked: number; verified: number };
   error?: string;
@@ -63,6 +66,12 @@ function num(v: unknown): number | undefined {
 }
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length ? v : undefined;
+}
+function readTokens(f: Fields): { in: number; out: number; total: number } | undefined {
+  const ti = num(f["tokens_in"]);
+  if (ti === undefined) return undefined;
+  const to = num(f["tokens_out"]) ?? 0;
+  return { in: ti, out: to, total: num(f["tokens_total"]) ?? ti + to };
 }
 
 /** Tapped by agentLog / agentError. Cheap, never throws, no-op unless enabled. */
@@ -115,6 +124,7 @@ function summarize(trace: RunTrace): RunSummary {
         s.sources = num(f["sources"]) ?? s.sources;
         s.answerChars = num(f["answer_chars"]) ?? s.answerChars;
         if (f["gate_requeried"] !== undefined) s.gateRequeried = f["gate_requeried"] === true;
+        s.tokens = readTokens(f) ?? s.tokens;
         break;
       case "verification": {
         const fc = num(f["faith_checked"]);
@@ -135,6 +145,7 @@ function summarize(trace: RunTrace): RunSummary {
         s.totalMs = num(f["total_ms"]) ?? s.totalMs;
         s.sources = num(f["sources"]) ?? s.sources;
         s.answerChars = num(f["answer_chars"]) ?? s.answerChars;
+        s.tokens = readTokens(f) ?? s.tokens;
         s.status = str(f["status"]) === "complete" ? "complete" : "error";
         break;
       case "run_failed":

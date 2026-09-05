@@ -356,7 +356,7 @@ export async function streamConverseToolLoop(
     onReasoning?: (delta: string) => void;
     onAnswer?: (delta: string) => void;
     onSynthesisStart?: () => void;
-    onStep?: (s: { step: number; ms: number; stopReason: string; toolCalls: string[]; cacheReadTokens: number; cacheWriteTokens: number }) => void;
+    onStep?: (s: { step: number; ms: number; stopReason: string; toolCalls: string[]; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) => void;
     onToolUse?: (call: BedrockToolCall) => void;
     execute: (call: BedrockToolCall) => Promise<string>;
   },
@@ -436,7 +436,7 @@ export async function streamConverseToolLoop(
       },
       handlers.onReasoning,
     );
-    handlers.onStep?.({ step: steps + 1, ms: Date.now() - t0, stopReason: turn.stopReason, toolCalls: turn.toolUses.map((t) => t.name), cacheReadTokens: turn.usage.cacheRead, cacheWriteTokens: turn.usage.cacheWrite });
+    handlers.onStep?.({ step: steps + 1, ms: Date.now() - t0, stopReason: turn.stopReason, toolCalls: turn.toolUses.map((t) => t.name), inputTokens: turn.usage.input, outputTokens: turn.usage.output, cacheReadTokens: turn.usage.cacheRead, cacheWriteTokens: turn.usage.cacheWrite });
     if (turn.text) lastText = turn.text;
     if (!turn.toolUses.length) {
       // The model wants to stop researching. If a comprehensiveness gate is
@@ -565,7 +565,7 @@ export async function streamConverseToolLoop(
     handlers.onAnswer ?? (() => {}),
     handlers.onReasoning,
   );
-  handlers.onStep?.({ step: steps + 1, ms: Date.now() - synthStart, stopReason: `synthesis:${synth.stopReason}`, toolCalls: [], cacheReadTokens: synth.usage.cacheRead, cacheWriteTokens: synth.usage.cacheWrite });
+  handlers.onStep?.({ step: steps + 1, ms: Date.now() - synthStart, stopReason: `synthesis:${synth.stopReason}`, toolCalls: [], inputTokens: synth.usage.input, outputTokens: synth.usage.output, cacheReadTokens: synth.usage.cacheRead, cacheWriteTokens: synth.usage.cacheWrite });
 
   return { narration: lastText, answer: synth.text, steps, gateRequeried };
 }

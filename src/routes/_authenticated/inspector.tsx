@@ -39,6 +39,7 @@ type RunSummary = {
   sources?: number;
   answerChars?: number;
   gateRequeried?: boolean;
+  tokens?: { in: number; out: number; total: number };
   faith?: { checked: number; supported: number; unsupported: number };
   verify?: { checked: number; verified: number };
   error?: string;
@@ -52,6 +53,10 @@ const POLL_MS = 2500;
 function ms(n?: number): string {
   if (n === undefined) return "—";
   return n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${Math.round(n)}ms`;
+}
+function tok(n?: number): string {
+  if (n === undefined || Number.isNaN(n)) return "—";
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 function fld(f: Record<string, unknown>, k: string): string | undefined {
   const v = f[k];
@@ -86,8 +91,11 @@ function describe(e: TraceEvent): { title: string; detail?: string; tone?: strin
         ms(Number(fld(f, "ms"))),
         stop ? `→ ${stop}` : "",
       ].filter(Boolean);
+      const inTok = fld(f, "in");
+      const outTok = fld(f, "out");
       const detail = [
         calls && calls !== "-" ? `tools: ${calls}` : "no tool calls",
+        inTok || outTok ? `tok ${tok(Number(inTok ?? 0))} in / ${tok(Number(outTok ?? 0))} out` : "",
         cr || cw ? `cache r${cr ?? 0}/w${cw ?? 0}` : "",
       ].filter(Boolean).join("  ·  ");
       return { title: bits.join("  "), detail };
@@ -107,7 +115,7 @@ function describe(e: TraceEvent): { title: string; detail?: string; tone?: strin
     case "research_loop":
       return {
         title: "Research loop done",
-        detail: `${fld(f, "steps")} steps · ${fld(f, "tool_calls")} calls · ${fld(f, "hits")} hits · ${fld(f, "sources")} src · ${fld(f, "answer_chars")} chars · gate ${fld(f, "gate_requeried") === "true" ? "re-queried" : "ok"}`,
+        detail: `${fld(f, "steps")} steps · ${fld(f, "tool_calls")} calls · ${fld(f, "hits")} hits · ${fld(f, "sources")} src · ${fld(f, "answer_chars")} chars · ${tok(Number(fld(f, "tokens_total")))} tok · gate ${fld(f, "gate_requeried") === "true" ? "re-queried" : "ok"}`,
       };
     case "faithfulness": {
       const flagged = fld(f, "flagged");
@@ -129,7 +137,7 @@ function describe(e: TraceEvent): { title: string; detail?: string; tone?: strin
     case "run_done":
       return {
         title: "Run complete",
-        detail: `${fld(f, "status")} · ${ms(Number(fld(f, "total_ms")))} · ${fld(f, "sources")} src`,
+        detail: `${fld(f, "status")} · ${ms(Number(fld(f, "total_ms")))} · ${fld(f, "sources")} src · ${tok(Number(fld(f, "tokens_total")))} tok`,
         tone: "text-emerald-700",
       };
     case "run_failed":
@@ -286,6 +294,7 @@ function InspectorPage() {
                         <span>{r.steps ?? 0} steps</span>
                         <span>{r.toolCalls ?? 0} calls</span>
                         <span>{r.sources ?? 0} src</span>
+                        {r.tokens && <span>{tok(r.tokens.total)} tok</span>}
                         {r.gateRequeried && <span className="text-amber-700">gate re-queried</span>}
                         {r.faith && (
                           <span className={r.faith.unsupported > 0 ? "text-amber-700" : "text-emerald-700"}>

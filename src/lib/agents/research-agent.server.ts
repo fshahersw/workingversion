@@ -248,6 +248,14 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     let docCreated = false; // did the model call create_document itself?
     const refs = new Set<string>();
     const loopStart = Date.now();
+    // Per-run token accounting — Bedrock returns exact billed usage per turn
+    // (usage.inputTokens/outputTokens) via onStep; sum across the research loop +
+    // synthesis for the trace and the subagent cost model. Side calls (coverage
+    // gate, faithfulness judge, memory) are separate and not included here.
+    let tokIn = 0;
+    let tokOut = 0;
+    let cacheRead = 0;
+    let cacheWrite = 0;
 
     let answerText = "";
     const historyPreamble =
@@ -349,8 +357,13 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
               answerText += text;
               if (!docReq.wants) emit("delta", { text });
             },
-            onStep: (s) =>
-              agentLog("agent_step", { run: runId, step: s.step, ms: s.ms, stop: s.stopReason, cache_read: s.cacheReadTokens, cache_write: s.cacheWriteTokens, calls: s.toolCalls.join(",") || "-" }),
+            onStep: (s) => {
+              tokIn += s.inputTokens;
+              tokOut += s.outputTokens;
+              cacheRead += s.cacheReadTokens;
+              cacheWrite += s.cacheWriteTokens;
+              agentLog("agent_step", { run: runId, step: s.step, ms: s.ms, stop: s.stopReason, in: s.inputTokens, out: s.outputTokens, cache_read: s.cacheReadTokens, cache_write: s.cacheWriteTokens, calls: s.toolCalls.join(",") || "-" });
+            },
             // A call emits tool_call TWICE with the same tool-use id: once here
             // when it STARTS (no hits, for a live "searching…" row) and once after
             // execute with the hit count. The client upserts by id, so the two
@@ -395,6 +408,11 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
           sources: book.all().length,
           answer_chars: answerText.length,
           gate_requeried: res.gateRequeried,
+          tokens_in: tokIn,
+          tokens_out: tokOut,
+          tokens_total: tokIn + tokOut,
+          cache_read: cacheRead,
+          cache_write: cacheWrite,
         });
       } catch (err) {
         agentError("research_loop_failed", { run: runId, error: trunc(errorMessage(err), 200) });
@@ -523,6 +541,9 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
       sources: sources.length,
       answer_chars: answerText.length,
       total_ms: since(runStart),
+      tokens_in: tokIn,
+      tokens_out: tokOut,
+      tokens_total: tokIn + tokOut,
     });
 
     // Refresh session memory off the critical path (answer is already done).
