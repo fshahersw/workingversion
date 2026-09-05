@@ -203,6 +203,8 @@ export type Message = {
   /** Effort mode this turn actually ran at (fast | think | conversational) and why. */
   mode?: string;
   modeReason?: string;
+  /** When set, this turn is producing a file deliverable (pdf|docx|xlsx). */
+  deliverable?: string;
   /** Live, streamed research narration ("thinking steps") shown before the answer. */
   thinking?: string;
   /** The model's actual adaptive-thinking reasoning, streamed live (frontier feel). */

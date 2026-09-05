@@ -199,7 +199,12 @@ function applyEvent(m: Message, e: SSEEvent): Message {
       return { ...m, sources };
     }
     case "writer_start":
-      return { ...m, status: "writing", collapseTimeline: true };
+      return {
+        ...m,
+        status: "writing",
+        collapseTimeline: true,
+        deliverable: d.deliverable ? String(d.deliverable) : m.deliverable,
+      };
     case "delta":
       // Streaming text is batched outside the reducer via RAF;
       // see useChat.send. We still tolerate raw deltas here.

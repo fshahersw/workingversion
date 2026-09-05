@@ -95,6 +95,18 @@ function attachmentsBlock(input: OrchestrateInput): string {
   return `UPLOADED FILES\nThe attorney uploaded ${files.length} file(s) this session: ${names}. Their content is below — use it directly when the question concerns these files. Data files (CSV/Excel/JSON) are also loaded in your code sandbox, so you can run_python over them by filename to compute exact figures. For any file that shows a read_document pointer, call read_document(name, keywords) to pull additional passages from the full document.\n\n${parts.join("\n\n")}\n\n`;
 }
 
+/** Short friendly confirmation shown in chat when a file deliverable is ready. */
+function friendlyDone(format: string, name: string): string {
+  const F = format.toUpperCase();
+  const openers = [
+    `**Your ${F} is ready.** I compiled the findings into **${name}** — download it below.`,
+    `**Done — I put this together as a ${F}.** Grab **${name}** below.`,
+    `**Your report is ready.** I saved it as **${name}** (${F}) — download it below.`,
+  ];
+  // Vary the phrasing deterministically by name length (no Math.random in prod path).
+  return openers[name.length % openers.length]!;
+}
+
 /** A document title: prefer the report's own first heading, else clean the query. */
 function docTitle(query: string, answer: string): string {
   const h = answer.match(/^#{1,3}\s+(.+)$/m);
@@ -271,13 +283,15 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             onSynthesisStart: () => {
               emit("agent_done", { round: 1, agent: "research", summary: "", count: hits, citations: [...refs] });
               emit("sources", { sources: book.all() });
-              emit("writer_start", { round: 1, sources: book.all().length });
+              emit("writer_start", { round: 1, sources: book.all().length, ...(docReq.wants ? { deliverable: docReq.format } : {}) });
               agentLog("writer_start", { run: runId, sources: book.all().length });
             },
-            // The final synthesis turn streams straight into the answer.
+            // The final synthesis turn streams straight into the answer — EXCEPT
+            // for a file deliverable, where the report goes into the file (not the
+            // chat); we accumulate it silently and show a short note when done.
             onAnswer: (text) => {
               answerText += text;
-              emit("delta", { text });
+              if (!docReq.wants) emit("delta", { text });
             },
             onStep: (s) =>
               agentLog("agent_step", { run: runId, step: s.step, ms: s.ms, stop: s.stopReason, cache_read: s.cacheReadTokens, cache_write: s.cacheWriteTokens, calls: s.toolCalls.join(",") || "-" }),
@@ -338,26 +352,41 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     }
     emit("sources", { sources });
 
-    // File deliverable: if the attorney asked for one and the model didn't
-    // already produce it as a tool step, render the synthesized report into the
-    // file now (reliable — synthesis runs tool-less, so the model can't call
-    // create_document itself once it's writing).
-    if (docReq.wants && !docCreated && answerText.trim().length > 150) {
-      try {
-        const gen = await executeResearchTool(
-          "create_document",
-          { format: docReq.format, title: docTitle(resolved.query, answerText), content: answerText },
-          book,
-        );
-        if (gen.artifacts?.length) {
-          emit("artifact", { round: 1, agent: "research", artifacts: gen.artifacts });
-          emit("delta", { text: `\n\n_Prepared **${gen.artifacts[0]!.name}** — download it below._` });
-          agentLog("doc_generated", { run: runId, format: docReq.format, name: gen.artifacts[0]!.name });
-        } else {
-          agentError("doc_gen_empty", { run: runId, note: trunc(gen.text, 160) });
+    // File deliverable: the report was written into `answerText` but NOT streamed
+    // to chat (see onAnswer). Render it into the file, then show a short friendly
+    // note — the chat stays clean, the content lives in the download.
+    if (docReq.wants) {
+      let handled = false;
+      if (!docCreated && answerText.trim().length > 150) {
+        try {
+          const gen = await executeResearchTool(
+            "create_document",
+            { format: docReq.format, title: docTitle(resolved.query, answerText), content: answerText, style: docReq.style },
+            book,
+          );
+          if (gen.artifacts?.length) {
+            emit("artifact", { round: 1, agent: "research", artifacts: gen.artifacts });
+            emit("delta", { text: friendlyDone(docReq.format, gen.artifacts[0]!.name) });
+            handled = true;
+            agentLog("doc_generated", { run: runId, format: docReq.format, name: gen.artifacts[0]!.name });
+          } else {
+            agentError("doc_gen_empty", { run: runId, note: trunc(gen.text, 160) });
+          }
+        } catch (err) {
+          agentError("doc_gen_failed", { run: runId, error: trunc(errorMessage(err), 200) });
         }
-      } catch (err) {
-        agentError("doc_gen_failed", { run: runId, error: trunc(errorMessage(err), 200) });
+      }
+      if (!handled) {
+        // The model already produced the file as a tool step -> confirm; otherwise
+        // the render failed / too little content -> fall back to the report inline
+        // so nothing the model wrote is ever lost.
+        if (docCreated) {
+          emit("delta", { text: "**Your file is ready — download it below.**" });
+        } else if (answerText.trim()) {
+          emit("delta", { text: `${answerText}\n\n_(I couldn't render the file this time — the full report is above.)_` });
+        } else {
+          emit("delta", { text: "I couldn't compile the report this time. Try again, or tell me what sections you'd like in it." });
+        }
       }
     }
 

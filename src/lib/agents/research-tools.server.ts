@@ -174,6 +174,7 @@ const CREATE_DOCUMENT_TOOL: ToolDef = {
       format: { type: "string", enum: ["pdf", "docx", "xlsx"], description: "Output file format." },
       title: { type: "string", description: "Document title (used on the cover page)." },
       content: { type: "string", description: "Markdown body (headings, tables, lists, ```dot diagrams)." },
+      style: { type: "string", enum: ["legal", "modern", "minimal"], description: "Visual style — 'legal' (navy/serif, default), 'modern' (teal/sans), or 'minimal' (understated)." },
       filename: { type: "string", description: "Optional base filename (extension added automatically)." },
     },
     required: ["format", "title", "content"],
@@ -542,9 +543,10 @@ async function createDocumentTool(input: Record<string, unknown>): Promise<ToolO
   const format = str(input["format"]) || "pdf";
   const title = str(input["title"]) || "Document";
   const content = str(input["content"]);
+  const style = str(input["style"]) || "legal";
   const filename = str(input["filename"]) || undefined;
   if (content.trim().length < 2) return { text: "create_document needs markdown content.", hits: 0, refs: [] };
-  const res = await generateDocument(format, title, content, filename);
+  const res = await generateDocument(format, title, content, filename, style);
   if ("error" in res) return { text: `create_document failed: ${trunc(res.error, 200)}`, hits: 0, refs: [] };
   const artifact: Artifact = {
     id: `doc-${++artifactSeq}-${res.name}`,

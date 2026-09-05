@@ -746,7 +746,9 @@ function AssistantMessage({
         <div className="mb-3 flex items-center gap-2 rounded-xl border border-brand-orange/25 bg-gradient-to-b from-brand-orange-soft/25 to-transparent px-3 py-2">
           <span className="h-[7px] w-[7px] shrink-0 animate-pulse rounded-full bg-brand-orange" />
           <span className="text-[12.5px] font-medium text-foreground/75">
-            Research complete · writing your answer
+            {msg.deliverable
+              ? `Research complete · preparing your ${msg.deliverable.toUpperCase()} report`
+              : "Research complete · writing your answer"}
             {(msg.sources?.length ?? 0) > 0
               ? ` from ${msg.sources.length} source${msg.sources.length === 1 ? "" : "s"}`
               : ""}

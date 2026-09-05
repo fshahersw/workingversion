@@ -126,7 +126,8 @@ export type EffortDecision = { mode: EffortMode; confidence: number; reason: str
 // than hoping the model calls create_document mid-loop (it can't, once it has
 // entered the tool-less synthesis phase).
 // ---------------------------------------------------------------------------
-export type DocRequest = { wants: boolean; format: "pdf" | "docx" | "xlsx" };
+export type DocStyle = "legal" | "modern" | "minimal";
+export type DocRequest = { wants: boolean; format: "pdf" | "docx" | "xlsx"; style: DocStyle };
 
 const DOC_FORMAT_RE = /\b(pdf|word\s?doc(?:ument)?s?|docx|\.docx?|excel|spread\s?sheets?|xlsx|\.xlsx?)\b/i;
 const DOC_VERB_RE = /\b(generate|create|make|draft|produce|build|prepare|assemble|put together|write[- ]?up|export|turn .* into)\b/i;
@@ -138,7 +139,10 @@ export function detectDocRequest(query: string): DocRequest {
   let format: "pdf" | "docx" | "xlsx" = "pdf";
   if (/\b(excel|spread\s?sheets?|xlsx|\.xlsx?|workbook)\b/i.test(q)) format = "xlsx";
   else if (/\b(word\s?doc(?:ument)?s?|docx|\.docx?)\b/i.test(q)) format = "docx";
-  return { wants, format };
+  let style: DocStyle = "legal";
+  if (/\b(modern|sleek|contemporary)\b/i.test(q)) style = "modern";
+  else if (/\b(minimal|minimalist|plain|bare[- ]?bones)\b/i.test(q)) style = "minimal";
+  return { wants, format, style };
 }
 
 /** Message STARTS with a social/acknowledgement opener ("thanks, that helps",
