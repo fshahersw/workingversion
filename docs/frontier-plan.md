@@ -17,9 +17,22 @@ DONE (committed on `feat/frontier-ux`):
 - `a155ea2` openFDA + Federal Register + eCFR primary-source tools
 - `d270493` run_python (AgentCore Code Interpreter — exact settlement/date math)
 - `53b1038` native file I/O (upload/create/download via the code interpreter; persistent fs)
+- `b15e79f` Phase 3b: run_python charts + created files render in chat (artifact SSE → ArtifactPanel; image-mime inline, files as download chips; base64 live-only, not persisted; validated live)
+- `ea0ea6d` Phase 2: upload-files button (replaces prominent "All matters" slot; matter picker demoted, kept) + drag-drop + Auto/Fast/Think ModeToggle. /api/upload → writeFileB64 (binary base64 via run_python), forceMode + attachments through the stack, UPLOADED-FILES prompt block. Validated live.
 - Eval on the 22-tool set: 75 avg, tier-pass 100%, verify 49%, 0 failures — no bloat regression.
-- NEXT: Phase 3b render charts/files in chat + Phase 2 upload button/mode toggle; then async Research mode (notify + report files) + Phase 5 browser/Nova Act (any form/interaction workflow). UI pieces need a visual smoke (auth-gated SPA; can't self-render).
 - Cross-session memory (Phase 4): DEFERRED per Firas.
+
+### Decisions made building 3b/2 (2026-09-05)
+- Mode toggle ships as **Auto / Fast / Think** (all functional). "Research" is NOT a toggle option yet — it is a separate ASYNC workflow (notify + report files) per Firas, and faking it as a synchronous 4th toggle would be a stub (violates no-stubs rule). Add it when its async backend exists.
+- Upload uses the **upload-once model**: file → /api/upload → sandbox (module-singleton session persists ~30min in dev) → referenced by name on every send via `attachments`. Works in single-process dev; prod multi-instance needs the per-actor session pool (seam = ensureSession()).
+- Artifacts are **live-only** (not written to DynamoDB history) — avoids the 400KB item cap. Persistence/S3 is a later phase.
+- "All matters" MatterScopePicker demoted (moved after the mic) rather than deleted — matter-scoping still works; upload is now the prominent action.
+
+### NEXT (in order)
+1. Visual smoke of 3b/2 UI (Firas screenshots or a local Playwright + dev `/preview` route) — composer row may be tight at 880px; ModeToggle/Upload labels are `hidden sm:inline`.
+2. Async **Research mode** (its own tab/flow): kick off → notify on completion → emit a polished report file suite (DOCX/XLSX/PDF, cover page) via the code interpreter.
+3. Phase 5 browser (AgentCore + Playwright CDP + DCV live view + Nova Act bridge) for any form/interaction workflow.
+4. Native multiple-choice selector popup; gateway targets/inference-subagents; PubMed tool.
 
 ## Resume checklist (read this first on a cold start)
 
