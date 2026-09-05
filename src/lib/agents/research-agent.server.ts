@@ -92,7 +92,7 @@ function attachmentsBlock(input: OrchestrateInput): string {
     return `${header}\n${a.contextText || "(no text extracted)"}${tail}`;
   });
   const names = files.map((a) => a.name).join(", ");
-  return `UPLOADED FILES\nThe attorney uploaded ${files.length} file(s) this session: ${names}. Their content is provided below (and the raw files are in your code sandbox for run_python computation; large docs are searchable via read_document). Use this content directly when the question concerns these files.\n\n${parts.join("\n\n")}\n\n`;
+  return `UPLOADED FILES\nThe attorney uploaded ${files.length} file(s) this session: ${names}. Their content is below — use it directly when the question concerns these files. Data files (CSV/Excel/JSON) are also loaded in your code sandbox, so you can run_python over them by filename to compute exact figures. For any file that shows a read_document pointer, call read_document(name, keywords) to pull additional passages from the full document.\n\n${parts.join("\n\n")}\n\n`;
 }
 
 export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Promise<void> {
@@ -273,7 +273,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
               }),
             execute: async (call) => {
               toolCalls++;
-              const out = await executeResearchTool(call.name, call.input, book);
+              const out = await executeResearchTool(call.name, call.input, book, input.attachments);
               hits += out.hits;
               out.refs.forEach((r) => refs.add(r));
               emit("tool_call", {

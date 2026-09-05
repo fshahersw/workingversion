@@ -235,4 +235,11 @@ export type Attachment = {
   contextText: string;
   hasFullText: boolean;
   chars?: number;
+  /** Lifecycle for async ingestion (BDA): processing while OCR runs. Only
+   *  "ready" attachments are sent to the model. */
+  status?: "processing" | "ready" | "error";
+  /** S3 key of the full extracted markdown (BDA path), for read_document. */
+  markdownKey?: string;
+  /** Non-fatal extraction note surfaced to the user. */
+  note?: string;
 };

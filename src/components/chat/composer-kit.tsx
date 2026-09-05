@@ -155,6 +155,16 @@ export function useUploads(
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  const upsert = useCallback(
+    (a: Attachment) =>
+      setFiles((prev) =>
+        prev.some((f) => f.name === a.name)
+          ? prev.map((f) => (f.name === a.name ? a : f))
+          : [...prev, a],
+      ),
+    [setFiles],
+  );
+
   const handleFiles = useCallback(
     async (list: FileList | null) => {
       if (!list || !list.length) return;
@@ -162,22 +172,20 @@ export function useUploads(
       setUploading(true);
       try {
         for (const file of Array.from(list)) {
-          const res = await uploadFile(file);
+          const res = await uploadFile(file, { onProcessing: (ph) => upsert(ph) });
           if (res.ok) {
-            setFiles((prev) =>
-              prev.some((f) => f.name === res.attachment.name)
-                ? prev.map((f) => (f.name === res.attachment.name ? res.attachment : f))
-                : [...prev, res.attachment],
-            );
+            upsert(res.attachment);
           } else {
-            setUploadError(`${file.name}: ${res.error}`);
+            setUploadError(`${res.name}: ${res.error}`);
+            // drop any processing placeholder that failed
+            setFiles((prev) => prev.filter((f) => !(f.name === res.name && f.status === "processing")));
           }
         }
       } finally {
         setUploading(false);
       }
     },
-    [setFiles],
+    [setFiles, upsert],
   );
 
   const removeFile = useCallback(
@@ -260,16 +268,29 @@ export function FileChips({
       {files.map((f) => {
         const size = humanSize(f.size);
         const kind = KIND_LABEL[f.kind] ?? f.kind;
+        const processing = f.status === "processing";
         return (
           <span
             key={f.name}
-            className="inline-flex max-w-[16rem] items-center gap-1.5 rounded-md border border-border/70 bg-muted/50 py-1 pl-2 pr-1 text-[11.5px] text-foreground/80"
-            title={`${f.name}${size ? ` · ${size}` : ""}${f.hasFullText ? " · searchable" : ""}`}
+            className={`inline-flex max-w-[16rem] items-center gap-1.5 rounded-md border py-1 pl-2 pr-1 text-[11.5px] ${
+              processing
+                ? "border-brand-orange/30 bg-brand-orange-soft/30 text-foreground/70"
+                : "border-border/70 bg-muted/50 text-foreground/80"
+            }`}
+            title={`${f.name}${size ? ` · ${size}` : ""}${processing ? " · reading…" : f.hasFullText ? " · searchable" : ""}`}
           >
-            <Paperclip className="h-3 w-3 shrink-0 text-brand-navy/60" />
+            {processing ? (
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin text-brand-orange" />
+            ) : (
+              <Paperclip className="h-3 w-3 shrink-0 text-brand-navy/60" />
+            )}
             <span className="truncate font-medium">{f.name}</span>
-            <span className="shrink-0 rounded bg-brand-navy/10 px-1 py-px text-[9.5px] font-semibold uppercase tracking-wide text-brand-navy/70">
-              {kind}
+            <span
+              className={`shrink-0 rounded px-1 py-px text-[9.5px] font-semibold uppercase tracking-wide ${
+                processing ? "bg-brand-orange/15 text-brand-orange" : "bg-brand-navy/10 text-brand-navy/70"
+              }`}
+            >
+              {processing ? "reading" : kind}
             </span>
             <button
               type="button"

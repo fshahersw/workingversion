@@ -20,7 +20,8 @@ import {
 } from "./courtlistener.server";
 import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
 import { runPython, collectNewArtifacts, readDocument } from "./code-interpreter.server";
-import type { Artifact } from "@/lib/chat-types";
+import { searchMarkdownKey } from "./bda.server";
+import type { Artifact, Attachment } from "@/lib/chat-types";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const trunc = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : v);
@@ -498,12 +499,21 @@ async function runPythonTool(input: Record<string, unknown>): Promise<ToolOutcom
   };
 }
 
-async function readDocumentTool(input: Record<string, unknown>): Promise<ToolOutcome> {
+async function readDocumentTool(input: Record<string, unknown>, attachments?: Attachment[]): Promise<ToolOutcome> {
   const name = str(input["name"]);
   const query = str(input["query"]);
   if (!name) return { text: "read_document needs a file name.", hits: 0, refs: [] };
   try {
-    const text = await readDocument(name, query);
+    // Resolve the uploaded file: BDA docs have their full markdown in S3;
+    // sandbox docs have a sidecar the code interpreter greps.
+    const att = (attachments ?? []).find((a) => a.name === name);
+    let text: string;
+    if (att?.markdownKey) {
+      text = await searchMarkdownKey(att.markdownKey, query);
+      if (!text) text = `No passages in "${name}" matched "${query}".`;
+    } else {
+      text = await readDocument(name, query);
+    }
     return { text: trunc(text, 6000), hits: 0, refs: [] };
   } catch (err) {
     return { text: `read_document failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
@@ -515,6 +525,7 @@ export async function executeResearchTool(
   name: string,
   input: Record<string, unknown>,
   book: SourceBook,
+  attachments?: Attachment[],
 ): Promise<ToolOutcome> {
   if (name === "fetch_page") return fetchPageTool(input, book);
   if (name === "recap_search") return recapSearchTool(input, book);
@@ -525,7 +536,7 @@ export async function executeResearchTool(
   if (name === "federal_register_search") return fedRegSearchTool(input, book);
   if (name === "ecfr_search") return ecfrSearchTool(input, book);
   if (name === "run_python") return runPythonTool(input);
-  if (name === "read_document") return readDocumentTool(input);
+  if (name === "read_document") return readDocumentTool(input, attachments);
   // search_authorities, the category web tools, and every db_* tool.
   return executeTool(name, input, book);
 }

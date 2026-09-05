@@ -136,42 +136,64 @@ function fileToB64(file: File): Promise<string> {
   });
 }
 
-/** Upload a file into the code-interpreter sandbox. The server extracts text
- *  natively and returns an Attachment (name, kind, meta, injected contextText,
- *  hasFullText). Reference it by name in run_python / read_document. */
+async function ingestPost(body: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  const res = await fetch("/api/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${SUPABASE_ANON}` },
+    body: JSON.stringify(body),
+    signal,
+  });
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok && !data.status) data.status = "error";
+  return data;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Ingest a file. Sandbox files (csv/xlsx/docx/txt/…) resolve immediately;
+ *  PDF/image files go through Amazon Bedrock Data Automation (OCR + markdown +
+ *  AI summary) asynchronously — onProcessing fires with a placeholder chip and
+ *  this polls until the extracted Attachment is ready. */
 export async function uploadFile(
   file: File,
-  signal?: AbortSignal,
+  opts?: { onProcessing?: (a: Attachment) => void; signal?: AbortSignal },
 ): Promise<{ ok: true; attachment: Attachment } | { ok: false; name: string; error: string }> {
   try {
     const b64 = await fileToB64(file);
-    const res = await fetch("/api/upload", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${SUPABASE_ANON}`,
-      },
-      body: JSON.stringify({ name: file.name, b64, mime: file.type }),
-      signal,
+    const start = await ingestPost(
+      { action: "start", name: file.name, b64, mime: file.type, size: file.size },
+      opts?.signal,
+    );
+
+    if (start.status === "ready") return { ok: true, attachment: start.attachment as Attachment };
+    if (start.status !== "processing") {
+      return { ok: false, name: file.name, error: String(start.error ?? "upload failed") };
+    }
+
+    const handle = {
+      invocationArn: String(start.invocationArn),
+      key: String(start.key),
+      name: String(start.name),
+      kind: String(start.kind),
+      size: Number(start.size) || file.size,
+    };
+    opts?.onProcessing?.({
+      name: handle.name,
+      kind: handle.kind,
+      size: handle.size,
+      contextText: "",
+      hasFullText: false,
+      status: "processing",
     });
-    const data = (await res.json().catch(() => ({}))) as Partial<Attachment> & {
-      ok?: boolean;
-      error?: string;
-    };
-    if (!res.ok || !data.ok || !data.name)
-      return { ok: false, name: file.name, error: data.error ?? `HTTP ${res.status}` };
-    return {
-      ok: true,
-      attachment: {
-        name: data.name,
-        kind: data.kind ?? "text",
-        size: data.size ?? file.size,
-        meta: data.meta ?? {},
-        contextText: data.contextText ?? "",
-        hasFullText: Boolean(data.hasFullText),
-        chars: data.chars ?? 0,
-      },
-    };
+
+    // Poll ~3s up to ~3.5 min (BDA async).
+    for (let i = 0; i < 70; i++) {
+      await sleep(3000);
+      const s = await ingestPost({ action: "status", ...handle }, opts?.signal);
+      if (s.status === "ready") return { ok: true, attachment: s.attachment as Attachment };
+      if (s.status === "error") return { ok: false, name: handle.name, error: String(s.error ?? "extraction failed") };
+    }
+    return { ok: false, name: handle.name, error: "extraction timed out" };
   } catch (err) {
     return { ok: false, name: file.name, error: err instanceof Error ? err.message : "upload failed" };
   }

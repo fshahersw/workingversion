@@ -56,6 +56,49 @@ async function getText(key: string): Promise<string> {
   return (await r.Body?.transformToString()) ?? "";
 }
 
+/** Store a text blob (e.g. consolidated markdown) in S3. */
+export async function putText(key: string, text: string): Promise<void> {
+  await s3().send(
+    new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: text, ContentType: "text/markdown; charset=utf-8" }),
+  );
+}
+
+/** Keyword retrieval over a stored markdown doc in S3. Returns the best-matching
+ *  passages (chunked by blank line / heading) so a long doc answers a query
+ *  without injecting the whole thing into context. Runs server-side (durable;
+ *  no sandbox dependency). */
+export async function searchMarkdownKey(key: string, query: string, maxChars = 4000): Promise<string> {
+  const text = await getText(key).catch(() => "");
+  if (!text) return "";
+  return searchText(text, query, maxChars);
+}
+
+export function searchText(text: string, query: string, maxChars = 4000): string {
+  const q = (query || "").trim();
+  if (!q) return text.slice(0, maxChars);
+  const terms = Array.from(new Set((q.toLowerCase().match(/\w+/g) ?? []).filter((t) => t.length > 2)));
+  if (!terms.length) return text.slice(0, maxChars);
+  const chunks = text.split(/\n\s*\n/).map((c) => c.trim()).filter(Boolean);
+  const scored = chunks
+    .map((c) => {
+      const cl = c.toLowerCase();
+      const distinct = terms.reduce((n, t) => (cl.includes(t) ? n + 1 : n), 0);
+      const total = terms.reduce((n, t) => n + cl.split(t).length - 1, 0);
+      return { c, distinct, total };
+    })
+    .filter((s) => s.distinct > 0)
+    .sort((a, b) => b.distinct - a.distinct || b.total - a.total);
+  const picked: string[] = [];
+  let used = 0;
+  for (const s of scored) {
+    const seg = s.c.slice(0, 1500);
+    if (used + seg.length > maxChars) break;
+    picked.push(seg);
+    used += seg.length;
+  }
+  return picked.join("\n\n---\n\n");
+}
+
 /** s3://bucket/key -> key (this bucket only). */
 function keyOf(uri: string): string {
   const m = uri.match(/^s3:\/\/[^/]+\/(.+)$/);

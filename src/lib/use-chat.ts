@@ -362,7 +362,13 @@ export function useChat(sessionId: string) {
               ? { matter_id: matter.matterId, matter_label: matter.label }
               : {}),
             ...(opts?.mode && opts.mode !== "auto" ? { mode: opts.mode } : {}),
-            ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
+            ...(() => {
+              // Only send fully-ingested attachments; processing/errored ones are skipped.
+              const ready = (opts?.attachments ?? []).filter(
+                (a) => a.status !== "processing" && a.status !== "error",
+              );
+              return ready.length ? { attachments: ready } : {};
+            })(),
           },
           (evt) => {
             if (evt.event === "delta") {
