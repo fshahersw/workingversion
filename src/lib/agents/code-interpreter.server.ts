@@ -6,16 +6,19 @@
 // settlement allocation, limitations/repose date math, data aggregation.
 //
 // One module-level session is reused across calls (cold start ~2s, then
-// sub-second); each execution runs with clearContext=true so calls are isolated
-// (no leaked variables between unrelated queries). The session is recreated
-// before its absolute TTL and on any error. Single-instance only — a second
-// server process has its own session (fine for dev; the seam to a shared pool
-// is ensureSession()).
+// sub-second). Executions run with clearContext=false so the sandbox FILESYSTEM
+// (and state) persist across calls within a session — that is what lets an
+// uploaded file be written, then read/processed by a later run_python, then its
+// output file (xlsx/docx/pdf/png) read back for download. Single-instance only —
+// a second server process gets its own session (fine for dev; the seam to a
+// per-actor pool is ensureSession()). The session is recreated before its
+// absolute TTL and on any error.
 // ============================================================================
 import {
   BedrockAgentCoreClient,
   StartCodeInterpreterSessionCommand,
   InvokeCodeInterpreterCommand,
+  type InvokeCodeInterpreterCommandInput,
   StopCodeInterpreterSessionCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 
@@ -63,39 +66,46 @@ async function ensureSession(): Promise<{ id: string; startedAt: number }> {
 
 export type CodeResult = { text: string; images: string[]; isError: boolean };
 
-async function invokeOnce(code: string): Promise<CodeResult> {
+type ContentItem = { type?: string; text?: string; data?: string; source?: { data?: string }; name?: string; path?: string };
+
+/** Drain the InvokeCodeInterpreter event stream into its content items + error flag. */
+async function drain(resp: unknown): Promise<{ content: ContentItem[]; isError: boolean }> {
+  const content: ContentItem[] = [];
+  let isError = false;
+  const stream = (resp as { stream?: AsyncIterable<unknown> }).stream;
+  if (stream) {
+    for await (const ev of stream) {
+      const r = (ev as { result?: { content?: ContentItem[]; isError?: boolean } }).result;
+      if (!r) continue;
+      if (r.isError) isError = true;
+      for (const c of r.content ?? []) content.push(c);
+    }
+  }
+  return { content, isError };
+}
+
+async function invoke(name: string, args: Record<string, unknown>): Promise<{ content: ContentItem[]; isError: boolean }> {
   const sess = await ensureSession();
   const resp = await client().send(
     new InvokeCodeInterpreterCommand({
       codeInterpreterIdentifier: INTERPRETER_ID,
       sessionId: sess.id,
-      name: "executeCode",
-      arguments: { code, language: "python", clearContext: true },
+      name: name as InvokeCodeInterpreterCommandInput["name"],
+      arguments: args,
     }),
   );
+  return drain(resp);
+}
+
+async function invokeOnce(code: string): Promise<CodeResult> {
+  const { content, isError } = await invoke("executeCode", { code, language: "python", clearContext: false });
   let text = "";
   const images: string[] = [];
-  let isError = false;
-  const stream = (resp as unknown as { stream?: AsyncIterable<unknown> }).stream;
-  if (stream) {
-    for await (const ev of stream) {
-      const r = (
-        ev as {
-          result?: {
-            content?: { type?: string; text?: string; data?: string; source?: { data?: string } }[];
-            isError?: boolean;
-          };
-        }
-      ).result;
-      if (!r) continue;
-      if (r.isError) isError = true;
-      for (const c of r.content ?? []) {
-        if (c.type === "text" && typeof c.text === "string") text += c.text;
-        else if (c.type === "image") {
-          const d = c.data ?? c.source?.data;
-          if (d) images.push(d);
-        }
-      }
+  for (const c of content) {
+    if (c.type === "text" && typeof c.text === "string") text += c.text;
+    else if (c.type === "image") {
+      const d = c.data ?? c.source?.data;
+      if (d) images.push(d);
     }
   }
   return { text, images, isError };
@@ -108,6 +118,39 @@ export async function runPython(code: string): Promise<CodeResult> {
   } catch {
     session = null; // session may have expired/died — recreate and retry once
     return await invokeOnce(code);
+  }
+}
+
+/** Write a text file into the sandbox (an upload the model / run_python can read).
+ *  Use a RELATIVE path (the sandbox rejects absolute paths like /tmp as traversal). */
+export async function writeFile(path: string, text: string): Promise<void> {
+  const { isError, content } = await invoke("writeFiles", { content: [{ path, text }] });
+  if (isError) throw new Error(`writeFile failed: ${content.map((c) => c.text ?? "").join("").slice(0, 200)}`);
+}
+
+/** Download a file from the sandbox as base64 (binary-safe), via run_python — the
+ *  dedicated readFiles tool's arg shape is unreliable and this handles binary
+ *  (xlsx/docx/pdf/png) cleanly. Returns null if the file is missing. */
+export async function getFile(path: string): Promise<string | null> {
+  const code = `import base64,os\np=${JSON.stringify(path)}\nprint('<<B64>>'+(base64.b64encode(open(p,'rb').read()).decode() if os.path.exists(p) else '')+'<<END>>')`;
+  const { text, isError } = await invokeOnce(code);
+  if (isError) return null;
+  const m = text.match(/<<B64>>([\s\S]*?)<<END>>/);
+  return m && m[1] ? m[1] : null;
+}
+
+export type Artifact = { name: string; size: number };
+
+/** List files in the sandbox working dir (name + byte size), via run_python. */
+export async function listArtifacts(): Promise<Artifact[]> {
+  const code = `import os,json\nout=[{'name':f,'size':os.path.getsize(f)} for f in sorted(os.listdir('.')) if os.path.isfile(f)]\nprint('<<JSON>>'+json.dumps(out)+'<<END>>')`;
+  const { text } = await invokeOnce(code);
+  const m = text.match(/<<JSON>>([\s\S]*?)<<END>>/);
+  if (!m) return [];
+  try {
+    return JSON.parse(m[1]) as Artifact[];
+  } catch {
+    return [];
   }
 }
 
