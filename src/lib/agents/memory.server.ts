@@ -203,13 +203,36 @@ export async function resolveQuestion(
 
 const UPDATE_SYSTEM = `You maintain the working memory of a litigation research conversation.
 
-Return JSON only:
-{"summary": "...", "entities": [{"label": "...", "kind": "matter|court|judge|party|statute|date|other"}]}
+Call the save_memory tool with the updated summary and entity ledger (kind is one of: matter, court, judge, party, statute, date, other).
 
 Rules:
 - summary: a compact running narrative of what the lawyer has asked and what has been established. Third person, no preamble, under 1200 characters. Fold the previous summary in; do not restart it.
 - entities: the concrete anchors the conversation is about (matters, MDL numbers, courts, judges, parties, key dates). Full, unambiguous labels. Maximum 15. Drop anything no longer relevant.
 - Record only what is supported by the exchange. Never invent docket numbers or dates.`;
+
+/** Forced-tool schema so the model returns validated JSON, not fragile text. */
+const MEMORY_TOOL = {
+  name: "save_memory",
+  description: "Save the running conversation memory (rolling summary + entity ledger).",
+  input_schema: {
+    type: "object",
+    properties: {
+      summary: {
+        type: "string",
+        description: "Compact running third-person narrative of the conversation, under 1200 characters.",
+      },
+      entities: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { label: { type: "string" }, kind: { type: "string" } },
+          required: ["label"],
+        },
+      },
+    },
+    required: ["summary"],
+  },
+};
 
 export async function updateMemory(
   mem: SessionMemory,
@@ -248,17 +271,19 @@ export async function updateMemory(
       model: BEDROCK_AGENT_MODEL,
       system: `${temporalContext()}\n\n${UPDATE_SYSTEM}`,
       messages: [userText(user)],
-      maxTokens: 700,
+      tools: [MEMORY_TOOL],
+      toolChoice: { name: "save_memory" },
+      maxTokens: 1500,
       temperature: 0,
       ...(signal ? { signal } : {}),
     });
-    const parsed = parseJsonBlock(res.text, "summary") as Record<string, unknown> | null;
+    // Forced tool call: the tool input is already-validated JSON, so a rich legal
+    // summary (quotes, $ figures, newlines) can no longer break fragile text-JSON
+    // parsing — which was missing on essentially every turn and left the rolling
+    // summary + entity ledger perpetually empty.
+    const parsed = (res.toolCalls[0]?.input as Record<string, unknown> | undefined) ?? null;
     if (!parsed) {
-      // A successful call whose JSON we could not parse used to return silently,
-      // leaving summary/entities empty — which then made resolveQuestion misfire
-      // topicShift on the next turn. Log it so a recurring parse-miss is visible;
-      // the prior summary/entities are preserved as the fallback.
-      agentError("memory_update_parse_miss", { chars: res.text.length });
+      agentError("memory_update_no_tool", { chars: res.text.length });
       return { ...mem, tail, sources: mergedSources, turns: nextTurn };
     }
 
