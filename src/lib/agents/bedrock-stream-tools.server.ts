@@ -294,6 +294,10 @@ export async function streamConverseToolLoop(
     model: string;
     system: string;
     user: string;
+    /** Prior conversation turns (verbatim), prepended before the current user
+     *  turn so the model has REAL multi-turn context — not only the rolling
+     *  summary. Empty on a first turn. */
+    history?: { role: "user" | "assistant"; content: string }[];
     tools: BedrockToolDef[];
     maxTokens: number;
     maxSteps: number;
@@ -327,7 +331,12 @@ export async function streamConverseToolLoop(
     execute: (call: BedrockToolCall) => Promise<string>;
   },
 ): Promise<StreamToolLoopResult> {
-  const messages: BedrockMsg[] = [{ role: "user", content: [{ text: opts.user }] }];
+  const messages: BedrockMsg[] = [
+    ...(opts.history ?? []).map(
+      (h) => ({ role: h.role, content: [{ text: h.content }] }) as BedrockMsg,
+    ),
+    { role: "user", content: [{ text: opts.user }] },
+  ];
   const perToolCap = opts.callBudget?.perTool ?? Number.POSITIVE_INFINITY;
   const totalCap = opts.callBudget?.total ?? Number.POSITIVE_INFINITY;
   const callCounts = new Map<string, number>();

@@ -123,6 +123,10 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             callBudget: { perTool: 4, total: 18 },
             deadlineMs: RESEARCH_DEADLINE_MS,
             cache: true, // cache the system + tool-defs prefix across every turn
+            // Real multi-turn context: prepend the verbatim recent turns so a
+            // follow-up isn't riding on the rolling summary alone (memoryBlock
+            // renders summary/entities/sources, never the tail).
+            ...(history.length ? { history } : {}),
             ...(RESEARCH_EFFORT ? { researchEffort: RESEARCH_EFFORT } : {}),
             ...(SYNTHESIS_EFFORT ? { synthesisEffort: SYNTHESIS_EFFORT } : {}),
             ...(input.signal ? { signal: input.signal } : {}),
