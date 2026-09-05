@@ -19,6 +19,7 @@ import {
   lookupCitations,
 } from "./courtlistener.server";
 import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
+import { pubmedSearch } from "./pubmed.server";
 import { runPython, collectNewArtifacts, readDocument } from "./code-interpreter.server";
 import { searchMarkdownKey } from "./bda.server";
 import { generateDocument } from "./docgen.server";
@@ -139,6 +140,24 @@ const ECFR_TOOL: ToolDef = {
   },
 };
 
+const PUBMED_TOOL: ToolDef = {
+  name: "search_pubmed",
+  description:
+    "Search PubMed for PRIMARY peer-reviewed biomedical literature (epidemiology, clinical studies, meta-analyses, toxicology) with abstracts. This is the authoritative source for GENERAL and SPECIFIC CAUSATION — use it for whether an exposure causes a disease, study design/quality, dose-response, relative risk / odds ratios, and an expert witness's own publication record. Prefer this over web search for the science. Query with distinctive terms (agent + disease + design), e.g. 'talc perineal ovarian cancer cohort' or 'glyphosate non-Hodgkin lymphoma meta-analysis'.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description:
+          "PubMed query — exposure/agent + disease/outcome + optional study type. Distinctive medical terms, not a sentence.",
+      },
+      limit: { type: "number", description: "Max articles (default 5, hard cap 20)." },
+    },
+    required: ["query"],
+  },
+};
+
 const RUN_PYTHON_TOOL: ToolDef = {
   name: "run_python",
   description:
@@ -192,6 +211,7 @@ export const RESEARCH_TOOLS: ToolDef[] = [
   FDA_SEARCH_TOOL,
   FED_REGISTER_TOOL,
   ECFR_TOOL,
+  PUBMED_TOOL,
   RUN_PYTHON_TOOL,
   READ_DOCUMENT_TOOL,
   CREATE_DOCUMENT_TOOL,
@@ -444,6 +464,34 @@ async function ecfrSearchTool(input: Record<string, unknown>, book: SourceBook):
   return { text: `eCFR (${hits.length}):\n${lines.join("\n")}`, hits: hits.length, refs };
 }
 
+async function pubmedSearchTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+  const query = str(input["query"]);
+  if (query.length < 3) return { text: "search_pubmed needs a query of at least 3 characters.", hits: 0, refs: [] };
+  const limit = clamp(input["limit"], 5, 20);
+  let hits;
+  try {
+    hits = await memoTTL(toolCacheKey("pubmed", { query, limit }), TOOL_CACHE_TTL_MS, () => pubmedSearch(query, limit));
+  } catch (err) {
+    return { text: `search_pubmed failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  if (!hits.length) return { text: `No PubMed articles for "${query}".`, hits: 0, refs: [] };
+  const refs: string[] = [];
+  const lines = hits.map((h) => {
+    const cite = `${h.title}${h.journal ? ` — ${h.journal}` : ""}${h.year ? ` (${h.year})` : ""}`;
+    const src = book.add({
+      citation: cite,
+      authority: "primary",
+      source_type: "science",
+      source_url: h.url,
+      effective_date: h.year || undefined,
+      content: trunc(`${h.authors ? `${h.authors}. ` : ""}${cite}. ${h.abstract || "(no abstract available)"}`, 1500),
+    });
+    refs.push(src.ref);
+    return `[${src.ref}] PMID ${h.pmid} — ${cite}${h.authors ? `\n    ${h.authors}` : ""}\n    ${trunc(h.abstract || "(no abstract)", 500)}`;
+  });
+  return { text: `PubMed (${hits.length}):\n${lines.join("\n\n")}`, hits: hits.length, refs };
+}
+
 const MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -575,6 +623,7 @@ export async function executeResearchTool(
   if (name === "fda_search") return fdaSearchTool(input, book);
   if (name === "federal_register_search") return fedRegSearchTool(input, book);
   if (name === "ecfr_search") return ecfrSearchTool(input, book);
+  if (name === "search_pubmed") return pubmedSearchTool(input, book);
   if (name === "run_python") return runPythonTool(input);
   if (name === "read_document") return readDocumentTool(input, attachments);
   if (name === "create_document") return createDocumentTool(input);

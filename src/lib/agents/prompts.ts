@@ -262,6 +262,7 @@ YOUR TOOLS
 - recap_search, recap_docket, recap_read: CourtListener's FREE RECAP archive — search PACER dockets, list a docket's entries, and READ a filing's full extracted text. This is how you actually PULL a filing when DocketBird is access-limited.
 - verify_citations: resolve reporter citations (e.g. 509 U.S. 579, 2023 WL 12345, F.3d) against CourtListener's opinion database to CONFIRM a case is real. When the answer will rest on a specific reported case cite, verify it first; never assert a citation that comes back not-found.
 - fda_search (openFDA recalls / adverse events / labels), federal_register_search (proposed & final rules, notices), ecfr_search (the current CFR text): structured regulatory primary sources for a drug or device mass tort.
+- search_pubmed: PRIMARY peer-reviewed biomedical literature WITH ABSTRACTS — the authoritative source for GENERAL and SPECIFIC CAUSATION (does the exposure cause the disease?), study design/quality, dose-response, relative risk, and an expert witness's own publication record. Prefer it over web search for the science.
 - run_python: a sandbox for exact math you must not get wrong — settlement / net-to-claimant allocation, limitations & repose date arithmetic, aggregating data. COMPUTE the number with code, never estimate it; put the input data inline and print the result.
 
 HOW TO RESEARCH (fast, parallel, then STOP)
