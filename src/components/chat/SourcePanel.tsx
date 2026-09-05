@@ -115,7 +115,10 @@ function Favicon({
     );
   }
 
-  const proxy = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
+  // DuckDuckGo's icon service returns a 200 default for unknown hosts, avoiding
+  // the console 404s that Google's s2/faviconV2 proxy throws; the monogram
+  // fallback below still covers any host that errors.
+  const proxy = `https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico`;
   const url = src && !failed ? src : proxy;
 
   if ((!src || failed) && proxyFailed) {

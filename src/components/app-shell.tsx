@@ -15,8 +15,10 @@ import {
 } from "lucide-react";
 import { type ComponentType, type ReactNode, useEffect, useState } from "react";
 
-import logoAsset from "@/assets/sw-logo.asset.json";
-import logoMark from "@/assets/sw-logo-mark.png.asset.json";
+// Import the real PNGs via Vite (hashed URL, works in dev + prod) rather than the
+// Lovable `.asset.json` CDN url (/__l5e/…), which 404s on localhost dev.
+import logoUrl from "@/assets/sw-logo.png";
+import logoMarkUrl from "@/assets/sw-logo-mark.png";
 import { MatterSelector } from "@/components/matters/MatterSelector";
 import { useAuth } from "@/lib/use-auth";
 
@@ -111,13 +113,13 @@ function SidebarInner({
       >
         {expanded ? (
           <img
-            src={logoAsset.url}
+            src={logoUrl}
             alt="Seeger Weiss LLP"
             className="block h-auto w-full max-h-full object-contain object-left transition-opacity duration-300"
           />
         ) : (
           <img
-            src={logoMark.url}
+            src={logoMarkUrl}
             alt="Seeger Weiss LLP"
             className="h-8 w-8 shrink-0 rounded-md object-contain transition-opacity duration-300"
           />
@@ -326,7 +328,7 @@ export function AppShell({ children }: { showHeaderLogo?: boolean; children?: Re
         <div className="flex h-full flex-col">
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-3">
             <div className="flex items-center gap-2">
-              <img src={logoAsset.url} alt="Seeger Weiss LLP" className="h-7 w-auto" />
+              <img src={logoUrl} alt="Seeger Weiss LLP" className="h-7 w-auto" />
             </div>
             <button
               type="button"
