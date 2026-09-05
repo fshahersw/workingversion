@@ -12,6 +12,48 @@ DONE (committed on `feat/frontier-ux`):
 - `2f55c95` WS4 per-call tool timeline (icons + running→resolved)
 - `35fab40` WS6 deterministic citation + fact verification + trust line
 - `d32f3ac` memory reliability: structured-output updateMemory (killed the parse-miss)
+- `5b9de51` writer-stage banner (research→writing announcement)
+- `ba6c6cc` verify_citations (CourtListener citation-lookup — hallucination guard for case cites)
+- `a155ea2` openFDA + Federal Register + eCFR primary-source tools
+- `d270493` run_python (AgentCore Code Interpreter — exact settlement/date math)
+- `53b1038` native file I/O (upload/create/download via the code interpreter; persistent fs)
+- Eval on the 22-tool set: 75 avg, tier-pass 100%, verify 49%, 0 failures — no bloat regression.
+- NEXT: Phase 3b render charts/files in chat + Phase 2 upload button/mode toggle; then async Research mode (notify + report files) + Phase 5 browser/Nova Act (any form/interaction workflow). UI pieces need a visual smoke (auth-gated SPA; can't self-render).
+- Cross-session memory (Phase 4): DEFERRED per Firas.
+
+## Resume checklist (read this first on a cold start)
+
+1. Branch `feat/frontier-ux` (baseline `ee76948`). App root `lit-ai-extracted/lit-ai-main`. NO desktop peer — driven solo.
+2. AWS SSO token expires every few hours → all Bedrock/DynamoDB/tool calls fail with "Token is expired". Fix: `aws sso login --profile AdministratorAccess-475976462949` (Firas runs it; `! ` prefix in-session), then RESTART `bun run dev` so the process picks up the fresh token.
+3. Run a script/probe: `AWS_PROFILE=AdministratorAccess-475976462949 AWS_REGION=us-east-1 BEDROCK_REGION=us-east-1 bun run scripts/<x>.ts`. Discipline: write a throwaway probe, validate live, delete it, commit. tsc gate: `npx --no-install tsc --noEmit -p tsconfig.json` and read `${PIPESTATUS[0]}` (NOT `$?` after a grep pipe).
+4. Eval: `bun run scripts/baseline.ts` (11 cases; run in background). Current: 75 avg, tier-pass 100%, 0 failures.
+5. Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. `.env` is gitignored — never commit it.
+
+## Hard-won gotchas (do not relearn these)
+
+- **Bedrock REDACTS Claude (Sonnet 5) extended-thinking TEXT** — reasoningContent streams a signature only, 0 chars at any effort. Raw reasoning cannot be streamed; `ReasoningStream.tsx` + the onReasoning channel are LATENT (light up only on an Anthropic-direct path). Frontier "watching it work" comes from the tool timeline + the "Composing…" writer banner.
+- **Code Interpreter** (`@aws-sdk/client-bedrock-agentcore`, `aws.codeinterpreter.v1`): reachable under admin SigV4; session cold start ~2s then sub-second; sandbox cwd `/opt/amazon/genesis1p-tools/var`; **ABSOLUTE PATHS BLOCKED as path-traversal — use RELATIVE paths**; sandbox has NO internet (compute only, data inline). `run_python` uses `clearContext:false` so the fs persists across calls. Read files back via `run_python` base64 (the `readFiles`/`listFiles` tool arg shapes are unreliable); `writeFiles` tool works for text. Pandas/numpy/matplotlib/openpyxl/dateutil preinstalled; duckdb NOT (needs a PUBLIC-network custom interpreter via control-plane).
+- **CourtListener PAID tier: 20/min, 250/hr, 1000/day.** citation-lookup is a separate throttle (60 valid cites/min, 250/request), `POST /api/rest/v4/citation-lookup/` Token auth, JSON body `{text}` (JSON works). Response array; status 200 found / 404 not-in-db / 300 ambiguous.
+- **eCFR** search API rejects a `title` param (use "21 CFR ..." in the query text). **openFDA** needs field-qualified search (`openfda.brand_name:"x"`); key optional. **Federal Register** + eCFR need no auth.
+- **Nova Act** (Phase 5): Python-only, us-east-1, preview → needs a bridge (Python subprocess OR AgentCore Runtime endpoint + InvokeAgentRuntime). **AgentCore Browser** via `bedrock-agentcore` TS SDK: `PlaywrightBrowser`/`generateWebSocketUrl` (header SigV4 → connectOverCDP), live view via `generateLiveViewUrl` (query presign, DCV, 300s) → `<BrowserLiveView>` React (DCV client vendored → Vite aliasing). Cloud browser can't see localhost.
+- **Prompt cache**: keep `RESEARCH_TOOLS` list STABLE across modes (gating the tool list per-turn breaks the cache); gate by budget/prompt instead. Cache is on via cachePoint.
+
+## Key file map
+
+- Router + mode config: `src/lib/research-intent.ts` (`classifyEffort`), `src/lib/agents/research-agent.server.ts` (`modeConfig`, `runResearchAgent` — conversational short-circuit, mode branch, verification emit).
+- Loop/stream: `src/lib/agents/bedrock-stream-tools.server.ts` (per-tool 20s timeout, retry/backoff, onReasoning latent, synthesis budget floor, history normalization).
+- Tools: `src/lib/agents/research-tools.server.ts` (RESEARCH_TOOLS + executeResearchTool dispatch: verify_citations, fda_search, federal_register_search, ecfr_search, run_python + web/db/recap). `courtlistener.server.ts` (lookupCitations), `regulatory-sources.server.ts` (fda/fedReg/ecfr), `code-interpreter.server.ts` (runPython/writeFile/getFile/listArtifacts), `agentcore-search.server.ts` (gateway web search).
+- Prompts: `src/lib/agents/prompts.ts` (`researchAgentPrompt` — first-person, tool list; `directAnswerPrompt`). `src/lib/system-prompt.ts`.
+- Verification: `src/lib/fact-check.ts` (`factCheck` + `checkCitations`).
+- Memory: `src/lib/agents/memory.server.ts` (topicShift keeps tail; `updateMemory` structured-output).
+- UI: `src/components/chat/` — `ChatView.tsx` (composer ~:590-655, MatterScopePicker "All matters" at :635 to replace w/ upload; writer banner; verification line), `AgentTimeline.tsx` (per-call icon timeline), `ReasoningStream.tsx` (latent), `AnswerMarkdown.tsx` (mermaid `pre`-override ~:68-80 — extend for artifacts). `src/lib/use-chat.ts` (SSE reducer `applyEvent` — add cases for new events; RAF buffers), `src/lib/chat-types.ts` (Message/ToolCall/verification types), `src/lib/orchestrate.ts` (SSE client).
+- Eval: `scripts/baseline.ts`, `src/lib/eval-set.ts`, `src/lib/eval-runner.ts` (+ `scoreResult`).
+
+## Immediate next (Phase 3b + Phase 2)
+
+- **3b:** surface `run_python` inline images + created files as artifacts → new `artifact` SSE (emit from research-agent's execute handler; thread via a new `artifacts?` field on `ToolOutcome`) → `use-chat` `applyEvent` `case "artifact"` → render inline images + file download buttons (extend `AnswerMarkdown` / new panel). File download: base64 in SSE for small, S3 presign for large.
+- **2:** replace/demote `MatterScopePicker` with an upload-files button (drag-drop on the composer form); on upload, POST to a server route that `writeFile`s into the sandbox (relative path) so `run_python` can read it; thread a note into the agent context. Add a Fast/Think/Research mode toggle → `send()` param → server override of `classifyEffort`.
+- **UI validation gap:** the SPA is Cognito-gated and the AgentCore cloud browser can't see localhost, so I can't self-render. Options: Firas screenshots, or a local Playwright harness + a dev-only `/preview` route with a mock message. Build UI tsc-clean; visual-smoke before calling it done.
 
 KEY FINDING: Bedrock redacts Claude extended-thinking TEXT (signature only, 0 chars at any effort). Raw reasoning CANNOT be streamed on this stack — frontier feel comes from the tool timeline + composing indicator, not streamed reasoning. WS3 plumbing kept latent (lights up on the Anthropic-direct path).
 
