@@ -9,7 +9,7 @@
 import type { OrchestrateInput, Emit } from "./orchestrator.server";
 import { researchAgentPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
-import { classifyEffort, type EffortMode } from "@/lib/research-intent";
+import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
 import { streamConverseToolLoop } from "./bedrock-stream-tools.server";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
@@ -95,6 +95,18 @@ function attachmentsBlock(input: OrchestrateInput): string {
   return `UPLOADED FILES\nThe attorney uploaded ${files.length} file(s) this session: ${names}. Their content is below — use it directly when the question concerns these files. Data files (CSV/Excel/JSON) are also loaded in your code sandbox, so you can run_python over them by filename to compute exact figures. For any file that shows a read_document pointer, call read_document(name, keywords) to pull additional passages from the full document.\n\n${parts.join("\n\n")}\n\n`;
 }
 
+/** A document title: prefer the report's own first heading, else clean the query. */
+function docTitle(query: string, answer: string): string {
+  const h = answer.match(/^#{1,3}\s+(.+)$/m);
+  if (h && h[1]) return h[1].replace(/[*_`#]/g, "").trim().slice(0, 90);
+  const q = query
+    .replace(/^\s*\[[^\]]*\]\s*/, "")
+    .replace(/\b(generate|create|make|draft|produce|build|prepare|write[- ]?up|please|for me|\d+\s*[- ]?page|pdf|word|docx|excel|spread\s?sheet|xlsx|report|memo(randum)?|document|file|deliverable|one[- ]?pager)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return q.slice(0, 80) || "Research Report";
+}
+
 export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Promise<void> {
   const runId = crypto.randomUUID();
   const runStart = Date.now();
@@ -174,7 +186,11 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // THINK = the validated full loop, ambiguous defaults to THINK.
     const decision = classifyEffort(resolved.query, history.length);
     const autoMode: EffortMode = decision.mode === "conversational" ? "fast" : decision.mode;
-    const mode: EffortMode = input.forceMode ?? autoMode;
+    let mode: EffortMode = input.forceMode ?? autoMode;
+    // A file deliverable (PDF/Word/Excel report) needs the fuller research +
+    // synthesis budget; never produce a document off the tight FAST path.
+    const docReq = detectDocRequest(resolved.query);
+    if (docReq.wants && mode === "fast" && !input.forceMode) mode = "think";
     const cfg = modeConfig(mode);
     emit("mode", { mode, reason: input.forceMode ? `${mode} mode (selected)` : decision.reason });
 
@@ -201,6 +217,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // --- The single research loop (Sonnet 5, tools, parallel calls) --------
     let hits = 0;
     let toolCalls = 0;
+    let docCreated = false; // did the model call create_document itself?
     const refs = new Set<string>();
     const loopStart = Date.now();
 
@@ -221,9 +238,11 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             maxSteps: cfg.maxSteps,
             synthesisUser:
               "Research complete — do NOT call any more tools. Now write the final answer for the attorney, using the sources you gathered above and citing them with [S#]. Lead with the bottom line, shape the format to the question, and end on the substance (no verification/next-steps closer)." +
-              (mode === "fast"
-                ? " This is FAST mode: keep it tight and direct — answer the question in a few well-cited sentences or a short list, no exhaustive survey."
-                : " This is THINK mode: be thorough and well-structured — cover the sub-issues, note tensions or splits, and cite precisely."),
+              (docReq.wants
+                ? ` The attorney asked for a ${docReq.format.toUpperCase()} deliverable. Write the COMPLETE report now, as your answer, in clean markdown: use "## " section headings, "| pipe | tables |" for any matrices/timelines, and "- " bullet lists. The markdown you write IS the document — it will be rendered directly into the ${docReq.format.toUpperCase()}. Do NOT say you will generate a file, do NOT describe what the report will contain, and do NOT defer — write the full content in full now.`
+                : mode === "fast"
+                  ? " This is FAST mode: keep it tight and direct — answer the question in a few well-cited sentences or a short list, no exhaustive survey."
+                  : " This is THINK mode: be thorough and well-structured — cover the sub-issues, note tensions or splits, and cite precisely."),
             // Sonnet 5 adaptive thinking is ALWAYS ON and shares this budget with
             // the answer. At 4000, heavy thinking on deep multi-part questions
             // consumed the whole budget and returned an EMPTY answer
@@ -277,6 +296,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             execute: async (call) => {
               toolCalls++;
               const out = await executeResearchTool(call.name, call.input, book, input.attachments);
+              if (call.name === "create_document" && out.artifacts?.length) docCreated = true;
               hits += out.hits;
               out.refs.forEach((r) => refs.add(r));
               emit("tool_call", {
@@ -317,6 +337,29 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
       throw new Error("Research produced no answer (Bedrock unavailable or throttled).");
     }
     emit("sources", { sources });
+
+    // File deliverable: if the attorney asked for one and the model didn't
+    // already produce it as a tool step, render the synthesized report into the
+    // file now (reliable — synthesis runs tool-less, so the model can't call
+    // create_document itself once it's writing).
+    if (docReq.wants && !docCreated && answerText.trim().length > 150) {
+      try {
+        const gen = await executeResearchTool(
+          "create_document",
+          { format: docReq.format, title: docTitle(resolved.query, answerText), content: answerText },
+          book,
+        );
+        if (gen.artifacts?.length) {
+          emit("artifact", { round: 1, agent: "research", artifacts: gen.artifacts });
+          emit("delta", { text: `\n\n_Prepared **${gen.artifacts[0]!.name}** — download it below._` });
+          agentLog("doc_generated", { run: runId, format: docReq.format, name: gen.artifacts[0]!.name });
+        } else {
+          agentError("doc_gen_empty", { run: runId, note: trunc(gen.text, 160) });
+        }
+      } catch (err) {
+        agentError("doc_gen_failed", { run: runId, error: trunc(errorMessage(err), 200) });
+      }
+    }
 
     // Deterministic verification (always on, no model call, no latency): confirm
     // the specifics the model asserted (MDL/docket/dates/figures/citations) appear

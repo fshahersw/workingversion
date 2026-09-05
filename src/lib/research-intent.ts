@@ -119,6 +119,28 @@ export function classifyIntent(query: string): RetrievalHints {
 export type EffortMode = "conversational" | "fast" | "think";
 export type EffortDecision = { mode: EffortMode; confidence: number; reason: string };
 
+// ---------------------------------------------------------------------------
+// Document-deliverable intent — did the attorney ask for a downloadable file
+// (PDF/Word/Excel report/memo), not just a chat answer? When true, the server
+// renders the synthesized report into a file after synthesis (reliable), rather
+// than hoping the model calls create_document mid-loop (it can't, once it has
+// entered the tool-less synthesis phase).
+// ---------------------------------------------------------------------------
+export type DocRequest = { wants: boolean; format: "pdf" | "docx" | "xlsx" };
+
+const DOC_FORMAT_RE = /\b(pdf|word\s?doc(?:ument)?s?|docx|\.docx?|excel|spread\s?sheets?|xlsx|\.xlsx?)\b/i;
+const DOC_VERB_RE = /\b(generate|create|make|draft|produce|build|prepare|assemble|put together|write[- ]?up|export|turn .* into)\b/i;
+const DOC_NOUN_RE = /\b(report|memo|memorandum|one[- ]?pager|write[- ]?up|fact ?sheet|chart ?pack|packet|dossier|deliverable|document|file|workbook)\b/i;
+
+export function detectDocRequest(query: string): DocRequest {
+  const q = query || "";
+  const wants = DOC_FORMAT_RE.test(q) || (DOC_VERB_RE.test(q) && DOC_NOUN_RE.test(q));
+  let format: "pdf" | "docx" | "xlsx" = "pdf";
+  if (/\b(excel|spread\s?sheets?|xlsx|\.xlsx?|workbook)\b/i.test(q)) format = "xlsx";
+  else if (/\b(word\s?doc(?:ument)?s?|docx|\.docx?)\b/i.test(q)) format = "docx";
+  return { wants, format };
+}
+
 /** Message STARTS with a social/acknowledgement opener ("thanks, that helps",
  *  "hey there", "great work"). Start-anchored, not whole-match, so trailing
  *  words don't defeat it — the !hasLegal + short-length guards keep it safe. */
