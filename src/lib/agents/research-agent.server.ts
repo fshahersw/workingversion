@@ -220,7 +220,10 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             maxTokens: 2000,
             maxSteps: cfg.maxSteps,
             synthesisUser:
-              "Research complete — do NOT call any more tools. Now write the final answer for the attorney, using the sources you gathered above and citing them with [S#]. Lead with the bottom line, shape the format to the question, and end on the substance (no verification/next-steps closer).",
+              "Research complete — do NOT call any more tools. Now write the final answer for the attorney, using the sources you gathered above and citing them with [S#]. Lead with the bottom line, shape the format to the question, and end on the substance (no verification/next-steps closer)." +
+              (mode === "fast"
+                ? " This is FAST mode: keep it tight and direct — answer the question in a few well-cited sentences or a short list, no exhaustive survey."
+                : " This is THINK mode: be thorough and well-structured — cover the sub-issues, note tensions or splits, and cite precisely."),
             // Sonnet 5 adaptive thinking is ALWAYS ON and shares this budget with
             // the answer. At 4000, heavy thinking on deep multi-part questions
             // consumed the whole budget and returned an EMPTY answer

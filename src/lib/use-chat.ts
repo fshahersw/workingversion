@@ -94,6 +94,8 @@ function applyEvent(m: Message, e: SSEEvent): Message {
   switch (e.event) {
     case "run":
       return m;
+    case "mode":
+      return { ...m, mode: d.mode ? String(d.mode) : m.mode, modeReason: d.reason ? String(d.reason) : m.modeReason };
     case "round": {
       const round: Round = {
         round: Number(d.round) || m.rounds.length + 1,

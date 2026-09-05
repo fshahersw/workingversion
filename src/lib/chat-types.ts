@@ -200,6 +200,9 @@ export type Message = {
   answer: string;
   /** Charts + files produced by run_python during this turn. */
   artifacts?: Artifact[];
+  /** Effort mode this turn actually ran at (fast | think | conversational) and why. */
+  mode?: string;
+  modeReason?: string;
   /** Live, streamed research narration ("thinking steps") shown before the answer. */
   thinking?: string;
   /** The model's actual adaptive-thinking reasoning, streamed live (frontier feel). */

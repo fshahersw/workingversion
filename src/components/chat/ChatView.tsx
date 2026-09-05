@@ -661,6 +661,29 @@ function ChatComposer({
   );
 }
 
+function ModeBadge({ mode, reason, sources }: { mode: string; reason?: string; sources: number }) {
+  const META: Record<string, { label: string; cls: string }> = {
+    fast: { label: "Fast", cls: "border-amber-200 bg-amber-50 text-amber-700" },
+    think: { label: "Think", cls: "border-[oklch(0.55_0.22_262/0.25)] bg-brand-blue-soft/50 text-brand-navy" },
+  };
+  const m = META[mode] ?? { label: mode, cls: "border-slate-200 bg-slate-100 text-slate-600" };
+  return (
+    <div className="mb-1.5 flex items-center gap-1.5 text-[11px]">
+      <span
+        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${m.cls}`}
+        title={reason ? `Effort: ${reason}` : undefined}
+      >
+        {m.label} mode
+      </span>
+      {sources > 0 && (
+        <span className="text-muted-foreground/70">
+          {sources} source{sources === 1 ? "" : "s"}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function UserMessage({ msg }: { msg: Message }) {
   return (
     <div data-user-msg={msg.id} className="mb-1.5 flex justify-end scroll-mt-4">
@@ -730,6 +753,9 @@ function AssistantMessage({
             &hellip;
           </span>
         </div>
+      )}
+      {msg.mode && msg.mode !== "conversational" && msg.answer.trim().length > 0 && (
+        <ModeBadge mode={msg.mode} reason={msg.modeReason} sources={(msg.sources ?? []).length} />
       )}
       <div className="prose prose-neutral max-w-none text-foreground [&_code]:break-all [&_pre]:whitespace-pre-wrap">
         <AnswerMarkdown
