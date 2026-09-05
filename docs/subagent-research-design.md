@@ -1,7 +1,12 @@
 # Orchestrator-Subagent Research — Design & Cost Model
 
-Status: **DESIGN ONLY, not built.** Approved 2026-09-05 (Firas) as "design now, build
-after the Run Inspector ships and can measure the single-agent baseline per run."
+Status: shared **subagent primitive BUILT + unit-tested** (`subagent.server.ts` +
+pure `subagent-plan.ts`, 2026-09-05); not yet wired into a caller. Track A (light
+file subagents) and Track B (standalone async Deep Research page) pending. Approved
+2026-09-05 (Firas): "add light subagents for file workflows, and a standalone
+Deep Research page with its own backend, async processing, cleanly separated from
+chat." Async substrate: in-process V1 behind a swappable Executor, AgentCore
+Runtime as the prod destination.
 
 This is the Phase 3 frontier bet from the agentic-workflow plan: a scoped
 orchestrator-subagent path that trades ~4–15x tokens for a large quality gain on
@@ -54,11 +59,11 @@ LeadResearcher (orchestrator)
   ├─ for each: emit a delegation contract (objective, output format, tools, bounds)
   │
   ├─ Subagents (parallel, bounded pool)      ← each is a focused mini research loop
-  │    ├─ sub-agent 1: own tool budget, own SourceBook slice, own findings
+  │    ├─ sub-agent 1: own tool budget + context, writes to the SHARED book
   │    ├─ sub-agent 2: ...
   │    └─ sub-agent N: ...
   │
-  ├─ merge → deduped global SourceBook (stable [S#] re-indexing, as today)
+  ├─ shared SourceBook already holds every source (globally-unique [S#], no merge)
   ├─ Synthesizer (Opus) → the deliverable, citing the merged sources
   └─ CitationAgent → faithfulness judge (already built) over the final answer
 ```
@@ -69,7 +74,10 @@ LeadResearcher (orchestrator)
   the highest-leverage decision (Anthropic: bad delegation → duplicated work or
   gaps).
 - **Subagents** = focused loops. Each runs a trimmed `streamConverseToolLoop` with
-  its own `callBudget` and an **isolated SourceBook** so contexts do not collide.
+  its own `callBudget`, sharing ONE run `SourceBook` (add() is synchronous, so
+  race-free under `Promise.all`; refs stay globally unique with NO merge step).
+  Contexts still stay isolated — each subagent's conversation holds only its own
+  tool results; the book is just the shared citation registry.
   Model: Sonnet 5 for genuinely analytical sub-questions; **Nemotron Nano 3
   workhorse** for narrow retrieve-and-extract sub-questions (e.g. "pull the docket
   posture of MDL X", "list the settlement amounts"). Mixed tiering per sub-question
@@ -151,7 +159,7 @@ the gain vs single-agent (run the same eval case both ways, compare score + toke
 | Token blowup | per-run budget cap + workhorse subagents + bounded N |
 | Duplicated work across subagents | strict delegation boundaries in the contract; mutual-exclusivity already enforced in PLAN |
 | Latency regression | parallel (not serial) subagents; deadline per subagent; degrade to single-agent past a wall-clock ceiling |
-| [S#] collisions on merge | reuse the existing stable re-indexing (already handles the deposition merge case) |
+| [S#] collisions | none by construction — subagents share one SourceBook, so refs are globally unique; no merge step exists |
 
 ## Rollout
 
@@ -171,7 +179,9 @@ the gain vs single-agent (run the same eval case both ways, compare score + toke
 - `bedrock-stream-tools.server.ts` — reuse `streamConverseToolLoop` for each
   subagent with an isolated SourceBook + budget.
 - `trace.server.ts` — `parent` field for nested subagent timelines.
-- New: `subagent.server.ts` — the delegation contract + subagent runner.
+- New (BUILT): `subagent.server.ts` (planner + runner + bounded parallel pool) and
+  pure `subagent-plan.ts` (types, plan parsing, pool, findings assembly);
+  `subagent-plan.test.ts` (6 tests). Shares one SourceBook; flag/caller-gated.
 
 ## References
 
