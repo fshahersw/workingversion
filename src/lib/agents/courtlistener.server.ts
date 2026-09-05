@@ -232,3 +232,87 @@ export async function readRecapDocument(
     pdfUrl: filepath ? `${PDF_HOST}/${filepath}` : null,
   };
 }
+
+// --- Citation lookup (POST /citation-lookup/) ------------------------------
+// Resolves reporter-style citations ("500 U.S. 100", "2023 WL 1234", F.3d) in a
+// block of text to real opinions. Own throttle: 60 valid cites/min, 250/request.
+
+async function clPost<T>(
+  path: string,
+  body: Record<string, unknown>,
+  opts?: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<T> {
+  const token = process.env["COURTLISTENER_API_TOKEN"];
+  if (!token) throw new CourtListenerError(401, "COURTLISTENER_API_TOKEN is not configured.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 30_000);
+  if (opts?.signal) opts.signal.addEventListener("abort", () => controller.abort());
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${token}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new CourtListenerError(0, `CourtListener request failed: ${err instanceof Error ? err.message : "network error"}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await res.text();
+  let json: unknown = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    /* non-JSON */
+  }
+  if (!res.ok) {
+    const detail =
+      (json && typeof json === "object" && "detail" in json
+        ? String((json as Record<string, unknown>)["detail"])
+        : "") || text.slice(0, 200);
+    throw new CourtListenerError(res.status, `CourtListener HTTP ${res.status}: ${detail}`);
+  }
+  return (json ?? []) as T;
+}
+
+export type CitationResult = {
+  citation: string;
+  /** 200 found · 404 valid-but-not-in-db · 400 bad reporter · 300 multiple matches. */
+  status: number;
+  found: boolean;
+  ambiguous: boolean;
+  caseName: string | null;
+  url: string | null;
+};
+
+/** Resolve every reporter citation in `text` against CourtListener's opinion DB. */
+export async function lookupCitations(
+  text: string,
+  opts?: { signal?: AbortSignal },
+): Promise<CitationResult[]> {
+  const rows = await clPost<Record<string, unknown>[]>(
+    "/citation-lookup/",
+    { text: text.slice(0, 64000) },
+    opts?.signal ? { signal: opts.signal } : undefined,
+  );
+  const arr = Array.isArray(rows) ? rows : [];
+  return arr.map((r) => {
+    const clusters = Array.isArray(r["clusters"]) ? (r["clusters"] as Record<string, unknown>[]) : [];
+    const status = num(r["status"]) ?? 0;
+    const c0 = clusters[0];
+    return {
+      citation: str(r["citation"]),
+      status,
+      found: status === 200 && clusters.length > 0,
+      ambiguous: status === 300,
+      caseName: c0 ? str(c0["case_name"]) : null,
+      url: c0 && c0["absolute_url"] != null ? `https://www.courtlistener.com${str(c0["absolute_url"])}` : null,
+    };
+  });
+}

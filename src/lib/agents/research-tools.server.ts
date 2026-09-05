@@ -16,6 +16,7 @@ import {
   getDocketEntries,
   readRecapDocument,
   courtlistenerConfigured,
+  lookupCitations,
 } from "./courtlistener.server";
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
@@ -77,6 +78,17 @@ const RECAP_READ_TOOL: ToolDef = {
   },
 };
 
+const VERIFY_CITATIONS_TOOL: ToolDef = {
+  name: "verify_citations",
+  description:
+    "Verify reporter-style legal citations (e.g. '576 U.S. 644', '2023 WL 12345', F.3d / F. Supp. 3d) against CourtListener's opinion database. Pass a block of TEXT (a paragraph of your draft, or a list of cites) and each citation resolves to a real case or is flagged not-found / ambiguous. Use to CONFIRM a case citation is real before you rely on it. For docket/PACER filings use recap_* or db_* instead.",
+  input_schema: {
+    type: "object",
+    properties: { text: { type: "string", description: "Text containing one or more legal citations to resolve." } },
+    required: ["text"],
+  },
+};
+
 /** The full flat tool list the single agent sees. */
 export const RESEARCH_TOOLS: ToolDef[] = [
   ...AGENT_TOOLS.legal_research, // search_authorities + 7 category web-search tools
@@ -84,6 +96,7 @@ export const RESEARCH_TOOLS: ToolDef[] = [
   RECAP_SEARCH_TOOL,
   RECAP_DOCKET_TOOL,
   RECAP_READ_TOOL,
+  VERIFY_CITATIONS_TOOL,
   ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
 ];
 
@@ -215,6 +228,41 @@ async function recapReadTool(input: Record<string, unknown>, book: SourceBook): 
   };
 }
 
+async function verifyCitationsTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+  if (!courtlistenerConfigured()) return { text: "Citation lookup is not configured (COURTLISTENER_API_TOKEN missing).", hits: 0, refs: [] };
+  const text = str(input["text"]);
+  if (text.trim().length < 3) return { text: "Provide text containing at least one citation.", hits: 0, refs: [] };
+  let results;
+  try {
+    results = await memoTTL(toolCacheKey("verify_citations", { text }), TOOL_CACHE_TTL_MS, () => lookupCitations(text));
+  } catch (err) {
+    return { text: `verify_citations failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  if (!results.length) return { text: "No recognizable legal citations were found in that text.", hits: 0, refs: [] };
+  const refs: string[] = [];
+  const lines = results.map((r) => {
+    if (r.found) {
+      const src = book.add({
+        citation: `${r.caseName || r.citation} (${r.citation})`,
+        authority: "primary",
+        source_type: "opinion",
+        source_url: r.url ?? undefined,
+        content: `Verified opinion: ${r.caseName || "(unnamed)"} — ${r.citation}`,
+      });
+      refs.push(src.ref);
+      return `[${src.ref}] CONFIRMED  ${r.citation} -> ${r.caseName || "(opinion)"}`;
+    }
+    if (r.ambiguous) return `AMBIGUOUS  ${r.citation} (multiple matches — narrow it)`;
+    return `NOT FOUND  ${r.citation} (status ${r.status} — do not rely on this cite without confirming)`;
+  });
+  const confirmed = results.filter((r) => r.found).length;
+  return {
+    text: `Citation check — ${confirmed}/${results.length} confirmed against CourtListener:\n${lines.join("\n")}`,
+    hits: confirmed,
+    refs,
+  };
+}
+
 /** One executor for every tool the single agent can call. */
 export async function executeResearchTool(
   name: string,
@@ -225,6 +273,7 @@ export async function executeResearchTool(
   if (name === "recap_search") return recapSearchTool(input, book);
   if (name === "recap_docket") return recapDocketTool(input);
   if (name === "recap_read") return recapReadTool(input, book);
+  if (name === "verify_citations") return verifyCitationsTool(input, book);
   // search_authorities, the category web tools, and every db_* tool.
   return executeTool(name, input, book);
 }
