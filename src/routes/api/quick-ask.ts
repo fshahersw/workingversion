@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { BEDROCK_AGENT_MODEL, bedrockChat, userText } from "@/lib/agents/bedrock.server";
 import { quickAskPrompt } from "@/lib/agents/prompts";
 import { agentLog, agentError, since, trunc } from "@/lib/agents/log.server";
+import { startSseHeartbeat } from "@/lib/sse.server";
 
 export const Route = createFileRoute("/api/quick-ask")({
   server: {
@@ -30,6 +31,10 @@ export const Route = createFileRoute("/api/quick-ask")({
                 /* closed */
               }
             };
+            const stopHeartbeat = startSseHeartbeat(
+              (comment) => controller.enqueue(encoder.encode(comment)),
+              request.signal,
+            );
             const started = Date.now();
             try {
               const { text } = await bedrockChat({
@@ -59,6 +64,7 @@ export const Route = createFileRoute("/api/quick-ask")({
                 message: err instanceof Error ? err.message : "Ask AI failed.",
               });
             } finally {
+              stopHeartbeat();
               try {
                 controller.close();
               } catch {

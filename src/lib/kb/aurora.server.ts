@@ -21,19 +21,24 @@ import {
   RollbackTransactionCommand,
   type SqlParameter,
 } from "@aws-sdk/client-rds-data";
+import {
+  loadKbConfig,
+  type EnvSource,
+  type KbConfig,
+} from "../config.server.ts";
 
-const REGION = process.env["AWS_REGION"] ?? "us-east-1";
-const CLUSTER_ARN = process.env["KB_CLUSTER_ARN"] ?? "";
-const SECRET_ARN = process.env["KB_SECRET_ARN"] ?? "";
-const DATABASE = process.env["KB_DATABASE"] ?? "";
-
-export function kbConfigured(): boolean {
-  return Boolean(CLUSTER_ARN && SECRET_ARN && DATABASE);
+export function kbConfigured(env?: EnvSource): boolean {
+  const config = env ? loadKbConfig(env) : loadKbConfig();
+  return Boolean(config.clusterArn && config.secretArn && config.database);
 }
 
 let _client: RDSDataClient | undefined;
-function client(): RDSDataClient {
-  if (!_client) _client = new RDSDataClient({ region: REGION });
+let _clientRegion = "";
+function client(region: string): RDSDataClient {
+  if (!_client || _clientRegion !== region) {
+    _client = new RDSDataClient({ region });
+    _clientRegion = region;
+  }
   return _client;
 }
 
@@ -59,12 +64,14 @@ async function sendWithRetry<T>(fn: () => Promise<T>, tries = 8, delayMs = 3000)
   }
 }
 
-function requireConfig(): void {
-  if (!kbConfigured()) {
+function requireConfig(): KbConfig {
+  const config = loadKbConfig();
+  if (!config.clusterArn || !config.secretArn || !config.database) {
     throw new Error(
       "KB is not configured (set KB_CLUSTER_ARN, KB_SECRET_ARN, KB_DATABASE).",
     );
   }
+  return config;
 }
 
 // --- parameters --------------------------------------------------------------
@@ -97,13 +104,13 @@ export async function execute(
   parameters: SqlParameter[] = [],
   transactionId?: string,
 ) {
-  requireConfig();
+  const config = requireConfig();
   return sendWithRetry(() =>
-    client().send(
+    client(config.region).send(
       new ExecuteStatementCommand({
-        resourceArn: CLUSTER_ARN,
-        secretArn: SECRET_ARN,
-        database: DATABASE,
+        resourceArn: config.clusterArn,
+        secretArn: config.secretArn,
+        database: config.database,
         sql,
         parameters: parameters.length ? parameters : undefined,
         transactionId,
@@ -133,14 +140,14 @@ export async function withPrincipal<T>(
   sub: string,
   fn: (transactionId: string) => Promise<T>,
 ): Promise<T> {
-  requireConfig();
+  const config = requireConfig();
   if (!sub) throw new Error("withPrincipal requires a verified principal");
   const begun = await sendWithRetry(() =>
-    client().send(
+    client(config.region).send(
       new BeginTransactionCommand({
-        resourceArn: CLUSTER_ARN,
-        secretArn: SECRET_ARN,
-        database: DATABASE,
+        resourceArn: config.clusterArn,
+        secretArn: config.secretArn,
+        database: config.database,
       }),
     ),
   );
@@ -155,10 +162,10 @@ export async function withPrincipal<T>(
     );
     const out = await fn(transactionId);
     await sendWithRetry(() =>
-      client().send(
+      client(config.region).send(
         new CommitTransactionCommand({
-          resourceArn: CLUSTER_ARN,
-          secretArn: SECRET_ARN,
+          resourceArn: config.clusterArn,
+          secretArn: config.secretArn,
           transactionId,
         }),
       ),
@@ -166,10 +173,10 @@ export async function withPrincipal<T>(
     return out;
   } catch (err) {
     try {
-      await client().send(
+      await client(config.region).send(
         new RollbackTransactionCommand({
-          resourceArn: CLUSTER_ARN,
-          secretArn: SECRET_ARN,
+          resourceArn: config.clusterArn,
+          secretArn: config.secretArn,
           transactionId,
         }),
       );
@@ -408,7 +415,7 @@ export async function insertChunks(
   rows: KbChunkRow[],
 ): Promise<void> {
   if (!rows.length) return;
-  requireConfig();
+  const config = requireConfig();
   const sql = `
     INSERT INTO kb.chunks
       (doc_id, owner_sub, workspace_id, surface, chunk_index, page_start, page_end,
@@ -439,11 +446,11 @@ export async function insertChunks(
   await withPrincipal(sub, async (tx) => {
     for (let i = 0; i < sets.length; i += CHUNK_INSERT_BATCH) {
       await sendWithRetry(() =>
-        client().send(
+        client(config.region).send(
           new BatchExecuteStatementCommand({
-            resourceArn: CLUSTER_ARN,
-            secretArn: SECRET_ARN,
-            database: DATABASE,
+            resourceArn: config.clusterArn,
+            secretArn: config.secretArn,
+            database: config.database,
             sql,
             parameterSets: sets.slice(i, i + CHUNK_INSERT_BATCH),
             transactionId: tx,

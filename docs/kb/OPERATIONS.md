@@ -3,6 +3,11 @@
 Provisioning, migration, configuration, cost, and troubleshooting for the KB.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works.
 
+> **NO DEPLOY FOR THE PRODUCTION-IAC PHASE:** Only the local validation and
+> `--dry-run` commands in this document are authorized for this phase. Do not
+> invoke AWS, deploy this template, apply a migration, or change the deployed
+> `sw-kb` stack.
+
 All commands use the SSO profile `AdministratorAccess-475976462949` in `us-east-1`.
 `aws sso login` and `aws iam` are operator-run.
 
@@ -37,6 +42,16 @@ aws cloudformation describe-stacks --stack-name sw-kb --query "Stacks[0].Outputs
 Parameters: `MinCapacity=0` = scale-to-0 (dev; ~15s cold start on first call after
 idle). Use `0.5` in prod to avoid the cold start. `EngineVersion` default `16.8`
 (pgvector 0.8.x + HNSW). Deletion protection on; backups 7 days; storage encrypted.
+The template preserves those deployed defaults and constrains backup retention,
+capacity, and auto-pause inputs. Optional `AlarmTopicArn` routes CPU,
+`DatabaseConnections`, and `ServerlessDatabaseCapacity` alarm and recovery
+actions.
+
+Local template validation does not call AWS:
+
+```bash
+cfn-lint db/kb/infra/kb-aurora.cfn.yaml
+```
 
 ## Applying the migration (recommended — Data API, no VPC/psql)
 
@@ -45,11 +60,20 @@ AWS creds. It splits statements (dollar-quote + comment aware), auto-resolves th
 master secret, retries the cold start, sets the `kb_app` password, and smoke-tests.
 
 ```bash
-AWS_PROFILE=AdministratorAccess-475976462949 AWS_REGION=us-east-1 KB_CLUSTER_ARN=arn:aws:rds:us-east-1:475976462949:cluster:sw-kb-kb KB_APP_SECRET_ARN=arn:aws:secretsmanager:us-east-1:475976462949:secret:sw-kb/kb/kb_app-voZDNh node scripts/kb-apply-migration.mjs
+AWS_PROFILE=AdministratorAccess-475976462949 AWS_REGION=us-east-1 KB_CLUSTER_ARN=arn:aws:rds:us-east-1:475976462949:cluster:sw-kb-kb KB_SECRET_ARN=arn:aws:secretsmanager:us-east-1:475976462949:secret:sw-kb/kb/kb_app-voZDNh node scripts/kb-apply-migration.mjs
 ```
 `--dry-run` parses without any AWS calls. Idempotent (schema uses IF NOT EXISTS /
 OR REPLACE). Fallback (psql from a VPC CloudShell / SSM bastion) is documented in
 [`db/kb/README.md`](../../db/kb/README.md).
+
+`KB_SECRET_ARN` is canonical for both the app and migration script.
+`KB_APP_SECRET_ARN` remains a temporary migration-script fallback only.
+
+For this production-IaC phase, run only:
+
+```bash
+node scripts/kb-apply-migration.mjs --dry-run
+```
 
 ## App configuration (`.env`, operator-managed)
 
@@ -59,6 +83,9 @@ KB_SECRET_ARN=arn:aws:secretsmanager:us-east-1:475976462949:secret:sw-kb/kb/kb_a
 KB_DATABASE=kb
 ```
 Without these, `kbConfigured()` is false and the KB routes/serverFns return `503`.
+In `NODE_ENV=production`, `loadKbConfig()` instead fails closed when any of the
+three values is missing. Configuration is loaded lazily so a stale import-time
+environment snapshot is not retained.
 The app runtime role needs the `sw-kb-kb-app-access` policy (dev SSO admin already
 covers it).
 

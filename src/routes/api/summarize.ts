@@ -4,6 +4,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { runSummarize, type PageText } from "@/lib/agents/summarizer.server";
 import { WRITER_MODEL } from "@/lib/agents/anthropic.server";
 import { fireworksEnabled, FIREWORKS_DIGEST_MODEL } from "@/lib/agents/fireworks.server";
+import { startSseHeartbeat } from "@/lib/sse.server";
 
 function sseHeaders() {
   return {
@@ -50,6 +51,9 @@ export const Route = createFileRoute("/api/summarize")({
                 closed = true;
               }
             };
+            const stopHeartbeat = startSseHeartbeat((comment) => {
+              if (!closed) controller.enqueue(encoder.encode(comment));
+            }, request.signal);
             try {
               emit("run", {
                 title,
@@ -74,6 +78,7 @@ export const Route = createFileRoute("/api/summarize")({
                 message: err instanceof Error ? err.message : "Summarization failed.",
               });
             } finally {
+              stopHeartbeat();
               closed = true;
               try {
                 controller.close();

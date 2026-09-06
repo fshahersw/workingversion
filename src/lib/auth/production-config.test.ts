@@ -8,6 +8,7 @@ import {
   loadCognitoConfig,
   loadCorpusConfig,
   loadDynamoConfig,
+  loadKbConfig,
   loadS3Config,
   requiredEnv,
   type EnvSource,
@@ -79,6 +80,25 @@ test("production requires DynamoDB and S3 deployment settings", () => {
   assertRequired(loadS3Config, s3, ["AWS_REGION"]);
 });
 
+test("production requires every KB deployment setting", () => {
+  const env = {
+    NODE_ENV: "production",
+    AWS_REGION: "test-region",
+    KB_CLUSTER_ARN: "test-cluster-arn",
+    KB_SECRET_ARN: "test-secret-arn",
+    KB_DATABASE: "test-database",
+  };
+  assertRequired(loadKbConfig, env, ["KB_CLUSTER_ARN"]);
+  assertRequired(loadKbConfig, env, ["KB_SECRET_ARN"]);
+  assertRequired(loadKbConfig, env, ["KB_DATABASE"]);
+  assert.deepEqual(loadKbConfig(env), {
+    clusterArn: "test-cluster-arn",
+    secretArn: "test-secret-arn",
+    database: "test-database",
+    region: "test-region",
+  });
+});
+
 test("production corpus config accepts either public env naming convention", () => {
   const env = {
     NODE_ENV: "production",
@@ -124,6 +144,7 @@ test("non-production keeps local defaults and errors never include env values", 
     loadCognitoConfig,
     loadDynamoConfig,
     loadS3Config,
+    loadKbConfig,
     loadCorpusConfig,
     loadBdaConfig,
     loadAgentCoreConfig,

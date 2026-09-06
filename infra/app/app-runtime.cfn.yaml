@@ -1,0 +1,1279 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Lit AI full-stack runtime for one new environment. Runs the TanStack
+  Start/Nitro build on Lambda through Lambda Web Adapter, streams through a
+  Regional API Gateway REST API, and places CloudFront plus WAF in front. This
+  template consumes app-foundation and KB outputs and never adopts existing
+  development resources.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    why: Own stateless application compute, streaming ingress, edge delivery, and runtime observability.
+    must:
+      - Use REST API InvokeWithResponseStream, preserve cookies and SSE, and never reference development resources.
+  DeploymentBoundary:
+    ExistingResources: >
+      This stack accepts producer-stack outputs as parameters. It does not
+      import, discover, or adopt resources by physical name.
+    ApiGatewayAccountLogging: >
+      REST API access logging requires the regional API Gateway account
+      CloudWatch role to be configured outside this environment stack. This
+      template intentionally does not own the region-wide AWS::ApiGateway::Account.
+    OriginProtection: >
+      CloudFront supplies a generated foundation secret as an x-api-key origin
+      header. Both REST methods require that key, preventing direct origin
+      requests from bypassing CloudFront and its WAF.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming and deployment safety
+        Parameters:
+          - NamePrefix
+          - Environment
+          - DeploymentIntent
+          - ApiGatewayAccountLoggingMode
+      - Label:
+          default: Versioned runtime artifact
+        Parameters:
+          - ArtifactBucketName
+          - ArtifactObjectKey
+          - ArtifactObjectVersion
+          - Architecture
+          - LambdaMemorySize
+          - LambdaTimeoutSeconds
+          - LambdaReservedConcurrency
+      - Label:
+          default: App foundation outputs
+        Parameters:
+          - AppKmsKeyArn
+          - AppAccessPolicyArn
+          - DynamoTableName
+          - AppDataBucketName
+          - OriginAccessSecretArn
+          - CognitoRegion
+          - CognitoUserPoolId
+          - CognitoClientId
+          - CognitoDomain
+          - CognitoRedirectUri
+          - CognitoLogoutUri
+      - Label:
+          default: KB stack outputs
+        Parameters:
+          - KbAccessPolicyArn
+          - KbClusterArn
+          - KbSecretArn
+          - KbDatabase
+      - Label:
+          default: AI and application configuration
+        Parameters:
+          - BedrockRegion
+          - BdaProjectArn
+          - BdaProfileArn
+          - AgentCoreGatewayUrl
+          - AgentCoreSearchTool
+          - AgentCoreCodeInterpreterId
+          - CorpusUrl
+          - CorpusPublishableKey
+          - CorpusServiceSecretArn
+      - Label:
+          default: API, edge, and WAF controls
+        Parameters:
+          - ApiStageName
+          - ApiDeploymentSlot
+          - ApiIntegrationTimeoutMilliseconds
+          - ApiThrottleRateLimit
+          - ApiThrottleBurstLimit
+          - CloudFrontPriceClass
+          - CloudFrontOriginReadTimeout
+          - WafRateLimit
+      - Label:
+          default: Alarms
+        Parameters:
+          - AlarmTopicArn
+          - LambdaDurationAlarmMilliseconds
+          - ApiLatencyAlarmMilliseconds
+    ParameterLabels:
+      DeploymentIntent:
+        default: Confirm this is a new environment
+      OriginAccessSecretArn:
+        default: Foundation CloudFront origin-access secret ARN
+      KbAccessPolicyArn:
+        default: KB producer managed-policy ARN
+
+Rules:
+  CloudFrontWebAclRegion:
+    Assertions:
+      - Assert: !Equals
+          - !Ref AWS::Region
+          - us-east-1
+        AssertDescription: >
+          Deploy this CloudFront-scoped WAF stack in us-east-1. No AWS call is
+          needed to validate this rule locally.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    MinLength: 3
+    MaxLength: 16
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: >
+      Use 3-16 lowercase letters, numbers, or hyphens; start with a letter and
+      end with a letter or number.
+    Description: Stable lowercase application prefix used in physical names.
+
+  Environment:
+    Type: String
+    AllowedValues:
+      - staging
+      - prod
+    Description: New greenfield environment. Provision and verify staging before prod.
+
+  DeploymentIntent:
+    Type: String
+    AllowedValues:
+      - new-environment
+    Description: >
+      Required acknowledgement that this template creates a new runtime and is
+      not an import or adoption mechanism.
+
+  ApiGatewayAccountLoggingMode:
+    Type: String
+    AllowedValues:
+      - preconfigured-outside-this-stack
+    Description: >
+      Acknowledges that the region-wide API Gateway CloudWatch role is managed
+      separately and already permits REST API access-log delivery.
+
+  ArtifactBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+    ConstraintDescription: Supply the app-foundation deployment artifact bucket name.
+    Description: DeploymentArtifactBucketName output from app-foundation.
+
+  ArtifactObjectKey:
+    Type: String
+    MinLength: 1
+    MaxLength: 1024
+    AllowedPattern: "^[^\\r\\n]+\\.zip$"
+    ConstraintDescription: Supply a nonempty S3 object key ending in .zip.
+    Description: Key of the locally built Lambda runtime ZIP.
+
+  ArtifactObjectVersion:
+    Type: String
+    MinLength: 1
+    MaxLength: 1024
+    AllowedPattern: "^[^\\r\\n]+$"
+    ConstraintDescription: Supply the immutable S3 VersionId returned by an authorized upload.
+    Description: Exact version ID of ArtifactObjectKey in the versioned foundation bucket.
+
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues:
+      - arm64
+      - x86_64
+    Description: Lambda instruction-set architecture; must match the adapter layer.
+
+  LambdaMemorySize:
+    Type: Number
+    Default: 2048
+    MinValue: 512
+    MaxValue: 10240
+    Description: Lambda memory in MiB.
+
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 900
+    MinValue: 30
+    MaxValue: 900
+    Description: Lambda invocation timeout. API Gateway streams for at most 15 minutes.
+
+  LambdaReservedConcurrency:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 1000
+    Description: Reserved concurrency protecting downstream services and account capacity.
+
+  AppKmsKeyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[A-Fa-f0-9-]+$"
+    ConstraintDescription: Supply the KmsKeyArn output from app-foundation.
+    Description: App-foundation KMS key used for Lambda environment and log encryption.
+
+  AppAccessPolicyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:iam::[0-9]{12}:policy/.+$"
+    ConstraintDescription: Supply the ApplicationAccessPolicyArn output from app-foundation.
+    Description: App-foundation managed policy for app data and approved AI resources.
+
+  DynamoTableName:
+    Type: String
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+    Description: DynamoTableName output from app-foundation; exported as SW_DDB_TABLE.
+
+  AppDataBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+    Description: S3BucketName output from app-foundation; exported as SW_S3_BUCKET.
+
+  OriginAccessSecretArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+    ConstraintDescription: Supply the CloudFrontOriginAccessSecretArn foundation output.
+    Description: >
+      ARN of the foundation-generated secret whose originKey field is resolved
+      by CloudFormation. The secret value is never a template parameter.
+
+  CognitoRegion:
+    Type: String
+    AllowedPattern: "^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$"
+    Description: CognitoRegion output from app-foundation.
+
+  CognitoUserPoolId:
+    Type: String
+    MinLength: 1
+    AllowedPattern: "^[A-Za-z0-9_-]+$"
+    Description: CognitoUserPoolId output from app-foundation.
+
+  CognitoClientId:
+    Type: String
+    MinLength: 1
+    AllowedPattern: "^[A-Za-z0-9]+$"
+    Description: CognitoClientId output from app-foundation.
+
+  CognitoDomain:
+    Type: String
+    MinLength: 1
+    AllowedPattern: "^[A-Za-z0-9.-]+$"
+    Description: CognitoDomain output from app-foundation without an https scheme.
+
+  CognitoRedirectUri:
+    Type: String
+    AllowedPattern: "^https://[^\\s]+/auth/callback$"
+    ConstraintDescription: Supply the reviewed HTTPS CloudFront callback URL.
+    Description: CognitoCallbackUrl output from app-foundation.
+
+  CognitoLogoutUri:
+    Type: String
+    AllowedPattern: "^https://[^\\s]+/$"
+    ConstraintDescription: Supply the reviewed HTTPS CloudFront post-logout URL.
+    Description: CognitoLogoutUrl output from app-foundation.
+
+  KbAccessPolicyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:iam::[0-9]{12}:policy/.+$"
+    ConstraintDescription: Supply the AppAccessPolicyArn output from the KB stack.
+    Description: >
+      KB producer managed policy attached to the runtime role. KB permissions
+      are not duplicated by this template or app-foundation.
+
+  KbClusterArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:rds:[^:]+:[0-9]{12}:cluster:.+$"
+    ConstraintDescription: Supply the ClusterArn output from the KB stack.
+    Description: KB_CLUSTER_ARN from the separately deployed KB stack.
+
+  KbSecretArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+    ConstraintDescription: Supply the KbAppSecretArn output from the KB stack.
+    Description: >
+      KB_SECRET_ARN for Data API calls. The runtime receives only the ARN; the
+      KB producer policy grants GetSecretValue on that exact secret.
+
+  KbDatabase:
+    Type: String
+    Default: kb
+    MinLength: 1
+    MaxLength: 63
+    AllowedPattern: "^[A-Za-z][A-Za-z0-9_]*$"
+    Description: Database output from the KB stack.
+
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+    AllowedPattern: "^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$"
+    Description: Region used by Bedrock, BDA, and AgentCore clients.
+
+  BdaProjectArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:[0-9]{12}:data-automation-project/[A-Za-z0-9_-]+$"
+    ConstraintDescription: Supply the same exact BDA project ARN granted by app-foundation.
+    Description: BDA_PROJECT_ARN runtime setting.
+
+  BdaProfileArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:[^:]*:data-automation-profile/[A-Za-z0-9._/-]+$"
+    ConstraintDescription: Supply the same exact BDA profile ARN granted by app-foundation.
+    Description: BDA_PROFILE_ARN runtime setting.
+
+  AgentCoreGatewayUrl:
+    Type: String
+    AllowedPattern: "^https://[A-Za-z0-9.-]+\\.gateway\\.bedrock-agentcore\\.[A-Za-z0-9-]+\\.amazonaws\\.com(/[^\\s]*)?$"
+    ConstraintDescription: Supply the HTTPS AgentCore gateway MCP URL.
+    Description: AGENTCORE_SEARCH_URL paired with the exact gateway ARN granted by app-foundation.
+
+  AgentCoreSearchTool:
+    Type: String
+    Default: general___WebSearch
+    MinLength: 1
+    MaxLength: 128
+    AllowedPattern: "^[A-Za-z0-9_-]+$"
+    Description: AGENTCORE_SEARCH_TOOL exposed by the approved gateway.
+
+  AgentCoreCodeInterpreterId:
+    Type: String
+    Default: aws.codeinterpreter.v1
+    MinLength: 1
+    MaxLength: 128
+    AllowedPattern: "^[A-Za-z0-9._-]+$"
+    Description: CODE_INTERPRETER_ID paired with the exact resource ARN granted by app-foundation.
+
+  CorpusUrl:
+    Type: String
+    AllowedPattern: "^https://[^\\s/]+(?:/[^\\s]*)?$"
+    ConstraintDescription: Supply the HTTPS public corpus service URL.
+    Description: Public corpus URL retained for application compatibility.
+
+  CorpusPublishableKey:
+    Type: String
+    NoEcho: true
+    MinLength: 1
+    MaxLength: 2048
+    AllowedPattern: "^[^\\r\\n]+$"
+    ConstraintDescription: Supply the public publishable corpus key, not a service-role secret.
+    Description: >
+      Public browser-safe corpus key retained for compatibility. Real service
+      credentials use a separate Secrets Manager dynamic reference.
+
+  CorpusServiceSecretArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+    ConstraintDescription: Supply an existing Secrets Manager secret ARN.
+    Description: >
+      Existing secret containing a JSON key named CORPUS_SERVICE_KEY.
+      CloudFormation resolves that key without accepting the credential as a
+      plaintext stack parameter.
+
+  ApiStageName:
+    Type: String
+    Default: app
+    MinLength: 1
+    MaxLength: 32
+    AllowedPattern: "^[A-Za-z0-9_-]+$"
+    Description: REST API stage name used by the CloudFront origin path.
+
+  ApiDeploymentSlot:
+    Type: String
+    Default: blue
+    AllowedValues:
+      - blue
+      - green
+    Description: >
+      Deployment snapshot slot. Toggle this value whenever REST resources,
+      methods, integrations, or response-streaming settings change.
+
+  ApiIntegrationTimeoutMilliseconds:
+    Type: Number
+    Default: 300000
+    MinValue: 50
+    MaxValue: 900000
+    Description: >
+      REST integration timeout. Values above the account default require a
+      separately reviewed API Gateway quota before deployment.
+
+  ApiThrottleRateLimit:
+    Type: Number
+    Default: 25
+    MinValue: 1
+    MaxValue: 10000
+    Description: Per-stage and per-origin-key steady-state requests per second.
+
+  ApiThrottleBurstLimit:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    MaxValue: 10000
+    Description: Per-stage and per-origin-key burst request limit.
+
+  CloudFrontPriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+    Description: CloudFront geographic price class.
+
+  CloudFrontOriginReadTimeout:
+    Type: Number
+    Default: 120
+    MinValue: 30
+    MaxValue: 120
+    Description: >
+      Seconds CloudFront waits between origin response packets. SSE producers
+      must emit heartbeats more frequently than this value.
+
+  WafRateLimit:
+    Type: Number
+    Default: 2000
+    MinValue: 100
+    MaxValue: 2000000000
+    Description: Five-minute per-IP request limit enforced at CloudFront.
+
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:sns:[^:]+:[0-9]{12}:[A-Za-z0-9_-]+$"
+    ConstraintDescription: Supply an SNS topic ARN or leave empty.
+    Description: Optional existing SNS topic for alarm and recovery actions.
+
+  LambdaDurationAlarmMilliseconds:
+    Type: Number
+    Default: 750000
+    MinValue: 1000
+    MaxValue: 900000
+    Description: Lambda p95 duration threshold.
+
+  ApiLatencyAlarmMilliseconds:
+    Type: Number
+    Default: 240000
+    MinValue: 100
+    MaxValue: 900000
+    Description: API Gateway p95 latency threshold.
+
+Mappings:
+  LambdaAdapterLayers:
+    arm64:
+      Arn: "arn:aws:lambda:us-east-1:753240598075:layer:LambdaAdapterLayerArm64:28"
+    x86:
+      Arn: "arn:aws:lambda:us-east-1:753240598075:layer:LambdaAdapterLayerX86:28"
+  EnvironmentSettings:
+    staging:
+      LogRetentionDays: 30
+    prod:
+      LogRetentionDays: 365
+
+Conditions:
+  HasAlarmTopic: !Not
+    - !Equals
+      - !Ref AlarmTopicArn
+      - ""
+  UseBlueDeployment: !Equals
+    - !Ref ApiDeploymentSlot
+    - blue
+  UseGreenDeployment: !Equals
+    - !Ref ApiDeploymentSlot
+    - green
+  UseArm64: !Equals
+    - !Ref Architecture
+    - arm64
+
+Resources:
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Store structured Lambda system and application logs under the foundation KMS policy.
+        must:
+          - Retain on replacement or deletion and never log document bodies through infrastructure settings.
+        mutable: change-with-constraints
+    Properties:
+      LogGroupName: !Sub "/lit-ai/${NamePrefix}/${Environment}/app-runtime"
+      KmsKeyId: !Ref AppKmsKeyArn
+      RetentionInDays: !FindInMap
+        - EnvironmentSettings
+        - !Ref Environment
+        - LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Store minimal request metadata for the Regional REST API.
+        must:
+          - Exclude request bodies, query strings, cookies, authorization headers, and document text.
+        mutable: change-with-constraints
+    Properties:
+      LogGroupName: !Sub "/lit-ai/${NamePrefix}/${Environment}/app-api-access"
+      KmsKeyId: !Ref AppKmsKeyArn
+      RetentionInDays: !FindInMap
+        - EnvironmentSettings
+        - !Ref Environment
+        - LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  RuntimeRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Combine producer-owned app and KB policies with runtime-only telemetry permissions.
+        must:
+          - Use the Lambda service trust and never duplicate KB data permissions inline.
+        mutable: review-required
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-app-runtime"
+      Path: !Sub "/lit-ai/${Environment}/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LambdaServiceTrust
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref AppAccessPolicyArn
+        - !Ref KbAccessPolicyArn
+      Policies:
+        - PolicyName: runtime-telemetry
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: LambdaLogWrites
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/lit-ai/${NamePrefix}/${Environment}/app-runtime:*"
+              - Sid: XRayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:PutTelemetryRecords
+                  - xray:PutTraceSegments
+                Resource: "*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AppFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Run the Nitro server through Lambda Web Adapter on a managed Node runtime.
+        must:
+          - Use a versioned artifact, architecture-matched adapter layer, response_stream mode, and no static AWS keys.
+        mutable: change-with-constraints
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-${Environment}-app"
+      Description: !Sub "Lit AI ${Environment} full-stack Nitro runtime"
+      PackageType: Zip
+      Runtime: nodejs22.x
+      Handler: run.sh
+      Architectures:
+        - !Ref Architecture
+      Layers:
+        - !If
+          - UseArm64
+          - !FindInMap [LambdaAdapterLayers, arm64, Arn]
+          - !FindInMap [LambdaAdapterLayers, x86, Arn]
+      Role: !GetAtt RuntimeRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref ArtifactObjectKey
+        S3ObjectVersion: !Ref ArtifactObjectVersion
+      KmsKeyArn: !Ref AppKmsKeyArn
+      MemorySize: !Ref LambdaMemorySize
+      Timeout: !Ref LambdaTimeoutSeconds
+      ReservedConcurrentExecutions: !Ref LambdaReservedConcurrency
+      EphemeralStorage:
+        Size: 2048
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        ApplicationLogLevel: WARN
+        LogFormat: JSON
+        LogGroup: !Ref LambdaLogGroup
+        SystemLogLevel: WARN
+      Environment:
+        Variables:
+          NODE_ENV: production
+          APP_ENVIRONMENT: !Ref Environment
+          HOST: 0.0.0.0
+          PORT: "8080"
+          NITRO_PORT: "8080"
+          AWS_LWA_PORT: "8080"
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          AWS_LWA_INVOKE_MODE: response_stream
+          AWS_LWA_READINESS_CHECK_PATH: /
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+          SW_DDB_TABLE: !Ref DynamoTableName
+          SW_S3_BUCKET: !Ref AppDataBucketName
+          COGNITO_REGION: !Ref CognitoRegion
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          COGNITO_DOMAIN: !Ref CognitoDomain
+          COGNITO_REDIRECT_URI: !Ref CognitoRedirectUri
+          COGNITO_LOGOUT_URI: !Ref CognitoLogoutUri
+          KB_CLUSTER_ARN: !Ref KbClusterArn
+          KB_SECRET_ARN: !Ref KbSecretArn
+          KB_DATABASE: !Ref KbDatabase
+          BEDROCK_REGION: !Ref BedrockRegion
+          BDA_PROJECT_ARN: !Ref BdaProjectArn
+          BDA_PROFILE_ARN: !Ref BdaProfileArn
+          AGENTCORE_SEARCH_URL: !Ref AgentCoreGatewayUrl
+          AGENTCORE_SEARCH_TOOL: !Ref AgentCoreSearchTool
+          CODE_INTERPRETER_ID: !Ref AgentCoreCodeInterpreterId
+          CORPUS_URL: !Ref CorpusUrl
+          CORPUS_KEY: !Ref CorpusPublishableKey
+          CORPUS_SERVICE_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:CORPUS_SERVICE_KEY}}"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Provide the only API Gateway response-streaming integration supported for this runtime.
+        must:
+          - Stay a Regional REST API with binary media passthrough and no endpoint caching.
+        mutable: review-required
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-app"
+      Description: !Sub >
+        Streaming REST origin for ${Environment}; account logging is
+        ${ApiGatewayAccountLoggingMode}.
+      ApiKeySourceType: HEADER
+      BinaryMediaTypes:
+        - "*/*"
+      DisableExecuteApiEndpoint: false
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ApiGatewayInvokeRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Let this exact REST API invoke only the environment Lambda function.
+        must:
+          - Scope both trust and permission to this account, API, and function.
+        mutable: review-required
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ApiGatewayServiceTrust
+            Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-streaming-function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeFunction
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt AppFunction.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  RootMethod:
+    Type: AWS::ApiGateway::Method
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stream the root route through Lambda InvokeWithResponseStream.
+        must:
+          - Keep AWS_PROXY, STREAM, and the response-streaming-invocations URI suffix together.
+        mutable: change-with-constraints
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !GetAtt RestApi.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials: !GetAtt ApiGatewayInvokeRole.Arn
+        ResponseTransferMode: STREAM
+        TimeoutInMillis: !Ref ApiIntegrationTimeoutMilliseconds
+        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/${AppFunction.Arn}/response-streaming-invocations"
+
+  ProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: "{proxy+}"
+
+  ProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stream every application, auth, and API sub-route through the same Nitro server.
+        must:
+          - Keep AWS_PROXY, STREAM, and the response-streaming-invocations URI suffix together.
+        mutable: change-with-constraints
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Credentials: !GetAtt ApiGatewayInvokeRole.Arn
+        ResponseTransferMode: STREAM
+        TimeoutInMillis: !Ref ApiIntegrationTimeoutMilliseconds
+        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/${AppFunction.Arn}/response-streaming-invocations"
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AppFunction
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  ApiDeploymentBlue:
+    Type: AWS::ApiGateway::Deployment
+    Condition: UseBlueDeployment
+    DependsOn:
+      - RootMethod
+      - ProxyMethod
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Snapshot both streaming methods for the explicit environment stage.
+        must:
+          - Toggle ApiDeploymentSlot when method or integration semantics change.
+        mutable: review-required
+    Properties:
+      RestApiId: !Ref RestApi
+      Description: Blue REST response-streaming deployment.
+
+  ApiDeploymentGreen:
+    Type: AWS::ApiGateway::Deployment
+    Condition: UseGreenDeployment
+    DependsOn:
+      - RootMethod
+      - ProxyMethod
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Alternate deployment snapshot so API-model changes always create a fresh deployment.
+        must:
+          - Toggle ApiDeploymentSlot when method or integration semantics change.
+        mutable: review-required
+    Properties:
+      RestApiId: !Ref RestApi
+      Description: Green REST response-streaming deployment.
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn:
+      - ApiInvokePermission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Apply access logging, metrics, X-Ray, and bounded throttling to every route.
+        must:
+          - Keep data tracing off and exclude request content from the access-log format.
+        mutable: change-with-constraints
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !If
+        - UseBlueDeployment
+        - !Ref ApiDeploymentBlue
+        - !Ref ApiDeploymentGreen
+      StageName: !Ref ApiStageName
+      Description: !Sub "${Environment} response-streaming application stage"
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","requestTimeEpoch":"$context.requestTimeEpoch","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationLatency":"$context.integration.latency"}
+      CacheClusterEnabled: false
+      MethodSettings:
+        - DataTraceEnabled: false
+          HttpMethod: "*"
+          LoggingLevel: "OFF"
+          MetricsEnabled: true
+          ResourcePath: "/*"
+          ThrottlingBurstLimit: !Ref ApiThrottleBurstLimit
+          ThrottlingRateLimit: !Ref ApiThrottleRateLimit
+      TracingEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  CloudFrontOriginApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Verify that API origin traffic came through this CloudFront distribution.
+        must:
+          - Resolve the generated originKey from Secrets Manager and never accept a plaintext parameter.
+        mutable: review-required
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-cloudfront-origin"
+      Description: CloudFront origin verification key; not an end-user authentication control.
+      Enabled: true
+      Value: !Sub "{{resolve:secretsmanager:${OriginAccessSecretArn}:SecretString:originKey}}"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  CloudFrontOriginUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - ApiStage
+    Properties:
+      UsagePlanName: !Sub "${NamePrefix}-${Environment}-cloudfront-origin"
+      Description: CloudFront-only origin throttle in addition to stage and WAF controls.
+      ApiStages:
+        - ApiId: !Ref RestApi
+          Stage: !Ref ApiStageName
+      Throttle:
+        BurstLimit: !Ref ApiThrottleBurstLimit
+        RateLimit: !Ref ApiThrottleRateLimit
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  CloudFrontOriginUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref CloudFrontOriginApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref CloudFrontOriginUsagePlan
+
+  SecurityResponseHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Apply browser security headers consistently without transforming streamed bodies.
+        must:
+          - Never add a cache directive to authenticated dynamic responses.
+        mutable: review-required
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${NamePrefix}-${Environment}-security"
+        Comment: Browser security headers for dynamic and immutable application responses.
+        SecurityHeadersConfig:
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 63072000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+          XSSProtection:
+            Protection: true
+            ModeBlock: true
+            Override: true
+        CustomHeadersConfig:
+          Items:
+            - Header: Permissions-Policy
+              Value: "camera=(), geolocation=(), microphone=()"
+              Override: true
+
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Protect the only viewer entry point before requests reach API Gateway and Lambda.
+        must:
+          - Stay CloudFront-scoped with common, known-bad-input, and rate-based protections.
+        mutable: review-required
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-edge"
+      Description: !Sub "Managed edge protection for ${NamePrefix} ${Environment}"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: RateLimitPerIp
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: !Ref WafRateLimit
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${NamePrefix}-${Environment}-rate-limit"
+            SampledRequestsEnabled: false
+        - Name: AwsManagedCommon
+          Priority: 10
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              RuleActionOverrides:
+                - Name: SizeRestrictions_BODY
+                  ActionToUse:
+                    Count: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${NamePrefix}-${Environment}-common"
+            SampledRequestsEnabled: false
+        - Name: AwsManagedKnownBadInputs
+          Priority: 20
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${NamePrefix}-${Environment}-known-bad"
+            SampledRequestsEnabled: false
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${NamePrefix}-${Environment}-edge"
+        SampledRequestsEnabled: false
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+      - CloudFrontOriginUsagePlanKey
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Preserve browser cookies and SSE while caching only immutable Vite assets.
+        must:
+          - Default to no cache, forward all viewer state except Host, require HTTPS, and attach WAF.
+        mutable: review-required
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "Lit AI ${Environment} streaming application"
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: !Ref CloudFrontPriceClass
+        WebACLId: !GetAtt WebAcl.Arn
+        Origins:
+          - Id: RegionalRestApi
+            DomainName: !Sub "${RestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+            OriginPath: !Sub "/${ApiStageName}"
+            ConnectionAttempts: 3
+            ConnectionTimeout: 10
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginKeepaliveTimeout: 5
+              OriginProtocolPolicy: https-only
+              OriginReadTimeout: !Ref CloudFrontOriginReadTimeout
+              OriginSSLProtocols:
+                - TLSv1.2
+            OriginCustomHeaders:
+              - HeaderName: x-api-key
+                HeaderValue: !Sub "{{resolve:secretsmanager:${OriginAccessSecretArn}:SecretString:originKey}}"
+        DefaultCacheBehavior:
+          TargetOriginId: RegionalRestApi
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - DELETE
+            - GET
+            - HEAD
+            - OPTIONS
+            - PATCH
+            - POST
+            - PUT
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: false
+          CachePolicyId: 413fca67-6d3c-4916-9ad5-2fa6672c1f02
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+        CacheBehaviors:
+          - PathPattern: /assets/*
+            TargetOriginId: RegionalRestApi
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+            ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-lambda-errors"
+      AlarmDescription: Lambda returned one or more invocation errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AppFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  LambdaThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-lambda-throttles"
+      AlarmDescription: Lambda invocation was throttled.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AppFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-lambda-duration"
+      AlarmDescription: Lambda p95 duration is sustained above the configured threshold.
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AppFunction
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: !Ref LambdaDurationAlarmMilliseconds
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApiServerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-api-5xx"
+      AlarmDescription: API Gateway returned one or more server errors.
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub "${NamePrefix}-${Environment}-app"
+        - Name: Stage
+          Value: !Ref ApiStageName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  ApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-api-latency"
+      AlarmDescription: API Gateway p95 latency is sustained above the configured threshold.
+      Namespace: AWS/ApiGateway
+      MetricName: Latency
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub "${NamePrefix}-${Environment}-app"
+        - Name: Stage
+          Value: !Ref ApiStageName
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: !Ref ApiLatencyAlarmMilliseconds
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  LambdaFunctionName:
+    Description: Name of the Nitro Lambda function.
+    Value: !Ref AppFunction
+
+  LambdaFunctionArn:
+    Description: ARN of the Nitro Lambda function.
+    Value: !GetAtt AppFunction.Arn
+
+  RuntimeRoleArn:
+    Description: Runtime role combining app-foundation and KB producer policies.
+    Value: !GetAtt RuntimeRole.Arn
+
+  RestApiId:
+    Description: Regional response-streaming REST API identifier.
+    Value: !Ref RestApi
+
+  RestApiOriginUrl:
+    Description: >
+      Direct origin URL. Calls require the generated origin API key and should
+      not be distributed to viewers.
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${ApiStageName}"
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution identifier.
+    Value: !Ref Distribution
+
+  CloudFrontDomainName:
+    Description: CloudFront hostname used for the staging baseline.
+    Value: !GetAtt Distribution.DomainName
+
+  CloudFrontUrl:
+    Description: HTTPS application origin for Cognito callback and logout settings.
+    Value: !Sub "https://${Distribution.DomainName}"
+
+  WebAclArn:
+    Description: CloudFront-scoped WAF web ACL ARN.
+    Value: !GetAtt WebAcl.Arn
+
+  LambdaLogGroupName:
+    Description: KMS-encrypted retained Lambda log group.
+    Value: !Ref LambdaLogGroup
+
+  ApiAccessLogGroupName:
+    Description: KMS-encrypted retained REST API access log group.
+    Value: !Ref ApiAccessLogGroup
+
+  ArtifactCoordinates:
+    Description: Immutable S3 artifact coordinate used by this Lambda version.
+    Value: !Sub "s3://${ArtifactBucketName}/${ArtifactObjectKey}?versionId=${ArtifactObjectVersion}"

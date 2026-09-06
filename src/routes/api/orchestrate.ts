@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import type { HistoryTurn } from "@/lib/agents/orchestration-types";
 import { runResearchAgent } from "@/lib/agents/research-agent.server";
 import type { Attachment } from "@/lib/chat-types";
+import { startSseHeartbeat } from "@/lib/sse.server";
 
 function sseHeaders() {
   return {
@@ -54,6 +55,9 @@ export const Route = createFileRoute("/api/orchestrate")({
                 closed = true;
               }
             };
+            const stopHeartbeat = startSseHeartbeat((comment) => {
+              if (!closed) controller.enqueue(encoder.encode(comment));
+            }, request.signal);
             try {
               await runResearchAgent(
                 {
@@ -77,6 +81,7 @@ export const Route = createFileRoute("/api/orchestrate")({
             } catch (err) {
               emit("error", { message: err instanceof Error ? err.message : "Research failed." });
             } finally {
+              stopHeartbeat();
               closed = true;
               try {
                 controller.close();

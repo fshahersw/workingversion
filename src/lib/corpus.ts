@@ -24,12 +24,17 @@ import {
 function corpusEnv(): EnvSource {
   const runtime = typeof process === "undefined" ? undefined : process.env;
   const vite = import.meta.env as ImportMetaEnv | undefined;
+  if (typeof window === "undefined" && runtime) {
+    return {
+      NODE_ENV: runtime["NODE_ENV"],
+      CORPUS_URL: runtime["CORPUS_URL"] ?? runtime["VITE_CORPUS_URL"],
+      CORPUS_KEY: runtime["CORPUS_KEY"] ?? runtime["VITE_CORPUS_KEY"],
+    };
+  }
   return {
-    NODE_ENV: runtime?.["NODE_ENV"] ?? (vite?.PROD ? "production" : vite?.MODE),
-    VITE_CORPUS_URL: vite?.VITE_CORPUS_URL ?? runtime?.["VITE_CORPUS_URL"],
-    CORPUS_URL: runtime?.["CORPUS_URL"],
-    VITE_CORPUS_KEY: vite?.VITE_CORPUS_KEY ?? runtime?.["VITE_CORPUS_KEY"],
-    CORPUS_KEY: runtime?.["CORPUS_KEY"],
+    NODE_ENV: vite?.PROD ? "production" : vite?.MODE,
+    VITE_CORPUS_URL: vite?.VITE_CORPUS_URL,
+    VITE_CORPUS_KEY: vite?.VITE_CORPUS_KEY,
   };
 }
 

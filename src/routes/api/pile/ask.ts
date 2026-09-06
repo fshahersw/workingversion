@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 
+import { startSseHeartbeat } from "@/lib/sse.server";
+
 function sseHeaders() {
   return {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -95,6 +97,9 @@ export const Route = createFileRoute("/api/pile/ask")({
                 closed = true;
               }
             };
+            const stopHeartbeat = startSseHeartbeat((comment) => {
+              if (!closed) controller.enqueue(encoder.encode(comment));
+            }, request.signal);
             try {
               const hits = Array.isArray(body.hits) ? (body.hits as never) : undefined;
               if (body.mode === "analyze") {
@@ -167,6 +172,7 @@ export const Route = createFileRoute("/api/pile/ask")({
                 message: err instanceof Error ? err.message : "Ask failed.",
               });
             } finally {
+              stopHeartbeat();
               closed = true;
               try {
                 controller.close();

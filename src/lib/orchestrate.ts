@@ -53,6 +53,7 @@ export async function streamSSE(
         if (line.startsWith("event:")) evt = line.slice(6).trim();
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
       }
+      if (evt === "message" && !dataLines.length) continue;
       const dataStr = dataLines.join("\n");
       let data: unknown = dataStr;
       if (dataStr) {

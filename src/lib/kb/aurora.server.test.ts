@@ -30,9 +30,25 @@ test("vectorLiteral formats a pgvector literal", () => {
   assert.equal(vectorLiteral([]), "[]");
 });
 
-test("kbConfigured is false without env", () => {
-  // No KB_* env in the test runner.
-  assert.equal(kbConfigured(), false);
+test("kbConfigured evaluates the supplied environment lazily", () => {
+  assert.equal(kbConfigured({ NODE_ENV: "development" }), false);
+  assert.equal(
+    kbConfigured({
+      NODE_ENV: "development",
+      AWS_REGION: "test-region",
+      KB_CLUSTER_ARN: "test-cluster-arn",
+      KB_SECRET_ARN: "test-secret-arn",
+      KB_DATABASE: "test-database",
+    }),
+    true,
+  );
+  assert.equal(
+    kbConfigured({
+      NODE_ENV: "development",
+      KB_CLUSTER_ARN: "test-cluster-arn",
+    }),
+    false,
+  );
 });
 
 test("data calls reject when unconfigured", async () => {

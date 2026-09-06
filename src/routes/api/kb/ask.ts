@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 
+import { startSseHeartbeat } from "@/lib/sse.server";
+
 // Saved-workspace Ask: resolve the authenticated DynamoDB workspace, retrieve
 // reranked Aurora chunks, then stream the existing Working Set answer events.
 // Gated by apiAuthMiddleware; principal is derived here and never from the body.
@@ -55,6 +57,9 @@ export const Route = createFileRoute("/api/kb/ask")({
                 closed = true;
               }
             };
+            const stopHeartbeat = startSseHeartbeat((comment) => {
+              if (!closed) controller.enqueue(encoder.encode(comment));
+            }, request.signal);
             try {
               const { askSavedWorkspace } = await import("@/lib/kb/ask.server");
               await askSavedWorkspace(
@@ -103,6 +108,7 @@ export const Route = createFileRoute("/api/kb/ask")({
                 recoverable: expected ? (typed.recoverable ?? false) : true,
               });
             } finally {
+              stopHeartbeat();
               closed = true;
               try {
                 controller.close();

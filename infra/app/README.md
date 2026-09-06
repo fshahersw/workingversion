@@ -1,218 +1,241 @@
-# Application foundation CloudFormation
+# Production application infrastructure
 
 > **NO DEPLOY:** This directory is an Infrastructure as Code deliverable only.
-> Do not run `deploy`, `execute-change-set`, `create-stack`, or `update-stack`
-> from this runbook until the target environment, names, IAM execution role,
-> costs, and change set have been reviewed.
+> Do not upload artifacts, create or execute change sets, create stacks, update
+> stacks, or change regional API Gateway account settings from this runbook.
+> Only the local validation commands below are authorized here.
 
-`app-foundation.cfn.yaml` describes app-layer resources for a **new
-environment**. It does not import, discover, reference by name, or adopt the
-resources already running in the development account.
+These templates describe new greenfield environments. Provision and verify
+`staging` before preparing `prod`. They do not import, discover, reference by
+physical name, or adopt the existing development resources.
 
-## Scope
+## Templates
 
-The template creates:
+### `app-foundation.cfn.yaml`
 
-- One on-demand DynamoDB table with `PK`/`SK`, `GSI1`, `GSI2`, point-in-time
-  recovery, deletion protection, KMS encryption, and TTL on the numeric `ttl`
-  attribute.
-- One private, versioned S3 bucket with Block Public Access, bucket-owner
-  enforced object ownership, a TLS-only bucket policy, KMS encryption with
-  bucket keys, one parameterized CORS origin, and lifecycle cleanup for
-  incomplete uploads and noncurrent versions.
-- One rotating customer-managed KMS key and environment-specific alias.
-- One Cognito user pool, public web client, and managed domain configured for
-  OIDC authorization code with PKCE. The client has no secret and allows only
-  the `code` OAuth flow with `openid email profile` scopes.
-- An optional Cognito group named `admin`. The name is intentional because the
-  application maps the `admin` group claim to its admin role.
-- One IAM managed policy for the table, indexes, bucket, KMS key, application
-  log group, and optional exact Bedrock, RDS Data API, Secrets Manager, and
-  secret KMS resources.
-- One KMS-encrypted CloudWatch log group and alarms for DynamoDB read/write
-  throttles and S3 `5xxErrors`. The S3 request-metrics configuration has a
-  CloudWatch cost.
+The foundation owns retained state and producer-managed runtime permissions:
 
-The IAM policy is output but is not attached to a role. The application compute
-platform and runtime role are deliberately not invented here.
+- Customer-managed KMS key with rotation and retained replacement/deletion
+  behavior.
+- On-demand DynamoDB table with point-in-time recovery, deletion protection,
+  TTL, two GSIs, and KMS encryption.
+- Private, versioned application-data bucket with Block Public Access,
+  bucket-owner enforced ownership, TLS-only access, KMS encryption, and
+  lifecycle controls.
+- Private, versioned deployment-artifact bucket with the same public-access,
+  TLS, and KMS controls. Current artifact versions do not expire; superseded
+  versions use the dedicated retention parameter.
+- Cognito user pool, public PKCE web client, managed domain, and optional
+  `admin` group.
+- A generated, retained Secrets Manager value used only to authenticate
+  CloudFront to the REST API origin. Only its ARN is output.
+- App-owned IAM permissions for DynamoDB, S3, exact Bedrock model/rerank
+  resources, exact BDA project/profile resources, account-scoped BDA invocation
+  jobs, and exact AgentCore gateway/Code Interpreter resources.
+- Retained KMS-encrypted application log group and baseline data alarms.
 
-This template also deliberately excludes WAF and rate-limiting resources. The
-deployment stack that owns the public CloudFront distribution, API Gateway,
-load balancer, or other ingress must attach the appropriate WAF web ACL and
-service-native throttling there. A WAF resource without an association target
-would not protect the application.
+The legacy optional RDS and database-secret parameters remain for compatibility
+with non-KB integrations. Leave them empty for the KB. The separately deployed
+KB stack owns and outputs its own managed policy.
 
-## Existing development resources
+### `app-runtime.cfn.yaml`
 
-Do not select `dev` and reuse the live prefix as an attempted migration.
-CloudFormation does not adopt a resource because its physical name matches.
-Creation will normally fail with an already-exists error, and partial stack
-creation can leave retained resources requiring cleanup.
+The runtime consumes foundation and KB outputs as parameters and creates:
 
-Use one of these paths:
+- A managed Node.js Lambda function running `.output/server/index.mjs` through
+  the pinned official Lambda Web Adapter v28 layer selected by architecture.
+- `AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap`,
+  `AWS_LWA_INVOKE_MODE=response_stream`, and port `8080` for both Nitro and the
+  adapter.
+- A Regional API Gateway **REST API** with root and `{proxy+}` `ANY` methods.
+  Both integrations use `AWS_PROXY`, `ResponseTransferMode: STREAM`, and a URI
+  ending in `/response-streaming-invocations`.
+- All SSE routes emit a comment heartbeat every 25 seconds, below the
+  CloudFront origin idle timeout, including during long retrieval/model gaps.
+- Minimal API access logs, metrics, X-Ray, stage and usage-plan throttles, and a
+  scoped API Gateway invocation role.
+- A generated origin API key resolved from the foundation secret. CloudFront
+  injects it as `x-api-key`; direct execute-api calls without it are rejected.
+- CloudFront with no caching for the default app/auth/API behavior. The managed
+  all-viewer-except-Host request policy forwards cookies, query strings,
+  authorization, and SSE request headers. Only `/assets/*` uses the managed
+  optimized cache policy.
+- A CloudFront-scoped WAF web ACL with AWS managed common and known-bad-input
+  rules plus a configurable per-IP rate rule. The common group's
+  `SizeRestrictions_BODY` rule is count-only because the current authenticated
+  KB ingest route accepts bounded document text; API Gateway and application
+  size limits remain enforced.
+- Retained KMS-encrypted Lambda and API access log groups. Staging retains logs
+  for 30 days and prod for 365 days.
+- Lambda error, throttle, and duration alarms plus API 5xx and latency alarms.
 
-1. Create a new named stack with a new environment identifier and new physical
-   names, then migrate data through a reviewed application/data migration.
-2. Build a separate, resource-by-resource CloudFormation import plan for
-   development. Confirm that each resource type supports import, capture its
-   exact live configuration and identifier, model dependencies in safe stages,
-   and use an `IMPORT` change set. Importing a bucket or table does not
-   automatically import its policies, KMS key, aliases, Cognito domain, groups,
-   alarms, or IAM policies.
+`ApiDeploymentSlot` must alternate between `blue` and `green` whenever a REST
+resource, method, integration, timeout, or response-streaming setting changes.
+API Gateway deployments are immutable snapshots; changing a method without
+changing the slot can leave the stage on the previous API model.
 
-Do not run a `CREATE` or `UPDATE` change set over live names to simulate import.
-Do not change retained resource names in place without a replacement and data
-migration plan.
+The runtime stack intentionally does not create `AWS::ApiGateway::Account`.
+That setting is regional and changing it could affect unrelated or existing
+APIs. Before a later authorized deployment, confirm that the separately managed
+regional API Gateway CloudWatch role can deliver REST API access logs.
 
-Physical names include both `NamePrefix` and `Environment`. The bucket is:
+The CloudFront-scoped WAF must be created in `us-east-1`; the template includes
+a rule that rejects another region.
 
-`{NamePrefix}-{Environment}-{AWS account ID}-{AWS Region}-data`
+## Cross-stack configuration contract
 
-The Cognito managed-domain prefix also includes the AWS account ID. A name
-collision causes stack creation to fail; it does not transfer ownership to the
-stack.
+Pass exact stack outputs, not reconstructed physical names.
 
-## Application configuration contract
+Foundation output to runtime parameter and environment:
 
-Use stack outputs to populate runtime configuration:
+- `DeploymentArtifactBucketName` -> `ArtifactBucketName`
+- `KmsKeyArn` -> `AppKmsKeyArn`
+- `ApplicationAccessPolicyArn` -> `AppAccessPolicyArn`
+- `DynamoTableName` -> `DynamoTableName` -> `SW_DDB_TABLE`
+- `S3BucketName` -> `AppDataBucketName` -> `SW_S3_BUCKET`
+- `CloudFrontOriginAccessSecretArn` -> `OriginAccessSecretArn`
+- `CognitoRegion` -> `CognitoRegion` -> `COGNITO_REGION`
+- `CognitoUserPoolId` -> `CognitoUserPoolId` -> `COGNITO_USER_POOL_ID`
+- `CognitoClientId` -> `CognitoClientId` -> `COGNITO_CLIENT_ID`
+- `CognitoDomain` -> `CognitoDomain` -> `COGNITO_DOMAIN`
+- `CognitoCallbackUrl` -> `CognitoRedirectUri` -> `COGNITO_REDIRECT_URI`
+- `CognitoLogoutUrl` -> `CognitoLogoutUri` -> `COGNITO_LOGOUT_URI`
 
-- `DynamoTableName` -> `SW_DDB_TABLE`
-- `S3BucketName` -> `SW_S3_BUCKET`
-- `CognitoRegion` -> `COGNITO_REGION`
-- `CognitoUserPoolId` -> `COGNITO_USER_POOL_ID`
-- `CognitoClientId` -> `COGNITO_CLIENT_ID`
-- `CognitoDomain` -> `COGNITO_DOMAIN`
-- `CognitoCallbackUrl` -> `COGNITO_REDIRECT_URI`
-- `CognitoLogoutUrl` -> `COGNITO_LOGOUT_URI`
-- Existing Aurora stack cluster ARN -> `KB_CLUSTER_ARN`
-- Existing Aurora application secret ARN -> `KB_SECRET_ARN`
+KB output to runtime parameter and environment:
 
-The Aurora cluster and application secret remain owned by their existing,
-separate stack. Pass their exact ARNs through `RdsClusterArn` and
-`DatabaseSecretArns` when creating a new app-foundation stack. If a database
-secret uses a customer-managed key, also pass its key ARN through
-`DatabaseSecretKmsKeyArns`. These parameters grant access only; they do not
-import or modify the referenced resources.
+- `AppAccessPolicyArn` -> `KbAccessPolicyArn`
+- `ClusterArn` -> `KbClusterArn` -> `KB_CLUSTER_ARN`
+- `KbAppSecretArn` -> `KbSecretArn` -> `KB_SECRET_ARN`
+- `Database` -> `KbDatabase` -> `KB_DATABASE`
 
-`BedrockModelResourceArns` accepts exact comma-delimited model and inference
-profile ARNs. Cross-Region inference requires all applicable inference-profile
-and backing foundation-model ARNs. `BedrockRerankResourceArns` is separate so
-the `bedrock:Rerank` action is not granted to unrelated model resources. Empty
-optional integration parameters produce no corresponding IAM statement.
+The runtime role attaches both producer policies. It does not copy the KB
+policy document. `KbSecretArn` is an ARN consumed by the RDS Data API SDK; the
+secret value is not placed in the Lambda environment. The legacy corpus
+service credential is supplied only as `CorpusServiceSecretArn`; CloudFormation
+resolves its `CORPUS_SERVICE_KEY` JSON field into the KMS-encrypted Lambda
+environment without accepting the value as a stack parameter.
 
-Production callback, logout, and app-origin values should use HTTPS. HTTP is
-accepted only to support isolated local/test environments.
+## Reproducible Lambda package
 
-## Local validation
+The package contains these paths at its root:
 
-From the repository root in PowerShell:
+- `server/**` from `.output/server`
+- `public/**` from `.output/public`
+- `build-metadata.json` with the intended staging/prod environment and public
+  corpus origin
+- `run.sh`
 
-```powershell
-cfn-lint .\infra\app\app-foundation.cfn.yaml
-```
+`vite.config.ts` pins Nitro to `node-server`; the Lovable wrapper's default
+`cloudflare-module` output does not start a Node listener and is not valid for
+Lambda Web Adapter. The Node packager verifies that preset, sorts entries,
+fixes ZIP timestamps, sets ordinary files to Unix `0644`, sets `run.sh` to Unix
+`0755`, and rejects CRLF in `run.sh`. The source file is also pinned to LF in
+`.gitattributes`.
 
-If `cfn-lint` is not installed, an isolated invocation avoids changing
-`package.json`:
-
-```powershell
-pipx run cfn-lint .\infra\app\app-foundation.cfn.yaml
-```
-
-For organization-specific policy checks, point CloudFormation Guard at the
-approved rule directory:
-
-```powershell
-if (-not $env:CFN_GUARD_RULES) {
-  throw "Set CFN_GUARD_RULES to the approved cfn-guard rule directory."
-}
-cfn-guard validate `
-  --rules $env:CFN_GUARD_RULES `
-  --data .\infra\app\app-foundation.cfn.yaml
-```
-
-The AWS CLI validation API is read-only but still requires AWS credentials. It
-was not invoked while producing this deliverable:
-
-```powershell
-aws cloudformation validate-template `
-  --region us-east-1 `
-  --template-body file://infra/app/app-foundation.cfn.yaml
-```
-
-## Create and inspect a non-executed change set
-
-Creating a change set writes CloudFormation control-plane state but does not
-create the template resources. It is included for a later, authorized review
-session. It was not run while producing this deliverable.
-
-Set explicit values first:
+From the repository root:
 
 ```powershell
-$env:LITAI_AWS_REGION = "us-east-1"
-$env:LITAI_NAME_PREFIX = "litai"
-$env:LITAI_ENVIRONMENT = "staging"
-$env:LITAI_APP_ORIGIN = "https://staging.example.com"
-$env:LITAI_CALLBACK_URL = "https://staging.example.com/auth/callback"
-$env:LITAI_LOGOUT_URL = "https://staging.example.com/"
+$env:LITAI_BUILD_ENVIRONMENT = "staging"
+$env:VITE_CORPUS_URL = "https://replace-with-staging-corpus.example"
+$env:VITE_CORPUS_KEY = "replace-with-public-publishable-key"
+node scripts/build-lambda.mjs
+bun run package:lambda
 ```
 
-Create a `CREATE` change set for a stack name that does not already exist:
+Or build and package together:
 
 ```powershell
-$changeSetName = "app-foundation-" + (Get-Date -Format "yyyyMMddHHmmss")
-
-aws cloudformation create-change-set `
-  --region $env:LITAI_AWS_REGION `
-  --stack-name "$($env:LITAI_NAME_PREFIX)-$($env:LITAI_ENVIRONMENT)-app-foundation" `
-  --change-set-name $changeSetName `
-  --change-set-type CREATE `
-  --description "Review only; new environment app foundation" `
-  --template-body file://infra/app/app-foundation.cfn.yaml `
-  --capabilities CAPABILITY_NAMED_IAM `
-  --parameters `
-    "ParameterKey=NamePrefix,ParameterValue=$env:LITAI_NAME_PREFIX" `
-    "ParameterKey=Environment,ParameterValue=$env:LITAI_ENVIRONMENT" `
-    "ParameterKey=DeploymentIntent,ParameterValue=new-environment" `
-    "ParameterKey=AppOrigin,ParameterValue=$env:LITAI_APP_ORIGIN" `
-    "ParameterKey=CognitoCallbackUrl,ParameterValue=$env:LITAI_CALLBACK_URL" `
-    "ParameterKey=CognitoLogoutUrl,ParameterValue=$env:LITAI_LOGOUT_URL"
+$env:LITAI_BUILD_ENVIRONMENT = "staging"
+$env:VITE_CORPUS_URL = "https://replace-with-staging-corpus.example"
+$env:VITE_CORPUS_KEY = "replace-with-public-publishable-key"
+bun run build:lambda
 ```
 
-Wait for CloudFormation to finish preparing the review artifact, then inspect
-all replacements, security-sensitive changes, and IAM changes:
+Only `build:lambda` is valid for a deployment artifact. It requires explicit
+staging/prod browser corpus settings and prevents `vite.config.ts` from loading
+the local `.env`. `package:lambda` then requires the controlled build metadata,
+checks the 200 MiB uncompressed application budget, and reopens the ZIP to
+verify its contents and executable mode.
+At cold start, `run.sh` rejects an artifact whose build environment does not
+match the runtime stack's `APP_ENVIRONMENT`.
+
+The ignored output is `infra/app/artifacts/app-runtime.zip`. The script prints
+its byte count and SHA-256. A later authorized process must upload that exact
+file to the foundation artifact bucket and record the returned S3 `VersionId`.
+The runtime template requires the bucket, key, and version so code deployment is
+immutable and reproducible.
+
+## Sanitized parameter examples
+
+The examples contain invalid account IDs, replacement markers, and `.invalid`
+hosts. They are review inputs, not deployment-ready values:
+
+- `parameters/staging-foundation.parameters.json`
+- `parameters/staging-runtime.parameters.json`
+- `parameters/prod-foundation.parameters.json`
+- `parameters/prod-runtime.parameters.json`
+
+Replace every `replace-with-*`, every `000000000000`, and every `.invalid`
+host. The runtime template pins the official arm64 and x86_64 adapter layer ARNs
+for `us-east-1`; changing the adapter version requires a reviewed template
+change.
+
+Because the first CloudFront hostname is not known until the runtime exists, a
+greenfield staging rollout needs a reviewed two-step callback update:
+
+1. Create the staging foundation with temporary HTTPS `.invalid` callback,
+   logout, and app-origin values.
+2. Create the staging runtime from an immutable artifact version.
+3. Use `CloudFrontUrl` to update the foundation callback/logout/app-origin
+   values, then pass those exact updated outputs to the runtime.
+4. Complete Cognito cookie, callback, SSE, origin-gate, WAF, and rollback tests.
+5. Repeat for prod only after staging acceptance.
+
+Those are sequencing notes only. This repository runbook does not authorize the
+AWS operations.
+
+Secrets Manager rotation does not by itself refresh values copied into Lambda,
+API Gateway, or CloudFront properties. Rotate the origin key with an overlap
+window and a coordinated runtime-stack update; do not remove the previous
+working value until the new distribution and API key have propagated.
+
+## Local validation only
+
+These commands do not call AWS:
 
 ```powershell
-aws cloudformation wait change-set-create-complete `
-  --region $env:LITAI_AWS_REGION `
-  --stack-name "$($env:LITAI_NAME_PREFIX)-$($env:LITAI_ENVIRONMENT)-app-foundation" `
-  --change-set-name $changeSetName
+cfn-lint `
+  .\infra\app\app-foundation.cfn.yaml `
+  .\infra\app\app-runtime.cfn.yaml `
+  .\db\kb\infra\kb-aurora.cfn.yaml
 
-aws cloudformation describe-change-set `
-  --region $env:LITAI_AWS_REGION `
-  --stack-name "$($env:LITAI_NAME_PREFIX)-$($env:LITAI_ENVIRONMENT)-app-foundation" `
-  --change-set-name $changeSetName `
-  --query "{Status:Status,Reason:StatusReason,Changes:Changes[*].ResourceChange}"
+node --experimental-strip-types --test `
+  .\src\lib\auth\production-config.test.ts `
+  .\src\lib\auth\production-iac.test.ts `
+  .\src\lib\kb\aurora.server.test.ts
+
+bun run test
+bunx tsc --noEmit
+bun run build
+bun run package:lambda
+git diff --check
 ```
 
-Delete the unexecuted review artifact after review:
+Do not substitute `aws cloudformation validate-template`; it still invokes an
+AWS API. Do not upload the generated ZIP during local validation.
 
-```powershell
-aws cloudformation delete-change-set `
-  --region $env:LITAI_AWS_REGION `
-  --stack-name "$($env:LITAI_NAME_PREFIX)-$($env:LITAI_ENVIRONMENT)-app-foundation" `
-  --change-set-name $changeSetName
-```
+Before any separately authorized deployment review, also verify:
 
-There is intentionally no `execute-change-set` command in this runbook.
-
-Before any authorized deployment, also review:
-
-- The CloudFormation execution role's permissions for KMS, IAM, DynamoDB, S3,
-  Cognito, Logs, and CloudWatch.
-- Globally unique bucket and Cognito domain names.
-- HTTPS callback/logout/origin values and Cognito sign-up/MFA policy.
-- Exact Bedrock model, inference-profile, RDS cluster, secret, and external KMS
-  ARNs.
-- Retention costs, S3 request-metrics costs, alarm SNS routing, backup
-  requirements, and recovery tests.
-- The public ingress stack's WAF association and rate-limit policy.
+- The target is a new staging or prod stack name and no parameter contains a
+  development physical name.
+- All producer ARNs come from the intended environment and account.
+- The CloudFormation execution role can read the versioned artifact and resolve
+  only the origin-access and corpus service secrets, including their KMS keys.
+- The pinned Lambda Web Adapter owner/version and selected architecture.
+- The selected API Gateway integration timeout, its effect on regional account
+  throttling, and the regional account logging role.
+- Cognito callback/logout URLs exactly match the CloudFront hostname.
+- The managed CloudFront policy IDs still identify CachingDisabled,
+  AllViewerExceptHostHeader, and CachingOptimized.
+- WAF false-positive behavior for legal-document uploads and authenticated APIs.
+- Alarm routing, reserved concurrency, cost, recovery, and rollback procedures.

@@ -96,6 +96,22 @@ export function loadS3Config(env: EnvSource = runtimeEnv()): {
   };
 }
 
+export type KbConfig = {
+  clusterArn: string;
+  secretArn: string;
+  database: string;
+  region: string;
+};
+
+export function loadKbConfig(env: EnvSource = runtimeEnv()): KbConfig {
+  return {
+    clusterArn: envOrDevDefault("KB_CLUSTER_ARN", "", env),
+    secretArn: envOrDevDefault("KB_SECRET_ARN", "", env),
+    database: envOrDevDefault("KB_DATABASE", "", env),
+    region: envOrDevDefault("AWS_REGION", "us-east-1", env),
+  };
+}
+
 export function loadCorpusConfig(env: EnvSource = runtimeEnv()): {
   url: string;
   key: string;

@@ -13,6 +13,7 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 // DOCKETBIRD_API_KEY then wins over .env and DocketBird returns 401.
 // Match the pipeline scripts: .env is the local source of truth.
 function applyLocalEnv() {
+  if (process.env["LITAI_LAMBDA_BUILD"] === "true") return;
   const path = resolve(process.cwd(), ".env");
   if (!existsSync(path)) return;
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
@@ -32,6 +33,11 @@ export default defineConfig({
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
     server: { entry: "server" },
+  },
+  // Lambda Web Adapter needs a Node process that listens on PORT. The Lovable
+  // wrapper otherwise defaults production builds to cloudflare-module.
+  nitro: {
+    preset: "node-server",
   },
   vite: {
     ssr: { external: ["node:sqlite"] },

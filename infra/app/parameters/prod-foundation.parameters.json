@@ -1,0 +1,62 @@
+[
+  {
+    "ParameterKey": "NamePrefix",
+    "ParameterValue": "litai"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "prod"
+  },
+  {
+    "ParameterKey": "DeploymentIntent",
+    "ParameterValue": "new-environment"
+  },
+  {
+    "ParameterKey": "AppOrigin",
+    "ParameterValue": "https://prod.invalid"
+  },
+  {
+    "ParameterKey": "CognitoCallbackUrl",
+    "ParameterValue": "https://prod.invalid/auth/callback"
+  },
+  {
+    "ParameterKey": "CognitoLogoutUrl",
+    "ParameterValue": "https://prod.invalid/"
+  },
+  {
+    "ParameterKey": "AllowSelfSignUp",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "EnableAdminGroup",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "365"
+  },
+  {
+    "ParameterKey": "BedrockModelResourceArns",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:000000000000:inference-profile/replace-with-profile,arn:aws:bedrock:us-east-1::foundation-model/replace-with-model"
+  },
+  {
+    "ParameterKey": "BedrockRerankResourceArns",
+    "ParameterValue": "arn:aws:bedrock:us-east-1::foundation-model/replace-with-rerank-model"
+  },
+  {
+    "ParameterKey": "BdaProjectArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:000000000000:data-automation-project/replace-with-project-id"
+  },
+  {
+    "ParameterKey": "BdaProfileArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:000000000000:data-automation-profile/us.data-automation-v1"
+  },
+  {
+    "ParameterKey": "AgentCoreGatewayArn",
+    "ParameterValue": "arn:aws:bedrock-agentcore:us-east-1:000000000000:gateway/replace-with-gateway-id"
+  },
+  {
+    "ParameterKey": "AgentCoreCodeInterpreterResourceArn",
+    "ParameterValue": "arn:aws:bedrock-agentcore:us-east-1:aws:code-interpreter/aws.codeinterpreter.v1"
+  }
+]

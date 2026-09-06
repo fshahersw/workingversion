@@ -1,0 +1,142 @@
+[
+  {
+    "ParameterKey": "NamePrefix",
+    "ParameterValue": "litai"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "staging"
+  },
+  {
+    "ParameterKey": "DeploymentIntent",
+    "ParameterValue": "new-environment"
+  },
+  {
+    "ParameterKey": "ApiGatewayAccountLoggingMode",
+    "ParameterValue": "preconfigured-outside-this-stack"
+  },
+  {
+    "ParameterKey": "ArtifactBucketName",
+    "ParameterValue": "litai-staging-000000000000-artifacts"
+  },
+  {
+    "ParameterKey": "ArtifactObjectKey",
+    "ParameterValue": "releases/replace-with-sha256/app-runtime.zip"
+  },
+  {
+    "ParameterKey": "ArtifactObjectVersion",
+    "ParameterValue": "replace-with-s3-version-id"
+  },
+  {
+    "ParameterKey": "Architecture",
+    "ParameterValue": "arm64"
+  },
+  {
+    "ParameterKey": "AppKmsKeyArn",
+    "ParameterValue": "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000000"
+  },
+  {
+    "ParameterKey": "AppAccessPolicyArn",
+    "ParameterValue": "arn:aws:iam::000000000000:policy/lit-ai/staging/litai-staging-app-access"
+  },
+  {
+    "ParameterKey": "DynamoTableName",
+    "ParameterValue": "litai-staging-app"
+  },
+  {
+    "ParameterKey": "AppDataBucketName",
+    "ParameterValue": "litai-staging-000000000000-us-east-1-data"
+  },
+  {
+    "ParameterKey": "OriginAccessSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:000000000000:secret:litai/staging/cloudfront-origin-replace"
+  },
+  {
+    "ParameterKey": "CognitoRegion",
+    "ParameterValue": "us-east-1"
+  },
+  {
+    "ParameterKey": "CognitoUserPoolId",
+    "ParameterValue": "us-east-1_REPLACE"
+  },
+  {
+    "ParameterKey": "CognitoClientId",
+    "ParameterValue": "replacewithclientid"
+  },
+  {
+    "ParameterKey": "CognitoDomain",
+    "ParameterValue": "litai-staging-000000000000.auth.us-east-1.amazoncognito.com"
+  },
+  {
+    "ParameterKey": "CognitoRedirectUri",
+    "ParameterValue": "https://replace-with-distribution.cloudfront.net/auth/callback"
+  },
+  {
+    "ParameterKey": "CognitoLogoutUri",
+    "ParameterValue": "https://replace-with-distribution.cloudfront.net/"
+  },
+  {
+    "ParameterKey": "KbAccessPolicyArn",
+    "ParameterValue": "arn:aws:iam::000000000000:policy/replace-with-kb-app-access"
+  },
+  {
+    "ParameterKey": "KbClusterArn",
+    "ParameterValue": "arn:aws:rds:us-east-1:000000000000:cluster:replace-with-kb-cluster"
+  },
+  {
+    "ParameterKey": "KbSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:000000000000:secret:replace-with-kb-app-secret"
+  },
+  {
+    "ParameterKey": "KbDatabase",
+    "ParameterValue": "kb"
+  },
+  {
+    "ParameterKey": "BedrockRegion",
+    "ParameterValue": "us-east-1"
+  },
+  {
+    "ParameterKey": "BdaProjectArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:000000000000:data-automation-project/replace-with-project-id"
+  },
+  {
+    "ParameterKey": "BdaProfileArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:000000000000:data-automation-profile/us.data-automation-v1"
+  },
+  {
+    "ParameterKey": "AgentCoreGatewayUrl",
+    "ParameterValue": "https://replace-with-gateway-id.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+  },
+  {
+    "ParameterKey": "AgentCoreSearchTool",
+    "ParameterValue": "general___WebSearch"
+  },
+  {
+    "ParameterKey": "AgentCoreCodeInterpreterId",
+    "ParameterValue": "aws.codeinterpreter.v1"
+  },
+  {
+    "ParameterKey": "CorpusUrl",
+    "ParameterValue": "https://corpus.invalid"
+  },
+  {
+    "ParameterKey": "CorpusPublishableKey",
+    "ParameterValue": "replace-with-public-publishable-key"
+  },
+  {
+    "ParameterKey": "CorpusServiceSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:000000000000:secret:replace-with-runtime-secrets"
+  },
+  {
+    "ParameterKey": "ApiIntegrationTimeoutMilliseconds",
+    "ParameterValue": "300000"
+  },
+  {
+    "ParameterKey": "CloudFrontPriceClass",
+    "ParameterValue": "PriceClass_100"
+  },
+  {
+    "ParameterKey": "WafRateLimit",
+    "ParameterValue": "2000"
+  }
+]

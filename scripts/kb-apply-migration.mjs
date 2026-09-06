@@ -11,13 +11,14 @@
 //
 // Usage (from repo root, with AWS_PROFILE + AWS_REGION exported):
 //   node scripts/kb-apply-migration.mjs --dry-run           # parse only, no AWS
-//   KB_CLUSTER_ARN=... KB_APP_SECRET_ARN=... node scripts/kb-apply-migration.mjs
+//   KB_CLUSTER_ARN=... KB_SECRET_ARN=... node scripts/kb-apply-migration.mjs
 //
 // Env:
 //   KB_CLUSTER_ARN        (required for a real run) Aurora cluster ARN
 //   KB_DATABASE           default "kb"
 //   KB_MASTER_SECRET_ARN  optional; auto-resolved from the cluster if unset
-//   KB_APP_SECRET_ARN     optional; if set, sets kb_app password + smoke test
+//   KB_SECRET_ARN          optional; if set, sets kb_app password + smoke test
+//   KB_APP_SECRET_ARN      deprecated fallback for KB_SECRET_ARN
 //   AWS_REGION            default "us-east-1"
 // ============================================================================
 import { readFileSync } from "node:fs";
@@ -167,7 +168,8 @@ async function main() {
   }
   console.log("Schema applied.");
 
-  const appSecretArn = process.env.KB_APP_SECRET_ARN;
+  const appSecretArn =
+    process.env.KB_SECRET_ARN || process.env.KB_APP_SECRET_ARN;
   if (appSecretArn) {
     const raw = aws([
       "secretsmanager",

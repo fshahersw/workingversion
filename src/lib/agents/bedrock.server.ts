@@ -1,9 +1,9 @@
 // ============================================================================
 // AWS Bedrock client (server-only) — NVIDIA Nemotron for the research loop.
 //
-// Uses Bedrock's provider-agnostic `converse` API over raw HTTPS with the
-// bearer-token auth mode (AWS_BEARER_TOKEN_BEDROCK), so no AWS SDK, no SigV4
-// and no IAM setup are needed in the worker runtime.
+// Uses Bedrock's provider-agnostic `converse` API over raw HTTPS with SigV4
+// signing and the default AWS credential chain. The runtime role therefore
+// needs scoped Bedrock model-invocation permissions.
 //
 // Exposes the same shapes as fireworks.server.ts so the orchestrator can swap
 // providers without touching tools.server.ts or the SSE emitter.

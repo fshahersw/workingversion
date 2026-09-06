@@ -1,11 +1,18 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Lit AI application-layer foundation for a new environment. Creates a
-  DynamoDB single table, private S3 data bucket, customer-managed KMS key,
-  Cognito OIDC/PKCE resources, scoped application managed policy, and baseline
-  CloudWatch observability. This template does not adopt existing resources.
+  DynamoDB single table, private S3 data and deployment-artifact buckets,
+  customer-managed KMS key, Cognito OIDC/PKCE resources, scoped application
+  managed policy, origin-access secret, and baseline CloudWatch observability.
+  This template does not adopt existing resources.
 
 Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    why: Own retained data, identity, encryption, and deployment artifacts for one new environment.
+    must:
+      - Never import, reference by physical name, or adopt existing development resources.
   DeploymentBoundary:
     ExistingResources: >
       Existing resources are not imported or adopted by this template. Use a
@@ -36,6 +43,7 @@ Metadata:
         Parameters:
           - KmsDeletionWindowInDays
           - NoncurrentVersionExpirationDays
+          - ArtifactNoncurrentVersionExpirationDays
           - IncompleteUploadExpirationDays
           - LogRetentionDays
           - AlarmTopicArn
@@ -44,6 +52,10 @@ Metadata:
         Parameters:
           - BedrockModelResourceArns
           - BedrockRerankResourceArns
+          - BdaProjectArn
+          - BdaProfileArn
+          - AgentCoreGatewayArn
+          - AgentCoreCodeInterpreterResourceArn
           - RdsClusterArn
           - DatabaseSecretArns
           - DatabaseSecretKmsKeyArns
@@ -52,8 +64,12 @@ Metadata:
         default: Confirm this is a new environment
       BedrockModelResourceArns:
         default: Bedrock model and inference-profile ARNs
+      BdaProjectArn:
+        default: Bedrock Data Automation project ARN
+      AgentCoreGatewayArn:
+        default: AgentCore gateway ARN
       DatabaseSecretKmsKeyArns:
-        default: KMS keys protecting database secrets
+        default: KMS keys protecting non-KB database secrets
 
 Parameters:
   NamePrefix:
@@ -68,13 +84,10 @@ Parameters:
 
   Environment:
     Type: String
-    MinLength: 3
-    MaxLength: 10
-    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
-    ConstraintDescription: >
-      Use 3-10 lowercase letters, numbers, or hyphens; start with a letter and
-      end with a letter or number.
-    Description: New environment identifier, such as test, staging, or prod.
+    AllowedValues:
+      - staging
+      - prod
+    Description: New greenfield environment; staging must be verified before prod.
 
   DeploymentIntent:
     Type: String
@@ -141,6 +154,15 @@ Parameters:
     MaxValue: 30
     Description: Days before S3 aborts incomplete multipart uploads.
 
+  ArtifactNoncurrentVersionExpirationDays:
+    Type: Number
+    Default: 365
+    MinValue: 30
+    MaxValue: 3650
+    Description: >
+      Days to retain superseded deployment ZIP versions. Current versions are
+      never expired by this template.
+
   LogRetentionDays:
     Type: Number
     Default: 30
@@ -189,19 +211,55 @@ Parameters:
     ConstraintDescription: Supply comma-delimited ARNs without spaces, or leave empty.
     Description: Optional comma-delimited exact Bedrock reranking model ARNs.
 
+  BdaProjectArn:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^arn:[^:]+:bedrock:[^:]+:[0-9]{12}:data-automation-project/[A-Za-z0-9_-]+$'
+    ConstraintDescription: Supply one exact Bedrock Data Automation project ARN or leave empty.
+    Description: >
+      Exact BDA project ARN. BdaProjectArn and BdaProfileArn must both be
+      supplied to enable runtime BDA permissions.
+
+  BdaProfileArn:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^arn:[^:]+:bedrock:[^:]+:[^:]*:data-automation-profile/[A-Za-z0-9._/-]+$'
+    ConstraintDescription: Supply one exact Bedrock Data Automation profile ARN or leave empty.
+    Description: >
+      Exact BDA profile ARN. BdaProjectArn and BdaProfileArn must both be
+      supplied to enable runtime BDA permissions.
+
+  AgentCoreGatewayArn:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^arn:[^:]+:bedrock-agentcore:[^:]+:[0-9]{12}:gateway/[A-Za-z0-9_-]+$'
+    ConstraintDescription: Supply one exact AgentCore gateway ARN or leave empty.
+    Description: Exact AgentCore gateway ARN permitted for InvokeGateway.
+
+  AgentCoreCodeInterpreterResourceArn:
+    Type: String
+    Default: ""
+    AllowedPattern: '^$|^arn:[^:]+:bedrock-agentcore:[^:]+:(aws|[0-9]{12}):(code-interpreter|code-interpreter-custom)/[A-Za-z0-9._/-]+$'
+    ConstraintDescription: Supply one exact built-in or custom AgentCore Code Interpreter ARN or leave empty.
+    Description: Exact AgentCore Code Interpreter resource used by the application.
+
   RdsClusterArn:
     Type: String
     Default: ""
     AllowedPattern: "^$|^arn:[^:]+:rds:[^:]+:[0-9]{12}:cluster:.+$"
     ConstraintDescription: Supply an Aurora DB cluster ARN or leave empty.
-    Description: Optional existing Aurora cluster ARN permitted for the RDS Data API.
+    Description: >
+      Optional non-KB Aurora cluster ARN permitted for the RDS Data API.
+      The KB producer stack owns and outputs its separate managed policy.
 
   DatabaseSecretArns:
     Type: String
     Default: ""
     AllowedPattern: "^$|^arn:[^\\s,]+(,arn:[^\\s,]+)*$"
     ConstraintDescription: Supply comma-delimited ARNs without spaces, or leave empty.
-    Description: Optional comma-delimited exact Secrets Manager secret ARNs readable by the app.
+    Description: >
+      Optional comma-delimited exact non-KB Secrets Manager secret ARNs
+      readable by the app. Do not duplicate the KB producer policy here.
 
   DatabaseSecretKmsKeyArns:
     Type: String
@@ -211,6 +269,19 @@ Parameters:
     Description: >
       Optional comma-delimited customer-managed KMS key ARNs protecting the
       database secrets. Leave empty for secrets using the AWS managed key.
+
+Rules:
+  BdaPermissionsArePaired:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref BdaProjectArn, ""]
+            - !Equals [!Ref BdaProfileArn, ""]
+          - !And
+            - !Not [!Equals [!Ref BdaProjectArn, ""]]
+            - !Not [!Equals [!Ref BdaProfileArn, ""]]
+        AssertDescription: >
+          Supply both BdaProjectArn and BdaProfileArn, or leave both empty.
 
 Conditions:
   CreateAdminGroup: !Equals
@@ -231,6 +302,23 @@ Conditions:
     - !Equals
       - !Ref BedrockRerankResourceArns
       - ""
+  HasBda: !And
+    - !Not
+      - !Equals
+        - !Ref BdaProjectArn
+        - ""
+    - !Not
+      - !Equals
+        - !Ref BdaProfileArn
+        - ""
+  HasAgentCoreGateway: !Not
+    - !Equals
+      - !Ref AgentCoreGatewayArn
+      - ""
+  HasAgentCoreCodeInterpreter: !Not
+    - !Equals
+      - !Ref AgentCoreCodeInterpreterResourceArn
+      - ""
   HasRdsCluster: !Not
     - !Equals
       - !Ref RdsClusterArn
@@ -249,6 +337,12 @@ Resources:
     Type: AWS::KMS::Key
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Encrypt all retained application data, artifacts, secrets, and owned logs.
+        must:
+          - Rotation stays enabled and replacement or stack deletion must retain the key.
+        mutable: change-with-constraints
     Properties:
       Description: !Sub "${NamePrefix}-${Environment} application data encryption"
       EnableKeyRotation: true
@@ -302,6 +396,12 @@ Resources:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Persist application state with recovery and tenant-aware key conventions.
+        must:
+          - Keep deletion protection, PITR, and customer-managed KMS encryption enabled.
+        mutable: review-required
     Properties:
       TableName: !Sub "${NamePrefix}-${Environment}-app"
       BillingMode: PAY_PER_REQUEST
@@ -364,6 +464,12 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Store private source documents and generated application artifacts.
+        must:
+          - Block public access, require TLS, retain versions, and encrypt with the application key.
+        mutable: change-with-constraints
     Properties:
       BucketName: !Sub "${NamePrefix}-${Environment}-${AWS::AccountId}-${AWS::Region}-data"
       BucketEncryption:
@@ -441,10 +547,111 @@ Resources:
               Bool:
                 "aws:SecureTransport": "false"
 
+  DeploymentArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Hold immutable, version-addressed Lambda deployment ZIPs built locally.
+        must:
+          - Never be public; require TLS, versioning, and customer-managed KMS encryption.
+        mutable: change-with-constraints
+    Properties:
+      BucketName: !Sub "${NamePrefix}-${Environment}-${AWS::AccountId}-artifacts"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt AppKmsKey.Arn
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: !Ref IncompleteUploadExpirationDays
+          - Id: ExpireSupersededArtifacts
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref ArtifactNoncurrentVersionExpirationDays
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub "${NamePrefix}-${Environment}-deployment-artifacts"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  DeploymentArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref DeploymentArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DeploymentArtifactBucket.Arn
+              - !Sub "${DeploymentArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  CloudFrontOriginAccessSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Gate the Regional API origin so viewers cannot bypass CloudFront and WAF.
+        must:
+          - Generate the originKey value and expose only the secret ARN across stacks.
+        mutable: review-required
+    Properties:
+      Name: !Sub "${NamePrefix}/${Environment}/cloudfront-origin"
+      Description: CloudFront-to-API-Gateway origin verification value.
+      KmsKeyId: !GetAtt AppKmsKey.Arn
+      GenerateSecretString:
+        SecretStringTemplate: '{"purpose":"cloudfront-origin-access"}'
+        GenerateStringKey: originKey
+        PasswordLength: 48
+        ExcludePunctuation: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
   AppUserPool:
     Type: AWS::Cognito::UserPool
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Own the environment-specific OIDC identity boundary for browser sessions.
+        must:
+          - Keep deletion protection, strong passwords, PKCE, and token revocation enabled.
+        mutable: review-required
     Properties:
       UserPoolName: !Sub "${NamePrefix}-${Environment}"
       DeletionProtection: ACTIVE
@@ -581,6 +788,12 @@ Resources:
 
   AppAccessPolicy:
     Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Publish exact app-data and AI-service permissions for the runtime role.
+        must:
+          - KB permissions remain owned by the separate KB stack policy.
+        mutable: review-required
     Properties:
       ManagedPolicyName: !Sub "${NamePrefix}-${Environment}-app-access"
       Path: !Sub "/lit-ai/${Environment}/"
@@ -660,13 +873,61 @@ Resources:
             - !Ref AWS::NoValue
           - !If
             - HasBedrockRerankModels
-            - Sid: BedrockRerank
+            - Sid: BedrockRerankApi
               Effect: Allow
               Action:
                 - bedrock:Rerank
+              # Rerank has no resource-level IAM type; AWS requires Resource "*".
+              Resource: "*"
+            - !Ref AWS::NoValue
+          - !If
+            - HasBedrockRerankModels
+            - Sid: BedrockRerankModel
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
               Resource: !Split
                 - ","
                 - !Ref BedrockRerankResourceArns
+            - !Ref AWS::NoValue
+          - !If
+            - HasBda
+            - Sid: BedrockDataAutomationInvoke
+              Effect: Allow
+              Action:
+                - bedrock:InvokeDataAutomationAsync
+              Resource:
+                - !Ref BdaProjectArn
+                - !Ref BdaProfileArn
+            - !Ref AWS::NoValue
+          - !If
+            - HasBda
+            - Sid: BedrockDataAutomationStatus
+              Effect: Allow
+              Action:
+                - bedrock:GetDataAutomationStatus
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:data-automation-invocation/*"
+            - !Ref AWS::NoValue
+          - !If
+            - HasAgentCoreGateway
+            - Sid: AgentCoreGatewayInvoke
+              Effect: Allow
+              Action:
+                - bedrock-agentcore:InvokeGateway
+              Resource:
+                - !Ref AgentCoreGatewayArn
+            - !Ref AWS::NoValue
+          - !If
+            - HasAgentCoreCodeInterpreter
+            - Sid: AgentCoreCodeInterpreterSessions
+              Effect: Allow
+              Action:
+                - bedrock-agentcore:InvokeCodeInterpreter
+                - bedrock-agentcore:StartCodeInterpreterSession
+                - bedrock-agentcore:StopCodeInterpreterSession
+              Resource:
+                - !Ref AgentCoreCodeInterpreterResourceArn
             - !Ref AWS::NoValue
           - !If
             - HasRdsCluster
@@ -812,6 +1073,20 @@ Outputs:
   S3BucketArn:
     Description: Application data bucket ARN.
     Value: !GetAtt AppDataBucket.Arn
+
+  DeploymentArtifactBucketName:
+    Description: Private versioned bucket for reproducible Lambda deployment ZIPs.
+    Value: !Ref DeploymentArtifactBucket
+
+  DeploymentArtifactBucketArn:
+    Description: ARN of the private deployment artifact bucket.
+    Value: !GetAtt DeploymentArtifactBucket.Arn
+
+  CloudFrontOriginAccessSecretArn:
+    Description: >
+      Secret ARN consumed through CloudFormation dynamic references by the
+      runtime stack; the secret JSON key is originKey.
+    Value: !Ref CloudFrontOriginAccessSecret
 
   KmsKeyArn:
     Description: Customer-managed key used by DynamoDB, S3, and CloudWatch Logs.

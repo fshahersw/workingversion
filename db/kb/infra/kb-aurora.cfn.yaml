@@ -6,6 +6,38 @@ Description: >
   least-privilege app access policy. First app-owned relational/vector store on
   the AWS-native stack. See db/kb/README.md.
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    why: Own the separately deployed Aurora KB data plane and its application access policy.
+    must:
+      - Preserve cluster identifiers, deletion protection, and snapshot retention for the deployed sw-kb stack.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network and engine
+        Parameters:
+          - VpcId
+          - SubnetIds
+          - EngineVersion
+          - KmsKeyId
+      - Label:
+          default: Serverless capacity and retention
+        Parameters:
+          - MinCapacity
+          - MaxCapacity
+          - SecondsUntilAutoPause
+          - BackupRetentionDays
+          - DeletionProtection
+      - Label:
+          default: Observability
+        Parameters:
+          - AlarmTopicArn
+          - CpuAlarmThreshold
+          - DatabaseConnectionsAlarmThreshold
+          - ServerlessCapacityAlarmThreshold
+
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
@@ -16,22 +48,32 @@ Parameters:
   EngineVersion:
     Type: String
     Default: "16.8"
+    AllowedPattern: "^16\\.[0-9]+$"
+    ConstraintDescription: Use an Aurora PostgreSQL 16 minor version.
     Description: Aurora PostgreSQL version (>=16.1 for Data API, >=16.3 for scale-to-0; 16.8 ships pgvector 0.8.x with HNSW).
   MinCapacity:
     Type: Number
     Default: 0
+    MinValue: 0
+    MaxValue: 256
     Description: Serverless v2 min ACU. 0 = auto-pause (dev). Use >=0.5 in prod to avoid the ~15s resume on the first query after idle.
   MaxCapacity:
     Type: Number
     Default: 4
+    MinValue: 1
+    MaxValue: 256
     Description: Serverless v2 max ACU (must be > 0.5).
   SecondsUntilAutoPause:
     Type: Number
     Default: 300
+    MinValue: 300
+    MaxValue: 86400
     Description: Idle seconds before auto-pause when MinCapacity is 0 (300-86400).
   BackupRetentionDays:
     Type: Number
     Default: 7
+    MinValue: 1
+    MaxValue: 35
     Description: Automated backup retention (days).
   DeletionProtection:
     Type: String
@@ -41,10 +83,42 @@ Parameters:
   KmsKeyId:
     Type: String
     Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[A-Fa-f0-9-]+$"
+    ConstraintDescription: Supply a customer-managed KMS key ARN or leave empty.
     Description: Optional customer-managed KMS key ARN for storage + the managed secrets. Empty = the aws/rds and aws/secretsmanager defaults.
+
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:sns:[^:]+:[0-9]{12}:[A-Za-z0-9_-]+$"
+    ConstraintDescription: Supply an SNS topic ARN or leave empty.
+    Description: Optional SNS topic for alarm and recovery actions.
+
+  CpuAlarmThreshold:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 100
+    Description: Writer CPUUtilization percentage that triggers an alarm.
+
+  DatabaseConnectionsAlarmThreshold:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 100000
+    Description: Cluster database connection count that triggers an alarm.
+
+  ServerlessCapacityAlarmThreshold:
+    Type: Number
+    Default: 3.5
+    MinValue: 0.5
+    MaxValue: 256
+    Description: ServerlessDatabaseCapacity ACUs that trigger an alarm.
 
 Conditions:
   UseCmk: !Not [!Equals [!Ref KmsKeyId, ""]]
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+  AutoPauseEnabled: !Equals [!Ref MinCapacity, 0]
 
 Resources:
   KbSubnetGroup:
@@ -52,6 +126,9 @@ Resources:
     Properties:
       DBSubnetGroupDescription: !Sub "${AWS::StackName} KB subnet group"
       SubnetIds: !Ref SubnetIds
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
 
   # No standing ingress: the app reaches the DB over the Data API (an AWS API,
   # not a 5432 connection). To apply the migration from a VPC-connected
@@ -65,11 +142,19 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-kb-sg"
+        - Key: ManagedBy
+          Value: CloudFormation
 
   KbCluster:
     Type: AWS::RDS::DBCluster
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Persist tenant-isolated KB metadata and vectors behind the RDS Data API.
+        must:
+          - Keep the existing identifier, encryption, HTTP endpoint, deletion protection, and snapshot policies.
+        mutable: review-required
     Properties:
       Engine: aurora-postgresql
       EngineVersion: !Ref EngineVersion
@@ -92,22 +177,49 @@ Resources:
       ServerlessV2ScalingConfiguration:
         MinCapacity: !Ref MinCapacity
         MaxCapacity: !Ref MaxCapacity
-        SecondsUntilAutoPause: !Ref SecondsUntilAutoPause
+        SecondsUntilAutoPause: !If
+          - AutoPauseEnabled
+          - !Ref SecondsUntilAutoPause
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Workload
+          Value: knowledge-base
 
   KbWriter:
     Type: AWS::RDS::DBInstance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Provide the single Aurora Serverless v2 writer used by Data API requests.
+        must:
+          - Stay private and attached to the retained KB cluster.
+        mutable: change-with-constraints
     Properties:
       Engine: aurora-postgresql
       DBInstanceClass: db.serverless
       DBClusterIdentifier: !Ref KbCluster
       PubliclyAccessible: false
       PromotionTier: 1
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Workload
+          Value: knowledge-base
 
   # kb_app is the least-privilege role the app connects as (FORCE RLS applies to
   # it). Password generated here; the migration runbook sets the DB role's
   # password to this value (ALTER ROLE kb_app ... PASSWORD).
   KbAppSecret:
     Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Store generated kb_app credentials used by the RDS Data API runtime.
+        must:
+          - Never contain the master credential and never be replaced without coordinating the database role.
+        mutable: review-required
     Properties:
       Name: !Sub "${AWS::StackName}/kb/kb_app"
       Description: KB application role (kb_app) credentials for the RDS Data API.
@@ -117,11 +229,22 @@ Resources:
         GenerateStringKey: password
         PasswordLength: 32
         ExcludePunctuation: true
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Workload
+          Value: knowledge-base
 
   # Attach to the app runtime role. Least privilege: Data API on THIS cluster,
   # read THIS secret only. No master-secret access (admin/migration only).
   KbAppAccessPolicy:
     Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Publish KB-only runtime access without duplicating permissions in the app foundation.
+        must:
+          - Scope Data API and secret reads to this cluster and kb_app secret.
+        mutable: review-required
     Properties:
       ManagedPolicyName: !Sub "${AWS::StackName}-kb-app-access"
       Description: Data API + kb_app secret access for the SeegerWeissAI app runtime.
@@ -142,6 +265,106 @@ Resources:
             Action:
               - secretsmanager:GetSecretValue
             Resource: !Ref KbAppSecret
+          - !If
+            - UseCmk
+            - Sid: KbAppSecretKmsDecrypt
+              Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:DescribeKey
+              Resource:
+                - !Ref KmsKeyId
+              Condition:
+                StringEquals:
+                  "kms:ViaService": !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+            - !Ref AWS::NoValue
+
+  KbCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-kb-writer-cpu"
+      AlarmDescription: Aurora KB writer CPU utilization is sustained above the configured threshold.
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref KbWriter
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: !Ref CpuAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  KbDatabaseConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-kb-connections"
+      AlarmDescription: Aurora KB database connections are sustained above the configured threshold.
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref KbWriter
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: !Ref DatabaseConnectionsAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  KbServerlessCapacityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-kb-serverless-capacity"
+      AlarmDescription: Aurora KB serverless capacity is sustained above the configured ACU threshold.
+      Namespace: AWS/RDS
+      MetricName: ServerlessDatabaseCapacity
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref KbWriter
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: !Ref ServerlessCapacityAlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
 
 Outputs:
   ClusterArn:
@@ -151,6 +374,7 @@ Outputs:
     Description: Writer endpoint (for the one-time migration only).
     Value: !GetAtt KbCluster.Endpoint.Address
   ClusterPort:
+    Description: Aurora PostgreSQL listener port.
     Value: !GetAtt KbCluster.Endpoint.Port
   Database:
     Description: KB_DATABASE
@@ -165,5 +389,5 @@ Outputs:
     Description: Add a temporary 5432 ingress here for the migration, then remove.
     Value: !Ref KbSecurityGroup
   AppAccessPolicyArn:
-    Description: Attach to the app runtime role.
+    Description: Attach this KB-owned managed policy to the app runtime role.
     Value: !Ref KbAppAccessPolicy
