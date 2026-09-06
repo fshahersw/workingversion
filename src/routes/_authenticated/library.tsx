@@ -184,12 +184,23 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
             <p className="text-[11px] text-muted-foreground">
               {w.docCount} doc{w.docCount === 1 ? "" : "s"} · {w.pageCount} pages
               {w.folderId && w.folderId !== "ROOT" ? ` · ${w.folderId}` : ""} · {relative(w.createdAt)}
+              {w.status === "saving"
+                ? " · saving"
+                : w.status === "error"
+                  ? " · save incomplete"
+                  : ""}
             </p>
+            {w.status === "error" && w.errorSummary ? (
+              <p className="mt-0.5 truncate text-[10.5px] text-destructive">
+                {w.errorSummary}
+              </p>
+            ) : null}
           </div>
           <button
             type="button"
             onClick={() => openWorkspace(w.itemId)}
-            className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+            disabled={w.status !== "ready"}
+            className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Open
           </button>

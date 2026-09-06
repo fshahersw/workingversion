@@ -4,11 +4,11 @@
 //  - original bytes live in S3 (optional; uploaded via the presigned flow)
 //  - the record is a DynamoDB library item (type=workspace) with folders (GSI1),
 //    reusing the existing library layer.
-import { ulid } from "ulid";
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 
 import {
   putItem,
+  putItemIfAbsent,
   getItem,
   queryPrefix,
   deleteItem,
@@ -21,6 +21,7 @@ const userPK = (p: string) => `USER#${p}`;
 const itemSK = (id: string) => `ITEM#${id}`;
 
 export type WorkspaceSurface = "workingset" | "deposition" | "review";
+export type WorkspaceStatus = "saving" | "ready" | "error";
 
 export type WorkspaceDoc = {
   docId: string;
@@ -41,11 +42,23 @@ export type WorkspaceSummary = {
   createdAt: string;
   docCount: number;
   pageCount: number;
+  status: WorkspaceStatus;
+  errorSummary?: string;
 };
 
 export type WorkspaceDetail = WorkspaceSummary & { kbWorkspaceId: string; docs: WorkspaceDoc[] };
 
 type PageText = { page: number; text: string };
+
+type WorkspacePayload = {
+  surface: WorkspaceSurface;
+  kbWorkspaceId: string;
+  requestFingerprint?: string;
+  docs: WorkspaceDoc[];
+  cleanupKeys: string[];
+};
+
+const WORKSPACE_STATUSES = new Set<WorkspaceStatus>(["saving", "ready", "error"]);
 
 export function workspacePagesKey(principal: string, docId: string): string {
   return `kb/pages/${principal}/${docId}.json`;
@@ -66,6 +79,39 @@ function requireOwnedStorageKeys(principal: string, keys: Array<string | undefin
   return out;
 }
 
+function safeErrorSummary(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean ? clean.slice(0, 240) : undefined;
+}
+
+function parseWorkspacePayload(row: Record<string, unknown>): WorkspacePayload {
+  let parsed: Partial<WorkspacePayload> = {};
+  try {
+    parsed = JSON.parse((row.workspace as string) || "{}") as Partial<WorkspacePayload>;
+  } catch {
+    parsed = {};
+  }
+  return {
+    surface:
+      (parsed.surface as WorkspaceSurface) ??
+      (row.surface as WorkspaceSurface) ??
+      "workingset",
+    kbWorkspaceId:
+      (parsed.kbWorkspaceId as string) ?? (row.kbWorkspaceId as string) ?? "",
+    requestFingerprint:
+      (parsed.requestFingerprint as string | undefined) ??
+      (row.requestFingerprint as string | undefined),
+    docs: Array.isArray(parsed.docs) ? parsed.docs : [],
+    cleanupKeys: Array.isArray(parsed.cleanupKeys)
+      ? parsed.cleanupKeys.filter((key): key is string => typeof key === "string")
+      : [],
+  };
+}
+
 /** Store one doc's extracted pages as JSON in S3 for pile rehydrate. */
 export async function putWorkspacePages(
   principal: string,
@@ -84,26 +130,42 @@ export async function putWorkspacePages(
   return key;
 }
 
-/** Create a completed workspace record after all document artifacts are saved. */
-export async function saveWorkspace(
+export type WorkspaceReservation = {
+  itemId: string;
+  kbWorkspaceId: string;
+  status: WorkspaceStatus;
+  docs: WorkspaceDoc[];
+};
+
+/**
+ * Reserve the durable record before Aurora/S3 writes. The request id is also
+ * the KB UUID and library item id, so an ambiguous client retry reaches the
+ * same record and workspace partition.
+ */
+export async function reserveWorkspace(
   principal: string,
   args: {
+    requestId: string;
+    requestFingerprint: string;
     name: string;
     surface: WorkspaceSurface;
-    kbWorkspaceId: string;
     folderId?: string;
-    docs: WorkspaceDoc[];
+    cleanupKeys?: string[];
   },
-): Promise<{ itemId: string }> {
-  requireOwnedStorageKeys(
-    principal,
-    args.docs.flatMap((doc) => [doc.pagesKey, doc.bytesKey]),
-  );
-  const itemId = ulid();
+): Promise<WorkspaceReservation> {
+  const itemId = args.requestId;
+  const kbWorkspaceId = args.requestId;
   const now = new Date().toISOString();
   const folderId = args.folderId ?? "ROOT";
-  const pageCount = args.docs.reduce((total, doc) => total + (doc.pageCount || 0), 0);
-  await putItem({
+  const cleanupKeys = requireOwnedStorageKeys(principal, args.cleanupKeys ?? []);
+  const payload: WorkspacePayload = {
+    surface: args.surface,
+    kbWorkspaceId,
+    requestFingerprint: args.requestFingerprint,
+    docs: [],
+    cleanupKeys,
+  };
+  const row = {
     PK: userPK(principal),
     SK: itemSK(itemId),
     entity: "item",
@@ -113,23 +175,114 @@ export async function saveWorkspace(
     name: (args.name || "Untitled workspace").slice(0, 120),
     surface: args.surface,
     folderId,
-    kbWorkspaceId: args.kbWorkspaceId,
-    workspace: JSON.stringify({
-      surface: args.surface,
-      kbWorkspaceId: args.kbWorkspaceId,
-      docs: args.docs,
-    }),
-    docCount: args.docs.length,
-    pageCount,
+    kbWorkspaceId,
+    requestFingerprint: args.requestFingerprint,
+    workspace: JSON.stringify(payload),
+    docCount: 0,
+    pageCount: 0,
+    status: "saving" as const,
     saved: true,
     createdAt: now,
+    updatedAt: now,
     GSI1PK: `FLD#${principal}#${folderId}`,
     GSI1SK: `ITEM#${now}#${itemId}`,
-  });
-  return { itemId };
+  };
+
+  const created = await withRetry(() => putItemIfAbsent(row));
+  if (created) {
+    return { itemId, kbWorkspaceId, status: "saving", docs: [] };
+  }
+
+  const existing = await withRetry(() =>
+    getItem(userPK(principal), itemSK(itemId), { consistent: true }),
+  );
+  if (!existing || existing.type !== "workspace" || existing.owner !== principal) {
+    throw new Error("workspace save reservation is unavailable");
+  }
+  const existingPayload = parseWorkspacePayload(existing);
+  if (
+    existingPayload.kbWorkspaceId !== kbWorkspaceId ||
+    existingPayload.requestFingerprint !== args.requestFingerprint
+  ) {
+    throw new Error("workspace save request does not match its reservation");
+  }
+  const status = WORKSPACE_STATUSES.has(existing.status as WorkspaceStatus)
+    ? (existing.status as WorkspaceStatus)
+    : "ready";
+  if (status !== "ready") {
+    const mergedCleanup = requireOwnedStorageKeys(principal, [
+      ...existingPayload.cleanupKeys,
+      ...cleanupKeys,
+    ]);
+    await withRetry(() =>
+      putItem({
+        ...existing,
+        status: "saving",
+        errorSummary: undefined,
+        updatedAt: new Date().toISOString(),
+        workspace: JSON.stringify({
+          ...existingPayload,
+          cleanupKeys: mergedCleanup,
+        } satisfies WorkspacePayload),
+      }),
+    );
+  }
+  return { itemId, kbWorkspaceId, status, docs: existingPayload.docs };
+}
+
+/** Checkpoint a terminal state after all bounded file tasks settle. */
+export async function finalizeWorkspace(
+  principal: string,
+  args: {
+    itemId: string;
+    requestFingerprint: string;
+    status: "ready" | "error";
+    docs: WorkspaceDoc[];
+    cleanupKeys?: string[];
+    errorSummary?: string;
+  },
+): Promise<void> {
+  const existing = await withRetry(() =>
+    getItem(userPK(principal), itemSK(args.itemId), { consistent: true }),
+  );
+  if (!existing || existing.type !== "workspace" || existing.owner !== principal) {
+    throw new Error("workspace save reservation was not found");
+  }
+  const payload = parseWorkspacePayload(existing);
+  if (payload.requestFingerprint !== args.requestFingerprint) {
+    throw new Error("workspace save request does not match its reservation");
+  }
+  const cleanupKeys = requireOwnedStorageKeys(principal, [
+    ...payload.cleanupKeys,
+    ...(args.cleanupKeys ?? []),
+    ...args.docs.flatMap((doc) => [doc.pagesKey, doc.bytesKey]),
+  ]);
+  const pageCount = args.docs.reduce(
+    (total, doc) => total + (doc.pageCount || 0),
+    0,
+  );
+  await withRetry(() =>
+    putItem({
+      ...existing,
+      status: args.status,
+      errorSummary: safeErrorSummary(args.errorSummary),
+      docCount: args.docs.length,
+      pageCount,
+      updatedAt: new Date().toISOString(),
+      workspace: JSON.stringify({
+        ...payload,
+        docs: args.docs,
+        cleanupKeys,
+      } satisfies WorkspacePayload),
+    }),
+  );
 }
 
 function toSummary(r: Record<string, unknown>): WorkspaceSummary {
+  const status = WORKSPACE_STATUSES.has(r.status as WorkspaceStatus)
+    ? (r.status as WorkspaceStatus)
+    : "ready";
+  const summary = safeErrorSummary(r.errorSummary);
   return {
     itemId: r.itemId as string,
     name: (r.name as string) ?? "Untitled workspace",
@@ -138,6 +291,8 @@ function toSummary(r: Record<string, unknown>): WorkspaceSummary {
     createdAt: (r.createdAt as string) ?? "",
     docCount: typeof r.docCount === "number" ? (r.docCount as number) : 0,
     pageCount: typeof r.pageCount === "number" ? (r.pageCount as number) : 0,
+    status,
+    ...(summary ? { errorSummary: summary } : {}),
   };
 }
 
@@ -155,19 +310,22 @@ export async function listWorkspaces(
 async function getWorkspaceState(
   principal: string,
   itemId: string,
-): Promise<WorkspaceDetail | null> {
-  const row = await getItem(userPK(principal), itemSK(itemId));
+): Promise<{
+  detail: WorkspaceDetail;
+  payload: WorkspacePayload;
+} | null> {
+  const row = await getItem(userPK(principal), itemSK(itemId), {
+    consistent: true,
+  });
   if (!row || row.type !== "workspace" || row.owner !== principal) return null;
-  let docs: WorkspaceDoc[] = [];
-  try {
-    docs = (JSON.parse((row.workspace as string) || "{}") as { docs?: WorkspaceDoc[] }).docs ?? [];
-  } catch {
-    docs = [];
-  }
+  const payload = parseWorkspacePayload(row);
   return {
-    ...toSummary(row),
-    kbWorkspaceId: (row.kbWorkspaceId as string) ?? "",
-    docs,
+    detail: {
+      ...toSummary(row),
+      kbWorkspaceId: payload.kbWorkspaceId,
+      docs: payload.docs,
+    },
+    payload,
   };
 }
 
@@ -176,7 +334,7 @@ export async function getWorkspace(
   principal: string,
   itemId: string,
 ): Promise<WorkspaceDetail | null> {
-  return getWorkspaceState(principal, itemId);
+  return (await getWorkspaceState(principal, itemId))?.detail ?? null;
 }
 
 /** Fetch a doc's stored pages for pile rehydrate (ownership-checked). */
@@ -277,7 +435,7 @@ export async function deleteWorkspace(
 
   const failures: WorkspaceDeleteFailure[] = [];
   let deletedDocuments: Awaited<ReturnType<typeof deleteWorkspaceDocuments>> = [];
-  if (!state.kbWorkspaceId) {
+  if (!state.detail.kbWorkspaceId) {
     failures.push({
       stage: "aurora",
       target: "workspace-data",
@@ -287,7 +445,7 @@ export async function deleteWorkspace(
     try {
       deletedDocuments = await deleteWorkspaceDocuments(
         principal,
-        state.kbWorkspaceId,
+        state.detail.kbWorkspaceId,
       );
     } catch {
       failures.push({
@@ -313,7 +471,8 @@ export async function deleteWorkspace(
     storage.set(key, target);
   };
 
-  for (const doc of state.docs) {
+  for (const key of state.payload.cleanupKeys) addStorageKey(key);
+  for (const doc of state.detail.docs) {
     addStorageKey(doc.pagesKey, "pages");
     addStorageKey(doc.bytesKey, "bytes");
   }

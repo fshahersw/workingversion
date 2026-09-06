@@ -79,6 +79,13 @@ export type KbSaveState = {
   message?: string;
 };
 
+type PendingWorkspaceSave = {
+  key: string;
+  requestId: string;
+  bytesKeyByFileId: Record<string, string>;
+  submitted: boolean;
+};
+
 export type PileState = {
   phase: PilePhase;
   session: PileSession | null;
@@ -141,11 +148,17 @@ function pagesFromExtracted(
   extracted: Extracted[],
   remainingPages: number,
   remainingFiles: number,
-): { files: PileSession["files"]; pages: PilePage[] } {
+): {
+  files: PileSession["files"];
+  pages: PilePage[];
+  sourceFiles: Map<string, File>;
+} {
   const pages: PilePage[] = [];
+  const sourceFiles = new Map<string, File>();
   let remaining = remainingPages;
   const files = extracted.slice(0, remainingFiles).map((x) => {
     const fileId = newId();
+    sourceFiles.set(fileId, x.file);
     const take = x.res.pages.slice(0, Math.max(0, remaining));
     remaining -= take.length;
     let emptyPages = 0;
@@ -156,15 +169,19 @@ function pagesFromExtracted(
     }
     return { id: fileId, name: x.res.name, pageCount: take.length, emptyPages, ocrPages: 0 };
   });
-  return { files, pages };
+  return { files, pages, sourceFiles };
 }
 
 function buildLocalPile(
   extracted: Extracted[],
   instructions?: string,
-): { session: PileSession; pages: PilePage[] } {
+): { session: PileSession; pages: PilePage[]; sourceFiles: Map<string, File> } {
   const now = Date.now();
-  const { files, pages } = pagesFromExtracted(extracted, MAX_PAGES, MAX_FILES);
+  const { files, pages, sourceFiles } = pagesFromExtracted(
+    extracted,
+    MAX_PAGES,
+    MAX_FILES,
+  );
   return {
     session: {
       id: `local-${newId()}`,
@@ -177,6 +194,7 @@ function buildLocalPile(
       structure: null,
     },
     pages,
+    sourceFiles,
   };
 }
 
@@ -394,9 +412,9 @@ export function usePile() {
   const { user } = useAuth();
   const ownerRef = useRef<string | null>(null);
   ownerRef.current = user?.sub ?? null;
-  // Original File blobs kept by name so "Save workspace" can persist the actual
-  // documents (bytes -> S3), not just the extracted text.
-  const filesByNameRef = useRef<Map<string, File>>(new Map());
+  // Original File blobs keyed by generated pile id, so duplicate filenames
+  // cannot attach the wrong bytes to a saved workspace document.
+  const filesByIdRef = useRef<Map<string, File>>(new Map());
   const [state, setState] = useState<PileState>(EMPTY);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -411,6 +429,7 @@ export function usePile() {
     texts: Record<string, string>;
     hits: PileHit[];
   } | null>(null);
+  const pendingWorkspaceSaveRef = useRef<PendingWorkspaceSave | null>(null);
 
   const pile = useCallback((): PileClient => {
     if (!pileRef.current) pileRef.current = new PileClient();
@@ -476,13 +495,14 @@ export function usePile() {
     pileRef.current?.dispose();
     pileRef.current = null;
     lastPackRef.current = null;
+    pendingWorkspaceSaveRef.current = null;
+    filesByIdRef.current.clear();
     if (ownerRef.current) void clearLocalPile(ownerRef.current).catch(() => undefined);
     setState(EMPTY);
   }, []);
 
   const start = useCallback(
     async (incoming: File[], instructions?: string) => {
-      for (const f of incoming) filesByNameRef.current.set(f.name, f);
       const files = incoming.filter((f) => fileKind(f) !== null).slice(0, MAX_FILES);
       if (!files.length) {
         setState({
@@ -499,6 +519,8 @@ export function usePile() {
       structureRef.current = null;
       pileRef.current?.dispose();
       pileRef.current = null;
+      pendingWorkspaceSaveRef.current = null;
+      filesByIdRef.current.clear();
       setState({
         ...EMPTY,
         phase: "reading",
@@ -581,6 +603,7 @@ export function usePile() {
       const built = buildLocalPile(ok, instructions);
       pagesRef.current = built.pages;
       sessionRef.current = built.session;
+      filesByIdRef.current = built.sourceFiles;
       await pile().clear();
       // Feed the worker in slices so the index is usable while the tail is still loading.
       for (let i = 0; i < built.pages.length; i += 500) {
@@ -631,7 +654,6 @@ export function usePile() {
 
   const addFiles = useCallback(
     async (incoming: File[]) => {
-      for (const f of incoming) filesByNameRef.current.set(f.name, f);
       const sess = sessionRef.current;
       if (!sess || !pagesRef.current.length) {
         await start(incoming);
@@ -727,6 +749,9 @@ export function usePile() {
       const room = Math.max(0, MAX_PAGES - pagesRef.current.length);
       const appended = pagesFromExtracted(ok, room, slots);
       pagesRef.current = [...pagesRef.current, ...appended.pages];
+      for (const [fileId, source] of appended.sourceFiles) {
+        filesByIdRef.current.set(fileId, source);
+      }
       const nextSession: PileSession = {
         ...sess,
         files: [...sess.files, ...appended.files],
@@ -1117,6 +1142,27 @@ export function usePile() {
     const pages = pagesRef.current;
     const session = sessionRef.current;
     if (!session?.files.length || !pages.length) return;
+    const attemptKey = JSON.stringify({
+      sessionId: session.id,
+      name: opts.name,
+      folderId: opts.folderId ?? "ROOT",
+      files: session.files.map((file) => [
+        file.id,
+        file.name,
+        file.pageCount,
+      ]),
+      pages: pages.length,
+    });
+    let attempt = pendingWorkspaceSaveRef.current;
+    if (!attempt || attempt.key !== attemptKey) {
+      attempt = {
+        key: attemptKey,
+        requestId: crypto.randomUUID(),
+        bytesKeyByFileId: {},
+        submitted: false,
+      };
+      pendingWorkspaceSaveRef.current = attempt;
+    }
     setState((s) => ({ ...s, kbSave: { status: "saving" } }));
     try {
       const byFile = new Map<string, { page: number; text: string }[]>();
@@ -1136,13 +1182,16 @@ export function usePile() {
       for (const file of session.files) {
         const fp = byFile.get(file.id);
         if (!fp?.length) continue;
-        let bytesKey: string | undefined;
-        const blob = filesByNameRef.current.get(file.name);
-        if (blob) {
+        let bytesKey = attempt.bytesKeyByFileId[file.id];
+        const blob = filesByIdRef.current.get(file.id);
+        if (blob && !bytesKey && !attempt.submitted) {
           try {
             const up = await createUploadFn({ data: { name: file.name, size: blob.size } });
             const put = await fetch(up.uploadUrl, { method: "PUT", body: blob });
-            if (put.ok) bytesKey = up.s3Key;
+            if (put.ok) {
+              bytesKey = up.s3Key;
+              attempt.bytesKeyByFileId[file.id] = bytesKey;
+            }
           } catch {
             /* best-effort byte preservation; pages+chunks still save */
           }
@@ -1155,9 +1204,17 @@ export function usePile() {
           pages: fp,
         });
       }
+      attempt.submitted = true;
       const res = await saveWorkspaceFn({
-        data: { name: opts.name, surface: "workingset", folderId: opts.folderId, files },
+        data: {
+          requestId: attempt.requestId,
+          name: opts.name,
+          surface: "workingset",
+          folderId: opts.folderId,
+          files,
+        },
       });
+      pendingWorkspaceSaveRef.current = null;
       setState((s) => ({
         ...s,
         kbSave: {
@@ -1166,9 +1223,13 @@ export function usePile() {
         },
       }));
     } catch (e) {
+      const message = e instanceof Error ? e.message : "Save failed";
+      if (message.includes("does not match its reservation")) {
+        pendingWorkspaceSaveRef.current = null;
+      }
       setState((s) => ({
         ...s,
-        kbSave: { status: "error", message: e instanceof Error ? e.message : "Save failed" },
+        kbSave: { status: "error", message },
       }));
     }
   }, []);

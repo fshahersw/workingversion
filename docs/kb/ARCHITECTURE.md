@@ -115,20 +115,22 @@ Modules (all under `src/lib/kb/`, pure ones unit-tested):
 
 ## Workspaces (Library integration)
 
-- **`workspace.server.ts`** — `saveWorkspace` (DynamoDB `type=workspace` item with
-  surface + folder + doc manifest + `kbWorkspaceId`), `listWorkspaces` (by surface),
+- **`workspace.server.ts`** — idempotent workspace reservations and terminal
+  `saving|ready|error` state (DynamoDB `type=workspace` item with surface + folder +
+  doc manifest + `kbWorkspaceId`), `listWorkspaces` (by surface),
   `getWorkspace`, `getWorkspacePages` (S3 → rehydrate, ownership-checked),
-  `getWorkspaceDownloadUrl` (bytes), `deleteWorkspace` (cascades S3 pages+bytes),
-  `putWorkspacePages` (pages → S3).
+  `getWorkspaceDownloadUrl` (bytes), `deleteWorkspace` (cascades Aurora chunks,
+  S3 pages+bytes, then metadata), `putWorkspacePages` (pages → S3).
 - **`workspace.functions.ts`** — `createServerFn` (requireAuth) wrappers:
-  `saveWorkspaceFn` (mints `kbWorkspaceId`, ingests each file scoped to it, stores
-  pages, writes record), `listWorkspacesFn`, `getWorkspaceFn`,
+  `saveWorkspaceFn` (reserves the client request UUID, runs three bounded file
+  ingests, stores pages, then finalizes ready/error), `listWorkspacesFn`, `getWorkspaceFn`,
   `getWorkspacePagesFn`, `deleteWorkspaceFn`.
 
 ## Client
 
 - **`src/lib/use-pile.ts`** (the Working Set hook):
-  - retains original `File` blobs by name (`filesByNameRef`) so Save can upload bytes;
+  - retains original `File` blobs by pile file id so duplicate names cannot attach
+    the wrong bytes;
   - `saveWorkspace(name, folderId)` — uploads bytes (library presigned PUT),
     gathers pages, calls `saveWorkspaceFn`; status in `state.kbSave`;
   - `reloadWorkspace(itemId)` — `getWorkspaceFn` + `getWorkspacePagesFn` per doc →
@@ -159,11 +161,12 @@ flow, but valid and retained.)
 SAVE WORKSPACE
   browser (pile pages + File blobs)
     -> presign+PUT bytes to S3 (per file)
-    -> saveWorkspaceFn { name, surface, folderId, files:[{fileName,pages,bytesKey,...}] }
-         mint kbWorkspaceId
-         per file: ingestPages -> chunk -> Titan embed -> Aurora kb.chunks
+    -> saveWorkspaceFn { requestId, name, surface, folderId, files:[...] }
+         reserve DynamoDB item (itemId = kbWorkspaceId = requestId; status=saving)
+         up to 3 files: ingestPages -> chunk -> Titan embed -> Aurora kb.chunks
                    putWorkspacePages -> S3 kb/pages/<sub>/<docId>.json
-         saveWorkspace -> DynamoDB workspace item (manifest + kbWorkspaceId)
+         finalize DynamoDB item status=ready|error + manifest
+         retrying the same browser attempt reuses requestId + document hashes
 
 RELOAD WORKSPACE
   Library "Open" -> sessionStorage[kb:reloadWorkspace]=itemId -> navigate /docs

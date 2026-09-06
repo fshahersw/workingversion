@@ -15,6 +15,7 @@ Session date: 2026-09-06.
 | P5a | Saved-workspace backend (record + pages + per-workspace KB) | done |
 | P5 | Save-as-workspace client flow (name/folder + byte upload) | done |
 | P5b/P5c | Library workspace tabs + one-click reload | done |
+| P5e | Idempotent save reservation + cross-store failure recovery | done |
 | P5d | Shared workspaces / invite | deferred |
 | — | Async BDA lane (SQS/Lambda/EventBridge) | deferred |
 
@@ -58,13 +59,16 @@ Session date: 2026-09-06.
 - **Workspace reframe (P5)**: "save" = a named, reloadable workspace persisting
   chunks + pages + bytes + record, browsed in the Library by surface. Each workspace
   gets its own `kbWorkspaceId` KB partition.
+- **Save request idempotency (P5e)**: the browser keeps one UUID for an ambiguous
+  save/retry; DynamoDB reserves it before ingest, Aurora document hashes make
+  replays non-duplicating, and the record ends in explicit `ready` or `error`.
 - **FORCE RLS + transaction-local `app.user` GUC**: correct isolation over the Data
   API (a transaction is one serialized session; a session-level `SET` could leak).
 
 ## Verification status
 
 - `tsc --noEmit` clean throughout.
-- Test suite: **119/119** passing (`npm test`, node --experimental-strip-types).
+- Test suite: **165/165** passing (`npm test`, node --experimental-strip-types).
   Unit-tested modules: `aurora.server` (helpers + guards), `chunk`, `convert`,
   `embed`, `rerank-parse`, plus the pre-existing pile/agent suites.
 - Live probes: `/api/kb/ingest`, `/api/kb/search`, `/api/kb/documents` all return

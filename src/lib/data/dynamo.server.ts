@@ -39,9 +39,36 @@ export async function putItem(item: Item): Promise<void> {
   await doc().send(new PutCommand({ TableName: tableName(), Item: item }));
 }
 
-export async function getItem(pk: string, sk: string): Promise<Item | undefined> {
+/** Conditional create used by idempotent job/workspace reservations. */
+export async function putItemIfAbsent(item: Item): Promise<boolean> {
+  try {
+    await doc().send(
+      new PutCommand({
+        TableName: tableName(),
+        Item: item,
+        ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)",
+      }),
+    );
+    return true;
+  } catch (error) {
+    if ((error as { name?: string })?.name === "ConditionalCheckFailedException") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export async function getItem(
+  pk: string,
+  sk: string,
+  opts?: { consistent?: boolean },
+): Promise<Item | undefined> {
   const r = await doc().send(
-    new GetCommand({ TableName: tableName(), Key: { PK: pk, SK: sk } }),
+    new GetCommand({
+      TableName: tableName(),
+      Key: { PK: pk, SK: sk },
+      ConsistentRead: opts?.consistent ?? false,
+    }),
   );
   return r.Item;
 }
