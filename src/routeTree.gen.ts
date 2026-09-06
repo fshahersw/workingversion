@@ -39,6 +39,7 @@ import { Route as ApiPileAskRouteImport } from './routes/api/pile/ask'
 import { Route as ApiKbSearchRouteImport } from './routes/api/kb/search'
 import { Route as ApiKbIngestRouteImport } from './routes/api/kb/ingest'
 import { Route as ApiKbDocumentsRouteImport } from './routes/api/kb/documents'
+import { Route as ApiKbAskRouteImport } from './routes/api/kb/ask'
 import { Route as ApiAuthMeRouteImport } from './routes/api/auth/me'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
 import { Route as ApiPublicWebhooksDocketbirdRouteImport } from './routes/api/public/webhooks/docketbird'
@@ -202,6 +203,11 @@ const ApiKbDocumentsRoute = ApiKbDocumentsRouteImport.update({
   path: '/api/kb/documents',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiKbAskRoute = ApiKbAskRouteImport.update({
+  id: '/api/kb/ask',
+  path: '/api/kb/ask',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAuthMeRoute = ApiAuthMeRouteImport.update({
   id: '/api/auth/me',
   path: '/api/auth/me',
@@ -287,6 +293,7 @@ export interface FileRoutesByFullPath {
   '/auth/logout': typeof AuthLogoutRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/kb/ask': typeof ApiKbAskRoute
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
@@ -329,6 +336,7 @@ export interface FileRoutesByTo {
   '/': typeof AuthenticatedIndexRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/kb/ask': typeof ApiKbAskRoute
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
@@ -373,6 +381,7 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/kb/ask': typeof ApiKbAskRoute
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
@@ -417,6 +426,7 @@ export interface FileRouteTypes {
     | '/auth/logout'
     | '/matters/$slug'
     | '/api/auth/me'
+    | '/api/kb/ask'
     | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
@@ -459,6 +469,7 @@ export interface FileRouteTypes {
     | '/'
     | '/matters/$slug'
     | '/api/auth/me'
+    | '/api/kb/ask'
     | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
@@ -502,6 +513,7 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/_authenticated/matters/$slug'
     | '/api/auth/me'
+    | '/api/kb/ask'
     | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
@@ -532,6 +544,7 @@ export interface RootRouteChildren {
   ApiTracesRoute: typeof ApiTracesRoute
   ApiUploadRoute: typeof ApiUploadRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
+  ApiKbAskRoute: typeof ApiKbAskRoute
   ApiKbDocumentsRoute: typeof ApiKbDocumentsRoute
   ApiKbIngestRoute: typeof ApiKbIngestRoute
   ApiKbSearchRoute: typeof ApiKbSearchRoute
@@ -760,6 +773,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiKbDocumentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/kb/ask': {
+      id: '/api/kb/ask'
+      path: '/api/kb/ask'
+      fullPath: '/api/kb/ask'
+      preLoaderRoute: typeof ApiKbAskRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/auth/me': {
       id: '/api/auth/me'
       path: '/api/auth/me'
@@ -928,6 +948,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiTracesRoute: ApiTracesRoute,
   ApiUploadRoute: ApiUploadRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
+  ApiKbAskRoute: ApiKbAskRoute,
   ApiKbDocumentsRoute: ApiKbDocumentsRoute,
   ApiKbIngestRoute: ApiKbIngestRoute,
   ApiKbSearchRoute: ApiKbSearchRoute,

@@ -25,6 +25,8 @@ export type WorkspaceStatus = "saving" | "ready" | "error";
 
 export type WorkspaceDoc = {
   docId: string;
+  /** Browser pile id used only to reconstruct the save response after a retry. */
+  sourceFileId?: string;
   fileName: string;
   pageCount: number;
   chunkCount: number;

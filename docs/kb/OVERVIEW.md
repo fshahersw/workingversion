@@ -55,6 +55,8 @@ uploaded documents:
 - Retrieval: hybrid (pgvector + BM25 RRF) + Bedrock rerank (`cohere.rerank-v3-5:0`).
 - Save-as-workspace (bytes + pages + chunks + record), Library browse by surface,
   one-click reload.
+- Saved Working Set Ask uses server-side hybrid search + rerank; the browser
+  does not repost page text. Unsaved or edited piles stay on the local index.
 - Cold-start retry so the first request after scale-to-0 idle waits instead of
   failing.
 

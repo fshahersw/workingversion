@@ -27,6 +27,11 @@ import {
 } from "@/lib/pile/cite-trust";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
 import {
+  completeSavedWorkspace,
+  selectedWorkspaceDocIds,
+  withoutSavedWorkspace,
+} from "@/lib/pile/kb-binding";
+import {
   clearLocalPile,
   loadLocalPile,
   purgeLegacyPile,
@@ -38,6 +43,10 @@ import {
   getWorkspaceFn,
   getWorkspacePagesFn,
 } from "@/lib/kb/workspace.functions";
+import {
+  streamSavedWorkspaceAsk,
+  type KbAskSource,
+} from "@/lib/kb/kb-client";
 import { createUploadFn } from "@/lib/library/library.functions";
 import {
   PILE_TTL_MS,
@@ -72,6 +81,7 @@ export type AskTurn = {
   id: string;
   query: string;
   answer: string;
+  citePages: CitePage[];
 };
 
 export type KbSaveState = {
@@ -428,8 +438,13 @@ export function usePile() {
     packs: PileFilePack[];
     texts: Record<string, string>;
     hits: PileHit[];
+    kbChunkIds?: number[];
+    kbDocIds?: string[];
+    citePages?: CitePage[];
   } | null>(null);
   const pendingWorkspaceSaveRef = useRef<PendingWorkspaceSave | null>(null);
+  /** Increments whenever the local document/page snapshot changes. */
+  const contentRevisionRef = useRef(0);
 
   const pile = useCallback((): PileClient => {
     if (!pileRef.current) pileRef.current = new PileClient();
@@ -447,6 +462,7 @@ export function usePile() {
       if (cancelled || !saved || pagesRef.current.length) return;
       pagesRef.current = saved.pages;
       sessionRef.current = saved.session;
+      contentRevisionRef.current += 1;
       structureRef.current = saved.session.structure;
       await pile().clear();
       for (let i = 0; i < saved.pages.length; i += 500) {
@@ -491,6 +507,7 @@ export function usePile() {
     askAbort.current = null;
     pagesRef.current = [];
     sessionRef.current = null;
+    contentRevisionRef.current += 1;
     structureRef.current = null;
     pileRef.current?.dispose();
     pileRef.current = null;
@@ -516,6 +533,7 @@ export function usePile() {
       ingestAbort.current = controller;
       pagesRef.current = [];
       sessionRef.current = null;
+      contentRevisionRef.current += 1;
       structureRef.current = null;
       pileRef.current?.dispose();
       pileRef.current = null;
@@ -629,6 +647,7 @@ export function usePile() {
           signal: controller.signal,
           step,
         });
+        contentRevisionRef.current += 1;
         sessionRef.current = next;
         persistPile(ownerRef.current, next, pagesRef.current);
         setState((s) => ({ ...s, session: next }));
@@ -749,11 +768,12 @@ export function usePile() {
       const room = Math.max(0, MAX_PAGES - pagesRef.current.length);
       const appended = pagesFromExtracted(ok, room, slots);
       pagesRef.current = [...pagesRef.current, ...appended.pages];
+      contentRevisionRef.current += 1;
       for (const [fileId, source] of appended.sourceFiles) {
         filesByIdRef.current.set(fileId, source);
       }
       const nextSession: PileSession = {
-        ...sess,
+        ...withoutSavedWorkspace(sess),
         files: [...sess.files, ...appended.files],
         pageCount: pagesRef.current.length,
         structure: null,
@@ -763,7 +783,13 @@ export function usePile() {
         await pile().addPages(appended.pages.slice(i, i + 500));
         if (controller.signal.aborted) return;
       }
-      setState((s) => ({ ...s, session: nextSession, adding: false, structure: null }));
+      setState((s) => ({
+        ...s,
+        session: nextSession,
+        adding: false,
+        structure: null,
+        kbSave: { status: "idle" },
+      }));
       persistPile(ownerRef.current, nextSession, pagesRef.current);
       step({
         id: "add",
@@ -781,6 +807,7 @@ export function usePile() {
           signal: controller.signal,
           step,
         });
+        contentRevisionRef.current += 1;
         sessionRef.current = afterOcr;
         persistPile(ownerRef.current, afterOcr, pagesRef.current);
         setState((s) => ({ ...s, session: afterOcr }));
@@ -827,6 +854,7 @@ export function usePile() {
       if (!newFiles.length && !newPages.length) return;
       await pile().addPages(newPages.length ? newPages : pages);
       pagesRef.current = [...pagesRef.current, ...newPages];
+      contentRevisionRef.current += 1;
       const now = Date.now();
       const sess = sessionRef.current ?? {
         id: `local-${newId()}`,
@@ -839,7 +867,7 @@ export function usePile() {
         structure: null,
       };
       const next: PileSession = {
-        ...sess,
+        ...withoutSavedWorkspace(sess),
         files: [...sess.files, ...newFiles],
         pageCount: pagesRef.current.length,
       };
@@ -849,6 +877,7 @@ export function usePile() {
         ...s,
         session: next,
         phase: s.phase === "idle" ? "ready" : s.phase,
+        kbSave: { status: "idle" },
         files: [
           ...s.files,
           ...newFiles.map((f) => ({
@@ -925,7 +954,15 @@ export function usePile() {
         citeReport: null,
         turns:
           s.answer.trim() && s.query.trim()
-            ? [...s.turns, { id: newId(), query: s.query, answer: s.answer }]
+            ? [
+                ...s.turns,
+                {
+                  id: newId(),
+                  query: s.query,
+                  answer: s.answer,
+                  citePages: s.citePages,
+                },
+              ]
             : s.turns,
       }));
       step({ id: "ask", label: "Retrieving pages and drafting", status: "running" });
@@ -933,6 +970,268 @@ export function usePile() {
         const sess = sessionRef.current;
         const fileCount = sess?.files.length ?? 0;
         const budget = askBudget(Math.max(fileCount, 1));
+
+        const binding = completeSavedWorkspace(sess);
+        const kbDocIds = sess ? selectedWorkspaceDocIds(sess, opts.fileIds) : null;
+        if (sess && binding && kbDocIds) {
+          let kbDeltaStarted = false;
+          let kbDone = false;
+          let kbError:
+            | { message: string; status: number; recoverable: boolean }
+            | undefined;
+          let kbCitePages: CitePage[] = [];
+          const selectedDocSet = new Set(kbDocIds);
+          const reusableChunks =
+            opts.followUp &&
+            lastPackRef.current?.kbChunkIds &&
+            lastPackRef.current.kbDocIds
+              ? lastPackRef.current.kbChunkIds.filter(
+                  (_chunkId, index) =>
+                    selectedDocSet.has(lastPackRef.current!.kbDocIds![index]!),
+                )
+              : [];
+          if (reusableChunks.length) {
+            step({ id: "ask", label: "Follow-up on the same saved passages", status: "running" });
+          }
+          const instructions = [sess.instructions, job?.instructions]
+            .filter(Boolean)
+            .join("\n\n");
+          await streamSavedWorkspaceAsk(
+            {
+              itemId: binding.itemId,
+              query: q,
+              docIds: kbDocIds,
+              ...(reusableChunks.length
+                ? { sourceChunkIds: reusableChunks }
+                : {}),
+              ...(instructions ? { instructions } : {}),
+              ...(opts.followUp && prev.query && prev.answer
+                ? {
+                    prior: {
+                      query: prev.query,
+                      answer: prev.answer.replace(/\[S\d+\]/g, ""),
+                    },
+                  }
+                : {}),
+            },
+            (evt) => {
+              const data = (evt.data ?? {}) as Record<string, unknown>;
+              if (evt.event === "delta") {
+                kbDeltaStarted = true;
+                setState((state) => ({
+                  ...state,
+                  answer: state.answer + String(data["text"] ?? ""),
+                }));
+                return;
+              }
+              if (evt.event === "retrieve" && data["status"] === "done") {
+                const rawSources = Array.isArray(data["sources"])
+                  ? (data["sources"] as KbAskSource[])
+                  : [];
+                const fileIdByDocId = new Map(
+                  Object.entries(binding.docIdByFileId).map(
+                    ([fileId, docId]) => [docId, fileId],
+                  ),
+                );
+                const sources = rawSources.filter(
+                  (source) =>
+                    source &&
+                    Number.isSafeInteger(source.chunkId) &&
+                    fileIdByDocId.has(source.docId) &&
+                    typeof source.text === "string",
+                );
+                kbCitePages = sources.map((source) => ({
+                  ref: source.ref,
+                  fileId: fileIdByDocId.get(source.docId)!,
+                  fileName: source.fileName,
+                  page: source.page,
+                  text: source.text,
+                  garbled: (source.conf ?? 1) < 0.5,
+                }));
+                const kbHits: PileHit[] = sources.map((source) => ({
+                  fileId: fileIdByDocId.get(source.docId)!,
+                  fileName: source.fileName,
+                  page: source.page,
+                  score: source.score,
+                  snippet: source.text.slice(0, 700),
+                  garbled: (source.conf ?? 1) < 0.5,
+                }));
+                const pagesByFile = new Map<string, PilePage[]>();
+                const hitsByFile = new Map<string, PileHit[]>();
+                const texts: Record<string, string> = {};
+                for (let index = 0; index < sources.length; index++) {
+                  const source = sources[index]!;
+                  const fileId = fileIdByDocId.get(source.docId)!;
+                  const page: PilePage = {
+                    fileId,
+                    fileName: source.fileName,
+                    page: source.page,
+                    text: source.text,
+                    ocr: false,
+                  };
+                  pagesByFile.set(fileId, [...(pagesByFile.get(fileId) ?? []), page]);
+                  hitsByFile.set(fileId, [
+                    ...(hitsByFile.get(fileId) ?? []),
+                    kbHits[index]!,
+                  ]);
+                  texts[`${fileId}:${source.page}`] = source.text;
+                }
+                const selectedFiles = sess.files.filter((file) =>
+                  selectedDocSet.has(binding.docIdByFileId[file.id]!),
+                );
+                const kbPacks: PileFilePack[] = selectedFiles.map((file) => {
+                  const fileHits = hitsByFile.get(file.id) ?? [];
+                  return {
+                    fileId: file.id,
+                    fileName: file.name,
+                    pageCount: file.pageCount,
+                    matched: fileHits.length > 0,
+                    topScore: fileHits.reduce(
+                      (best, hit) => Math.max(best, hit.score),
+                      0,
+                    ),
+                    hits: fileHits,
+                    pages: pagesByFile.get(file.id) ?? [],
+                  };
+                });
+                lastPackRef.current = {
+                  packs: kbPacks,
+                  texts,
+                  hits: kbHits,
+                  kbChunkIds: sources.map((source) => source.chunkId),
+                  kbDocIds: sources.map((source) => source.docId),
+                  citePages: kbCitePages,
+                };
+                setState((state) => ({
+                  ...state,
+                  hits: kbHits,
+                  groups: kbPacks,
+                  pageTexts: { ...state.pageTexts, ...texts },
+                  citePages: kbCitePages,
+                  hasPack: true,
+                }));
+                return;
+              }
+              if (evt.event === "fanout") {
+                const list = Array.isArray(data["files"]) ? data["files"] : [];
+                const total = Number(data["total"]) || list.length;
+                const pagesRead = Number(data["pages"]) || 0;
+                step({
+                  id: "fanout",
+                  label:
+                    total > list.length
+                      ? `Reading ${list.length} of ${total} documents (${pagesRead} passages)`
+                      : `Reading ${list.length} document${list.length === 1 ? "" : "s"} in parallel (${pagesRead} passages)`,
+                  status: "running",
+                });
+                return;
+              }
+              if (evt.event === "file_read") {
+                const name = String(data["fileName"] ?? "document");
+                const status = String(data["status"] ?? "running");
+                step({
+                  id: `file-${String(data["fileId"] ?? name)}`,
+                  label: name,
+                  status:
+                    status === "error"
+                      ? "error"
+                      : status === "done"
+                        ? "done"
+                        : "running",
+                  detail:
+                    status === "done"
+                      ? data["matched"]
+                        ? "Digest ready"
+                        : "Does not address the question"
+                      : status === "error"
+                        ? String(data["detail"] ?? "read failed")
+                        : "Reading this file on its own",
+                });
+                return;
+              }
+              if (evt.event === "writer_start" && kbDocIds.length > 1) {
+                step({ id: "fanout", label: "Per-document read", status: "done" });
+                step({
+                  id: "synthesis",
+                  label: "Cross-analyzing the documents",
+                  status: "running",
+                });
+                return;
+              }
+              if (evt.event === "error") {
+                const message = String(data["message"] ?? "Saved workspace Ask failed");
+                const match = message.match(/HTTP\s+(\d{3})/i);
+                const status = Number(data["status"]) || Number(match?.[1]) || 500;
+                kbError = {
+                  message,
+                  status,
+                  recoverable:
+                    data["recoverable"] === true || status >= 500,
+                };
+                return;
+              }
+              if (evt.event === "done") {
+                kbDone = true;
+                if (kbDocIds.length > 1) {
+                  step({
+                    id: "synthesis",
+                    label: "Cross-analyzing the documents",
+                    status: "done",
+                  });
+                }
+                step({ id: "ask", label: "Retrieving saved passages and drafting", status: "done" });
+                setState((state) => {
+                  const report = verifyAnswerCites(state.answer, kbCitePages);
+                  return {
+                    ...state,
+                    phase: "ready",
+                    citeReport: {
+                      ...report,
+                      filesTotal: sess.files.length,
+                    },
+                  };
+                });
+              }
+            },
+            controller.signal,
+          );
+          if (kbDone) return;
+          const failure = kbError ?? {
+            message: "Saved workspace Ask ended before completion.",
+            status: 500,
+            recoverable: true,
+          };
+          if (!kbDeltaStarted && failure.recoverable) {
+            lastPackRef.current = null;
+            step({
+              id: "ask",
+              label: "Saved retrieval unavailable; using the local index",
+              status: "running",
+              detail: failure.message,
+            });
+            setState((state) => ({
+              ...state,
+              answer: "",
+              error: null,
+              citePages: [],
+              citeReport: null,
+            }));
+          } else {
+            step({
+              id: "ask",
+              label: "Retrieving saved passages and drafting",
+              status: "error",
+              detail: failure.message,
+            });
+            setState((state) => ({
+              ...state,
+              phase: "error",
+              error: failure.message,
+            }));
+            return;
+          }
+        }
+
         let packs: PileFilePack[] = [];
         let texts: Record<string, string> = {};
         let hits: PileHit[] = [];
@@ -1142,8 +1441,10 @@ export function usePile() {
     const pages = pagesRef.current;
     const session = sessionRef.current;
     if (!session?.files.length || !pages.length) return;
+    const snapshotRevision = contentRevisionRef.current;
     const attemptKey = JSON.stringify({
       sessionId: session.id,
+      revision: snapshotRevision,
       name: opts.name,
       folderId: opts.folderId ?? "ROOT",
       files: session.files.map((file) => [
@@ -1172,7 +1473,16 @@ export function usePile() {
         arr.push({ page: p.page, text: p.text });
         byFile.set(p.fileId, arr);
       }
+      const unreadableFiles = session.files.filter(
+        (file) => !byFile.get(file.id)?.length,
+      );
+      if (unreadableFiles.length) {
+        throw new Error(
+          `Cannot save: ${unreadableFiles.length} document${unreadableFiles.length === 1 ? "" : "s"} have no readable text.`,
+        );
+      }
       const files: {
+        clientFileId: string;
         fileName: string;
         mime?: string;
         byteSize?: number;
@@ -1197,6 +1507,7 @@ export function usePile() {
           }
         }
         files.push({
+          clientFileId: file.id,
           fileName: file.name,
           ...(blob?.type ? { mime: blob.type } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
@@ -1214,12 +1525,40 @@ export function usePile() {
           files,
         },
       });
+      const docIdByFileId = Object.fromEntries(
+        res.documents.map((doc) => [doc.clientFileId, doc.docId]),
+      );
+      const bindingComplete = session.files.every((file) =>
+        Boolean(docIdByFileId[file.id]),
+      );
+      const snapshotStillCurrent =
+        contentRevisionRef.current === snapshotRevision &&
+        sessionRef.current?.id === session.id;
+      if (bindingComplete && snapshotStillCurrent) {
+        const savedSession: PileSession = {
+          ...session,
+          savedWorkspace: {
+            itemId: res.itemId,
+            kbWorkspaceId: res.kbWorkspaceId,
+            surface: "workingset",
+            docIdByFileId,
+          },
+        };
+        sessionRef.current = savedSession;
+        persistPile(ownerRef.current, savedSession, pagesRef.current);
+        setState((state) => ({ ...state, session: savedSession }));
+      }
       pendingWorkspaceSaveRef.current = null;
       setState((s) => ({
         ...s,
         kbSave: {
           status: "saved",
-          message: `Saved “${opts.name}” · ${res.docCount} doc${res.docCount === 1 ? "" : "s"} · ${res.chunkCount} passages`,
+          message:
+            bindingComplete && snapshotStillCurrent
+              ? `Saved “${opts.name}” · ${res.docCount} doc${res.docCount === 1 ? "" : "s"} · ${res.chunkCount} passages`
+              : bindingComplete
+                ? `Saved “${opts.name}”, but this Working Set changed during save. Save it again to use hybrid Ask.`
+                : `Saved “${opts.name}”, but the current pile could not be bound. Reload it from the Library to use hybrid Ask.`,
         },
       }));
     } catch (e) {
@@ -1234,33 +1573,98 @@ export function usePile() {
     }
   }, []);
 
-  // One-click reload of a saved workspace: pull each doc's stored pages and
-  // rehydrate the pile (instant local search + reader; KB chunks already exist
-  // server-side for hybrid search). Merges into the current session.
+  // One-click reload replaces the active pile atomically. An explicit merge
+  // action can be added later; implicit merging would make the saved KB binding
+  // incomplete and could silently omit locally added documents from retrieval.
   const reloadWorkspace = useCallback(
     async (itemId: string) => {
       setState((s) => ({ ...s, phase: "reading", error: null }));
       try {
         const ws = await getWorkspaceFn({ data: { itemId } });
-        if (!ws) {
+        if (!ws || ws.status !== "ready") {
           setState((s) => ({ ...s, phase: "error", error: "Workspace not found" }));
           return;
         }
-        const files: PileFile[] = [];
-        const pages: PilePage[] = [];
-        for (const d of ws.docs) {
+        const loaded = await mapPool(ws.docs, 6, async (doc) => {
+          const d = doc;
           const pg = await getWorkspacePagesFn({ data: { itemId, docId: d.docId } });
-          if (!pg?.length) continue;
-          files.push({ id: d.docId, name: d.fileName, pageCount: pg.length, emptyPages: 0, ocrPages: 0 });
-          for (const p of pg) {
-            pages.push({ fileId: d.docId, fileName: d.fileName, page: p.page, text: p.text, ocr: false });
-          }
-        }
-        if (!files.length) {
+          if (!pg?.length) throw new Error(`Stored pages are missing for ${d.fileName}`);
+          return {
+            file: {
+              id: d.docId,
+              name: d.fileName,
+              pageCount: pg.length,
+              emptyPages: 0,
+              ocrPages: 0,
+            } satisfies PileFile,
+            pages: pg.map(
+              (page): PilePage => ({
+                fileId: d.docId,
+                fileName: d.fileName,
+                page: page.page,
+                text: page.text,
+                ocr: false,
+              }),
+            ),
+          };
+        });
+        const files = loaded.map((entry) => entry.file);
+        const pages = loaded.flatMap((entry) => entry.pages);
+        if (!files.length || files.length !== ws.docs.length) {
           setState((s) => ({ ...s, phase: "error", error: "Nothing to load in that workspace" }));
           return;
         }
-        await ingestPages(files, pages);
+        const replacement = new PileClient();
+        for (let index = 0; index < pages.length; index += 500) {
+          await replacement.addPages(pages.slice(index, index + 500));
+        }
+        const now = Date.now();
+        const session: PileSession = {
+          id: `workspace-${itemId}`,
+          createdAt: now,
+          expiresAt: now + PILE_TTL_MS,
+          matterLabel: null,
+          instructions: null,
+          files,
+          pageCount: pages.length,
+          structure: null,
+          savedWorkspace: {
+            itemId,
+            kbWorkspaceId: ws.kbWorkspaceId,
+            surface: ws.surface,
+            docIdByFileId: Object.fromEntries(
+              files.map((file) => [file.id, file.id]),
+            ),
+          },
+        };
+        ingestAbort.current?.abort();
+        askAbort.current?.abort();
+        pileRef.current?.dispose();
+        pileRef.current = replacement;
+        pagesRef.current = pages;
+        sessionRef.current = session;
+        contentRevisionRef.current += 1;
+        structureRef.current = null;
+        lastPackRef.current = null;
+        pendingWorkspaceSaveRef.current = null;
+        filesByIdRef.current.clear();
+        persistPile(ownerRef.current, session, pages);
+        setState({
+          ...EMPTY,
+          phase: "ready",
+          session,
+          files: files.map((file) => ({
+            name: file.name,
+            pages: file.pageCount,
+            empty: 0,
+            done: file.pageCount,
+            status: "ready",
+          })),
+          kbSave: {
+            status: "saved",
+            message: `Loaded “${ws.name}” · ${files.length} doc${files.length === 1 ? "" : "s"}`,
+          },
+        });
       } catch (e) {
         setState((s) => ({
           ...s,
@@ -1269,7 +1673,7 @@ export function usePile() {
         }));
       }
     },
-    [ingestPages],
+    [],
   );
 
   return {

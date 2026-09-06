@@ -208,14 +208,13 @@ function CiteStrip({ report }: { report: CiteReport }) {
 
 function PriorTurn({
   turn,
-  onCite,
-  citeLabels,
+  onOpen,
 }: {
   turn: AskTurn;
-  onCite: (ref: string) => void;
-  citeLabels?: Record<string, string>;
+  onOpen: (fileId: string, page: number) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const citeLabels = citeLabelMap(turn.citePages);
   return (
     <section className="border-b border-border/70">
       <button
@@ -230,7 +229,14 @@ function PriorTurn({
       </button>
       {open ? (
         <div className="px-4 pb-3">
-          <AnswerMarkdown text={turn.answer} onCite={onCite} citeLabels={citeLabels} />
+          <AnswerMarkdown
+            text={turn.answer}
+            citeLabels={citeLabels}
+            onCite={(ref) => {
+              const page = turn.citePages.find((candidate) => candidate.ref === ref);
+              if (page) onOpen(page.fileId, page.page);
+            }}
+          />
         </div>
       ) : null}
     </section>
@@ -306,7 +312,7 @@ export function ResultsPane({
             Earlier questions
           </p>
           {turns.map((t) => (
-            <PriorTurn key={t.id} turn={t} onCite={onCite} citeLabels={labels} />
+            <PriorTurn key={t.id} turn={t} onOpen={onOpen} />
           ))}
         </div>
       ) : null}

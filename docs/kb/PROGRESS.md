@@ -16,6 +16,7 @@ Session date: 2026-09-06.
 | P5 | Save-as-workspace client flow (name/folder + byte upload) | done |
 | P5b/P5c | Library workspace tabs + one-click reload | done |
 | P5e | Idempotent save reservation + cross-store failure recovery | done |
+| P6 | Bind saved piles to workspaces and route Ask through hybrid KB | done |
 | P5d | Shared workspaces / invite | deferred |
 | — | Async BDA lane (SQS/Lambda/EventBridge) | deferred |
 
@@ -64,15 +65,19 @@ Session date: 2026-09-06.
   replays non-duplicating, and the record ends in explicit `ready` or `error`.
 - **FORCE RLS + transaction-local `app.user` GUC**: correct isolation over the Data
   API (a transaction is one serialized session; a session-level `SET` could leak).
+- **Saved Ask stays fail-closed (P6)**: the browser only sends the workspace id
+  and selected Aurora `docId`s. Adding or OCR-mutating files drops the binding so
+  Ask cannot search a stale saved snapshot while showing new local pages.
 
 ## Verification status
 
 - `tsc --noEmit` clean throughout.
-- Test suite: **165/165** passing (`npm test`, node --experimental-strip-types).
-  Unit-tested modules: `aurora.server` (helpers + guards), `chunk`, `convert`,
-  `embed`, `rerank-parse`, plus the pre-existing pile/agent suites.
-- Live probes: `/api/kb/ingest`, `/api/kb/search`, `/api/kb/documents` all return
-  `401` unauthenticated (auth gate working); routes auto-registered by the dev server.
+- Test suite: **172/172** passing (`npm test`, node --experimental-strip-types).
+  Unit-tested modules include saved-workspace binding and document selection,
+  `aurora.server`, `chunk`, `convert`, `embed`, and `rerank-parse`.
+- Live probes: `/api/kb/ask`, `/api/kb/ingest`, `/api/kb/search`, and
+  `/api/kb/documents` return `401` unauthenticated (auth gate working); routes
+  auto-register with the dev server.
 - CloudFormation template validates; migration applied over the Data API (28/28
   statements) with the cold-start retry exercised; `kb_app` smoke query returned
   `count=0` (RLS + grants + Data API confirmed).

@@ -5,6 +5,7 @@
 // MVP workspace: a single per-user default workspace for the working-set surface
 // (RLS already scopes every row by the verified principal, so this constant just
 // partitions a user's own saved docs). Named matters / shared workspaces are P5.
+import { streamSSE, type SSEEvent } from "@/lib/orchestrate";
 
 export const KB_WORKINGSET_WORKSPACE = "00000000-0000-0000-0000-000000000001";
 
@@ -22,6 +23,34 @@ export type KbSearchHit = {
   conf: number | null;
   score: number;
 };
+
+export type KbAskSource = {
+  ref: string;
+  chunkId: number;
+  docId: string;
+  fileName: string;
+  page: number;
+  pageEnd: number | null;
+  kind: string | null;
+  text: string;
+  conf: number | null;
+  score: number;
+};
+
+export function streamSavedWorkspaceAsk(
+  input: {
+    itemId: string;
+    query: string;
+    docIds?: string[];
+    sourceChunkIds?: number[];
+    instructions?: string | null;
+    prior?: { query: string; answer: string };
+  },
+  onEvent: (event: SSEEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamSSE("/api/kb/ask", input, onEvent, signal);
+}
 
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, {

@@ -19,6 +19,7 @@ function principalOf(context: unknown): string {
 const SURFACES = new Set<WorkspaceSurface>(["workingset", "deposition", "review"]);
 
 type SaveFile = {
+  clientFileId: string;
   fileName: string;
   mime?: string;
   sha256?: string;
@@ -43,12 +44,24 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       if (!isUuid(requestId)) throw new Error("valid requestId required");
       const files = Array.isArray(d?.files) ? d.files : [];
       if (!files.length) throw new Error("no files to save");
+      const clientFileIds = files.map((file) =>
+        String(file?.clientFileId ?? "").trim(),
+      );
+      if (clientFileIds.some((id) => !id)) {
+        throw new Error("clientFileId required for every file");
+      }
+      if (new Set(clientFileIds).size !== clientFileIds.length) {
+        throw new Error("clientFileId must be unique for every file");
+      }
       return {
         requestId,
         name: (d.name || "Untitled workspace").slice(0, 120),
         surface,
         folderId: d.folderId || "ROOT",
-        files,
+        files: files.map((file, index) => ({
+          ...file,
+          clientFileId: clientFileIds[index]!,
+        })),
       };
     },
   )
@@ -70,13 +83,18 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       import("@/lib/pile/async"),
     ]);
 
-    const files = data.files.flatMap((file) => {
+    const files = data.files.map((file) => {
       const pages = (file.pages ?? []).filter(
         (page) => page && Number(page.page) > 0 && String(page.text).trim(),
       );
-      return pages.length ? [{ ...file, pages }] : [];
+      return { ...file, pages };
     });
-    if (!files.length) throw new Error("nothing to save (no extractable pages)");
+    const unreadable = files.filter((file) => !file.pages.length);
+    if (unreadable.length) {
+      throw new Error(
+        `cannot save: ${unreadable.length} document${unreadable.length === 1 ? "" : "s"} have no extractable pages`,
+      );
+    }
 
     const { requestFingerprint, fileFingerprints } = workspaceSaveFingerprint({
       name: data.name,
@@ -103,6 +121,11 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
         chunkCount: reservation.docs.reduce(
           (total, doc) => total + doc.chunkCount,
           0,
+        ),
+        documents: reservation.docs.flatMap((doc) =>
+          doc.sourceFileId
+            ? [{ clientFileId: doc.sourceFileId, docId: doc.docId }]
+            : [],
         ),
       };
     }
@@ -135,6 +158,7 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
             ok: true,
             doc: {
               docId: res.docId,
+              sourceFileId: file.clientFileId,
               fileName: file.fileName,
               pageCount: res.pageCount,
               chunkCount: res.chunkCount,
@@ -172,6 +196,11 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       kbWorkspaceId: reservation.kbWorkspaceId,
       docCount: docs.length,
       chunkCount: docs.reduce((total, doc) => total + doc.chunkCount, 0),
+      documents: docs.flatMap((doc) =>
+        doc.sourceFileId
+          ? [{ clientFileId: doc.sourceFileId, docId: doc.docId }]
+          : [],
+      ),
     };
   });
 

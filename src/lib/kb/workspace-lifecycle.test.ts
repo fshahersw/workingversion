@@ -52,6 +52,13 @@ test("workspace request fingerprints bind name, folder, surface, order, and cont
     workspaceSaveFingerprint({ ...base, folderId: "MOTIONS" }).requestFingerprint,
     fingerprint,
   );
+  assert.notEqual(
+    workspaceSaveFingerprint({
+      ...base,
+      files: [{ ...file, clientFileId: "pile-file-1" }],
+    }).requestFingerprint,
+    fingerprint,
+  );
   assert.match(fingerprint, /^[0-9a-f]{64}$/);
   assert.doesNotMatch(fingerprint, /First page|motion\.pdf/);
 });
@@ -84,5 +91,7 @@ test("client retries reuse their request and bind original bytes by pile file id
   assert.match(client, /pendingWorkspaceSaveRef/);
   assert.match(client, /requestId:\s*attempt\.requestId/);
   assert.match(client, /filesByIdRef\.current\.get\(file\.id\)/);
+  assert.match(client, /contentRevisionRef\.current === snapshotRevision/);
+  assert.match(client, /revision:\s*snapshotRevision/);
   assert.doesNotMatch(client, /filesByNameRef/);
 });

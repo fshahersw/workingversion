@@ -24,6 +24,16 @@ export type PileStructure = {
   issues: string[];
 };
 
+export type SavedWorkspaceBinding = {
+  /** Owner-scoped DynamoDB workspace item resolved by the server. */
+  itemId: string;
+  /** Informational client snapshot metadata; the server re-resolves both. */
+  kbWorkspaceId: string;
+  surface: "workingset" | "deposition" | "review";
+  /** Maps this browser pile's ids to authoritative Aurora document ids. */
+  docIdByFileId: Record<string, string>;
+};
+
 export type PileSession = {
   id: string;
   createdAt: number;
@@ -33,6 +43,7 @@ export type PileSession = {
   files: PileFile[];
   pageCount: number;
   structure: PileStructure | null;
+  savedWorkspace?: SavedWorkspaceBinding;
 };
 
 export type PileHit = {

@@ -6,6 +6,7 @@ export type WorkspaceFingerprintPage = {
 };
 
 export type WorkspaceFingerprintFile = {
+  clientFileId?: string;
   fileName: string;
   mime?: string;
   byteSize?: number;
@@ -27,6 +28,7 @@ export function workspaceFileFingerprint(
 ): string {
   const hash = createHash("sha256");
   field(hash, index);
+  field(hash, file.clientFileId);
   field(hash, file.fileName);
   field(hash, file.mime);
   field(hash, file.byteSize);

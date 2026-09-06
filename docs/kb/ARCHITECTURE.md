@@ -110,6 +110,10 @@ Modules (all under `src/lib/kb/`, pure ones unit-tested):
   (pgvector + BM25 RRF) → **Bedrock rerank** (`cohere.rerank-v3-5:0`) → top-K.
   Degrades gracefully: lexical-only if the embedder fails, fused order if rerank
   fails. Bedrock/Titan imports are lazy so the module is node-testable.
+- **`ask.server.ts`** — `askSavedWorkspace`: resolve the owned workspace, search
+  or reuse follow-up chunk ids, `fetch_chunks` the full bodies, then stream the
+  existing Working Set writer events. Unsaved or mutated piles stay on the
+  local BM25 path.
 - **`rerank-parse.ts`** — pure parser for the Bedrock Rerank response (identity
   fallback), unit-tested.
 
@@ -132,17 +136,21 @@ Modules (all under `src/lib/kb/`, pure ones unit-tested):
   - retains original `File` blobs by pile file id so duplicate names cannot attach
     the wrong bytes;
   - `saveWorkspace(name, folderId)` — uploads bytes (library presigned PUT),
-    gathers pages, calls `saveWorkspaceFn`; status in `state.kbSave`;
+    gathers pages, calls `saveWorkspaceFn`, then binds pile file ids to Aurora
+    `docId`s so later Asks can stay on the saved workspace;
   - `reloadWorkspace(itemId)` — `getWorkspaceFn` + `getWorkspacePagesFn` per doc →
-    build `PileFile`/`PilePage` → `ingestPages` rehydrate;
+    build `PileFile`/`PilePage` → `ingestPages` rehydrate with the same binding;
+  - adding or OCR-mutating files drops `savedWorkspace` so Ask cannot silently
+    omit the new local pages;
   - IndexedDB store namespaced by Cognito `sub` (shared-workstation fix).
+- **`src/lib/pile/kb-binding.ts`** — fail-closed helpers: a session is only
+  "saved" when every pile file has a unique Aurora `docId`.
 - **`src/components/summarize/SummarizeView.tsx`** — "Save workspace" name+folder
   popover; reads `sessionStorage["kb:reloadWorkspace"]` on mount to trigger reload.
 - **`src/routes/_authenticated/library.tsx`** — Working Sets / Depositions /
   Tabular Review tabs; `WorkspacesList` lists + Open (sessionStorage handoff) + Delete.
-- **`src/lib/kb/kb-client.ts`** — `ingestFileToKb` / `searchKbApi` /
-  `listKbDocuments` (used by the earlier default-workspace path; retained for a
-  future Library search surface).
+- **`src/lib/kb/kb-client.ts`** — `streamSavedWorkspaceAsk` plus the earlier
+  `ingestFileToKb` / `searchKbApi` / `listKbDocuments` helpers.
 
 ## API surface
 
@@ -151,9 +159,10 @@ Server functions (`createServerFn`, requireAuth): `saveWorkspaceFn`,
 plus the library `createUploadFn` (byte presign).
 
 File routes (`createFileRoute`, gated by `apiAuthMiddleware`, principal via
-`getUserFromRequest`): `POST /api/kb/ingest`, `POST /api/kb/search`,
-`GET /api/kb/documents`. (Superseded by the workspace serverFns for the workspace
-flow, but valid and retained.)
+`getUserFromRequest`): `POST /api/kb/ask`, `POST /api/kb/ingest`,
+`POST /api/kb/search`, `GET /api/kb/documents`. The Ask route is the live
+Working Set path for a complete saved snapshot. Ingest/search/documents remain
+valid for the earlier default-workspace helpers.
 
 ## Data-flow summaries
 
@@ -179,6 +188,14 @@ SEARCH
   searchKb(sub, {workspaceId, surface, query})
     Titan embed query -> kb.hybrid_search (pgvector kNN + BM25 RRF, RLS-scoped)
     -> pre-truncate -> cohere.rerank-v3-5:0 -> top-K passages
+
+ASK (saved Working Set)
+  browser pile with a complete savedWorkspace binding
+    -> POST /api/kb/ask { itemId, query, docIds }
+         getWorkspace (consistent, owner-checked, status=ready)
+         searchKb (or reuse follow-up sourceChunkIds)
+         fetch_chunks -> existing pile writer SSE
+  unsaved / mutated piles stay on /api/pile/ask with local BM25 pages
 ```
 
 ## Security & isolation
