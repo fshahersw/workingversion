@@ -7,6 +7,7 @@ import { DropPanel } from "./DropPanel";
 import { IngestProgress } from "./IngestProgress";
 import { ReasoningRail } from "./ReasoningRail";
 import { docTypeOf, fileFormat, RefineRail } from "./RefineRail";
+import { SavedDocsPanel } from "./SavedDocsPanel";
 import { ResultsPane } from "./ResultsPane";
 import { StructureRail } from "./StructureRail";
 import { Button } from "@/components/ui/button";
@@ -201,6 +202,7 @@ export function SummarizeView() {
           />
         </>
       ) : null}
+      <SavedDocsPanel reloadKey={`${state.kbSave.status}:${state.kbSave.message ?? ""}`} />
     </RefineRail>
   );
 
