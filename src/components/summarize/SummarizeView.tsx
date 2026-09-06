@@ -34,8 +34,11 @@ function fileAsGroup(file: PileFile, hits: PileFileHits["hits"]): PileFileHits {
 }
 
 export function SummarizeView() {
-  const { state, start, addFiles, search, ask, reset, loadPage, saveToKb, setQuery, selectHit } =
+  const { state, start, addFiles, search, ask, reset, loadPage, saveWorkspace, setQuery, selectHit } =
     useSharedPile();
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [wsName, setWsName] = useState("");
+  const [wsFolder, setWsFolder] = useState("");
   const [mode, setMode] = useState<Mode>("ask");
   const [types, setTypes] = useState<Set<string>>(new Set());
   const [formats, setFormats] = useState<Set<string>>(new Set());
@@ -216,9 +219,9 @@ export function SummarizeView() {
             {(state.session?.pageCount ?? 0).toLocaleString()} pages
             {state.adding ? " · adding files…" : " · kept on this device"}
           </p>
-          <div className="ml-auto flex shrink-0 items-center gap-3">
+          <div className="relative ml-auto flex shrink-0 items-center gap-3">
             {state.kbSave.status === "saved" && state.kbSave.message ? (
-              <span className="hidden text-[11px] text-muted-foreground sm:inline">
+              <span className="hidden max-w-[280px] truncate text-[11px] text-muted-foreground sm:inline">
                 {state.kbSave.message}
               </span>
             ) : null}
@@ -229,16 +232,14 @@ export function SummarizeView() {
             ) : null}
             <button
               type="button"
-              onClick={() => void saveToKb()}
+              onClick={() => {
+                setWsName(files[0]?.name?.replace(/\.[^.]+$/, "") ?? "");
+                setSaveOpen((v) => !v);
+              }}
               disabled={state.kbSave.status === "saving"}
-              title="Persist this working set to your searchable documents"
               className="text-[11.5px] font-medium text-brand-orange transition hover:underline disabled:opacity-50"
             >
-              {state.kbSave.status === "saving"
-                ? "Saving…"
-                : state.kbSave.status === "saved"
-                  ? "Saved ✓"
-                  : "Save to my documents"}
+              {state.kbSave.status === "saving" ? "Saving…" : "Save workspace"}
             </button>
             <button
               type="button"
@@ -247,6 +248,45 @@ export function SummarizeView() {
             >
               Clear session
             </button>
+            {saveOpen ? (
+              <div className="absolute right-0 top-7 z-20 w-64 rounded-lg border border-border bg-card p-3 shadow-lg">
+                <p className="mb-2 text-[11px] font-semibold text-brand-navy">Save as workspace</p>
+                <input
+                  value={wsName}
+                  onChange={(e) => setWsName(e.target.value)}
+                  placeholder="Workspace name"
+                  className="mb-2 h-[29px] w-full rounded border border-border bg-muted/40 px-2 text-[12px] outline-none focus:border-brand-blue/50 focus:bg-card"
+                />
+                <input
+                  value={wsFolder}
+                  onChange={(e) => setWsFolder(e.target.value)}
+                  placeholder="Folder (optional)"
+                  className="mb-2.5 h-[29px] w-full rounded border border-border bg-muted/40 px-2 text-[12px] outline-none focus:border-brand-blue/50 focus:bg-card"
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSaveOpen(false)}
+                    className="text-[11.5px] text-muted-foreground hover:text-foreground"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void saveWorkspace({
+                        name: wsName.trim() || files[0]?.name || "Working set",
+                        ...(wsFolder.trim() ? { folderId: wsFolder.trim() } : {}),
+                      });
+                      setSaveOpen(false);
+                    }}
+                    className="rounded bg-brand-orange px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         </header>
       ) : null}

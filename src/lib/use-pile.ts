@@ -33,7 +33,8 @@ import {
   saveLocalPile,
 } from "@/lib/pile/local-store";
 import { useAuth } from "@/lib/use-auth";
-import { ingestFileToKb } from "@/lib/kb/kb-client";
+import { saveWorkspaceFn } from "@/lib/kb/workspace.functions";
+import { createUploadFn } from "@/lib/library/library.functions";
 import {
   PILE_TTL_MS,
   type PileFile,
@@ -389,6 +390,9 @@ export function usePile() {
   const { user } = useAuth();
   const ownerRef = useRef<string | null>(null);
   ownerRef.current = user?.sub ?? null;
+  // Original File blobs kept by name so "Save workspace" can persist the actual
+  // documents (bytes -> S3), not just the extracted text.
+  const filesByNameRef = useRef<Map<string, File>>(new Map());
   const [state, setState] = useState<PileState>(EMPTY);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -474,6 +478,7 @@ export function usePile() {
 
   const start = useCallback(
     async (incoming: File[], instructions?: string) => {
+      for (const f of incoming) filesByNameRef.current.set(f.name, f);
       const files = incoming.filter((f) => fileKind(f) !== null).slice(0, MAX_FILES);
       if (!files.length) {
         setState({
@@ -622,6 +627,7 @@ export function usePile() {
 
   const addFiles = useCallback(
     async (incoming: File[]) => {
+      for (const f of incoming) filesByNameRef.current.set(f.name, f);
       const sess = sessionRef.current;
       if (!sess || !pagesRef.current.length) {
         await start(incoming);
@@ -1100,10 +1106,10 @@ export function usePile() {
     [pile, step],
   );
 
-  // Explicit write-through of the current working set to the durable per-user KB.
-  // The local pile stays the fast default; this persists it (cross-device, and
-  // the basis for shared workspaces). One ingest call per file.
-  const saveToKb = useCallback(async () => {
+  // Save the working set as a durable, reloadable workspace: persist each file's
+  // chunks+embeddings (Aurora), its extracted pages (S3, for one-click reload),
+  // and its original bytes (S3, best-effort), plus the workspace record.
+  const saveWorkspace = useCallback(async (opts: { name: string; folderId?: string }) => {
     const pages = pagesRef.current;
     const session = sessionRef.current;
     if (!session?.files.length || !pages.length) return;
@@ -1116,20 +1122,43 @@ export function usePile() {
         arr.push({ page: p.page, text: p.text });
         byFile.set(p.fileId, arr);
       }
-      let saved = 0;
-      let chunks = 0;
+      const files: {
+        fileName: string;
+        mime?: string;
+        byteSize?: number;
+        bytesKey?: string;
+        pages: { page: number; text: string }[];
+      }[] = [];
       for (const file of session.files) {
         const fp = byFile.get(file.id);
         if (!fp?.length) continue;
-        const r = await ingestFileToKb({ fileName: file.name, pages: fp });
-        saved += 1;
-        chunks += r.chunkCount;
+        let bytesKey: string | undefined;
+        const blob = filesByNameRef.current.get(file.name);
+        if (blob) {
+          try {
+            const up = await createUploadFn({ data: { name: file.name, size: blob.size } });
+            const put = await fetch(up.uploadUrl, { method: "PUT", body: blob });
+            if (put.ok) bytesKey = up.s3Key;
+          } catch {
+            /* best-effort byte preservation; pages+chunks still save */
+          }
+        }
+        files.push({
+          fileName: file.name,
+          ...(blob?.type ? { mime: blob.type } : {}),
+          ...(blob ? { byteSize: blob.size } : {}),
+          ...(bytesKey ? { bytesKey } : {}),
+          pages: fp,
+        });
       }
+      const res = await saveWorkspaceFn({
+        data: { name: opts.name, surface: "workingset", folderId: opts.folderId, files },
+      });
       setState((s) => ({
         ...s,
         kbSave: {
           status: "saved",
-          message: `Saved ${saved} file${saved === 1 ? "" : "s"} · ${chunks} passage${chunks === 1 ? "" : "s"} indexed`,
+          message: `Saved “${opts.name}” · ${res.docCount} doc${res.docCount === 1 ? "" : "s"} · ${res.chunkCount} passages`,
         },
       }));
     } catch (e) {
@@ -1149,7 +1178,7 @@ export function usePile() {
     ask,
     reset,
     loadPage,
-    saveToKb,
+    saveWorkspace,
     client: pile,
     setQuery: (query: string) => setState((s) => ({ ...s, query })),
     selectHit: (selected: string | null) => setState((s) => ({ ...s, selected })),
