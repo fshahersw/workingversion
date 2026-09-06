@@ -110,18 +110,26 @@ CREATE INDEX IF NOT EXISTS kb_chunks_embedding_hnsw
 -- Mirrors the proven corpus hybrid pattern but scoped to a single tenant and
 -- surface, with an optional doc-id restrict list ("search only these files").
 -- SECURITY INVOKER (default) so FORCE RLS still applies as defense in depth.
+--
+-- Data API caps (HARD errors, not truncation): 1 MiB per result set, 64 KB per
+-- row. So this returns a BOUNDED snippet (left(content, p_snippet_chars)) as
+-- rerank input, never the full body and NEVER the embedding column (a 1024-dim
+-- vector as text is ~10-15 KB/row and would blow the cap). Full bodies for the
+-- reranked top-K are fetched separately at synthesis time (P3). Default match is
+-- kept modest so match * snippet stays well under 1 MiB.
 -- NOTE (v2): global RRF here; per-file candidate pooling (so a 5k-page doc
 -- can't crowd out a short exhibit) is a later refinement.
 
 CREATE OR REPLACE FUNCTION kb.hybrid_search(
-  p_owner      text,
-  p_workspace  uuid,
-  p_surface    text,
-  p_query      text,
-  p_embedding  vector(1024),
-  p_match      integer DEFAULT 150,
-  p_rrf_k      integer DEFAULT 60,
-  p_doc_ids    uuid[]  DEFAULT NULL
+  p_owner         text,
+  p_workspace     uuid,
+  p_surface       text,
+  p_query         text,
+  p_embedding     vector(1024),
+  p_match         integer DEFAULT 120,
+  p_rrf_k         integer DEFAULT 60,
+  p_snippet_chars integer DEFAULT 2500,
+  p_doc_ids       uuid[]  DEFAULT NULL
 ) RETURNS TABLE (
   chunk_id    bigint,
   doc_id      uuid,
@@ -167,12 +175,40 @@ LANGUAGE sql STABLE AS $$
     FROM vec v
     FULL OUTER JOIN lex l ON v.chunk_id = l.chunk_id
   )
-  SELECT c.chunk_id, c.doc_id, c.page_start, c.page_end, c.kind, c.content,
+  SELECT c.chunk_id, c.doc_id, c.page_start, c.page_end, c.kind,
+         left(c.content, p_snippet_chars) AS content,
          c.conf, f.rrf AS score
   FROM fused f
   JOIN kb.chunks c ON c.chunk_id = f.chunk_id
   ORDER BY f.rrf DESC
   LIMIT p_match;
+$$;
+
+-- Full chunk bodies for the reranked top-K (synthesis input). Keep the id list
+-- bounded (<= ~40) so the 1 MiB Data API result cap is not exceeded; chunk
+-- content is capped < 64 KB at ingest to respect the per-row limit.
+CREATE OR REPLACE FUNCTION kb.fetch_chunks(
+  p_owner     text,
+  p_workspace uuid,
+  p_surface   text,
+  p_ids       bigint[]
+) RETURNS TABLE (
+  chunk_id    bigint,
+  doc_id      uuid,
+  page_start  integer,
+  page_end    integer,
+  kind        text,
+  content     text,
+  conf        real
+)
+LANGUAGE sql STABLE AS $$
+  SELECT c.chunk_id, c.doc_id, c.page_start, c.page_end, c.kind, c.content, c.conf
+  FROM kb.chunks c
+  WHERE c.owner_sub = p_owner
+    AND c.workspace_id = p_workspace
+    AND c.surface = p_surface
+    AND c.chunk_id = ANY(p_ids)
+  ORDER BY array_position(p_ids, c.chunk_id);
 $$;
 
 -- --- grants + FORCED row-level security --------------------------------------
@@ -183,8 +219,9 @@ $$;
 GRANT SELECT, INSERT, UPDATE, DELETE ON kb.documents TO kb_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON kb.chunks    TO kb_app;
 GRANT EXECUTE ON FUNCTION kb.hybrid_search(
-  text, uuid, text, text, vector, integer, integer, uuid[]
+  text, uuid, text, text, vector, integer, integer, integer, uuid[]
 ) TO kb_app;
+GRANT EXECUTE ON FUNCTION kb.fetch_chunks(text, uuid, text, bigint[]) TO kb_app;
 
 ALTER TABLE kb.documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kb.documents FORCE  ROW LEVEL SECURITY;

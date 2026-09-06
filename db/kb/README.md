@@ -14,63 +14,118 @@ PostgREST. Design: [`docs/kb-ingest-design.md`](../../docs/kb-ingest-design.md).
   `context` (contextual-retrieval prefix, embed-only), a generated `tsv` (BM25 leg),
   and a `vector(1024)` Titan v2 embedding (HNSW cosine).
 - `kb.hybrid_search(...)` — RRF fuse of vector kNN + BM25 in one round trip,
-  scoped to `(owner_sub, workspace_id, surface)` with an optional doc-id restrict.
+  scoped to `(owner_sub, workspace_id, surface)`, returns **bounded snippets**
+  (Data API 1 MiB / 64 KB caps — see below), with an optional doc-id restrict.
+- `kb.fetch_chunks(...)` — full chunk bodies for the reranked top-K (bounded id
+  list) at synthesis time.
 
-## Provisioning (out of band, one time)
+## Provisioning — CloudFormation (prod-quality, private)
 
-Not covered by this SQL (no IaC in the repo yet):
+IaC lives at [`infra/kb-aurora.cfn.yaml`](infra/kb-aurora.cfn.yaml): Aurora
+PostgreSQL Serverless v2, **private** (no public access), **RDS-managed master
+password**, Data API enabled, deletion protection, backups, optional scale-to-0,
+a generated `kb_app` secret, and a least-privilege app access policy.
 
-1. Aurora PostgreSQL **Serverless v2** cluster in `us-east-1`, KMS-encrypted, in a
-   private subnet. Enable the **RDS Data API** and **IAM DB authentication**.
-2. Create a database (e.g. `kb`).
-3. A Secrets Manager secret with credentials for the **`kb_app`** role (NOT the
-   master user) — FORCE RLS only constrains non-owner roles, and `kb_app` is the
-   least-privilege app role this migration grants to.
-4. Confirm the Aurora engine version ships `pgvector` (>= the version that provides
-   HNSW).
-
-## Applying the migration
-
-Either via `psql` against the cluster endpoint, or the Data API. Example:
+Validate, then deploy (needs two subnets in different AZs; `MinCapacity=0` for a
+dev cluster that auto-pauses, or `0.5` in prod to avoid the ~15s resume):
 
 ```bash
-psql "$KB_ADMIN_URL" -f db/kb/0001_kb_init.sql
+aws cloudformation validate-template --template-body file://db/kb/infra/kb-aurora.cfn.yaml --profile AdministratorAccess-475976462949 --region us-east-1
+```
+```bash
+aws cloudformation deploy --stack-name sw-kb --template-file db/kb/infra/kb-aurora.cfn.yaml --capabilities CAPABILITY_NAMED_IAM --parameter-overrides VpcId=<VPC_ID> SubnetIds=<SUBNET_A>,<SUBNET_B> MinCapacity=0 MaxCapacity=4 --profile AdministratorAccess-475976462949 --region us-east-1
+```
+```bash
+aws cloudformation describe-stacks --stack-name sw-kb --query "Stacks[0].Outputs" --output table --profile AdministratorAccess-475976462949 --region us-east-1
 ```
 
-Idempotent — safe to re-run. Run as an admin/owner role (it creates the schema,
-`kb_app` role, tables, function, and policies).
+Note the outputs: `ClusterArn`, `ClusterEndpoint`, `KbAppSecretArn`,
+`MasterSecretArn`, `DbSecurityGroupId`, `AppAccessPolicyArn`.
+
+## Applying the migration (private — no public access)
+
+The cluster has no standing 5432 ingress. Apply from **inside the VPC** — a
+VPC-connected **AWS CloudShell** (or an SSM Session Manager bastion) with `psql`.
+Do NOT use the RDS Query Editor for this file: the Data API forbids multi-statement
+calls and naive semicolon-splitting breaks the PL/pgSQL function bodies / DO blocks.
+Do NOT enable public accessibility (Security Hub RDS.2).
+
+1. In a VPC CloudShell environment (same VPC, a private subnet), add a temporary
+   ingress rule so CloudShell's ENI can reach 5432:
+   ```bash
+   aws ec2 authorize-security-group-ingress --group-id <DbSecurityGroupId> --protocol tcp --port 5432 --source-group <CLOUDSHELL_OR_BASTION_SG> --profile AdministratorAccess-475976462949 --region us-east-1
+   ```
+2. Read the **master** credentials (RDS-managed) from Secrets Manager:
+   ```bash
+   aws secretsmanager get-secret-value --secret-id <MasterSecretArn> --query SecretString --output text --profile AdministratorAccess-475976462949 --region us-east-1
+   ```
+3. Apply the schema into `kb` (the CFN already created the `kb` database):
+   ```bash
+   psql "host=<ClusterEndpoint> port=5432 dbname=kb user=kbmaster password=<MASTER_PW> sslmode=require" -f db/kb/0001_kb_init.sql
+   ```
+4. Set the `kb_app` role's password to the generated secret value so the Data API
+   can authenticate as it (read `<KbAppSecretArn>` for `<KBAPP_PW>`):
+   ```bash
+   psql "host=<ClusterEndpoint> port=5432 dbname=kb user=kbmaster password=<MASTER_PW> sslmode=require" -c "ALTER ROLE kb_app WITH LOGIN PASSWORD '<KBAPP_PW>';"
+   ```
+5. Remove the temporary ingress rule (leave the SG with no standing ingress):
+   ```bash
+   aws ec2 revoke-security-group-ingress --group-id <DbSecurityGroupId> --protocol tcp --port 5432 --source-group <CLOUDSHELL_OR_BASTION_SG> --profile AdministratorAccess-475976462949 --region us-east-1
+   ```
+
+Migration is idempotent — safe to re-run.
+
+## Wiring the app
+
+1. Attach `<AppAccessPolicyArn>` to the app runtime role (dev SSO already has
+   admin; prod needs this scoped policy).
+2. Set env (your `.env` — not touched by this repo):
+   ```
+   KB_CLUSTER_ARN=<ClusterArn>
+   KB_SECRET_ARN=<KbAppSecretArn>
+   KB_DATABASE=kb
+   ```
+3. Smoke-test the Data API path end to end (a `0` count = role/grants/Data API OK):
+   ```bash
+   aws rds-data execute-statement --resource-arn <ClusterArn> --secret-arn <KbAppSecretArn> --database kb --sql "select count(*) from kb.documents" --profile AdministratorAccess-475976462949 --region us-east-1
+   ```
 
 ## App connection + tenancy (RDS Data API)
 
-The server seam (`src/lib/kb/aurora.server.ts`, P1 follow-up) uses
-`@aws-sdk/client-rds-data` with the default AWS credential chain (SigV4 — no static
-keys), reading:
-
-- `KB_CLUSTER_ARN` — Aurora cluster ARN
-- `KB_SECRET_ARN` — Secrets Manager ARN for the `kb_app` credentials
-- `KB_DATABASE` — database name (e.g. `kb`)
-
-**Per-request tenant isolation.** Every data call runs inside a Data API transaction
-that first sets the principal, so FORCE RLS scopes the connection:
+The seam `src/lib/kb/aurora.server.ts` uses `@aws-sdk/client-rds-data` with the
+default AWS credential chain (SigV4, no static keys). Every data call runs inside a
+Data API transaction that first sets the principal, so FORCE RLS scopes it:
 
 ```
 BeginTransaction
-  SET LOCAL app.user = '<verified Cognito sub>'   -- from getUserFromRequest, never client input
+  SELECT set_config('app.user', '<verified Cognito sub>', true)   -- its own call; transaction-local
   <statements>
 CommitTransaction
 ```
 
-`current_setting('app.user', true)` returns NULL when unset, so an unscoped
-connection is default-deny (sees no rows). Queries also pass `owner`/`workspace`
-explicitly to `kb.hybrid_search` as belt-and-suspenders.
+A Data API transaction is a single serialized backend session, so the
+transaction-local GUC holds for the transaction. `current_setting('app.user', true)`
+is NULL when unset → default-deny. Queries also pass `owner`/`workspace` explicitly
+to the functions (belt and suspenders).
+
+## Data API limits this schema is designed around
+
+- **1 MiB per result set, 64 KB per row — HARD errors, not truncation.**
+  `hybrid_search` returns `left(content, p_snippet_chars)` (default 2500) and a
+  modest default `p_match` (120); it NEVER selects the embedding column (a 1024-dim
+  vector as text is ~10-15 KB/row and would blow the cap). Full bodies come from
+  `fetch_chunks` for a bounded top-K.
+- Chunk `content` is capped < 64 KB at ingest (the ~512-token target does this).
+- Scale-to-0 (dev): the first Data API call after idle pays a ~15s resume.
 
 ## Dimensions / models
 
 - Embeddings: `amazon.titan-embed-text-v2:0`, **1024-dim**, normalized, cosine.
 - Rerank (post-retrieval, app side): `cohere.rerank-v3-5:0` via the Bedrock Rerank
-  API — pre-truncate the fused pool to ~150 before rerank.
+  API — pre-truncate the fused pool before rerank.
 
 ## Migration order
 
-- `0001_kb_init.sql` — schema, indexes, hybrid function, `kb_app` role, FORCE RLS.
+- `0001_kb_init.sql` — schema, indexes, `hybrid_search` + `fetch_chunks`, `kb_app`
+  role, FORCE RLS.
 - Future: `0002_*` shared-workspace membership (extends the RLS USING clause).

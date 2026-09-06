@@ -177,6 +177,13 @@ export type HybridSearchArgs = {
   /** Fused candidate ceiling before app-side rerank. */
   match?: number;
   rrfK?: number;
+  /**
+   * Per-row snippet length (chars) returned as rerank input. Bounded because the
+   * Data API hard-errors past 1 MiB total / 64 KB per row; full bodies for the
+   * reranked top-K come from fetchChunks(). NEVER widen this to return whole
+   * documents.
+   */
+  snippetChars?: number;
   /** Optional restrict-to set of document ids. */
   docIds?: string[];
 };
@@ -184,12 +191,14 @@ export type HybridSearchArgs = {
 /**
  * Hybrid RRF search (pgvector kNN + BM25) scoped to the tenant + surface.
  * Runs under withPrincipal so RLS applies; owner/workspace are also passed
- * explicitly to the function (defense in depth).
+ * explicitly to the function (defense in depth). Returns bounded snippets, not
+ * full bodies (Data API 1 MiB / 64 KB caps).
  */
 export async function hybridSearch(args: HybridSearchArgs): Promise<KbHit[]> {
   requireConfig();
-  const match = args.match ?? 150;
+  const match = args.match ?? 120;
   const rrfK = args.rrfK ?? 60;
+  const snippetChars = args.snippetChars ?? 2500;
   const restrict = args.docIds?.length ? true : false;
 
   const parameters: SqlParameter[] = [
@@ -200,6 +209,7 @@ export async function hybridSearch(args: HybridSearchArgs): Promise<KbHit[]> {
     param("embedding", vectorLiteral(args.embedding)),
     param("match", match),
     param("rrf_k", rrfK),
+    param("snippet", snippetChars),
   ];
   if (restrict) {
     parameters.push({
@@ -219,9 +229,49 @@ export async function hybridSearch(args: HybridSearchArgs): Promise<KbHit[]> {
       CAST(:embedding AS vector),
       CAST(:match AS int),
       CAST(:rrf_k AS int),
+      CAST(:snippet AS int),
       ${docIdsSql}
     )
   `;
 
   return withPrincipal(args.sub, (tx) => queryJson<KbHit>(sql, parameters, tx));
+}
+
+export type KbChunk = {
+  chunk_id: number;
+  doc_id: string;
+  page_start: number | null;
+  page_end: number | null;
+  kind: string | null;
+  content: string;
+  conf: number | null;
+};
+
+/**
+ * Full chunk bodies for the reranked top-K (synthesis input). Keep `chunkIds`
+ * bounded (<= ~40) so the 1 MiB Data API result cap is not exceeded; per-row
+ * content is < 64 KB by the ingest chunk-size cap. Order follows `chunkIds`.
+ */
+export async function fetchChunks(
+  sub: string,
+  workspaceId: string,
+  surface: KbSurface,
+  chunkIds: number[],
+): Promise<KbChunk[]> {
+  if (!chunkIds.length) return [];
+  requireConfig();
+  const parameters: SqlParameter[] = [
+    param("owner", sub),
+    param("workspace", workspaceId),
+    param("surface", surface),
+    {
+      name: "ids",
+      value: { arrayValue: { longValues: chunkIds } },
+    },
+  ];
+  const sql = `
+    SELECT chunk_id, doc_id, page_start, page_end, kind, content, conf
+    FROM kb.fetch_chunks(:owner, CAST(:workspace AS uuid), :surface, CAST(:ids AS bigint[]))
+  `;
+  return withPrincipal(sub, (tx) => queryJson<KbChunk>(sql, parameters, tx));
 }

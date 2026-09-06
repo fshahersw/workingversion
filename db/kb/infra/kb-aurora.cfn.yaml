@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  SeegerWeissAI per-user document KB. Aurora PostgreSQL Serverless v2 with the
+  RDS Data API, private (no public access), RDS-managed master password, optional
+  scale-to-0, deletion protection, plus a generated kb_app secret and a
+  least-privilege app access policy. First app-owned relational/vector store on
+  the AWS-native stack. See db/kb/README.md.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to place the cluster in.
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two+ subnets in different AZs for the DB subnet group.
+  EngineVersion:
+    Type: String
+    Default: "16.8"
+    Description: Aurora PostgreSQL version (>=16.1 for Data API, >=16.3 for scale-to-0; 16.8 ships pgvector 0.8.x with HNSW).
+  MinCapacity:
+    Type: Number
+    Default: 0
+    Description: Serverless v2 min ACU. 0 = auto-pause (dev). Use >=0.5 in prod to avoid the ~15s resume on the first query after idle.
+  MaxCapacity:
+    Type: Number
+    Default: 4
+    Description: Serverless v2 max ACU (must be > 0.5).
+  SecondsUntilAutoPause:
+    Type: Number
+    Default: 300
+    Description: Idle seconds before auto-pause when MinCapacity is 0 (300-86400).
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    Description: Automated backup retention (days).
+  DeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Block accidental cluster deletion.
+  KmsKeyId:
+    Type: String
+    Default: ""
+    Description: Optional customer-managed KMS key ARN for storage + the managed secrets. Empty = the aws/rds and aws/secretsmanager defaults.
+
+Conditions:
+  UseCmk: !Not [!Equals [!Ref KmsKeyId, ""]]
+
+Resources:
+  KbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${AWS::StackName} KB subnet group"
+      SubnetIds: !Ref SubnetIds
+
+  # No standing ingress: the app reaches the DB over the Data API (an AWS API,
+  # not a 5432 connection). To apply the migration from a VPC-connected
+  # CloudShell or an SSM bastion, add a TEMPORARY ingress rule on 5432 from that
+  # environment's security group, then remove it. Never open this to 0.0.0.0/0.
+  KbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} KB Aurora (Data API only; no standing ingress)"
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-kb-sg"
+
+  KbCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      DBClusterIdentifier: !Sub "${AWS::StackName}-kb"
+      DatabaseName: kb
+      MasterUsername: kbmaster
+      ManageMasterUserPassword: true
+      MasterUserSecret: !If
+        - UseCmk
+        - KmsKeyId: !Ref KmsKeyId
+        - !Ref "AWS::NoValue"
+      EnableHttpEndpoint: true
+      StorageEncrypted: true
+      KmsKeyId: !If [UseCmk, !Ref KmsKeyId, !Ref "AWS::NoValue"]
+      DBSubnetGroupName: !Ref KbSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref KbSecurityGroup
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      DeletionProtection: !Ref DeletionProtection
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: !Ref MaxCapacity
+        SecondsUntilAutoPause: !Ref SecondsUntilAutoPause
+
+  KbWriter:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref KbCluster
+      PubliclyAccessible: false
+      PromotionTier: 1
+
+  # kb_app is the least-privilege role the app connects as (FORCE RLS applies to
+  # it). Password generated here; the migration runbook sets the DB role's
+  # password to this value (ALTER ROLE kb_app ... PASSWORD).
+  KbAppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${AWS::StackName}/kb/kb_app"
+      Description: KB application role (kb_app) credentials for the RDS Data API.
+      KmsKeyId: !If [UseCmk, !Ref KmsKeyId, !Ref "AWS::NoValue"]
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"kb_app"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  # Attach to the app runtime role. Least privilege: Data API on THIS cluster,
+  # read THIS secret only. No master-secret access (admin/migration only).
+  KbAppAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-kb-app-access"
+      Description: Data API + kb_app secret access for the SeegerWeissAI app runtime.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: KbDataApi
+            Effect: Allow
+            Action:
+              - rds-data:BatchExecuteStatement
+              - rds-data:BeginTransaction
+              - rds-data:CommitTransaction
+              - rds-data:ExecuteStatement
+              - rds-data:RollbackTransaction
+            Resource: !GetAtt KbCluster.DBClusterArn
+          - Sid: KbAppSecretRead
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Ref KbAppSecret
+
+Outputs:
+  ClusterArn:
+    Description: KB_CLUSTER_ARN
+    Value: !GetAtt KbCluster.DBClusterArn
+  ClusterEndpoint:
+    Description: Writer endpoint (for the one-time migration only).
+    Value: !GetAtt KbCluster.Endpoint.Address
+  ClusterPort:
+    Value: !GetAtt KbCluster.Endpoint.Port
+  Database:
+    Description: KB_DATABASE
+    Value: kb
+  KbAppSecretArn:
+    Description: KB_SECRET_ARN (the app connects as kb_app via this secret).
+    Value: !Ref KbAppSecret
+  MasterSecretArn:
+    Description: RDS-managed master secret (admin/migration only).
+    Value: !GetAtt KbCluster.MasterUserSecret.SecretArn
+  DbSecurityGroupId:
+    Description: Add a temporary 5432 ingress here for the migration, then remove.
+    Value: !Ref KbSecurityGroup
+  AppAccessPolicyArn:
+    Description: Attach to the app runtime role.
+    Value: !Ref KbAppAccessPolicy

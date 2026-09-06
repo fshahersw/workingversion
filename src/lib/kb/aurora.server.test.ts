@@ -4,7 +4,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { param, vectorLiteral, kbConfigured, hybridSearch, withPrincipal } from "./aurora.server.ts";
+import {
+  param,
+  vectorLiteral,
+  kbConfigured,
+  hybridSearch,
+  fetchChunks,
+  withPrincipal,
+} from "./aurora.server.ts";
 
 test("param infers the Data API field type", () => {
   assert.deepEqual(param("s", "hi"), { name: "s", value: { stringValue: "hi" } });
@@ -30,4 +37,13 @@ test("data calls reject when unconfigured", async () => {
     /not configured/,
   );
   await assert.rejects(() => withPrincipal("u1", async () => 1), /not configured/);
+  await assert.rejects(
+    () => fetchChunks("u1", "w1", "workingset", [1, 2]),
+    /not configured/,
+  );
+});
+
+test("fetchChunks short-circuits on empty ids", async () => {
+  // Returns before requireConfig, so it must not throw even unconfigured.
+  assert.deepEqual(await fetchChunks("u1", "w1", "workingset", []), []);
 });
