@@ -102,10 +102,10 @@ test("fallback classifier covers Bedrock first-use and region errors", () => {
 
 test("transport and no-think routing match the Bedrock model families", () => {
   assert.equal(transportFor("nvidia.nemotron-super-3-120b"), "converse");
-  assert.equal(transportFor("google.gemma-4-26b-a4b"), "mantle");
-  assert.equal(transportFor("moonshotai.kimi-k2.5"), "mantle");
+  assert.equal(transportFor(MODELS.gemma), "converse");
+  assert.equal(transportFor(MODELS.kimi), "converse");
   assert.equal(needsNoThink("nvidia.nemotron-nano-3-30b"), true);
-  assert.equal(needsNoThink("google.gemma-4-26b-a4b"), false);
+  assert.equal(needsNoThink(MODELS.gemma), false);
 });
 
 test("parseConfidence defaults unknown values to medium", () => {

@@ -26,6 +26,7 @@ import {
   REVIEW_SAMPLE_ROWS,
   cellCacheKey,
   displayValue,
+  documentRowFingerprint,
   type CellAnswer,
   type ColumnKind,
   type ReviewCell,
@@ -71,6 +72,22 @@ export type SampleResult = {
 
 type CellKey = string;
 const key = (rowId: string, columnId: string): CellKey => `${rowId}:${columnId}`;
+
+function findDocumentRow(
+  rows: readonly ReviewRow[],
+  name: string,
+  pageCount: number,
+): ReviewRow | undefined {
+  const fingerprint = documentRowFingerprint(name, pageCount);
+  const legacyUploadPrefix = `${fingerprint}|`;
+  return (
+    rows.find((row) => row.fingerprint === fingerprint) ??
+    rows.find((row) => row.fingerprint?.startsWith(legacyUploadPrefix)) ??
+    rows.find(
+      (row) => documentRowFingerprint(row.label, row.pageCount) === fingerprint,
+    )
+  );
+}
 
 async function requestCell(input: {
   column: { name: string; question: string; kind: ColumnKind; options: string[] };
@@ -322,12 +339,11 @@ export function useReviewTable(
             );
             const recovered = await recoverScannedPages(file, pages);
             pages = recovered.pages;
-            const chars = pages.reduce((n, p) => n + p.text.length, 0);
             fresh.push({
               fileId,
               name: res.name,
               pages,
-              fingerprint: `${res.name}|${pages.length}|${chars}`,
+              fingerprint: documentRowFingerprint(res.name, pages.length),
             });
             setFiles((prev) =>
               prev.map((f) =>
@@ -352,7 +368,7 @@ export function useReviewTable(
             fileId,
             name: res.name,
             pages,
-            fingerprint: `${res.name}|${take.length}|${res.charCount}`,
+            fingerprint: documentRowFingerprint(res.name, pages.length),
           });
           setFiles((prev) =>
             prev.map((f) =>
@@ -396,10 +412,9 @@ export function useReviewTable(
         });
 
         // Re-link rows that already exist for this document; insert the rest.
-        const existing = new Map(rows.map((r) => [r.fingerprint ?? r.label, r]));
         const toInsert: typeof fresh = [];
         for (const f of fresh) {
-          const match = existing.get(f.fingerprint) ?? existing.get(f.name);
+          const match = findDocumentRow(rows, f.name, f.pages.length);
           if (match) {
             await db.relinkRow(match.id, [f.fileId]);
             setRows((prev) =>
@@ -442,12 +457,11 @@ export function useReviewTable(
       setError(null);
       setBusy(true);
       try {
-        const existing = new Map(rows.map((r) => [r.fingerprint ?? r.label, r]));
         const toInsert: { label: string; fileIds: string[]; fingerprint: string; pageCount: number }[] =
           [];
         for (const f of files) {
-          const fingerprint = `${f.name}|${f.pageCount}`;
-          const match = existing.get(fingerprint) ?? existing.get(f.name);
+          const fingerprint = documentRowFingerprint(f.name, f.pageCount);
+          const match = findDocumentRow(rows, f.name, f.pageCount);
           if (match) {
             await db.relinkRow(match.id, [f.id]);
             setRows((prev) =>
@@ -879,7 +893,11 @@ export function useReviewTable(
   );
 
   const stats = useMemo(() => {
-    const list = Object.values(cells);
+    const rowIds = new Set(rows.map((row) => row.id));
+    const columnIds = new Set(columns.map((column) => column.id));
+    const list = Object.values(cells).filter(
+      (cell) => rowIds.has(cell.rowId) && columnIds.has(cell.columnId),
+    );
     return {
       total: rows.length * columns.length,
       filled: list.filter((c) => c.status !== "pending").length,
@@ -889,7 +907,7 @@ export function useReviewTable(
       verified: list.filter((c) => !!c.verifiedAt).length,
       pages: rows.reduce((n, r) => n + r.pageCount, 0),
     };
-  }, [cells, columns.length, rows]);
+  }, [cells, columns, rows]);
 
   /** A row whose document is not in this browser session cannot be re-run. */
   const linkedRowIds = useMemo(() => {

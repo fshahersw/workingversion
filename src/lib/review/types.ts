@@ -109,6 +109,15 @@ export type ReviewRow = {
   position: number;
 };
 
+/**
+ * Stable document evidence shared by direct uploads and imported working sets.
+ * File ids and extracted character counts are intentionally excluded because
+ * they can change when the same document is re-opened or OCR is retried.
+ */
+export function documentRowFingerprint(name: string, pageCount: number): string {
+  return `${name}|${pageCount}`;
+}
+
 export type ReviewCell = {
   id: string;
   tableId: string;
