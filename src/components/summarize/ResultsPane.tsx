@@ -187,7 +187,7 @@ function CiteStrip({ report }: { report: CiteReport }) {
         {report.cites.length
           ? ` · ${report.verified} verified cite${report.verified === 1 ? "" : "s"}`
           : ""}
-        {report.unverified ? ` · ${report.unverified} unchecked` : ""}
+        {report.unverified ? ` · ${report.unverified} unverified` : ""}
       </p>
       {report.ocrUsed || report.garbledUsed ? (
         <p className="rounded-md border border-amber-500/30 bg-amber-500/8 px-2.5 py-1.5 text-[11.5px] leading-relaxed text-amber-900">
@@ -198,8 +198,8 @@ function CiteStrip({ report }: { report: CiteReport }) {
       ) : null}
       {report.unverified ? (
         <p className="text-[11.5px] text-muted-foreground">
-          {report.unverified} cite{report.unverified === 1 ? "" : "s"} could not be matched to the
-          packed page.
+          {report.unverified} cite{report.unverified === 1 ? "" : "s"} lacked a verifiable quoted
+          span or did not match the cited page.
         </p>
       ) : null}
     </div>

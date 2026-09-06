@@ -127,3 +127,17 @@ test("mergeDepAnalysis keeps distinct findings that share only a cite", () => {
   const merged = mergeDepAnalysis(base, next);
   assert.equal(merged.admissions.length, 2);
 });
+
+test("mergeDepAnalysis keeps summary-only findings without quote or cite", () => {
+  const base = parseDepAnalysis(`{
+    "themes": [{ "title": "Baseline theme" }]
+  }`);
+  const next = parseDepAnalysis(`{
+    "themes": [{ "title": "Cross-pass synthesis" }]
+  }`);
+  const merged = mergeDepAnalysis(base, next);
+  assert.deepEqual(
+    merged.themes.map((item) => item.title),
+    ["Baseline theme", "Cross-pass synthesis"],
+  );
+});

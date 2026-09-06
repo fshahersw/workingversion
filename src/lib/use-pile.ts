@@ -18,7 +18,7 @@ import {
   askBudget,
   perFileHits,
 } from "@/lib/pile/limits";
-import { isLowQualityText } from "@/lib/pile/text-quality";
+import { isLowQualityText, pageNeedsOcr } from "@/lib/pile/text-quality";
 import {
   pagesFromPack,
   verifyAnswerCites,
@@ -279,7 +279,7 @@ async function recoverScannedPages(args: {
   for (const item of args.extracted) {
     if (fileKind(item.file) !== "pdf") continue;
     const pages = item.res.pages
-      .filter((p) => p.text.trim().length < OCR_EMPTY_CHARS)
+      .filter((p) => pageNeedsOcr(p.text, OCR_EMPTY_CHARS))
       .map((p) => p.page);
     if (pages.length) scanned.set(item.res.name, pages);
   }

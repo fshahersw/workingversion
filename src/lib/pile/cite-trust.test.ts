@@ -9,7 +9,7 @@ import {
   shortFileName,
   verifyAnswerCites,
 } from "./cite-trust.ts";
-import type { PilePage } from "./types.ts";
+import type { PileHit, PilePage } from "./types.ts";
 
 const pages: PilePage[] = [
   {
@@ -33,24 +33,71 @@ test("cite labels use file and page, not S-ids", () => {
   assert.ok(shortFileName("very-long-expert-report-name-here.pdf").endsWith(".pdf"));
 });
 
-test("verifyAnswerCites keeps a quote that appears on the packed page", () => {
+test("verifyAnswerCites preserves exact, normalized, and fuzzy quote matches", () => {
   const packed = pagesFromPack(pages);
-  const answer =
-    'The order says "Daubert hearing is set for March 14, 2026" [S1]. They argue "the expert should be excluded under Rule 702" [S2].';
-  const report = verifyAnswerCites(answer, packed);
-  assert.equal(report.cites.length, 2);
-  assert.equal(report.cites[0]!.label, "cmo-12.pdf p. 4");
-  assert.notEqual(report.cites[0]!.match, "none");
-  assert.notEqual(report.cites[1]!.match, "none");
-  assert.equal(report.ocrUsed, true);
+  const exact = verifyAnswerCites(
+    'The order says "A Daubert hearing is set for March 14, 2026." [S1].',
+    packed,
+  );
+  const normalized = verifyAnswerCites(
+    'The order says "a daubert hearing is set for march 14, 2026." [S1].',
+    packed,
+  );
+  const fuzzy = verifyAnswerCites(
+    'The order says "A Daubert hearing is scheduled for March 14, 2026." [S1].',
+    packed,
+  );
+
+  assert.equal(exact.cites[0]!.match, "exact");
+  assert.equal(exact.cites[0]!.label, "cmo-12.pdf p. 4");
+  assert.equal(normalized.cites[0]!.match, "normalized");
+  assert.equal(fuzzy.cites[0]!.match, "fuzzy");
+  assert.equal(exact.verified, 1);
+  assert.equal(exact.unverified, 0);
 });
 
-test("verifyAnswerCites flags an invented cite", () => {
+test("verifyAnswerCites does not verify a packed cite without a quoted span", () => {
   const packed = pagesFromPack(pages);
-  const answer = 'The court awarded "$40 million in punitive damages" [S1].';
+  const answer =
+    'The order says "A Daubert hearing is set for March 14, 2026." [S1]. Defendants request exclusion under Rule 702 [S2].';
   const report = verifyAnswerCites(answer, packed);
-  assert.equal(report.cites[0]!.match, "none");
+
+  assert.equal(report.cites[1]!.match, "packed");
+  assert.equal(report.cites[1]!.quote, "");
+  assert.equal(report.verified, 1);
   assert.equal(report.unverified, 1);
+});
+
+test("verifyAnswerCites rejects a real quote cited to the wrong page", () => {
+  const packed = pagesFromPack(pages);
+  const answer = 'Defendants argue "the expert should be excluded under Rule 702." [S1].';
+  const report = verifyAnswerCites(answer, packed);
+
+  assert.equal(report.cites[0]!.match, "none");
+  assert.equal(report.verified, 0);
+  assert.equal(report.unverified, 1);
+});
+
+test("verifyAnswerCites reports OCR and garbled packed pages", () => {
+  const hits: PileHit[] = [
+    {
+      fileId: "a",
+      fileName: "cmo-12.pdf",
+      page: 4,
+      score: 1,
+      snippet: "Daubert hearing",
+      garbled: true,
+    },
+  ];
+  const packed = pagesFromPack(pages, hits);
+  const answer =
+    'The order says "A Daubert hearing is set for March 14, 2026." [S1]. Defendants argue "the expert should be excluded under Rule 702." [S2].';
+  const report = verifyAnswerCites(answer, packed);
+
+  assert.equal(report.cites[0]!.garbled, true);
+  assert.equal(report.cites[1]!.ocr, true);
+  assert.equal(report.garbledUsed, true);
+  assert.equal(report.ocrUsed, true);
 });
 
 test("claimNearCite prefers a quoted span", () => {

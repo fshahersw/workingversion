@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { isLowQualityText, textQualityScore } from "./text-quality.ts";
+import { isLowQualityText, pageNeedsOcr, textQualityScore } from "./text-quality.ts";
 
 test("clean pleading text scores high", () => {
   const t =
@@ -26,4 +26,27 @@ test("character-spaced OCR scores low", () => {
 test("empty is low quality", () => {
   assert.equal(textQualityScore(""), 0);
   assert.equal(isLowQualityText("   "), true);
+});
+
+test("pageNeedsOcr selects short and garbled pages but skips readable text", () => {
+  const clean =
+    "The court denied the motion to dismiss. Plaintiffs allege a Daubert challenge to the epidemiology expert. ".repeat(
+      2,
+    );
+  const garbled =
+    "If there is any possibility of you bec9ming pregnant you must abs,ain fn:,m siexu;,1 relations or use a medically ".repeat(
+      2,
+    );
+  const pages = [
+    { page: 1, text: "Scanned cover page" },
+    { page: 2, text: clean },
+    { page: 3, text: garbled },
+  ];
+
+  assert.ok(clean.length > 120);
+  assert.ok(garbled.length > 120);
+  assert.deepEqual(
+    pages.filter((page) => pageNeedsOcr(page.text)).map((page) => page.page),
+    [1, 3],
+  );
 });

@@ -18,6 +18,7 @@ export type CiteCheck = {
   page: number;
   label: string;
   quote: string;
+  /** `packed` means the cited page was provided, but no verifiable quoted span was present. */
   match: "exact" | "normalized" | "fuzzy" | "none" | "packed";
   ocr: boolean;
   garbled: boolean;
@@ -67,17 +68,26 @@ export function citeLabelMap(pages: CitePage[]): Record<string, string> {
   return Object.fromEntries(pages.map((p) => [p.ref, citeLabel(p.fileName, p.page)]));
 }
 
+function quotedSpanNearCite(answer: string, ref: string): string {
+  const token = `[${ref}]`;
+  const idx = answer.indexOf(token);
+  if (idx < 0) return "";
+  const start = Math.max(0, answer.lastIndexOf("\n", idx));
+  const before = answer.slice(start, idx);
+  const quote = before.match(/[“"]([^”"]{12,400})[”"](?:[\s.,;:()*_`–—-]*)$/);
+  return quote?.[1]?.trim() ?? "";
+}
+
 /** Quoted span immediately before [Sn], else a distinctive window from that line. */
 export function claimNearCite(answer: string, ref: string): string {
+  const quote = quotedSpanNearCite(answer, ref);
+  if (quote) return quote;
   const token = `[${ref}]`;
   const idx = answer.indexOf(token);
   if (idx < 0) return "";
   const start = Math.max(0, answer.lastIndexOf("\n", idx));
   const nextBreak = answer.indexOf("\n", idx);
   const end = nextBreak === -1 ? answer.length : nextBreak;
-  const before = answer.slice(start, idx);
-  const quotes = [...before.matchAll(/[“"]([^”"]{12,400})[”"]/g)].map((m) => m[1]!.trim());
-  if (quotes.length) return quotes[quotes.length - 1]!;
   const sentence = answer.slice(start, end).replace(/\[S\d+\]/g, " ").replace(/[*_`#]/g, " ");
   return sentence.replace(/\s+/g, " ").trim().slice(0, 280);
 }
@@ -105,7 +115,7 @@ export function verifyAnswerCites(answer: string, pages: CitePage[]): CiteReport
       });
       continue;
     }
-    const quote = claimNearCite(answer, ref);
+    const quote = quotedSpanNearCite(answer, ref);
     const match = quote.length >= 12 ? quoteOnPage(quote, page.text) : "packed";
     cites.push({
       ref,
@@ -114,16 +124,19 @@ export function verifyAnswerCites(answer: string, pages: CitePage[]): CiteReport
       page: page.page,
       label: citeLabel(page.fileName, page.page),
       quote,
-      match: match === "none" && quote.length < 12 ? "packed" : match,
+      match,
       ocr: !!page.ocr,
       garbled: !!page.garbled,
     });
   }
   const files = new Set(pages.map((p) => p.fileId));
+  const verified = cites.filter(
+    (c) => c.match === "exact" || c.match === "normalized" || c.match === "fuzzy",
+  ).length;
   return {
     cites,
-    verified: cites.filter((c) => c.match !== "none").length,
-    unverified: cites.filter((c) => c.match === "none").length,
+    verified,
+    unverified: cites.length - verified,
     ocrUsed: pages.some((p) => p.ocr) || cites.some((c) => c.ocr),
     garbledUsed: pages.some((p) => p.garbled) || cites.some((c) => c.garbled),
     pagesRead: pages.length,

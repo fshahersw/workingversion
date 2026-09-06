@@ -432,7 +432,10 @@ export function mergeDepAnalysis(base: DepAnalysis, next: DepAnalysis): DepAnaly
     const out = [...a];
     for (const item of b) {
       const key = `${displayCite(item.cite)}|${normalizeQuote(item.quote)}`;
-      if (key === "|") continue; // no quote and no cite — always keep
+      if (key === "|") {
+        out.push(item); // summary-only synth/cross findings have no stable dedupe key
+        continue;
+      }
       if (out.some((x) => `${displayCite(x.cite)}|${normalizeQuote(x.quote)}` === key)) continue;
       out.push(item);
     }
