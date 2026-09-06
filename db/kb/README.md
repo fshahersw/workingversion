@@ -44,11 +44,23 @@ Note the outputs: `ClusterArn`, `ClusterEndpoint`, `KbAppSecretArn`,
 
 ## Applying the migration (private — no public access)
 
-The cluster has no standing 5432 ingress. Apply from **inside the VPC** — a
-VPC-connected **AWS CloudShell** (or an SSM Session Manager bastion) with `psql`.
-Do NOT use the RDS Query Editor for this file: the Data API forbids multi-statement
-calls and naive semicolon-splitting breaks the PL/pgSQL function bodies / DO blocks.
-Do NOT enable public accessibility (Security Hub RDS.2).
+**Recommended — apply over the Data API (no VPC / psql / CloudShell).**
+`scripts/kb-apply-migration.mjs` splits this file into single statements
+(dollar-quote + comment aware; the Data API forbids multi-statement calls) and runs
+each with the RDS-managed master secret, then sets the `kb_app` password from its
+secret and runs a smoke query. Runs from anywhere with your AWS creds:
+
+```bash
+AWS_PROFILE=AdministratorAccess-475976462949 AWS_REGION=us-east-1 KB_CLUSTER_ARN=<ClusterArn> KB_APP_SECRET_ARN=<KbAppSecretArn> node scripts/kb-apply-migration.mjs
+```
+
+It auto-resolves the master secret from the cluster. `--dry-run` parses without any
+AWS calls. Idempotent (the schema uses IF NOT EXISTS / OR REPLACE).
+
+**Fallback — psql from inside the VPC.** The cluster has no standing 5432 ingress,
+so use a VPC-connected **AWS CloudShell** (or an SSM bastion) with `psql`. Do NOT use
+the RDS Query Editor (its Data-API multi-statement limit breaks the PL/pgSQL bodies)
+and do NOT enable public accessibility (Security Hub RDS.2).
 
 1. In a VPC CloudShell environment (same VPC, a private subnet), add a temporary
    ingress rule so CloudShell's ENI can reach 5432:
