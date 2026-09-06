@@ -4,8 +4,12 @@ import {
   BookmarkCheck,
   Download,
   FileText,
+  FolderOpen,
+  Layers,
   Loader2,
   MessageSquare,
+  Mic,
+  Table2,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -27,6 +31,8 @@ import {
   listItemsFn,
   registerUploadFn,
 } from "@/lib/library/library.functions";
+import { deleteWorkspaceFn, listWorkspacesFn } from "@/lib/kb/workspace.functions";
+import type { WorkspaceSummary, WorkspaceSurface } from "@/lib/kb/workspace.server";
 
 export const Route = createFileRoute("/_authenticated/library")({
   ssr: false,
@@ -45,12 +51,16 @@ type LibItem = {
 };
 
 const TABS = [
+  { key: "workingset", label: "Working Sets", icon: Layers },
+  { key: "deposition", label: "Depositions", icon: Mic },
+  { key: "review", label: "Tabular Review", icon: Table2 },
   { key: "chats", label: "Chat history", icon: MessageSquare },
   { key: "output", label: "Saved outputs", icon: Bookmark },
   { key: "prompt", label: "Prompts", icon: FileText },
   { key: "file", label: "Uploads", icon: Upload },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
+const SURFACE_TABS = new Set<TabKey>(["workingset", "deposition", "review"]);
 
 function relative(iso: string): string {
   if (!iso) return "";
@@ -74,7 +84,7 @@ function prettySize(bytes?: number): string {
 }
 
 function LibraryPage() {
-  const [tab, setTab] = useState<TabKey>("chats");
+  const [tab, setTab] = useState<TabKey>("workingset");
   return (
     <AppShell>
       <div className="mx-auto flex h-full w-full max-w-[900px] flex-col px-4 py-6 sm:px-6">
@@ -105,10 +115,100 @@ function LibraryPage() {
         </div>
 
         <div className="wr-app-scroll mt-4 min-h-0 flex-1 overflow-y-auto">
-          {tab === "chats" ? <ChatsList /> : <ItemsList kind={tab as ItemKind} />}
+          {tab === "chats" ? (
+            <ChatsList />
+          ) : SURFACE_TABS.has(tab) ? (
+            <WorkspacesList surface={tab as WorkspaceSurface} />
+          ) : (
+            <ItemsList kind={tab as ItemKind} />
+          )}
         </div>
       </div>
     </AppShell>
+  );
+}
+
+function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
+  const navigate = useNavigate();
+  const [items, setItems] = useState<WorkspaceSummary[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setItems((await listWorkspacesFn({ data: { surface } })) as WorkspaceSummary[]);
+    } catch {
+      setItems([]);
+    }
+  }, [surface]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const openWorkspace = (id: string) => {
+    try {
+      sessionStorage.setItem("kb:reloadWorkspace", id);
+    } catch {
+      /* sessionStorage may be unavailable */
+    }
+    void navigate({ to: "/docs" });
+  };
+  const remove = async (id: string) => {
+    setBusyId(id);
+    try {
+      await deleteWorkspaceFn({ data: { itemId: id } });
+      await load();
+      toast.success("Workspace deleted");
+    } catch {
+      toast.error("Could not delete workspace");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (!items) return <Loading />;
+  if (!items.length) {
+    return (
+      <EmptyState label="No saved workspaces yet. Save a working set from Discovery to see it here." />
+    );
+  }
+  return (
+    <ul className="space-y-1.5">
+      {items.map((w) => (
+        <li
+          key={w.itemId}
+          className="flex items-center gap-3 rounded-lg border border-border/70 bg-card px-3 py-2.5"
+        >
+          <FolderOpen className="h-4 w-4 shrink-0 text-brand-navy/50" strokeWidth={1.8} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-medium text-foreground">{w.name}</p>
+            <p className="text-[11px] text-muted-foreground">
+              {w.docCount} doc{w.docCount === 1 ? "" : "s"} · {w.pageCount} pages
+              {w.folderId && w.folderId !== "ROOT" ? ` · ${w.folderId}` : ""} · {relative(w.createdAt)}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => openWorkspace(w.itemId)}
+            className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+          >
+            Open
+          </button>
+          <button
+            type="button"
+            onClick={() => void remove(w.itemId)}
+            disabled={busyId === w.itemId}
+            aria-label="Delete workspace"
+            className="shrink-0 text-muted-foreground transition hover:text-destructive disabled:opacity-50"
+          >
+            {busyId === w.itemId ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
 

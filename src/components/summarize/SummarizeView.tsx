@@ -7,7 +7,6 @@ import { DropPanel } from "./DropPanel";
 import { IngestProgress } from "./IngestProgress";
 import { ReasoningRail } from "./ReasoningRail";
 import { docTypeOf, fileFormat, RefineRail } from "./RefineRail";
-import { SavedDocsPanel } from "./SavedDocsPanel";
 import { ResultsPane } from "./ResultsPane";
 import { StructureRail } from "./StructureRail";
 import { Button } from "@/components/ui/button";
@@ -34,11 +33,34 @@ function fileAsGroup(file: PileFile, hits: PileFileHits["hits"]): PileFileHits {
 }
 
 export function SummarizeView() {
-  const { state, start, addFiles, search, ask, reset, loadPage, saveWorkspace, setQuery, selectHit } =
-    useSharedPile();
+  const {
+    state,
+    start,
+    addFiles,
+    search,
+    ask,
+    reset,
+    loadPage,
+    saveWorkspace,
+    reloadWorkspace,
+    setQuery,
+    selectHit,
+  } = useSharedPile();
   const [saveOpen, setSaveOpen] = useState(false);
   const [wsName, setWsName] = useState("");
   const [wsFolder, setWsFolder] = useState("");
+
+  // One-click reload: the Library "Open" hands off a workspace id via sessionStorage.
+  useEffect(() => {
+    let id: string | null = null;
+    try {
+      id = sessionStorage.getItem("kb:reloadWorkspace");
+      if (id) sessionStorage.removeItem("kb:reloadWorkspace");
+    } catch {
+      /* sessionStorage unavailable */
+    }
+    if (id) void reloadWorkspace(id);
+  }, [reloadWorkspace]);
   const [mode, setMode] = useState<Mode>("ask");
   const [types, setTypes] = useState<Set<string>>(new Set());
   const [formats, setFormats] = useState<Set<string>>(new Set());
@@ -205,7 +227,6 @@ export function SummarizeView() {
           />
         </>
       ) : null}
-      <SavedDocsPanel reloadKey={`${state.kbSave.status}:${state.kbSave.message ?? ""}`} />
     </RefineRail>
   );
 

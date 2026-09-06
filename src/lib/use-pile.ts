@@ -33,7 +33,11 @@ import {
   saveLocalPile,
 } from "@/lib/pile/local-store";
 import { useAuth } from "@/lib/use-auth";
-import { saveWorkspaceFn } from "@/lib/kb/workspace.functions";
+import {
+  saveWorkspaceFn,
+  getWorkspaceFn,
+  getWorkspacePagesFn,
+} from "@/lib/kb/workspace.functions";
 import { createUploadFn } from "@/lib/library/library.functions";
 import {
   PILE_TTL_MS,
@@ -1169,6 +1173,44 @@ export function usePile() {
     }
   }, []);
 
+  // One-click reload of a saved workspace: pull each doc's stored pages and
+  // rehydrate the pile (instant local search + reader; KB chunks already exist
+  // server-side for hybrid search). Merges into the current session.
+  const reloadWorkspace = useCallback(
+    async (itemId: string) => {
+      setState((s) => ({ ...s, phase: "reading", error: null }));
+      try {
+        const ws = await getWorkspaceFn({ data: { itemId } });
+        if (!ws) {
+          setState((s) => ({ ...s, phase: "error", error: "Workspace not found" }));
+          return;
+        }
+        const files: PileFile[] = [];
+        const pages: PilePage[] = [];
+        for (const d of ws.docs) {
+          const pg = await getWorkspacePagesFn({ data: { itemId, docId: d.docId } });
+          if (!pg?.length) continue;
+          files.push({ id: d.docId, name: d.fileName, pageCount: pg.length, emptyPages: 0, ocrPages: 0 });
+          for (const p of pg) {
+            pages.push({ fileId: d.docId, fileName: d.fileName, page: p.page, text: p.text, ocr: false });
+          }
+        }
+        if (!files.length) {
+          setState((s) => ({ ...s, phase: "error", error: "Nothing to load in that workspace" }));
+          return;
+        }
+        await ingestPages(files, pages);
+      } catch (e) {
+        setState((s) => ({
+          ...s,
+          phase: "error",
+          error: e instanceof Error ? e.message : "Could not reload workspace",
+        }));
+      }
+    },
+    [ingestPages],
+  );
+
   return {
     state,
     start,
@@ -1179,6 +1221,7 @@ export function usePile() {
     reset,
     loadPage,
     saveWorkspace,
+    reloadWorkspace,
     client: pile,
     setQuery: (query: string) => setState((s) => ({ ...s, query })),
     selectHit: (selected: string | null) => setState((s) => ({ ...s, selected })),
