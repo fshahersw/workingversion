@@ -1,6 +1,6 @@
 // In-house multi-agent litigation research endpoint (SSE).
 import { createFileRoute } from "@tanstack/react-router";
-import { type HistoryTurn } from "@/lib/agents/orchestrator.server";
+import type { HistoryTurn } from "@/lib/agents/orchestration-types";
 import { runResearchAgent } from "@/lib/agents/research-agent.server";
 import type { Attachment } from "@/lib/chat-types";
 

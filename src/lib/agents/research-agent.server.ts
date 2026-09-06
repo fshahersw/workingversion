@@ -6,7 +6,7 @@
 // is supported, then the same model streams the final cited answer. Emits the
 // SSE event vocabulary the chat UI already renders.
 // ============================================================================
-import type { OrchestrateInput, Emit } from "./orchestrator.server";
+import type { Emit, OrchestrateInput } from "./orchestration-types";
 import { researchAgentPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
 import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
