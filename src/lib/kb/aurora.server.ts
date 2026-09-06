@@ -37,6 +37,28 @@ function client(): RDSDataClient {
   return _client;
 }
 
+// Scale-to-0: the first Data API call after idle must wait for the cluster to
+// resume (~15s), which surfaces as a transient error. Retry those (and throttle
+// / 5xx) so the user's first save/search after idle doesn't just fail.
+const RESUME_RE = /resum|not currently available|is not available|throttl|too many requests|timeout|serviceunavailable/i;
+
+async function sendWithRetry<T>(fn: () => Promise<T>, tries = 8, delayMs = 3000): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const err = e as { name?: string; message?: string; $metadata?: { httpStatusCode?: number } };
+      const msg = `${err?.name ?? ""} ${err?.message ?? ""}`;
+      const status = err?.$metadata?.httpStatusCode ?? 0;
+      if (attempt < tries && (RESUME_RE.test(msg) || status === 429 || status >= 500)) {
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 function requireConfig(): void {
   if (!kbConfigured()) {
     throw new Error(
@@ -76,16 +98,18 @@ export async function execute(
   transactionId?: string,
 ) {
   requireConfig();
-  return client().send(
-    new ExecuteStatementCommand({
-      resourceArn: CLUSTER_ARN,
-      secretArn: SECRET_ARN,
-      database: DATABASE,
-      sql,
-      parameters: parameters.length ? parameters : undefined,
-      transactionId,
-      formatRecordsAs: "JSON",
-    }),
+  return sendWithRetry(() =>
+    client().send(
+      new ExecuteStatementCommand({
+        resourceArn: CLUSTER_ARN,
+        secretArn: SECRET_ARN,
+        database: DATABASE,
+        sql,
+        parameters: parameters.length ? parameters : undefined,
+        transactionId,
+        formatRecordsAs: "JSON",
+      }),
+    ),
   );
 }
 
@@ -111,12 +135,14 @@ export async function withPrincipal<T>(
 ): Promise<T> {
   requireConfig();
   if (!sub) throw new Error("withPrincipal requires a verified principal");
-  const begun = await client().send(
-    new BeginTransactionCommand({
-      resourceArn: CLUSTER_ARN,
-      secretArn: SECRET_ARN,
-      database: DATABASE,
-    }),
+  const begun = await sendWithRetry(() =>
+    client().send(
+      new BeginTransactionCommand({
+        resourceArn: CLUSTER_ARN,
+        secretArn: SECRET_ARN,
+        database: DATABASE,
+      }),
+    ),
   );
   const transactionId = begun.transactionId;
   if (!transactionId) throw new Error("KB: could not begin transaction");
@@ -128,12 +154,14 @@ export async function withPrincipal<T>(
       transactionId,
     );
     const out = await fn(transactionId);
-    await client().send(
-      new CommitTransactionCommand({
-        resourceArn: CLUSTER_ARN,
-        secretArn: SECRET_ARN,
-        transactionId,
-      }),
+    await sendWithRetry(() =>
+      client().send(
+        new CommitTransactionCommand({
+          resourceArn: CLUSTER_ARN,
+          secretArn: SECRET_ARN,
+          transactionId,
+        }),
+      ),
     );
     return out;
   } catch (err) {
@@ -410,15 +438,17 @@ export async function insertChunks(
   ]);
   await withPrincipal(sub, async (tx) => {
     for (let i = 0; i < sets.length; i += CHUNK_INSERT_BATCH) {
-      await client().send(
-        new BatchExecuteStatementCommand({
-          resourceArn: CLUSTER_ARN,
-          secretArn: SECRET_ARN,
-          database: DATABASE,
-          sql,
-          parameterSets: sets.slice(i, i + CHUNK_INSERT_BATCH),
-          transactionId: tx,
-        }),
+      await sendWithRetry(() =>
+        client().send(
+          new BatchExecuteStatementCommand({
+            resourceArn: CLUSTER_ARN,
+            secretArn: SECRET_ARN,
+            database: DATABASE,
+            sql,
+            parameterSets: sets.slice(i, i + CHUNK_INSERT_BATCH),
+            transactionId: tx,
+          }),
+        ),
       );
     }
   });
