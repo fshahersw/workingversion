@@ -39,6 +39,7 @@ import { Route as ApiPileOcrRouteImport } from './routes/api/pile/ocr'
 import { Route as ApiPileAskRouteImport } from './routes/api/pile/ask'
 import { Route as ApiKbSearchRouteImport } from './routes/api/kb/search'
 import { Route as ApiKbIngestRouteImport } from './routes/api/kb/ingest'
+import { Route as ApiKbDocumentsRouteImport } from './routes/api/kb/documents'
 import { Route as ApiAuthMeRouteImport } from './routes/api/auth/me'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
 import { Route as ApiPublicWebhooksDocketbirdRouteImport } from './routes/api/public/webhooks/docketbird'
@@ -216,6 +217,11 @@ const ApiKbIngestRoute = ApiKbIngestRouteImport.update({
   path: '/api/kb/ingest',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiKbDocumentsRoute = ApiKbDocumentsRouteImport.update({
+  id: '/api/kb/documents',
+  path: '/api/kb/documents',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAuthMeRoute = ApiAuthMeRouteImport.update({
   id: '/api/auth/me',
   path: '/api/auth/me',
@@ -377,6 +383,7 @@ export interface FileRoutesByFullPath {
   '/auth/logout': typeof AuthLogoutRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
   '/api/pile/ask': typeof ApiPileAskRoute
@@ -433,6 +440,7 @@ export interface FileRoutesByTo {
   '/': typeof AuthenticatedIndexRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
   '/api/pile/ask': typeof ApiPileAskRoute
@@ -491,6 +499,7 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
   '/api/pile/ask': typeof ApiPileAskRoute
@@ -549,6 +558,7 @@ export interface FileRouteTypes {
     | '/auth/logout'
     | '/matters/$slug'
     | '/api/auth/me'
+    | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
     | '/api/pile/ask'
@@ -605,6 +615,7 @@ export interface FileRouteTypes {
     | '/'
     | '/matters/$slug'
     | '/api/auth/me'
+    | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
     | '/api/pile/ask'
@@ -662,6 +673,7 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/_authenticated/matters/$slug'
     | '/api/auth/me'
+    | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
     | '/api/pile/ask'
@@ -706,6 +718,7 @@ export interface RootRouteChildren {
   ApiTracesRoute: typeof ApiTracesRoute
   ApiUploadRoute: typeof ApiUploadRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
+  ApiKbDocumentsRoute: typeof ApiKbDocumentsRoute
   ApiKbIngestRoute: typeof ApiKbIngestRoute
   ApiKbSearchRoute: typeof ApiKbSearchRoute
   ApiPileAskRoute: typeof ApiPileAskRoute
@@ -935,6 +948,13 @@ declare module '@tanstack/react-router' {
       path: '/api/kb/ingest'
       fullPath: '/api/kb/ingest'
       preLoaderRoute: typeof ApiKbIngestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/kb/documents': {
+      id: '/api/kb/documents'
+      path: '/api/kb/documents'
+      fullPath: '/api/kb/documents'
+      preLoaderRoute: typeof ApiKbDocumentsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/auth/me': {
@@ -1267,6 +1287,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiTracesRoute: ApiTracesRoute,
   ApiUploadRoute: ApiUploadRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
+  ApiKbDocumentsRoute: ApiKbDocumentsRoute,
   ApiKbIngestRoute: ApiKbIngestRoute,
   ApiKbSearchRoute: ApiKbSearchRoute,
   ApiPileAskRoute: ApiPileAskRoute,

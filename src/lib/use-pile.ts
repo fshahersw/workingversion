@@ -1117,17 +1117,19 @@ export function usePile() {
         byFile.set(p.fileId, arr);
       }
       let saved = 0;
+      let chunks = 0;
       for (const file of session.files) {
         const fp = byFile.get(file.id);
         if (!fp?.length) continue;
-        await ingestFileToKb({ fileName: file.name, pages: fp });
+        const r = await ingestFileToKb({ fileName: file.name, pages: fp });
         saved += 1;
+        chunks += r.chunkCount;
       }
       setState((s) => ({
         ...s,
         kbSave: {
           status: "saved",
-          message: `Saved ${saved} file${saved === 1 ? "" : "s"} to your documents`,
+          message: `Saved ${saved} file${saved === 1 ? "" : "s"} · ${chunks} passage${chunks === 1 ? "" : "s"} indexed`,
         },
       }));
     } catch (e) {

@@ -64,6 +64,33 @@ export function ingestFileToKb(
   );
 }
 
+export type KbDocument = {
+  doc_id: string;
+  file_name: string;
+  page_count: number | null;
+  status: string;
+  created_at: string;
+  chunk_count: number;
+};
+
+/** List the caller's saved KB documents for a surface. */
+export async function listKbDocuments(
+  opts: { workspaceId?: string; surface?: KbSurface } = {},
+  signal?: AbortSignal,
+): Promise<KbDocument[]> {
+  const qs = new URLSearchParams({
+    workspaceId: opts.workspaceId ?? KB_WORKINGSET_WORKSPACE,
+    surface: opts.surface ?? "workingset",
+  });
+  const res = await fetch(`/api/kb/documents?${qs.toString()}`, {
+    credentials: "include",
+    ...(signal ? { signal } : {}),
+  });
+  const data = (await res.json().catch(() => ({}))) as { documents?: KbDocument[]; error?: string };
+  if (!res.ok) throw new Error(data?.error || `request failed [${res.status}]`);
+  return data.documents ?? [];
+}
+
 /** Hybrid search over the user's saved KB. */
 export async function searchKbApi(
   query: string,

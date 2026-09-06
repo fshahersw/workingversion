@@ -453,3 +453,36 @@ export async function insertChunks(
     }
   });
 }
+
+export type KbDocumentRow = {
+  doc_id: string;
+  file_name: string;
+  page_count: number | null;
+  status: string;
+  created_at: string;
+  chunk_count: number;
+};
+
+/** The user's saved documents for a surface (most recent first), with a chunk
+ *  count so the UI can show what was indexed. RLS-scoped to the principal. */
+export async function listDocuments(
+  sub: string,
+  workspaceId: string,
+  surface: KbSurface,
+): Promise<KbDocumentRow[]> {
+  requireConfig();
+  const sql = `
+    SELECT d.doc_id, d.file_name, d.page_count, d.status, d.created_at,
+           (SELECT count(*) FROM kb.chunks c WHERE c.doc_id = d.doc_id) AS chunk_count
+    FROM kb.documents d
+    WHERE d.owner_sub = :owner AND d.workspace_id = CAST(:workspace AS uuid) AND d.surface = :surface
+    ORDER BY d.created_at DESC
+    LIMIT 200
+  `;
+  const parameters: SqlParameter[] = [
+    param("owner", sub),
+    param("workspace", workspaceId),
+    param("surface", surface),
+  ];
+  return withPrincipal(sub, (tx) => queryJson<KbDocumentRow>(sql, parameters, tx));
+}

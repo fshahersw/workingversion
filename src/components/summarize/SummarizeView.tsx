@@ -215,16 +215,21 @@ export function SummarizeView() {
             {state.adding ? " · adding files…" : " · kept on this device"}
           </p>
           <div className="ml-auto flex shrink-0 items-center gap-3">
+            {state.kbSave.status === "saved" && state.kbSave.message ? (
+              <span className="hidden text-[11px] text-muted-foreground sm:inline">
+                {state.kbSave.message}
+              </span>
+            ) : null}
             {state.kbSave.status === "error" ? (
               <span className="text-[11px] text-destructive" title={state.kbSave.message}>
-                Save failed
+                {state.kbSave.message ?? "Save failed"}
               </span>
             ) : null}
             <button
               type="button"
               onClick={() => void saveToKb()}
               disabled={state.kbSave.status === "saving"}
-              title={state.kbSave.message ?? "Persist this working set to your searchable documents"}
+              title="Persist this working set to your searchable documents"
               className="text-[11.5px] font-medium text-brand-orange transition hover:underline disabled:opacity-50"
             >
               {state.kbSave.status === "saving"
