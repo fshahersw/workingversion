@@ -149,6 +149,33 @@ export function sheetsToCanonical(sheets: SheetInput[], meta: DocMeta): Canonica
   };
 }
 
+// --- client-extracted pages → canonical --------------------------------------
+
+export type PageText = { page: number; text: string };
+
+/** Bridge for the synchronous ingest path: the browser pile already extracts
+ *  page text, so map {page,text}[] to canonical para blocks (paragraph split),
+ *  preserving the client's page numbers. No table structure at this level;
+ *  scanned/complex docs get that via the BDA lane later. */
+export function pagesToCanonical(pages: PageText[], meta: DocMeta): CanonicalDoc {
+  const out: Page[] = [];
+  for (const p of pages) {
+    const text = (p.text ?? "").replace(/\r\n?/g, "\n").trim();
+    if (!text) continue;
+    const paras = text.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
+    const blocks: Block[] = (paras.length ? paras : [text]).map((t) => ({ kind: "para", text: t }));
+    out.push({ pageNo: p.page, blocks, source: "text" });
+  }
+  return {
+    ...(meta.docId ? { docId: meta.docId } : {}),
+    ...(meta.sha256 ? { sha256: meta.sha256 } : {}),
+    fileName: meta.fileName,
+    ...(meta.mime ? { mime: meta.mime } : {}),
+    pageCount: out.length,
+    pages: out,
+  };
+}
+
 // --- plain text → canonical --------------------------------------------------
 
 /** Paginate plain text into ~pageChars windows on paragraph boundaries; each

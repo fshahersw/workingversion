@@ -8,6 +8,7 @@ import {
   bdaToCanonical,
   sheetsToCanonical,
   textToCanonical,
+  pagesToCanonical,
 } from "./convert.ts";
 
 const META = { fileName: "f.pdf" };
@@ -69,6 +70,24 @@ test("sheetsToCanonical makes one page + table per non-empty sheet", () => {
   assert.deepEqual(table.table!.header, ["Name", "Amount"]);
   assert.equal(table.table!.rows.length, 2);
   assert.equal(doc.pages[0]!.source, "sheet");
+});
+
+test("pagesToCanonical maps client pages to para blocks, skips empties, keeps page nums", () => {
+  const doc = pagesToCanonical(
+    [
+      { page: 1, text: "Para one.\n\nPara two." },
+      { page: 2, text: "   " },
+      { page: 3, text: "Solo." },
+    ],
+    { fileName: "c.pdf" },
+  );
+  assert.equal(doc.pages.length, 2);
+  assert.deepEqual(
+    doc.pages.map((p) => p.pageNo),
+    [1, 3],
+  );
+  assert.equal(doc.pages[0]!.blocks.length, 2);
+  assert.ok(doc.pages[0]!.blocks.every((b) => b.kind === "para"));
 });
 
 test("textToCanonical paginates on paragraph boundaries", () => {
