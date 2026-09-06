@@ -15,6 +15,7 @@
 import {
   RDSDataClient,
   ExecuteStatementCommand,
+  BatchExecuteStatementCommand,
   BeginTransactionCommand,
   CommitTransactionCommand,
   RollbackTransactionCommand,
@@ -274,4 +275,150 @@ export async function fetchChunks(
     FROM kb.fetch_chunks(:owner, CAST(:workspace AS uuid), :surface, CAST(:ids AS bigint[]))
   `;
   return withPrincipal(sub, (tx) => queryJson<KbChunk>(sql, parameters, tx));
+}
+
+// --- writes (ingest) ---------------------------------------------------------
+
+export type KbDocumentInput = {
+  workspaceId: string;
+  surface: KbSurface;
+  fileName: string;
+  mime?: string | null;
+  sha256?: string | null;
+  byteSize?: number | null;
+  pageCount?: number | null;
+  s3Key?: string | null;
+  converter?: string | null;
+  status?: string;
+};
+
+/**
+ * Upsert a document row (dedup on (owner, workspace, sha256) when sha256 is set)
+ * and return its doc_id. Runs under the tenant principal.
+ */
+export async function insertDocument(sub: string, d: KbDocumentInput): Promise<string> {
+  requireConfig();
+  const sql = `
+    INSERT INTO kb.documents
+      (owner_sub, workspace_id, surface, file_name, mime, sha256, byte_size, page_count, s3_key, converter, status)
+    VALUES
+      (:owner, CAST(:workspace AS uuid), :surface, :file_name, :mime, :sha256, :byte_size, :page_count, :s3_key, :converter, :status)
+    ON CONFLICT (owner_sub, workspace_id, sha256) DO UPDATE SET
+      status = EXCLUDED.status, page_count = EXCLUDED.page_count, s3_key = EXCLUDED.s3_key,
+      converter = EXCLUDED.converter, updated_at = now()
+    RETURNING doc_id
+  `;
+  const parameters: SqlParameter[] = [
+    param("owner", sub),
+    param("workspace", d.workspaceId),
+    param("surface", d.surface),
+    param("file_name", d.fileName),
+    param("mime", d.mime ?? null),
+    param("sha256", d.sha256 ?? null),
+    param("byte_size", d.byteSize ?? null),
+    param("page_count", d.pageCount ?? null),
+    param("s3_key", d.s3Key ?? null),
+    param("converter", d.converter ?? null),
+    param("status", d.status ?? "queued"),
+  ];
+  const rows = await withPrincipal(sub, (tx) =>
+    queryJson<{ doc_id: string }>(sql, parameters, tx),
+  );
+  const id = rows[0]?.doc_id;
+  if (!id) throw new Error("insertDocument returned no doc_id");
+  return id;
+}
+
+export async function updateDocumentStatus(
+  sub: string,
+  docId: string,
+  status: string,
+  extra?: { s3Key?: string; pageCount?: number; error?: string },
+): Promise<void> {
+  requireConfig();
+  const sets = ["status = :status", "updated_at = now()"];
+  const parameters: SqlParameter[] = [param("status", status), param("doc_id", docId)];
+  if (extra?.s3Key !== undefined) {
+    sets.push("s3_key = :s3_key");
+    parameters.push(param("s3_key", extra.s3Key));
+  }
+  if (extra?.pageCount !== undefined) {
+    sets.push("page_count = :page_count");
+    parameters.push(param("page_count", extra.pageCount));
+  }
+  if (extra?.error !== undefined) {
+    sets.push("error = :error");
+    parameters.push(param("error", extra.error.slice(0, 2000)));
+  }
+  const sql = `UPDATE kb.documents SET ${sets.join(", ")} WHERE doc_id = CAST(:doc_id AS uuid)`;
+  await withPrincipal(sub, (tx) => execute(sql, parameters, tx));
+}
+
+export type KbChunkRow = {
+  chunkIndex: number;
+  pageStart: number | null;
+  pageEnd: number | null;
+  kind: string;
+  content: string;
+  context?: string | null;
+  conf?: number | null;
+  tokenCount?: number | null;
+  embedding: number[] | null;
+};
+
+const CHUNK_INSERT_BATCH = 25;
+
+/** Batch-insert chunks (idempotent on (doc_id, chunk_index)), under the tenant
+ *  principal so the RLS WITH CHECK passes. Batched to respect the Data API
+ *  4 MiB request-body limit. */
+export async function insertChunks(
+  sub: string,
+  docId: string,
+  workspaceId: string,
+  surface: KbSurface,
+  rows: KbChunkRow[],
+): Promise<void> {
+  if (!rows.length) return;
+  requireConfig();
+  const sql = `
+    INSERT INTO kb.chunks
+      (doc_id, owner_sub, workspace_id, surface, chunk_index, page_start, page_end,
+       kind, content, context, conf, token_count, embedding)
+    VALUES
+      (CAST(:doc_id AS uuid), :owner, CAST(:workspace AS uuid), :surface, :chunk_index,
+       :page_start, :page_end, :kind, :content, :context, :conf, :token_count,
+       CAST(:embedding AS vector))
+    ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
+      content = EXCLUDED.content, context = EXCLUDED.context, conf = EXCLUDED.conf,
+      token_count = EXCLUDED.token_count, embedding = EXCLUDED.embedding
+  `;
+  const sets: SqlParameter[][] = rows.map((r) => [
+    param("doc_id", docId),
+    param("owner", sub),
+    param("workspace", workspaceId),
+    param("surface", surface),
+    param("chunk_index", r.chunkIndex),
+    param("page_start", r.pageStart),
+    param("page_end", r.pageEnd),
+    param("kind", r.kind),
+    param("content", r.content),
+    param("context", r.context ?? null),
+    param("conf", r.conf ?? null),
+    param("token_count", r.tokenCount ?? null),
+    param("embedding", r.embedding ? vectorLiteral(r.embedding) : null),
+  ]);
+  await withPrincipal(sub, async (tx) => {
+    for (let i = 0; i < sets.length; i += CHUNK_INSERT_BATCH) {
+      await client().send(
+        new BatchExecuteStatementCommand({
+          resourceArn: CLUSTER_ARN,
+          secretArn: SECRET_ARN,
+          database: DATABASE,
+          sql,
+          parameterSets: sets.slice(i, i + CHUNK_INSERT_BATCH),
+          transactionId: tx,
+        }),
+      );
+    }
+  });
 }

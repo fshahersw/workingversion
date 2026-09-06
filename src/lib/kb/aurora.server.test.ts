@@ -10,6 +10,8 @@ import {
   kbConfigured,
   hybridSearch,
   fetchChunks,
+  insertDocument,
+  insertChunks,
   withPrincipal,
 } from "./aurora.server.ts";
 
@@ -46,4 +48,22 @@ test("data calls reject when unconfigured", async () => {
 test("fetchChunks short-circuits on empty ids", async () => {
   // Returns before requireConfig, so it must not throw even unconfigured.
   assert.deepEqual(await fetchChunks("u1", "w1", "workingset", []), []);
+});
+
+test("write calls reject when unconfigured", async () => {
+  await assert.rejects(
+    () => insertDocument("u1", { workspaceId: "w1", surface: "workingset", fileName: "f.pdf" }),
+    /not configured/,
+  );
+  await assert.rejects(
+    () =>
+      insertChunks("u1", "d1", "w1", "workingset", [
+        { chunkIndex: 0, pageStart: 1, pageEnd: 1, kind: "para", content: "x", embedding: [1] },
+      ]),
+    /not configured/,
+  );
+});
+
+test("insertChunks short-circuits on empty rows", async () => {
+  await insertChunks("u1", "d1", "w1", "workingset", []); // no throw even unconfigured
 });
