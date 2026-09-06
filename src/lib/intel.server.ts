@@ -1,6 +1,6 @@
 // Server-only readers/writers for the litigation intelligence feed and the
 // corpus-backed signal tabs on the home terminal.
-import { CORPUS_URL } from "@/lib/corpus";
+import { corpusUrl } from "@/lib/corpus";
 import { toRow, type IntelFeed, type IntelRow } from "@/lib/intel-schema";
 import type {
   CorpusSignal,
@@ -20,7 +20,7 @@ function key(): string {
 
 async function rest(path: string, init: RequestInit = {}): Promise<Response> {
   const k = key();
-  return fetch(`${CORPUS_URL}/rest/v1/${path}`, {
+  return fetch(`${corpusUrl()}/rest/v1/${path}`, {
     ...init,
     headers: {
       apikey: k,

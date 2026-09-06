@@ -12,17 +12,23 @@ import {
   BatchWriteCommand,
   type QueryCommandInput,
 } from "@aws-sdk/lib-dynamodb";
-
-export const TABLE = process.env.SW_DDB_TABLE ?? "sw-dev-app";
-const REGION = process.env.AWS_REGION ?? "us-east-1";
+import { loadDynamoConfig } from "../config.server";
 
 let _doc: DynamoDBDocumentClient | undefined;
+let _docRegion = "";
+
+export function tableName(): string {
+  return loadDynamoConfig().table;
+}
+
 export function doc(): DynamoDBDocumentClient {
-  if (!_doc) {
-    const base = new DynamoDBClient({ region: REGION });
+  const { region } = loadDynamoConfig();
+  if (!_doc || _docRegion !== region) {
+    const base = new DynamoDBClient({ region });
     _doc = DynamoDBDocumentClient.from(base, {
       marshallOptions: { removeUndefinedValues: true },
     });
+    _docRegion = region;
   }
   return _doc;
 }
@@ -30,11 +36,13 @@ export function doc(): DynamoDBDocumentClient {
 export type Item = Record<string, unknown>;
 
 export async function putItem(item: Item): Promise<void> {
-  await doc().send(new PutCommand({ TableName: TABLE, Item: item }));
+  await doc().send(new PutCommand({ TableName: tableName(), Item: item }));
 }
 
 export async function getItem(pk: string, sk: string): Promise<Item | undefined> {
-  const r = await doc().send(new GetCommand({ TableName: TABLE, Key: { PK: pk, SK: sk } }));
+  const r = await doc().send(
+    new GetCommand({ TableName: tableName(), Key: { PK: pk, SK: sk } }),
+  );
   return r.Item;
 }
 
@@ -47,7 +55,7 @@ export async function queryPrefix(
   let ExclusiveStartKey: Record<string, unknown> | undefined;
   do {
     const input: QueryCommandInput = {
-      TableName: TABLE,
+      TableName: tableName(),
       KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
       ExpressionAttributeValues: { ":pk": pk, ":p": skPrefix },
       ScanIndexForward: opts?.scanForward ?? true,
@@ -75,7 +83,7 @@ export async function queryIndexPrefix(
   let ExclusiveStartKey: Record<string, unknown> | undefined;
   do {
     const input: QueryCommandInput = {
-      TableName: TABLE,
+      TableName: tableName(),
       IndexName: index,
       KeyConditionExpression: "#pk = :pk AND begins_with(#sk, :p)",
       ExpressionAttributeNames: { "#pk": pkName, "#sk": skName },
@@ -116,7 +124,7 @@ export async function updateItem(
   if (!parts.length) return;
   await doc().send(
     new UpdateCommand({
-      TableName: TABLE,
+      TableName: tableName(),
       Key: { PK: pk, SK: sk },
       UpdateExpression: parts.join(" "),
       ExpressionAttributeNames: names,
@@ -126,16 +134,19 @@ export async function updateItem(
 }
 
 export async function deleteItem(pk: string, sk: string): Promise<void> {
-  await doc().send(new DeleteCommand({ TableName: TABLE, Key: { PK: pk, SK: sk } }));
+  await doc().send(
+    new DeleteCommand({ TableName: tableName(), Key: { PK: pk, SK: sk } }),
+  );
 }
 
 export async function batchDelete(keys: { PK: string; SK: string }[]): Promise<void> {
+  const table = tableName();
   for (let i = 0; i < keys.length; i += 25) {
     const chunk = keys.slice(i, i + 25);
     if (!chunk.length) continue;
     await doc().send(
       new BatchWriteCommand({
-        RequestItems: { [TABLE]: chunk.map((Key) => ({ DeleteRequest: { Key } })) },
+        RequestItems: { [table]: chunk.map((Key) => ({ DeleteRequest: { Key } })) },
       }),
     );
   }

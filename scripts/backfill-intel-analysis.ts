@@ -3,7 +3,7 @@
 //   CORPUS_SERVICE_KEY=... LOVABLE_API_KEY=... bun scripts/backfill-intel-analysis.ts
 //
 // Idempotent: only touches rows where analysis_lead is null.
-import { CORPUS_URL } from "@/lib/corpus";
+import { corpusUrl } from "@/lib/corpus";
 import { analyzeItems, type AnalysisInput } from "@/lib/intel-analyze.server";
 
 const KEY = process.env["CORPUS_SERVICE_KEY"];
@@ -31,7 +31,9 @@ async function fetchPending(limit: number): Promise<Row[]> {
     order: "published_at.desc.nullslast",
     limit: String(limit),
   });
-  const res = await fetch(`${CORPUS_URL}/rest/v1/corpus_intel_items?${qs}`, { headers });
+  const res = await fetch(`${corpusUrl()}/rest/v1/corpus_intel_items?${qs}`, {
+    headers,
+  });
   if (!res.ok) throw new Error(`fetch pending: ${res.status} ${await res.text()}`);
   return (await res.json()) as Row[];
 }
@@ -41,7 +43,7 @@ async function writeAnalysis(
   a: { lead: string | null; bullets: string[]; impact: string | null },
 ): Promise<void> {
   const res = await fetch(
-    `${CORPUS_URL}/rest/v1/corpus_intel_items?intel_id=eq.${encodeURIComponent(id)}`,
+    `${corpusUrl()}/rest/v1/corpus_intel_items?intel_id=eq.${encodeURIComponent(id)}`,
     {
       method: "PATCH",
       headers: { ...headers, Prefer: "return=minimal" },

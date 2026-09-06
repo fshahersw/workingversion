@@ -1,6 +1,6 @@
 // Server-only helpers for the ingest endpoints: corpus REST bookkeeping and
 // S3 presigned PUT/GET generation (SigV4, no SDK — Worker friendly).
-import { CORPUS_URL, MATTERS_BUCKET } from "@/lib/corpus";
+import { corpusUrl, MATTERS_BUCKET } from "@/lib/corpus";
 import type { Manifest, Reject } from "./schema";
 
 const enc = new TextEncoder();
@@ -37,7 +37,7 @@ export function json(body: unknown, status = 200): Response {
 // ------------------------------------------------------------ corpus REST --
 async function rest(path: string, init: RequestInit = {}): Promise<Response> {
   const k = serviceKey();
-  return fetch(`${CORPUS_URL}/rest/v1/${path}`, {
+  return fetch(`${corpusUrl()}/rest/v1/${path}`, {
     ...init,
     headers: {
       apikey: k,

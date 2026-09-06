@@ -5,7 +5,7 @@
 // the public bridge views (public.corpus_*) on the corpus project, using the
 // same clean display labels and sort order as the Matters workspace.
 // ============================================================================
-import { CORPUS_URL } from "@/lib/corpus";
+import { corpusUrl } from "@/lib/corpus";
 
 type Row = Record<string, unknown>;
 
@@ -29,7 +29,10 @@ async function rest(
   const headers: Record<string, string> = { apikey: k, Authorization: `Bearer ${k}` };
   if (range) headers["Range"] = `${range[0]}-${range[1]}`;
   if (exactCount) headers["Prefer"] = "count=exact";
-  const res = await fetch(`${CORPUS_URL}/rest/v1/${table}?${new URLSearchParams(params).toString()}`, { headers });
+  const res = await fetch(
+    `${corpusUrl()}/rest/v1/${table}?${new URLSearchParams(params).toString()}`,
+    { headers },
+  );
   if (!res.ok) throw new Error(`Corpus ${table}: ${res.status} ${await res.text()}`);
   const cr = res.headers.get("content-range");
   const total = cr && cr.includes("/") ? Number(cr.split("/")[1]) : null;

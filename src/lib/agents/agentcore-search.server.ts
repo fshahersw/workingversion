@@ -15,12 +15,9 @@
 // scoping (domainFilter) can be layered on later via DOMAIN_FILTERS — today the
 // connector's admin-level domain allow-list already keeps results authoritative.
 // ============================================================================
+import { loadAgentCoreConfig } from "../config.server";
 import { signedAwsFetch } from "./bedrock-sign.server";
 
-const GATEWAY_URL =
-  process.env["AGENTCORE_SEARCH_URL"] ||
-  "https://claudeaddinwebsearchiamgateway-x9d5bnlhd4.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp";
-const TOOL_NAME = process.env["AGENTCORE_SEARCH_TOOL"] || "general___WebSearch";
 // This gateway negotiates MCP 2025-03-26 (not the newer 2025-11-25).
 const PROTOCOL_VERSION = "2025-03-26";
 const JSONRPC_ID = 1;
@@ -60,6 +57,7 @@ export class AgentCoreSearchError extends Error {
 /** Search runs under the default AWS credential chain, resolved at call time
  *  (SSO in dev, the app role in prod). Always attempt it server-side. */
 export function agentCoreConfigured(): boolean {
+  loadAgentCoreConfig();
   return true;
 }
 
@@ -146,6 +144,7 @@ export async function agentCoreSearch(
   const q = (query || "").trim().slice(0, 200);
   if (!q) return [];
 
+  const config = loadAgentCoreConfig();
   const domains = DOMAIN_FILTERS[gatewayKey];
   const args: Record<string, unknown> = {
     query: q,
@@ -159,7 +158,7 @@ export async function agentCoreSearch(
     jsonrpc: "2.0",
     id: JSONRPC_ID,
     method: "tools/call",
-    params: { name: TOOL_NAME, arguments: args },
+    params: { name: config.toolName, arguments: args },
   });
 
   const controller = new AbortController();
@@ -168,7 +167,7 @@ export async function agentCoreSearch(
 
   let res: Response;
   try {
-    res = await signedAwsFetch("bedrock-agentcore", GATEWAY_URL, {
+    res = await signedAwsFetch("bedrock-agentcore", config.gatewayUrl, {
       body,
       headers: {
         accept: "application/json, text/event-stream",

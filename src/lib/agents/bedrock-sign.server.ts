@@ -16,21 +16,23 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { HttpRequest } from "@smithy/protocol-http";
 import { SignatureV4 } from "@smithy/signature-v4";
 
-const REGION = process.env["BEDROCK_REGION"] ?? process.env["AWS_REGION"] ?? "us-east-1";
+import { loadBedrockRegion } from "../config.server";
 
-// One signer per AWS service name (e.g. "bedrock", "bedrock-agentcore").
+// One signer per AWS region/service pair (e.g. "bedrock-agentcore").
 const _signers = new Map<string, SignatureV4>();
 function signer(service: string): SignatureV4 {
-  let s = _signers.get(service);
+  const region = loadBedrockRegion();
+  const key = `${region}:${service}`;
+  let s = _signers.get(key);
   if (!s) {
     s = new SignatureV4({
       service,
-      region: REGION,
+      region,
       // Default chain: SSO profile in dev, container/instance role in prod.
       credentials: defaultProvider(),
       sha256: Sha256,
     });
-    _signers.set(service, s);
+    _signers.set(key, s);
   }
   return s;
 }

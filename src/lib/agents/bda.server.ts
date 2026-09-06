@@ -17,49 +17,60 @@ import {
   GetDataAutomationStatusCommand,
 } from "@aws-sdk/client-bedrock-data-automation-runtime";
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
-import { BUCKET, s3 } from "@/lib/data/s3.server";
-
-const REGION = process.env["BEDROCK_REGION"] ?? process.env["AWS_REGION"] ?? "us-east-1";
-const ACCOUNT = process.env["AWS_ACCOUNT_ID"] ?? "475976462949";
-const PROJECT_ARN =
-  process.env["BDA_PROJECT_ARN"] ??
-  "arn:aws:bedrock:us-east-1:475976462949:data-automation-project/7df322dd90ae";
-// BDA requires a cross-region data-automation profile ARN.
-const PROFILE_ARN =
-  process.env["BDA_PROFILE_ARN"] ??
-  `arn:aws:bedrock:${REGION}:${ACCOUNT}:data-automation-profile/us.data-automation-v1`;
+import { loadBdaConfig } from "@/lib/config.server";
+import { bucketName, s3 } from "@/lib/data/s3.server";
 
 let _client: BedrockDataAutomationRuntimeClient | null = null;
+let _clientRegion = "";
 function client(): BedrockDataAutomationRuntimeClient {
-  return (_client ??= new BedrockDataAutomationRuntimeClient({ region: REGION }));
+  const { region } = loadBdaConfig();
+  if (!_client || _clientRegion !== region) {
+    _client = new BedrockDataAutomationRuntimeClient({ region });
+    _clientRegion = region;
+  }
+  return _client;
 }
 
 function s3Uri(key: string): string {
-  return `s3://${BUCKET}/${key}`;
+  return `s3://${bucketName()}/${key}`;
 }
 
 /** Upload raw bytes to the S3 input area. */
 export async function putObject(key: string, body: Uint8Array, contentType?: string): Promise<void> {
   await s3().send(
-    new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: body, ...(contentType ? { ContentType: contentType } : {}) }),
+    new PutObjectCommand({
+      Bucket: bucketName(),
+      Key: key,
+      Body: body,
+      ...(contentType ? { ContentType: contentType } : {}),
+    }),
   );
 }
 
 async function getJson(key: string): Promise<unknown> {
-  const r = await s3().send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+  const r = await s3().send(
+    new GetObjectCommand({ Bucket: bucketName(), Key: key }),
+  );
   const text = await r.Body?.transformToString();
   return text ? JSON.parse(text) : null;
 }
 
 async function getText(key: string): Promise<string> {
-  const r = await s3().send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+  const r = await s3().send(
+    new GetObjectCommand({ Bucket: bucketName(), Key: key }),
+  );
   return (await r.Body?.transformToString()) ?? "";
 }
 
 /** Store a text blob (e.g. consolidated markdown) in S3. */
 export async function putText(key: string, text: string): Promise<void> {
   await s3().send(
-    new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: text, ContentType: "text/markdown; charset=utf-8" }),
+    new PutObjectCommand({
+      Bucket: bucketName(),
+      Key: key,
+      Body: text,
+      ContentType: "text/markdown; charset=utf-8",
+    }),
   );
 }
 
@@ -110,12 +121,16 @@ export type BdaJob = { invocationArn: string; outputPrefix: string };
 /** Kick off async extraction of an S3 object. Returns the invocation ARN + the
  *  output prefix to read once complete. */
 export async function startExtraction(inputKey: string, outputPrefix: string): Promise<BdaJob> {
+  const config = loadBdaConfig();
   const res = await client().send(
     new InvokeDataAutomationAsyncCommand({
       inputConfiguration: { s3Uri: s3Uri(inputKey) },
       outputConfiguration: { s3Uri: s3Uri(outputPrefix) },
-      dataAutomationConfiguration: { dataAutomationProjectArn: PROJECT_ARN, stage: "LIVE" },
-      dataAutomationProfileArn: PROFILE_ARN,
+      dataAutomationConfiguration: {
+        dataAutomationProjectArn: config.projectArn,
+        stage: "LIVE",
+      },
+      dataAutomationProfileArn: config.profileArn,
     }),
   );
   return { invocationArn: res.invocationArn ?? "", outputPrefix };
@@ -221,6 +236,7 @@ function extractTables(doc: Record<string, unknown>): string[] {
 }
 
 export function bdaEnabled(): boolean {
+  loadBdaConfig();
   return true;
 }
 

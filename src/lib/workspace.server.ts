@@ -1,6 +1,6 @@
 // Server-only readers for the corpus v2 workspace. Queries the public-schema
 // bridge views (public.corpus_*) on the corpus project with the service key.
-import { CORPUS_URL, MATTERS_BUCKET } from "@/lib/corpus";
+import { corpusUrl, MATTERS_BUCKET } from "@/lib/corpus";
 import type {
   DocumentQuery,
   DocumentsPage,
@@ -37,7 +37,7 @@ async function request(
   };
   if (range) headers["Range"] = `${range[0]}-${range[1]}`;
   if (exactCount) headers["Prefer"] = "count=exact";
-  const res = await fetch(`${CORPUS_URL}/rest/v1/${table}?${qs}`, { headers });
+  const res = await fetch(`${corpusUrl()}/rest/v1/${table}?${qs}`, { headers });
   if (!res.ok) throw new Error(`Corpus ${table}: ${res.status} ${await res.text()}`);
   const cr = res.headers.get("content-range");
   const total = cr && cr.includes("/") ? Number(cr.split("/")[1]) : null;

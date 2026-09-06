@@ -1,6 +1,7 @@
 import { getCompanyCalendar } from "./agents/docketbird.server";
 import type { CalendarEvent, CalendarMatter, CalendarPage } from "./calendar-types";
-import { CORPUS_URL } from "./corpus";
+import { requiredEnv } from "./config.server";
+import { corpusUrl } from "./corpus";
 import { rpc, restSelect } from "./ingest/store.server";
 
 const CORE_RE = /(\d{2,4})-([a-z]+)-(\d+)/i;
@@ -19,13 +20,12 @@ function fingerprint(caseId: string, date: string, time: string | null, title: s
 type MatterRow = { matterId: string; slug: string; name: string; docketNumber: string };
 
 async function listMatterDockets(): Promise<MatterRow[]> {
-  const k = process.env["CORPUS_SERVICE_KEY"];
-  if (!k) throw new Error("Corpus key not configured");
+  const k = requiredEnv("CORPUS_SERVICE_KEY");
   const qs = new URLSearchParams({
     select: "matter_id,slug,short_name,case_name,docket_number",
     order: "short_name.asc",
   });
-  const res = await fetch(`${CORPUS_URL}/rest/v1/corpus_matters?${qs}`, {
+  const res = await fetch(`${corpusUrl()}/rest/v1/corpus_matters?${qs}`, {
     headers: { apikey: k, Authorization: `Bearer ${k}` },
   });
   if (!res.ok) throw new Error(`Corpus matters: ${res.status}`);

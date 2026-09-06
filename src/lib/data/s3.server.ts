@@ -14,24 +14,37 @@ import {
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-
-export const BUCKET = process.env.SW_S3_BUCKET ?? "sw-dev-seegerweissai-475976462949";
-const REGION = process.env.AWS_REGION ?? "us-east-1";
+import { loadS3Config } from "../config.server";
 
 const PUT_TTL = 900; // 15 min to start an upload
 const GET_TTL = 300; // 5 min download link
 
 let _s3: S3Client | undefined;
+let _s3Region = "";
+
+export function bucketName(): string {
+  return loadS3Config().bucket;
+}
+
+/** Compatibility for callers migrated in the following storage commit. */
+export const BUCKET = bucketName();
+
 export function s3(): S3Client {
-  if (!_s3) _s3 = new S3Client({ region: REGION });
+  const { region } = loadS3Config();
+  if (!_s3 || _s3Region !== region) {
+    _s3 = new S3Client({ region });
+    _s3Region = region;
+  }
   return _s3;
 }
 
 /** Presigned URL for a direct browser PUT. No Content-Type is signed. */
 export async function presignPut(key: string): Promise<string> {
-  return getSignedUrl(s3(), new PutObjectCommand({ Bucket: BUCKET, Key: key }), {
-    expiresIn: PUT_TTL,
-  });
+  return getSignedUrl(
+    s3(),
+    new PutObjectCommand({ Bucket: bucketName(), Key: key }),
+    { expiresIn: PUT_TTL },
+  );
 }
 
 /** Presigned URL to download an object as an attachment with a clean filename. */
@@ -44,7 +57,7 @@ export async function presignGet(
   return getSignedUrl(
     s3(),
     new GetObjectCommand({
-      Bucket: BUCKET,
+      Bucket: bucketName(),
       Key: key,
       ResponseContentDisposition: `attachment; filename="${safe}"`,
       ...(contentType ? { ResponseContentType: contentType } : {}),
@@ -54,5 +67,5 @@ export async function presignGet(
 }
 
 export async function deleteObject(key: string): Promise<void> {
-  await s3().send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+  await s3().send(new DeleteObjectCommand({ Bucket: bucketName(), Key: key }));
 }

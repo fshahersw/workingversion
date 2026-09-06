@@ -1,5 +1,5 @@
 // Server-only storage for document summaries (corpus bridge view + S3 uploads).
-import { CORPUS_URL, MATTERS_BUCKET } from "@/lib/corpus";
+import { corpusUrl, MATTERS_BUCKET } from "@/lib/corpus";
 import type { SectionDigest } from "@/lib/agents/summarizer.server";
 
 const VIEW = "corpus_doc_summaries";
@@ -32,7 +32,7 @@ function key(): string {
 
 async function rest(path: string, init: RequestInit = {}): Promise<Response> {
   const k = key();
-  return fetch(`${CORPUS_URL}/rest/v1/${path}`, {
+  return fetch(`${corpusUrl()}/rest/v1/${path}`, {
     ...init,
     headers: {
       apikey: k,

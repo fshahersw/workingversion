@@ -11,7 +11,7 @@
 //  * teardown runs in `finally` and deletes every object and row it created
 //  * no real matter is read, written, or locked at any point
 // ============================================================================
-import { CORPUS_URL, MATTERS_BUCKET } from "@/lib/corpus";
+import { corpusUrl, MATTERS_BUCKET } from "@/lib/corpus";
 import { parseCsv, compact } from "./csv";
 import {
   canonicalPdfKey,
@@ -402,5 +402,5 @@ export async function runSelfTest(origin: string): Promise<SelfTestReport> {
   };
 }
 
-export const CORPUS_ENDPOINT = CORPUS_URL;
+export const corpusEndpoint = corpusUrl;
 export const slotLabel = slotKey;

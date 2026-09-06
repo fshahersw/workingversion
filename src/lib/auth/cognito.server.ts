@@ -4,23 +4,25 @@
 // Replaces Supabase auth. Microsoft Entra can be added to the SAME Cognito pool
 // later (add the IdP, link by email) with no change to this module.
 //
-// Config comes from env with dev defaults baked in (the pool built 2026-09-03).
+// Config is resolved on use. Production requires explicit env values; local
+// development keeps the pool defaults built on 2026-09-03.
 import crypto from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
-const REGION = process.env.COGNITO_REGION ?? "us-east-1";
-const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID ?? "us-east-1_D7NX6OyAR";
-const CLIENT_ID = process.env.COGNITO_CLIENT_ID ?? "3ab10qboajkm0vc36lcv59k78m";
-const DOMAIN = process.env.COGNITO_DOMAIN ?? "seegerweissai-auth.auth.us-east-1.amazoncognito.com";
-const REDIRECT_URI = process.env.COGNITO_REDIRECT_URI ?? "http://localhost:8080/auth/callback";
-const LOGOUT_URI = process.env.COGNITO_LOGOUT_URI ?? "http://localhost:8080/";
+import { loadCognitoConfig } from "../config.server";
+
 const SCOPES = "openid email profile";
 
-const ISSUER = `https://cognito-idp.${REGION}.amazonaws.com/${USER_POOL_ID}`;
-const JWKS = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`));
+let jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
+let jwksIssuer = "";
 
-// Secure cookies only over https (dev is http://localhost).
-const SECURE = REDIRECT_URI.startsWith("https://");
+function remoteJwks(issuer: string): ReturnType<typeof createRemoteJWKSet> {
+  if (!jwks || jwksIssuer !== issuer) {
+    jwks = createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`));
+    jwksIssuer = issuer;
+  }
+  return jwks;
+}
 
 // Cookie names
 export const C_ID = "sw_id";
@@ -44,21 +46,26 @@ export function newState(): string {
 }
 
 export function authorizeUrl(state: string, challenge: string): string {
+  const config = loadCognitoConfig();
   const p = new URLSearchParams({
-    client_id: CLIENT_ID,
+    client_id: config.clientId,
     response_type: "code",
     scope: SCOPES,
-    redirect_uri: REDIRECT_URI,
+    redirect_uri: config.redirectUri,
     state,
     code_challenge: challenge,
     code_challenge_method: "S256",
   });
-  return `https://${DOMAIN}/oauth2/authorize?${p.toString()}`;
+  return `https://${config.domain}/oauth2/authorize?${p.toString()}`;
 }
 
 export function logoutUrl(): string {
-  const p = new URLSearchParams({ client_id: CLIENT_ID, logout_uri: LOGOUT_URI });
-  return `https://${DOMAIN}/logout?${p.toString()}`;
+  const config = loadCognitoConfig();
+  const p = new URLSearchParams({
+    client_id: config.clientId,
+    logout_uri: config.logoutUri,
+  });
+  return `https://${config.domain}/logout?${p.toString()}`;
 }
 
 type TokenResponse = {
@@ -70,14 +77,15 @@ type TokenResponse = {
 };
 
 export async function exchangeCode(code: string, verifier: string): Promise<TokenResponse> {
+  const config = loadCognitoConfig();
   const body = new URLSearchParams({
     grant_type: "authorization_code",
-    client_id: CLIENT_ID,
+    client_id: config.clientId,
     code,
-    redirect_uri: REDIRECT_URI,
+    redirect_uri: config.redirectUri,
     code_verifier: verifier,
   });
-  const res = await fetch(`https://${DOMAIN}/oauth2/token`, {
+  const res = await fetch(`https://${config.domain}/oauth2/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
@@ -87,12 +95,13 @@ export async function exchangeCode(code: string, verifier: string): Promise<Toke
 }
 
 export async function refreshTokens(refreshToken: string): Promise<TokenResponse> {
+  const config = loadCognitoConfig();
   const body = new URLSearchParams({
     grant_type: "refresh_token",
-    client_id: CLIENT_ID,
+    client_id: config.clientId,
     refresh_token: refreshToken,
   });
-  const res = await fetch(`https://${DOMAIN}/oauth2/token`, {
+  const res = await fetch(`https://${config.domain}/oauth2/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
@@ -113,7 +122,11 @@ export type SwUser = {
 };
 
 export async function verifyIdToken(idToken: string): Promise<SwUser> {
-  const { payload } = await jwtVerify(idToken, JWKS, { issuer: ISSUER, audience: CLIENT_ID });
+  const config = loadCognitoConfig();
+  const { payload } = await jwtVerify(idToken, remoteJwks(config.issuer), {
+    issuer: config.issuer,
+    audience: config.clientId,
+  });
   if (payload["token_use"] !== "id") throw new Error("not an id token");
   const claims = payload as JWTPayload & Record<string, unknown>;
   const groups = (claims["cognito:groups"] as string[] | undefined) ?? [];
@@ -143,6 +156,7 @@ export function parseCookies(header: string | null): Record<string, string> {
 }
 
 export function serializeCookie(name: string, value: string, maxAgeSec: number): string {
+  const { secureCookies } = loadCognitoConfig();
   const parts = [
     `${name}=${encodeURIComponent(value)}`,
     "Path=/",
@@ -150,13 +164,14 @@ export function serializeCookie(name: string, value: string, maxAgeSec: number):
     "SameSite=Lax",
     `Max-Age=${maxAgeSec}`,
   ];
-  if (SECURE) parts.push("Secure");
+  if (secureCookies) parts.push("Secure");
   return parts.join("; ");
 }
 
 export function clearCookie(name: string): string {
+  const { secureCookies } = loadCognitoConfig();
   const parts = [`${name}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
-  if (SECURE) parts.push("Secure");
+  if (secureCookies) parts.push("Secure");
   return parts.join("; ");
 }
 
@@ -167,6 +182,7 @@ export function clearCookie(name: string): string {
  * Silent refresh via the refresh_token cookie is a later enhancement.
  */
 export async function getUserFromRequest(request: Request): Promise<SwUser | null> {
+  loadCognitoConfig();
   const idToken = parseCookies(request.headers.get("cookie"))[C_ID];
   if (!idToken) return null;
   try {
@@ -176,6 +192,34 @@ export async function getUserFromRequest(request: Request): Promise<SwUser | nul
   }
 }
 
+export const getCognitoConfig = loadCognitoConfig;
+
+// Compatibility view for callers that inspect config directly. Values remain
+// lazy so importing this module cannot select development infrastructure.
 export const cognitoConfig = {
-  REGION, USER_POOL_ID, CLIENT_ID, DOMAIN, REDIRECT_URI, LOGOUT_URI, ISSUER, SECURE, SCOPES,
+  get REGION() {
+    return loadCognitoConfig().region;
+  },
+  get USER_POOL_ID() {
+    return loadCognitoConfig().userPoolId;
+  },
+  get CLIENT_ID() {
+    return loadCognitoConfig().clientId;
+  },
+  get DOMAIN() {
+    return loadCognitoConfig().domain;
+  },
+  get REDIRECT_URI() {
+    return loadCognitoConfig().redirectUri;
+  },
+  get LOGOUT_URI() {
+    return loadCognitoConfig().logoutUri;
+  },
+  get ISSUER() {
+    return loadCognitoConfig().issuer;
+  },
+  get SECURE() {
+    return loadCognitoConfig().secureCookies;
+  },
+  SCOPES,
 };
