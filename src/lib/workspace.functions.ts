@@ -1,6 +1,8 @@
 // Server functions for the corpus v2 matter workspace.
 import { createServerFn } from "@tanstack/react-start";
 
+import { requireAdmin, requireAuth } from "@/lib/auth/require-auth";
+
 import type {
   DocumentQuery,
   DocumentsPage,
@@ -12,14 +14,15 @@ import type {
   WorkspaceDocument,
 } from "./workspace-types";
 
-export const getMatters = createServerFn({ method: "GET" }).handler(
-  async (): Promise<MatterListItem[]> => {
+export const getMatters = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async (): Promise<MatterListItem[]> => {
     const { listMatters } = await import("./workspace.server");
     return listMatters();
-  },
-);
+  });
 
 export const getMatterWorkspace = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
   .inputValidator((data: { slug: string }) => data)
   .handler(async ({ data }): Promise<MatterWorkspace | null> => {
     const { loadWorkspace } = await import("./workspace.server");
@@ -27,6 +30,7 @@ export const getMatterWorkspace = createServerFn({ method: "POST" })
   });
 
 export const getMatterEntries = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
   .inputValidator((data: EntryQuery) => data)
   .handler(async ({ data }): Promise<EntriesPage> => {
     const { loadEntries } = await import("./workspace.server");
@@ -34,6 +38,7 @@ export const getMatterEntries = createServerFn({ method: "POST" })
   });
 
 export const getMatterDocuments = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
   .inputValidator((data: DocumentQuery) => data)
   .handler(async ({ data }): Promise<DocumentsPage> => {
     const { loadDocuments } = await import("./workspace.server");
@@ -41,6 +46,7 @@ export const getMatterDocuments = createServerFn({ method: "POST" })
   });
 
 export const getEntryDocuments = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
   .inputValidator((data: { slug: string; entryId: string }) => data)
   .handler(async ({ data }): Promise<WorkspaceDocument[]> => {
     const { loadEntryDocuments } = await import("./workspace.server");
@@ -48,6 +54,7 @@ export const getEntryDocuments = createServerFn({ method: "POST" })
   });
 
 export const getDocumentViewUrl = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
   .inputValidator((data: { documentId: string }) => data)
   .handler(async ({ data }): Promise<{ url: string | null; error?: string }> => {
     const { documentViewUrl } = await import("./workspace.server");
@@ -55,6 +62,7 @@ export const getDocumentViewUrl = createServerFn({ method: "POST" })
   });
 
 export const getUploadUrls = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
   .inputValidator(
     (data: { slug: string; files: { name: string; size: number }[]; namespace?: string }) => data,
   )
@@ -63,9 +71,9 @@ export const getUploadUrls = createServerFn({ method: "POST" })
     return uploadUrls(data.slug, data.files, data.namespace);
   });
 
-export const getPipelineRuns = createServerFn({ method: "GET" }).handler(
-  async (): Promise<PipelineRun[]> => {
+export const getPipelineRuns = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async (): Promise<PipelineRun[]> => {
     const { loadPipelineRuns } = await import("./workspace.server");
     return loadPipelineRuns();
-  },
-);
+  });

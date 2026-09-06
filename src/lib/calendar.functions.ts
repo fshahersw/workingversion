@@ -1,9 +1,12 @@
 import { createServerFn } from "@tanstack/react-start";
 
+import { requireAuth } from "@/lib/auth/require-auth";
+
 import type { CalendarPage } from "./calendar-types";
 
-export const getCorpusCalendar = createServerFn({ method: "GET" }).handler(
-  async (): Promise<CalendarPage> => {
+export const getCorpusCalendar = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async (): Promise<CalendarPage> => {
     const { loadCorpusCalendar } = await import("./calendar.server");
     try {
       return await loadCorpusCalendar();
@@ -19,5 +22,4 @@ export const getCorpusCalendar = createServerFn({ method: "GET" }).handler(
         error: message,
       };
     }
-  },
-);
+  });

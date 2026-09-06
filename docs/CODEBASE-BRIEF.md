@@ -1,6 +1,6 @@
 # SeegerWeissAI - Codebase Brief
 
-Last updated: 2026-09-04. Audience: whoever picks this project up next, human or agent.
+Last updated: 2026-09-06. Audience: whoever picks this project up next, human or agent.
 Companion to `docs/HANDOFF.md`. Read HANDOFF first for how to run the app; read this for
 what the code actually does and where it is weak.
 
@@ -27,10 +27,12 @@ Trust calibration:
 
 These were checked directly, outside the agent fan-out, because they are load-bearing:
 
-1. `src/start.ts:23` sets `functionMiddleware: []`, and `grep -rn requireAuth src/routes/api/`
-   returns zero files. The `/api/*` surface has no authentication middleware.
-2. `src/routes/api/pile/session.$id.ts:8` returns a pile session by id with no owner check.
-   Six lines of code, no ownership concept in the model.
+1. `src/start.ts` now registers `apiAuthMiddleware`, which verifies the Cognito
+   session for `/api/*` except `/api/public/*`; public cron/webhook routes retain
+   their own shared-secret authentication.
+2. `src/routes/api/pile/session.$id.ts:8` returns a pile session by id with no owner
+   check. The route is now authenticated globally, but any authenticated firm user
+   with an id can still cross-read because the model has no ownership concept.
 3. `src/lib/agents/fetch-page.server.ts:104` validates only `^https?:$` and follows
    redirects at `:116`. No private-IP, loopback, or link-local filtering exists.
 4. `src/lib/pile/ask-deposition.server.ts:21-22` hardcodes `zai.glm-5` and
@@ -53,9 +55,9 @@ HANDOFF.md is broadly accurate but wrong on three points. Fix these before actin
    `routeDocument` in `router.server.ts` is live, called from
    `src/lib/agents/summarizer.server.ts:792`. Deleting that file breaks the summariser.
    `orchestrator.server.ts` and `tavily.server.ts` are genuinely unreachable.
-3. **The "Open / pending" list omits the largest issue in the repo**, which is that the
-   entire `/api/*` surface is unauthenticated. See Risk 1 in section 6 below. Per-tool
-   timeouts, the item HANDOFF does list, are a latency optimisation and are far less urgent.
+3. **The previously open `/api/*` authentication issue is resolved.**
+   `apiAuthMiddleware` now gates non-public API routes, and the exposed firm-shared
+   server functions named in section 2 now carry per-handler Cognito middleware.
 
 Two model ids in the tree do not resolve, and both are inert: `us.anthropic.claude-haiku-4-5`
 appears only in a comment inside dead code, and `google.gemma-4-26b-a4b` appears only in
@@ -86,19 +88,34 @@ Browser SPA renders under `src/routes/_authenticated/`. That gate is client-side
 
 Two server surfaces exist and they behave differently.
 
-**Server functions (RPC).** Chat, library, and review call `requireAuth` (`src/lib/auth/require-auth.ts:9`), a TanStack *function* middleware that re-reads the `sw_id` httpOnly cookie and verifies the Cognito id_token with `jose` `jwtVerify` against the remote JWKS, issuer and audience pinned, `token_use==="id"` asserted (`src/lib/auth/cognito.server.ts:115`). Handlers then derive `principal = context.user.sub` and build `PK=USER#<sub>`, so ownership is structural. Matter/workspace, intel, and calendar server functions do **not** apply it.
+**Server functions (RPC).** Each protected handler must explicitly attach TanStack
+*function* middleware. Chat, library, review, and the firm-shared workspace,
+summaries, intel, and calendar reads use `requireAuth`
+(`src/lib/auth/require-auth.ts:9`); pipeline administration plus firm-global summary
+and upload writes use `requireAdmin`. The middleware re-reads the `sw_id` httpOnly
+cookie and verifies the Cognito id_token with `jose` `jwtVerify` against the remote
+JWKS, issuer and audience pinned, `token_use==="id"` asserted
+(`src/lib/auth/cognito.server.ts:115`). User-owned handlers derive
+`principal = context.user.sub` and build `PK=USER#<sub>`, so ownership is structural.
 
-**HTTP file routes (`src/routes/api/*`).** 34 files. Only `api/auth/me.ts` checks identity. `src/start.ts:23` registers `requestMiddleware:[errorMiddleware]` and `functionMiddleware: []`, so nothing is enforced globally, and `requireAuth` cannot be attached to a file route as written.
+**HTTP file routes (`src/routes/api/*`).** `src/start.ts` registers
+`apiAuthMiddleware` as request middleware. It verifies the Cognito session for every
+`/api/*` route except `/api/public/*`; the public cron/webhook endpoints continue to
+self-authenticate with their shared-secret headers. `requireAuth` remains
+function-only and is not the mechanism used for file routes.
 
 From there: Bedrock calls go out through `src/lib/agents/bedrock-sign.server.ts:43` (SigV4, `@smithy/signature-v4`, default credential chain, no static keys). Web search hops to the AgentCore MCP gateway tool `general___WebSearch`. Persistence splits three ways: personal data to DynamoDB/S3 via the AWS SDK default chain; corpus reads to Supabase PostgREST with a static service key; document text for the pile and review tables stays in the browser (IndexedDB / PileIndex) and is POSTed per request.
 
-**The trust boundary is `requireAuth` on server functions, and only there.** Everything under `/api/` except `/api/auth/me` and the shared-secret `/api/public/*` routes is anonymous, and nothing in `src/` sits in front of it.
+**The trust boundary has two layers.** `apiAuthMiddleware` gates non-public HTTP
+routes, while each protected server function must attach `requireAuth` or
+`requireAdmin`. `/api/public/*` deliberately bypasses the Cognito gate and retains
+route-specific shared-secret authentication.
 
 ## 3. The four named features
 
 ### Matter library
 
-Two unrelated things share the name. `/library` (`src/routes/_authenticated/library.tsx:47`) is the attorney's personal store: chat history, saved outputs, prompts, uploads, keyed by Cognito sub, with no matter linkage at all. The matter-scoped document collection is the Documents tab of the matter workspace (`src/components/matters/MatterWorkspace.tsx:185`), reading `public.corpus_*` bridge views over PostgREST with `CORPUS_SERVICE_KEY` (`src/lib/workspace.server.ts:21`), URL-state paging, and a 30-minute presigned PDF GET (`:265`). Maturity: personal library is solid and authenticated; the matter workspace is functional but unauthenticated at the RPC layer, does 3N+1 PostgREST round trips per navigation (`:104`), and depends on `src/lib/s3.server.ts:41`, which hard-requires static AWS keys. There is no matter-scoped personal library.
+Two unrelated things share the name. `/library` (`src/routes/_authenticated/library.tsx:47`) is the attorney's personal store: chat history, saved outputs, prompts, uploads, keyed by Cognito sub, with no matter linkage at all. The matter-scoped document collection is the Documents tab of the matter workspace (`src/components/matters/MatterWorkspace.tsx:185`), reading `public.corpus_*` bridge views over PostgREST with `CORPUS_SERVICE_KEY` (`src/lib/workspace.server.ts:21`), URL-state paging, and a 30-minute presigned PDF GET (`:265`). Maturity: personal library is owner-scoped; the matter workspace is authenticated but intentionally firm-shared, does 3N+1 PostgREST round trips per navigation (`:104`), and depends on `src/lib/s3.server.ts:41`, which hard-requires static AWS keys. There is no matter-scoped personal library.
 
 ### Bulk document upload and analysis ("pile" / Working Set)
 
@@ -110,7 +127,7 @@ Transcripts are parsed client-side into page:line `TranscriptLine`s, split into 
 
 ### Review tables
 
-`useReviewTable` (`src/lib/review/use-review-table.ts:124`) extracts documents in the browser, OCRs bad pages using the quality-aware `pageNeedsOcr`, ingests into the shared PileIndex, and writes one row per document. Columns run sequentially (one retrieval per column, 16 pages per document), rows fan out 10-wide to `POST /api/review/cell`, which runs extract over Nemotron Nano then Gemma, a deterministic quote-on-page check (`src/lib/review/pipeline-core.ts:241`), an independent verify by the other model family, and Sonnet 5 escalation for low-confidence cells. Grid state, history, and runs persist owner-scoped in DynamoDB. Maturity: the most complete and audit-aware feature (six template packs, override/verify trail with actor email, cite-carrying CSV/XLSX export), undercut by an unauthenticated cell endpoint, two incompatible row fingerprint formulas, and non-cascading row/column deletes.
+`useReviewTable` (`src/lib/review/use-review-table.ts:124`) extracts documents in the browser, OCRs bad pages using the quality-aware `pageNeedsOcr`, ingests into the shared PileIndex, and writes one row per document. Columns run sequentially (one retrieval per column, 16 pages per document), rows fan out 10-wide to `POST /api/review/cell`, which runs extract over Nemotron Nano then Gemma, a deterministic quote-on-page check (`src/lib/review/pipeline-core.ts:241`), an independent verify by the other model family, and Sonnet 5 escalation for low-confidence cells. Grid state, history, and runs persist owner-scoped in DynamoDB. Maturity: the most complete and audit-aware feature (six template packs, override/verify trail with actor email, cite-carrying CSV/XLSX export); its cell endpoint is now covered by the global Cognito API gate, while two incompatible row fingerprint formulas and non-cascading row/column deletes remain.
 
 ## 4. Microsoft Office / M365 program
 
@@ -142,12 +159,21 @@ Conflicts reconciled: the two RCELL wordings are the same shape because `rowId`/
 
 Dropped after spot-check: 1 (the "Supabase scratch subsystem is dead code" finding, since 6 routes do import `scratch.server.ts`). Narrowed: 3 (review stat inflation, Word add-in origin claim, `deployment-log.md` citation).
 
-1. **Whole `/api/*` surface is anonymous.** `src/start.ts:23` has empty `functionMiddleware`; only `api/auth/me.ts` checks a session. Any caller drives Bedrock (`/api/review/cell`, `/api/pile/ask`, `/api/orchestrate`). Fix: add a request middleware that verifies the `sw_id` cookie for every `/api/` path except `/api/public/*`.
-2. **Cross-tenant read of ingested discovery text.** `src/routes/api/pile/session.$id.ts:6` returns a session by id with no owner field in the model. Fix: stamp `owner` on pile sessions and compare against the verified sub.
-3. **Matter corpus enumeration plus presigned PDFs without auth.** `src/lib/workspace.functions.ts` has zero `requireAuth`; `workspace.server.ts:265` presigns 1800s. Fix: apply `requireAuth` to all workspace, intel, and calendar server functions.
-4. **Arbitrary-prefix write into the shared matters bucket.** `src/lib/workspace.server.ts:272-287` interpolates the caller-supplied `slug` raw into the S3 key; unauthenticated, and no callers. Fix: delete `getUploadUrls`, or authenticate it and resolve slug via a matter lookup.
+1. **Resolved: anonymous `/api/*` access.** `apiAuthMiddleware` now verifies
+   Cognito sessions for every `/api/*` path except `/api/public/*`, whose cron and
+   webhook handlers retain their own shared-secret checks.
+2. **Authenticated cross-user read of ingested discovery text.**
+   `src/routes/api/pile/session.$id.ts:6` returns a session by id with no owner field
+   in the model. The API gate prevents anonymous access but not cross-user access.
+   Fix: stamp `owner` on pile sessions and compare against the verified sub.
+3. **Resolved: anonymous matter corpus and presigned-PDF server functions.**
+   Workspace, summaries, intel, and calendar firm reads now use `requireAuth`.
+4. **Admin-only arbitrary-prefix write into the shared matters bucket.**
+   `src/lib/workspace.server.ts:272-287` still interpolates caller-supplied `slug`
+   into the S3 key, but the unused `getUploadUrls` function now requires
+   `requireAdmin`. Resolve the slug via a matter lookup before activating callers.
 5. **Service-role Supabase key hand-carried between laptops.** `sw-word-agent-review/START-HERE.txt:4-8`. Fix: rotate the key, ship config from Secrets Manager only, stop distributing `.env` in the ZIP.
-6. **SSRF via `fetch_page`.** `src/lib/agents/fetch-page.server.ts:104` accepts any `http(s)` URL, `redirect:"follow"` at `:116`, no host/IP filter, and the URL can come from previously fetched page content. Fix: resolve and block RFC1918/loopback/link-local, deny redirects off the allowed host set, cap body bytes during read.
+6. **Authenticated SSRF via `fetch_page`.** `src/lib/agents/fetch-page.server.ts:104` accepts any `http(s)` URL, `redirect:"follow"` at `:116`, no host/IP filter, and the URL can come from previously fetched page content. The API gate removes anonymous reachability but not the SSRF. Fix: resolve and block RFC1918/loopback/link-local, deny redirects off the allowed host set, cap body bytes during read.
 7. **Session cookie may ship without `Secure`.** `cognito.server.ts:23` derives `SECURE` from `COGNITO_REDIRECT_URI`, which defaults to `http://localhost:8080/auth/callback`; pool id, client id, and URIs are hardcoded `??` fallbacks at `:11-16`. Fix: fail closed on missing env, force `Secure` unless an explicit dev flag is set.
 8. **Un-migrated third-party LLM egress for docket content.** `src/lib/intel-analyze.server.ts:8` posts to `ai.gateway.lovable.dev` with `LOVABLE_API_KEY`. Fix: repoint briefings at Bedrock Converse and delete the key.
 9. **Cron jobs target the wrong origin.** `supabase/corpus/calendar-sync-cron.sql:23` and `supabase/migrations/20260828121115_*.sql:8` POST to a `lovable.app` preview host. Fix: repoint the vault secrets at the AWS origin and assert on the next run's stats row.
@@ -161,13 +187,15 @@ Dropped after spot-check: 1 (the "Supabase scratch subsystem is dead code" findi
 
 - **Legacy research pipeline.** `src/lib/agents/orchestrator.server.ts:333` (`runOrchestration`) and `tavily.server.ts` have no runtime callers; the two importers use `import type` only. Roughly 1400 lines plus `TAVILY_API_KEY`/`RESEARCH_ENGINE` in this path. Deleting breaks nothing, but keep `router.server.ts`: `routeDocument` is live at `summarizer.server.ts:792`.
 - **Server-persisted pile sessions.** `src/lib/pile/session.server.ts:69` plus the `/api/pile/session/*` routes, Titan embeddings, and RRF fusion have no client caller. Deleting removes the only hybrid-vector retrieval path for the pile and risk 2 above; keeping it means maintaining a process-local SQLite store that cannot survive multi-instance deploys (`src/lib/pile/store.ts:97`).
-- **Supabase scratch workspace.** `scratch-upload.ts` (client driver) is orphaned, but `scratch.server.ts` and 6 routes are wired and unauthenticated. Deleting the routes removes attack surface and the Voyage dependency; nothing in the UI regresses.
-- **Auth stubs.** `requireAdmin` (`require-auth.ts:20`) has zero callers, `refreshTokens` (`cognito.server.ts:89`) has zero callers while a 30-day refresh cookie is still set, and `queryIndexPrefix` has zero callers though GSI1 keys are written on every library item. Deleting the refresh cookie removes an unused long-lived credential; deleting GSI1 writes removes index cost but also the documented folder read path that was never built. `src/lib/pipeline.functions.ts:12` still gates 5 functions on a retired Supabase `requireAdmin`, so there is no working admin authorization anywhere.
-- **Other dead capabilities.** `runHeavyAnalysis` Kimi chain (`cell-pipeline.server.ts:576`), `getUploadUrls`, the `/discovery` and `/summarize` redirect shims, `firm-legal-skills` (26 authored skills with no Office consumer), and the `/eval` harness which is live but absent from the sidebar (`src/components/app-shell.tsx:30`). `pipeline-core.test.ts:105` still asserts a `mantle` transport that `pipeline-core.ts:37` no longer returns, so the review test suite fails as committed.
+- **Supabase scratch workspace.** `scratch-upload.ts` (client driver) is orphaned, but `scratch.server.ts` and 6 routes are wired. The routes are now covered by the Cognito API gate. Deleting the routes removes unused attack surface and the Voyage dependency; nothing in the UI regresses.
+- **Auth stubs.** `requireAdmin` (`require-auth.ts:20`) now gates pipeline administration and firm-global summary/upload writes. `refreshTokens` (`cognito.server.ts:89`) still has zero callers while a 30-day refresh cookie is set, and `queryIndexPrefix` has zero callers though GSI1 keys are written on every library item. Deleting the refresh cookie removes an unused long-lived credential; deleting GSI1 writes removes index cost but also the documented folder read path that was never built.
+- **Other dead capabilities.** `runHeavyAnalysis` Kimi chain (`cell-pipeline.server.ts:576`), admin-gated `getUploadUrls`, the `/discovery` and `/summarize` redirect shims, `firm-legal-skills` (26 authored skills with no Office consumer), and the `/eval` harness which is live but absent from the sidebar (`src/components/app-shell.tsx:30`). `pipeline-core.test.ts:105` still asserts a `mantle` transport that `pipeline-core.ts:37` no longer returns, so the review test suite fails as committed.
 
 ## 8. Open questions only you can answer
 
-1. Is anything (ALB, CloudFront, WAF, Cognito at edge) in front of the app in the deployed environment? Every risk from 1 to 4 is either critical or moot depending on the answer, and nothing in `src/` settles it.
+1. What ALB, CloudFront, or WAF controls supplement the application-level Cognito
+   boundary in the deployed environment? `src/` now gates non-public APIs and the
+   firm-shared server functions, but it cannot establish the deployed edge posture.
 2. Are `zai.glm-5` and `nvidia.nemotron-super-3-120b` actually granted in Bedrock us-east-1 for 475976462949? If not, the deposition workbench is dead today.
 3. Does `sw-dev-app` have GSI1/GSI2 provisioned and TTL enabled on attribute `ttl`, and does the S3 bucket policy deny non-TLS and non-KMS PUTs with a lifecycle on `uploads/`? No IaC was found in scope.
 4. Which pile backend is canonical going forward: browser-only, DynamoDB/S3 server sessions, or Supabase scratch? Three designs currently coexist and only one is wired.
@@ -187,26 +215,42 @@ independent agent whose instruction was to look for claims that are wrong. Verba
 ## Spot-check results
 
 1. **fetch_page SSRF** — CONFIRMED. `lit-ai-extracted/lit-ai-main/src/lib/agents/fetch-page.server.ts:104` only checks `^https?:$`; `redirect:"follow"` at :116; grep for localhost/127.0/169.254/RFC1918/allowlist in that file returns zero hits.
-2. **/api/pile/* unauthenticated** — CONFIRMED. `src/routes/api/pile/ocr.ts:6-9` handler has no auth; `src/lib/auth/require-auth.ts:9` is `createMiddleware({ type: "function" })`, only usable on serverFns.
+2. **/api/pile/* authentication** — RESOLVED 2026-09-06.
+   `apiAuthMiddleware` now verifies the Cognito session before these route handlers;
+   function-only `requireAuth` is not used for this HTTP surface.
 3. **OCR trigger length-only** — CONFIRMED. `src/lib/use-pile.ts:263` filters `p.text.trim().length < OCR_EMPTY_CHARS`; `pageNeedsOcr` (`src/lib/pile/text-quality.ts:33`) has exactly one caller, `src/lib/review/ocr-pages.ts:15`.
 4. **Bulk upload never touches S3/DynamoDB** — CONFIRMED. `src/lib/pile/db.server.ts:8` opens `.data/pile.sqlite`; grep `s3|dynamo` over `src/lib/pile` + `src/routes/api/pile` = zero hits.
-5. **Scratch subsystem dead** — PARTLY REFUTED. `src/lib/pile/scratch-upload.ts` genuinely has zero importers (client upload path unreachable), but `scratch.server.ts` **is** imported by 7 call sites across the 6 scratch routes (e.g. `src/routes/api/pile/scratch.session.ts:8`). So the HTTP endpoints are live and unauthenticated, not dead code; only the client driver is orphaned. Voyage key at `src/lib/pile/scratch.server.ts:192,240` confirmed.
+5. **Scratch subsystem dead** — PARTLY REFUTED. `src/lib/pile/scratch-upload.ts` genuinely has zero importers (client upload path unreachable), but `scratch.server.ts` **is** imported by 7 call sites across the 6 scratch routes (e.g. `src/routes/api/pile/scratch.session.ts:8`). The HTTP endpoints are live and now covered by the global Cognito API gate; only the client driver is orphaned. Voyage key at `src/lib/pile/scratch.server.ts:192,240` confirmed.
 6. **Deposition models hardcoded** — CONFIRMED. `src/lib/pile/ask-deposition.server.ts:21-22` (`zai.glm-5`, `nvidia.nemotron-super-3-120b`), fallback loop at :125-146, `continue` on 400/403/404, no env override, no Claude path.
 7. **verifyAnswerCites counts quote-free as verified** — CONFIRMED. `src/lib/pile/cite-trust.ts:109` (`quote.length >= 12 ? quoteOnPage : "packed"`), :117, and `verified: cites.filter(c => c.match !== "none")` at :126.
-8. **/api/review/cell no auth, no global fn middleware** — CONFIRMED. `src/start.ts:23-27` = `requestMiddleware:[errorMiddleware]`, `functionMiddleware: []`; `src/routes/api/review/cell.ts` has no auth import.
+8. **/api/review/cell authentication** — RESOLVED 2026-09-06.
+   The handler has no local auth import because `apiAuthMiddleware` now gates it
+   before dispatch.
 9. **deleteRow/deleteColumn orphan cells** — CONFIRMED with one correction. `src/lib/review/review.server.ts:215` and `:252` delete only the col/row item (contrast `:154`, where table delete fans out over `RCOL#/RROW#/RCELL#/RRUN#/RHIST#`). In `src/lib/review/use-review-table.ts:881-889`, `needsReview/notFound/errors/verified/filled` are over `Object.values(cells)` and do inflate — but `total` is `rows.length * columns.length`, not cell-derived, so `total` is **not** inflated.
 10. **Two row fingerprint formulas** — CONFIRMED. `use-review-table.ts:329` `` `${res.name}|${pages.length}|${chars}` `` vs `:448` `` `${f.name}|${f.pageCount}` ``; consumed by `cellCacheKey` at `src/lib/review/types.ts:168`.
-11. **Matter serverFns unauthenticated** — CONFIRMED. `src/lib/workspace.functions.ts` has zero `requireAuth` occurrences (all handlers plain `createServerFn`); 30-min presign confirmed at `src/lib/workspace.server.ts:265` (`presignS3Get(..., 1800)`).
-12. **getUploadUrls unauth + unsanitised slug + no callers** — CONFIRMED. `src/lib/workspace.server.ts:272-287`: prefix is `` `${slug}/incoming/${ns}` ``; only the filename (`safe()`) and `namespace` are sanitised, slug is raw. `getUploadUrls` appears only at its definition (`workspace.functions.ts:57`).
+11. **Matter serverFns authentication** — RESOLVED 2026-09-06. Firm-shared
+    workspace reads now use `requireAuth`; the 30-minute presign remains at
+    `src/lib/workspace.server.ts:265`.
+12. **getUploadUrls unsanitised slug + no callers** — AUTH PORTION RESOLVED.
+    `getUploadUrls` now uses `requireAdmin`. The prefix remains
+    `` `${slug}/incoming/${ns}` `` and the function still has no callers.
 13. **s3.server.ts hard-requires static keys** — CONFIRMED. `src/lib/s3.server.ts:41-44`: reads `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `throw new Error("Object storage credentials not configured")`.
 14. **research-workspace.ts on Supabase auth** — CONFIRMED as written (including its own "runtime unverified" caveat). `src/lib/research-workspace.ts:58-61`: `uid()` = `supabase.auth.getUser()`.
-15. **Only /api/auth/me does an auth check** — CONFIRMED. Grep `requireAuth|getUserFromRequest|requireUser|requireSession|getSessionUser` over `src/routes/api` → only `src/routes/api/auth/me.ts`. 34 route files total.
-16. **Pile session readable by id alone** — CONFIRMED. `src/routes/api/pile/session.$id.ts:6-10`: `getPileSession(params.id)`, no owner field anywhere in the pile session model.
+15. **Only /api/auth/me does an auth check** — SUPERSEDED 2026-09-06.
+    `apiAuthMiddleware` now authenticates non-public API routes globally.
+16. **Pile session readable by id alone** — PARTIALLY RESOLVED. The route now
+    requires a Cognito session, but `getPileSession(params.id)` still has no owner
+    comparison.
 17. **Secure flag derived from redirect URI** — CONFIRMED. `src/lib/auth/cognito.server.ts:15` default `http://localhost:8080/auth/callback`, `:23` `const SECURE = REDIRECT_URI.startsWith("https://")`, applied at `:153` and `:159`.
 18. **Cognito config hardcoded as `??` fallbacks** — CONFIRMED. `cognito.server.ts:11-16` (pool `us-east-1_D7NX6OyAR`, client `3ab10qboajkm0vc36lcv59k78m`, domain, localhost redirect/logout).
-19. **All API surface open except /api/public/*** — CONFIRMED. Exactly 19 files under `src/routes/api/pile/`; `/api/public/*` gates on `X-Ingest-Key` / `X-Cron-Token` / `?token=` (`public/ingest/batches.ts:2`, `public/intel/run.ts:11-15`, `public/webhooks/*.ts:1`).
-20. **Intel/calendar serverFns unauth** — CONFIRMED. `src/lib/intel.functions.ts:6`, `src/lib/calendar.functions.ts:5`, plain `createServerFn`.
-21. **Route auth client-side only** — CONFIRMED. `src/routes/_authenticated/route.tsx:8-9`: `ssr:false` + `beforeLoad` browser `fetch("/api/auth/me")`.
+19. **All API surface open except /api/public/*** — RESOLVED 2026-09-06.
+    Non-public APIs require Cognito; `/api/public/*` continues to self-authenticate
+    with `X-Ingest-Key`, `X-Cron-Token`, or webhook tokens.
+20. **Intel/calendar serverFns unauth** — RESOLVED 2026-09-06. Their handlers now
+    attach `requireAuth`.
+21. **Page-route auth is client-side** — STILL TRUE, but it is no longer the
+    authorization boundary. Non-public APIs and protected server functions now
+    enforce authentication server-side.
 22. **Briefings still on Lovable gateway** — CONFIRMED. `src/lib/intel-analyze.server.ts:8` `https://ai.gateway.lovable.dev/v1/chat/completions`, model `google/gemini-3.7-flash` (:9), key `LOVABLE_API_KEY` (:135); docket path `src/lib/intel.server.ts:456` `refreshDocketAnalysis` → `analyzeItems` (:471).
 23. **pg_cron POSTs to lovable.app host** — CONFIRMED. `supabase/corpus/calendar-sync-cron.sql:23` and `supabase/migrations/20260828121115_….sql:8`, both `https://project--69032d3d-…lovable.app/api/public/...` stored as vault secrets.
 24. **Transfer ZIP ships Supabase service key** — CONFIRMED. `C:/Users/fshaher/projects/sw-word-agent-review/START-HERE.txt:4-8`: "THIS PACKAGE IS SENSITIVE … contains the configured Supabase service key and AgentCore web-search endpoint", hand-carried ZIP.
@@ -222,7 +266,7 @@ All checked shapes are internally consistent; no key-shape errors found.
 
 ## Corrected statements safe to carry forward
 
-- The Supabase scratch subsystem is **half-dead**: `scratch-upload.ts` (client driver) has zero importers, but `scratch.server.ts` and the 6 `/api/pile/scratch*` routes are wired and unauthenticated. Treat it as reachable attack surface, not dead code.
+- The Supabase scratch subsystem is **half-dead**: `scratch-upload.ts` (client driver) has zero importers, but `scratch.server.ts` and the 6 `/api/pile/scratch*` routes are wired and covered by the global Cognito API gate. Treat it as reachable authenticated attack surface, not dead code.
 - Review-table stats: `needsReview / notFound / errors / verified / filled` inflate after a row/column delete; `total` does not (it is `rows.length * columns.length`).
 - Both Word add-in manifests share one manifest Id and both still serve the taskpane from `https://localhost:3000`. The distinguishing facts are version (1.1.1.0 vs 1.0.9.0), git tracking (`word-addin/` untracked), the added `entra_auth.py`, and the Entra SSO `Resource` URI on the Amplify domain. `word_tools.py` is present in both.
 - `sw-word-agent-review` contains no `deployment-log.md`; the ECS/Amplify/CloudFront artifacts are specs with no recorded deployment, and live deployment status cannot be confirmed read-only.
@@ -233,25 +277,27 @@ All checked shapes are internally consistent; no key-shape errors found.
 # Appendix B - Full findings register
 
 All severities, as reported per domain. The synthesised risk register in section 6 above is the
-triaged view of this; this appendix is the raw list so nothing is lost.
+triaged view of this; this appendix is the raw list so nothing is lost. Auth rows
+are updated to the 2026-09-06 boundary so they are not carried forward as current
+findings.
 
 | Domain | Severity | Finding | Evidence |
 |---|---|---|---|
-| Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | critical | Only /api/auth/me performs any auth check; the other ~33 HTTP route handlers under src/routes/api (pile/*, review/cell, orchestrate, quick-ask, summarize, followups, public/*) have no requireAuth, no cookie check and no API key, so an unauthenticated caller can drive Bedrock and the ingest pipeline. | `lit-ai-extracted/lit-ai-main/src/routes/api/review/cell.ts:25` |
-| Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | critical | Pile sessions have no owner field and GET /api/pile/session/$id returns the session by id alone, so one user (or an anonymous caller) can read another user's ingested discovery document text if the id is known or guessed. | `lit-ai-extracted/lit-ai-main/src/routes/api/pile/session.$id.ts:8` |
-| Bulk document upload and analysis ("pile" / Working Set): session model, storage, ingest, OCR | critical | No /api/pile/* route has any authentication or authorization; requireAuth in src/lib/auth/require-auth.ts:9 is a TanStack *function* middleware and is never applied to these file-route handlers, so any unauthenticated caller can POST arbitrary images to /api/pile/ocr (Bedrock Nemotron VL) or arbitrary text to /api/pile/ask (Sonnet 5), burning firm Bedrock spend and using the app as an open LLM proxy. | `lit-ai-extracted/lit-ai-main/src/routes/api/pile/ocr.ts:9` |
-| Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | critical | No handler under src/routes/api/ enforces user auth except the shared-secret /api/public/* routes: /api/summarize, /api/orchestrate, /api/quick-ask, /api/followups, /api/review/cell and all 19 /api/pile/* routes are reachable unauthenticated (grep for requireUser\|requireSession\|getSessionUser\|requireAuth across src/routes/api returns zero files), so the model, RAG and pile upload/OCR surface is open to anyone who can reach the host. | `src/routes/api/summarize.ts:1 (src/routes/api/auth/me.ts:11 is the only auth consumer)` |
-| Matters / workspaces / document Library / chat history (SeegerWeissAI) | critical | None of the matter/workspace server functions carry requireAuth, so an unauthenticated POST to the serverFn RPC can enumerate every matter, docket entry and document and mint a 30-minute presigned PDF URL; the only gate is the client-side beforeLoad in the _authenticated route. | `src/lib/workspace.functions.ts:15` |
-| Matters / workspaces / document Library / chat history (SeegerWeissAI) | critical | getUploadUrls is unauthenticated and interpolates the caller-supplied `slug` straight into the S3 key prefix with no matter lookup or path sanitisation, allowing arbitrary-prefix writes into the shared matters bucket (e.g. slug = "other-matter/pdf"); it also has no callers in the app. | `src/lib/workspace.server.ts:279` |
+| Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | resolved | `apiAuthMiddleware` now verifies Cognito sessions for `/api/*` except `/api/public/*`, whose handlers keep their own shared-secret checks. | `src/start.ts` |
+| Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | critical | Pile sessions still have no owner field and GET `/api/pile/session/$id` returns by id alone. Anonymous access is closed, but authenticated cross-user access remains possible if an id is known or guessed. | `lit-ai-extracted/lit-ai-main/src/routes/api/pile/session.$id.ts:8` |
+| Bulk document upload and analysis ("pile" / Working Set): session model, storage, ingest, OCR | resolved | `/api/pile/*` is now covered by `apiAuthMiddleware`; function-only `requireAuth` is not needed on each file route. | `src/start.ts` |
+| Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | resolved | Non-public API routes now require Cognito through global request middleware; `/api/public/*` retains route-level shared-secret authentication. | `src/start.ts` |
+| Matters / workspaces / document Library / chat history (SeegerWeissAI) | resolved | Firm-shared workspace reads and document presigning now require Cognito `requireAuth` on each server function. | `src/lib/workspace.functions.ts` |
+| Matters / workspaces / document Library / chat history (SeegerWeissAI) | reduced | `getUploadUrls` now requires Cognito `requireAdmin` and still has no callers; caller-supplied `slug` remains unsanitised inside the admin-only path. | `src/lib/workspace.functions.ts; src/lib/workspace.server.ts:279` |
 | Microsoft Office / M365 program: Claude for M365 add-in, two Word add-ins, firm skills library, dictation helper | critical | The transfer ZIP for the first-party add-in intentionally ships the Supabase service key and the AgentCore search endpoint inside server/.env and is hand-carried between laptops — a service-role DB credential leaving controlled infrastructure. | `C:/Users/fshaher/projects/sw-word-agent-review/START-HERE.txt:4` |
-| Review tables (spreadsheet-over-documents extraction) in SeegerWeissAI | critical | POST /api/review/cell has no auth middleware and no rate limit: it is a file-route handler, and start.ts registers only an error middleware globally (functionMiddleware: []), so any anonymous caller can POST up to 24 pages x 24k chars and burn Bedrock inference on the firm's account. | `lit-ai-extracted/lit-ai-main/src/routes/api/review/cell.ts:25 (no requireAuth) vs src/start.ts:23` |
+| Review tables (spreadsheet-over-documents extraction) in SeegerWeissAI | resolved | POST `/api/review/cell` is covered by `apiAuthMiddleware`. It still has no route-specific rate limit. | `src/start.ts; src/routes/api/review/cell.ts` |
 | Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | high | The Secure cookie flag is derived from COGNITO_REDIRECT_URI, which defaults to http://localhost:8080/auth/callback; if that env var is not set in a hosted environment the session id_token and the 30-day refresh token are sent without Secure. | `lit-ai-extracted/lit-ai-main/src/lib/auth/cognito.server.ts:23` |
 | Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | high | Production-capable Cognito pool id, client id, domain, redirect and logout URIs are hardcoded as `??` fallbacks, so a missing-env deploy silently authenticates against the dev pool and localhost redirect instead of failing closed. | `lit-ai-extracted/lit-ai-main/src/lib/auth/cognito.server.ts:11` |
 | Bulk document upload and analysis ("pile" / Working Set): session model, storage, ingest, OCR | high | The live OCR trigger is length-only (<120 chars) and ignores text quality, so the garbled PACER/scan text layers that text-quality.ts was written to catch are counted as emptyPages but never sent to OCR; pageNeedsOcr is only called from the review-table path. | `lit-ai-extracted/lit-ai-main/src/lib/use-pile.ts:263` |
 | Bulk document upload and analysis ("pile" / Working Set): session model, storage, ingest, OCR | high | Bulk upload never touches S3 or DynamoDB, contrary to the project's stated AWS persistence model: document text lives in browser memory + IndexedDB, the server-side alternative is a local SQLite kv file, and the scratch alternative is Supabase bytea. Grep for S3/Dynamo across src/lib/pile and src/routes/api/pile returns zero hits. | `lit-ai-extracted/lit-ai-main/src/lib/pile/db.server.ts:8` |
 | Bulk document upload and analysis ("pile" / Working Set): session model, storage, ingest, OCR | high | The entire Supabase 'scratch' workspace subsystem (scratch.server.ts, scratch-upload.ts, 6 routes, Docling python worker contract) has zero importers in src — scratch-upload.ts is imported nowhere, so this upload path is unreachable dead code carrying a service-role key and Voyage API dependency. | `lit-ai-extracted/lit-ai-main/src/lib/pile/scratch-upload.ts:68` |
-| Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | high | The UI data path is TanStack server functions with no auth check either: getIntelFeed / getCorpusSignals / getCorpusCalendar are plain createServerFn handlers, so corpus signal and calendar data is served without a session even though the pages sit behind /_authenticated. | `src/lib/intel.functions.ts:6; src/lib/calendar.functions.ts:5` |
-| Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | high | Route-level auth is client-side only: /_authenticated gates on a browser fetch to /api/auth/me with ssr:false, which blocks navigation but is not a server-side authorization boundary. | `src/routes/_authenticated/route.tsx:8` |
+| Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | resolved | `getIntelFeed`, `getCorpusSignals`, and `getCorpusCalendar` now attach Cognito `requireAuth`. | `src/lib/intel.functions.ts; src/lib/calendar.functions.ts` |
+| Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | informational | The page navigation guard remains client-side, but server-side API request middleware and per-handler server-function middleware now provide the authorization boundary. | `src/routes/_authenticated/route.tsx:8; src/start.ts` |
 | Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | high | AI briefings for intel items and docket entries still go through the upstream Lovable AI gateway on LOVABLE_API_KEY, not Bedrock/SigV4: an un-migrated third-party LLM egress path for docket content in a fork whose stated LLM boundary is Bedrock Converse. | `src/lib/intel-analyze.server.ts:8` |
 | Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | high | Both pg_cron definitions POST to a hardcoded lovable.app preview host, so on the AWS deployment intel collection and calendar sync fire against the wrong origin unless the vault secret was repointed after apply. | `supabase/corpus/calendar-sync-cron.sql:23; supabase/migrations/20260828121115_dd7c42dd-6e52-4756-9bf3-0db17745c791.sql:8` |
 | Matters / workspaces / document Library / chat history (SeegerWeissAI) | high | lib/s3.server.ts hard-requires static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and throws otherwise, contradicting the credential-chain-only posture of lib/data/s3.server.ts; the matter PDF viewer breaks the moment static keys are removed. | `src/lib/s3.server.ts:41` |
@@ -266,7 +312,7 @@ triaged view of this; this appendix is the raw list so nothing is lost.
 | Review tables (spreadsheet-over-documents extraction) in SeegerWeissAI | high | Row fingerprints are computed two different ways, so the same document added by drag-drop and by "use working set" produces two rows and invalidates cell cache keys: addFiles uses `name\|pages\|charCount`, useWorkingSet uses `name\|pageCount`. | `lit-ai-extracted/lit-ai-main/src/lib/review/use-review-table.ts:330 vs :449, consumed by cellCacheKey in src/lib/review/types.ts:169` |
 | Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | medium | Message items are keyed PK=CONV#<convId> with no principal in the key and no `owner` attribute, so tenant isolation for chat content rests entirely on every caller calling loadConv(principal, convId) first rather than on the key structure. | `lit-ai-extracted/lit-ai-main/src/lib/chat/chat.server.ts:73` |
 | Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | medium | A 30-day refresh token is stored in a cookie but refreshTokens() has zero callers, so the long-lived credential is exposed for no benefit while sessions still hard-expire at the id_token exp (~1h). | `lit-ai-extracted/lit-ai-main/src/routes/auth.callback.ts:44` |
-| Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | medium | src/lib/pipeline.functions.ts still gates 5 server functions on a Supabase-session requireAdmin against the retired managed project, which will throw at runtime; the Cognito requireAdmin in require-auth.ts has zero callers, so there is currently no working admin authorization anywhere. | `lit-ai-extracted/lit-ai-main/src/lib/pipeline.functions.ts:12` |
+| Auth boundary (Cognito OIDC) + DynamoDB/S3 data layer, SeegerWeissAI (TanStack Start fork of lit-ai) | resolved | All pipeline server functions now use Cognito `requireAdmin`; the overview derives email from `context.user`, and no Supabase auth import remains. | `src/lib/pipeline.functions.ts` |
 | Bulk document upload and analysis ("pile" / Working Set): session model, storage, ingest, OCR | medium | The server-persisted pile session (session.server.ts + /api/pile/session/$id/{ingest,ocr,embed,search,structure,ask}) has no client caller; nothing in src fetches /api/pile/session, so the Titan-embedding + RRF hybrid path and its SQLite store are unexercised by the app. | `lit-ai-extracted/lit-ai-main/src/lib/pile/session.server.ts:90` |
 | Bulk document upload and analysis ("pile" / Working Set): session model, storage, ingest, OCR | medium | If the persisted-session path is ever revived it will break on any multi-instance/serverless deploy: the kv store is a process-local SQLite file under process.cwd()/.data and silently degrades to a per-process in-memory Map when node:sqlite is unavailable, so session reads land on the wrong instance. | `lit-ai-extracted/lit-ai-main/src/lib/pile/store.ts:97` |
 | Intel + docket watch, batch ingest, summarize/discovery, calendar, eval, app shell | medium | Corpus project URL and publishable key are committed as dev fallbacks, so a deploy missing VITE_CORPUS_URL/CORPUS_URL silently reads the shared dev corpus instead of failing loudly. | `src/lib/corpus.ts:23` |
@@ -378,8 +424,9 @@ exported symbol and found at least one. `unverified` means it could not be confi
 
 - Cognito authorization-code + PKCE login [live] lit-ai-extracted/lit-ai-main/src/routes/auth.login.ts:9
 - JWKS-backed id_token verification [live] lit-ai-extracted/lit-ai-main/src/lib/auth/cognito.server.ts:115
+- Non-public API request middleware [live] src/start.ts
 - requireAuth serverFn middleware [live] lit-ai-extracted/lit-ai-main/src/lib/auth/require-auth.ts:9
-- requireAdmin middleware [dead] lit-ai-extracted/lit-ai-main/src/lib/auth/require-auth.ts:20
+- requireAdmin middleware [live] lit-ai-extracted/lit-ai-main/src/lib/auth/require-auth.ts:20
 - Silent token refresh [dead] lit-ai-extracted/lit-ai-main/src/lib/auth/cognito.server.ts:89
 - Owner-scoped single-table CRUD [live] lit-ai-extracted/lit-ai-main/src/lib/data/dynamo.server.ts:32
 - GSI query helper [dead] lit-ai-extracted/lit-ai-main/src/lib/data/dynamo.server.ts:66
@@ -423,26 +470,22 @@ version; this is every question as asked.
 - Is the throttle/retry behaviour of streamOneTurn adequate? Unlike bedrock.server's Converse path it has no retry/backoff; a ThrottlingException frame throws BedrockStreamError and the whole loop is abandoned with only an agentError log (research-agent.server.ts:166).
 - Should the run-state MemoryKV be swapped for DynamoDB/Redis? It is per-process, so tool caching gives nothing across instances (run-state.server.ts:67 exposes the seam).
 - Are the persisted-session and Supabase-scratch backends intended for revival on AWS (DynamoDB/S3) or should both be deleted? Right now they are three competing upload designs in one directory with only the browser one wired.
-- Was leaving /api/pile/* unauthenticated deliberate for the pilot, or an oversight from the fork? It is the only obvious path to unmetered Bedrock spend.
 - Should the live pile switch the OCR trigger from length-only to pageNeedsOcr (as review/ocr-pages.ts already does) so garbled PACER layers are re-read?
 - Nothing enforces the 4h session expiry on IndexedDB rehydrate — is indefinite local retention of case documents acceptable under the firm's retention posture?
 - Are zai.glm-5 and nvidia.nemotron-super-3-120b actually granted in Bedrock us-east-1 for account 475976462949? If not, the entire deposition workbench is dead and needs repointing at BEDROCK_PILE_WRITER_MODEL (unverified — no AWS calls made).
 - Is /api/pile/session/:id/embed ever invoked in the normal Ask flow, or does hybridSearchPile usually fall back to keyword-only because no page has an embedding? (Only the route and embedPile were found; no client trigger verified.)
 - Deposition transcripts are parsed in the browser and full testimony text is POSTed per 16-block window to /api/pile/ask with no server session — is that acceptable under the HIPAA discipline, and is anything logging those request bodies?
 - Should verifyAnswerCites delete or visibly strike unmatched [Sn] before the answer is exported, to match the deposition path's drop-on-fail behaviour?
-- Was leaving /api/review/cell unauthenticated deliberate (it takes the document text in the body, so it needs no data access) or an oversight from the Supabase-era port? It still spends Bedrock money and accepts arbitrary prompts.
 - Should deleteRow/deleteColumn cascade-delete RCELL#/RHIST# items, or is orphan retention wanted for audit? Today it is neither cleaned nor filtered.
 - Is the Kimi HEAVY_CHAIN path (runHeavyAnalysis) planned work or should it be deleted along with MODELS.nemotronSuper and the mantle transport remnants?
 - Which fingerprint scheme is canonical for ReviewRow, `name|pages|chars` or `name|pageCount`? The mismatch silently duplicates rows and forces full re-extraction.
 - Which surface did the user mean by "matter library" — matters/$slug?tab=documents (per-matter corpus documents) or /library (personal, un-scoped)? There is currently no matter-scoped personal library at all.
 - Is a Supabase session still established anywhere post-Cognito, or is the whole WorkspaceRail (pins/watches/saved answers/prompts) dead in practice?
 - Is the `matters` Supabase Storage bucket meant to migrate to the AWS bucket, which would let lib/s3.server.ts and its static keys be deleted?
-- Is the serverFn RPC endpoint reachable without the session cookie in the deployed Nitro config, or is there an edge/proxy auth layer not present in src/?
-- Are the unauthenticated /api/* handlers intended to be reachable only from the authenticated SPA shell, and is there any edge/ALB/WAF layer in front that gates them? Nothing in src does.
 - Does the deployed sw-dev-app table actually have GSI1/GSI2 and TTL enabled on attribute `ttl`? Only the code side was verifiable here; no IaC or table definition was found in scope.
 - Is COGNITO_REDIRECT_URI set (https) in every non-local environment, and is the Cognito app client restricted to those callback URLs?
 - Does the S3 bucket policy deny non-TLS and non-KMS PUTs, and is there a lifecycle rule for uploads/? The code relies on bucket-default SSE-KMS.
-- Is the app deployed behind an external authenticator (ALB/CloudFront/Cognito-at-edge)? If not, every non-public /api route in this subsystem is anonymous.
+- Which edge controls (ALB, CloudFront, or WAF) supplement the application-level Cognito gate in production?
 - Was the Lovable AI gateway in intel-analyze.server.ts intentionally left un-migrated, or is it an outstanding Bedrock cutover item?
 - Which host do the two pg_cron jobs target today: the vault secrets may have been repointed off the committed lovable.app URLs (unverified from the repo).
 - Is REVIEW_TABLES_ENABLED on in the pilot, i.e. does the Review tab actually appear for attorneys?

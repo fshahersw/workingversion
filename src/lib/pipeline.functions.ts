@@ -1,26 +1,17 @@
-// Owner-only pipeline server functions. Every handler re-checks the verified
-// Supabase email against the server allowlist — the route guard is UX only.
+// Admin-only pipeline server functions, gated by the verified Cognito role.
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/react-start/server";
 
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireAdmin } from "@/lib/auth/require-auth";
 
 /** RPC payloads cross the wire as plain JSON. */
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 const asJson = <T>(value: T): Json => JSON.parse(JSON.stringify(value)) as Json;
 
-async function requireAdmin(context: { supabase: { auth: { getUser: () => Promise<{ data: { user: { email?: string | null } | null } }> } } }) {
-  const { isAdminEmail } = await import("@/lib/pipeline.server");
-  const { data } = await context.supabase.auth.getUser();
-  const email = data.user?.email ?? null;
-  if (!isAdminEmail(email)) throw new Error("Forbidden");
-  return email as string;
-}
-
 export const getPipelineOverview = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAdmin])
   .handler(async ({ context }) => {
-    const email = await requireAdmin(context as never);
+    const email = context.user.email;
     const { listBatches, listRecentRejects, matterHealth, summarize } = await import("@/lib/pipeline.server");
     const [batches, rejects, health] = await Promise.all([
       listBatches(25).catch(() => []),
@@ -38,9 +29,8 @@ export const getPipelineOverview = createServerFn({ method: "GET" })
   });
 
 export const runPipelineSelfTest = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => {
-    await requireAdmin(context as never);
+  .middleware([requireAdmin])
+  .handler(async () => {
     const { runSelfTest } = await import("@/lib/ingest/selftest.server");
     const req = getRequest();
     const origin = new URL(req.url).origin;
@@ -48,25 +38,21 @@ export const runPipelineSelfTest = createServerFn({ method: "POST" })
   });
 
 export const checkPipelineAccess = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => {
-    const { isAdminEmail } = await import("@/lib/pipeline.server");
-    const { data } = await (context as { supabase: { auth: { getUser: () => Promise<{ data: { user: { email?: string | null } | null } }> } } }).supabase.auth.getUser();
-    return { allowed: isAdminEmail(data.user?.email ?? null) };
+  .middleware([requireAdmin])
+  .handler(async () => {
+    return { allowed: true };
   });
 
 export const runIntelRefresh = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => {
-    await requireAdmin(context as never);
+  .middleware([requireAdmin])
+  .handler(async () => {
     const { runIntelCollection } = await import("@/lib/intel-collect.server");
     return asJson(await runIntelCollection());
   });
 
 export const getDocketWatchOverview = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => {
-    await requireAdmin(context as never);
+  .middleware([requireAdmin])
+  .handler(async () => {
     const { docketWatchOverview } = await import("@/lib/pipeline.server");
     return asJson(await docketWatchOverview());
   });

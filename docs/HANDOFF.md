@@ -1,6 +1,6 @@
 # SeegerWeissAI — Project Handoff (read this first)
 
-Last updated: 2026-09-04. Author: prior Claude Code session. Audience: a fresh
+Last updated: 2026-09-06. Author: prior Claude Code session. Audience: a fresh
 Claude Code instance (terminal or inside the Claude desktop app) picking this up
 cold, and the human driving it (Firas Shaher, AI Solutions Architect, Seeger
 Weiss LLP).
@@ -166,17 +166,14 @@ network time**, plus ~16s fixed synthesis generation. We are near the safe
 on-demand floor.
 
 **Open / pending:**
-- **THE BIG ONE, found 2026-09-04: the entire `/api/*` surface is unauthenticated.**
-  `src/start.ts:23` sets `functionMiddleware: []`, and zero files under
-  `src/routes/api/` reference `requireAuth`. Only `api/auth/me.ts` checks a session.
-  Any anonymous caller can drive `/api/orchestrate`, `/api/review/cell`, and
-  `/api/pile/ask` (arbitrary Bedrock spend), and can read another user's ingested
-  discovery text via `/api/pile/session/{id}`, which has no owner field at all.
-  `fetch_page` compounds it: `src/lib/agents/fetch-page.server.ts:104` allows any
-  http(s) URL and follows redirects with no private-IP filter, so it is an
-  unauthenticated SSRF primitive that can reach instance metadata. Severity depends
-  on whether an ALB/CloudFront/WAF fronts the deployed app, which nothing in `src/`
-  settles. See `docs/CODEBASE-BRIEF.md` section 6 for the full risk register.
+- **AUTH BOUNDARY CLOSED 2026-09-06:** `apiAuthMiddleware` now requires a valid
+  Cognito session for `/api/*` except `/api/public/*`, whose cron/webhook routes
+  retain their own shared-secret authentication. Server functions still require
+  per-handler middleware; the firm-shared workspace, summaries, intel, and calendar
+  reads now use `requireAuth`, while pipeline administration and firm-global
+  summary/upload writes use `requireAdmin`. Pile sessions still lack owner scoping,
+  and `fetch_page` still needs private-IP/redirect filtering, but those paths are no
+  longer anonymously reachable.
 - **Browser smoke test** of the current streaming UX (thinking box, tool chips,
   Mermaid, footnote citations, no reflexive caveat).
 - **Per-tool hard timeouts** (proposed, not built): cap each tool call (~8s) so
