@@ -173,8 +173,9 @@ export type HybridSearchArgs = {
   workspaceId: string;
   surface: KbSurface;
   query: string;
-  /** Titan v2 query embedding, 1024-dim. */
-  embedding: number[];
+  /** Titan v2 query embedding, 1024-dim. Null runs lexical-only (BM25) when the
+   *  embedder is unavailable — hybrid_search skips the vector leg on NULL. */
+  embedding: number[] | null;
   /** Fused candidate ceiling before app-side rerank. */
   match?: number;
   rrfK?: number;
@@ -207,7 +208,7 @@ export async function hybridSearch(args: HybridSearchArgs): Promise<KbHit[]> {
     param("workspace", args.workspaceId),
     param("surface", args.surface),
     param("query", args.query),
-    param("embedding", vectorLiteral(args.embedding)),
+    param("embedding", args.embedding && args.embedding.length ? vectorLiteral(args.embedding) : null),
     param("match", match),
     param("rrf_k", rrfK),
     param("snippet", snippetChars),

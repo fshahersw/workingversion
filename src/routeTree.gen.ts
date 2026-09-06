@@ -37,6 +37,7 @@ import { Route as ApiPileSessionRouteImport } from './routes/api/pile/session'
 import { Route as ApiPileRerankRouteImport } from './routes/api/pile/rerank'
 import { Route as ApiPileOcrRouteImport } from './routes/api/pile/ocr'
 import { Route as ApiPileAskRouteImport } from './routes/api/pile/ask'
+import { Route as ApiKbSearchRouteImport } from './routes/api/kb/search'
 import { Route as ApiKbIngestRouteImport } from './routes/api/kb/ingest'
 import { Route as ApiAuthMeRouteImport } from './routes/api/auth/me'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
@@ -203,6 +204,11 @@ const ApiPileOcrRoute = ApiPileOcrRouteImport.update({
 const ApiPileAskRoute = ApiPileAskRouteImport.update({
   id: '/api/pile/ask',
   path: '/api/pile/ask',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiKbSearchRoute = ApiKbSearchRouteImport.update({
+  id: '/api/kb/search',
+  path: '/api/kb/search',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiKbIngestRoute = ApiKbIngestRouteImport.update({
@@ -372,6 +378,7 @@ export interface FileRoutesByFullPath {
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
+  '/api/kb/search': typeof ApiKbSearchRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -427,6 +434,7 @@ export interface FileRoutesByTo {
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
+  '/api/kb/search': typeof ApiKbSearchRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -484,6 +492,7 @@ export interface FileRoutesById {
   '/_authenticated/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
+  '/api/kb/search': typeof ApiKbSearchRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -541,6 +550,7 @@ export interface FileRouteTypes {
     | '/matters/$slug'
     | '/api/auth/me'
     | '/api/kb/ingest'
+    | '/api/kb/search'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -596,6 +606,7 @@ export interface FileRouteTypes {
     | '/matters/$slug'
     | '/api/auth/me'
     | '/api/kb/ingest'
+    | '/api/kb/search'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -652,6 +663,7 @@ export interface FileRouteTypes {
     | '/_authenticated/matters/$slug'
     | '/api/auth/me'
     | '/api/kb/ingest'
+    | '/api/kb/search'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -695,6 +707,7 @@ export interface RootRouteChildren {
   ApiUploadRoute: typeof ApiUploadRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
   ApiKbIngestRoute: typeof ApiKbIngestRoute
+  ApiKbSearchRoute: typeof ApiKbSearchRoute
   ApiPileAskRoute: typeof ApiPileAskRoute
   ApiPileOcrRoute: typeof ApiPileOcrRoute
   ApiPileRerankRoute: typeof ApiPileRerankRoute
@@ -908,6 +921,13 @@ declare module '@tanstack/react-router' {
       path: '/api/pile/ask'
       fullPath: '/api/pile/ask'
       preLoaderRoute: typeof ApiPileAskRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/kb/search': {
+      id: '/api/kb/search'
+      path: '/api/kb/search'
+      fullPath: '/api/kb/search'
+      preLoaderRoute: typeof ApiKbSearchRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/kb/ingest': {
@@ -1248,6 +1268,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiUploadRoute: ApiUploadRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
   ApiKbIngestRoute: ApiKbIngestRoute,
+  ApiKbSearchRoute: ApiKbSearchRoute,
   ApiPileAskRoute: ApiPileAskRoute,
   ApiPileOcrRoute: ApiPileOcrRoute,
   ApiPileRerankRoute: ApiPileRerankRoute,
