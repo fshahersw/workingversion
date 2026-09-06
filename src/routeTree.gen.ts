@@ -33,7 +33,6 @@ import { Route as AuthenticatedCalendarRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedMattersIndexRouteImport } from './routes/_authenticated/matters.index'
 import { Route as ApiReviewCellRouteImport } from './routes/api/review/cell'
 import { Route as ApiPileStructureRouteImport } from './routes/api/pile/structure'
-import { Route as ApiPileSessionRouteImport } from './routes/api/pile/session'
 import { Route as ApiPileRerankRouteImport } from './routes/api/pile/rerank'
 import { Route as ApiPileOcrRouteImport } from './routes/api/pile/ocr'
 import { Route as ApiPileAskRouteImport } from './routes/api/pile/ask'
@@ -48,23 +47,9 @@ import { Route as ApiPublicIntelRunRouteImport } from './routes/api/public/intel
 import { Route as ApiPublicIngestIntelRouteImport } from './routes/api/public/ingest/intel'
 import { Route as ApiPublicIngestBatchesRouteImport } from './routes/api/public/ingest/batches'
 import { Route as ApiPublicCalendarSyncRouteImport } from './routes/api/public/calendar/sync'
-import { Route as ApiPileSessionIdRouteImport } from './routes/api/pile/session.$id'
-import { Route as ApiPileScratchSessionRouteImport } from './routes/api/pile/scratch.session'
 import { Route as ApiPublicIngestBatchesIdRouteImport } from './routes/api/public/ingest/batches.$id'
-import { Route as ApiPileSessionIdStructureRouteImport } from './routes/api/pile/session.$id.structure'
-import { Route as ApiPileSessionIdSearchRouteImport } from './routes/api/pile/session.$id.search'
-import { Route as ApiPileSessionIdOcrRouteImport } from './routes/api/pile/session.$id.ocr'
-import { Route as ApiPileSessionIdIngestRouteImport } from './routes/api/pile/session.$id.ingest'
-import { Route as ApiPileSessionIdEmbedRouteImport } from './routes/api/pile/session.$id.embed'
-import { Route as ApiPileSessionIdAskRouteImport } from './routes/api/pile/session.$id.ask'
-import { Route as ApiPileScratchSessionIdRouteImport } from './routes/api/pile/scratch.session.$id'
 import { Route as ApiPublicIngestBatchesIdValidateRouteImport } from './routes/api/public/ingest/batches.$id.validate'
 import { Route as ApiPublicIngestBatchesIdCommitRouteImport } from './routes/api/public/ingest/batches.$id.commit'
-import { Route as ApiPileScratchSessionIdSearchRouteImport } from './routes/api/pile/scratch.session.$id.search'
-import { Route as ApiPileScratchSessionIdPagesRouteImport } from './routes/api/pile/scratch.session.$id.pages'
-import { Route as ApiPileScratchSessionIdDocumentRouteImport } from './routes/api/pile/scratch.session.$id.document'
-import { Route as ApiPileScratchDocumentIdEnqueueRouteImport } from './routes/api/pile/scratch.document.$id.enqueue'
-import { Route as ApiPileScratchDocumentIdBytesRouteImport } from './routes/api/pile/scratch.document.$id.bytes'
 
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
@@ -187,11 +172,6 @@ const ApiPileStructureRoute = ApiPileStructureRouteImport.update({
   path: '/api/pile/structure',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiPileSessionRoute = ApiPileSessionRouteImport.update({
-  id: '/api/pile/session',
-  path: '/api/pile/session',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ApiPileRerankRoute = ApiPileRerankRouteImport.update({
   id: '/api/pile/rerank',
   path: '/api/pile/rerank',
@@ -265,58 +245,12 @@ const ApiPublicCalendarSyncRoute = ApiPublicCalendarSyncRouteImport.update({
   path: '/api/public/calendar/sync',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiPileSessionIdRoute = ApiPileSessionIdRouteImport.update({
-  id: '/$id',
-  path: '/$id',
-  getParentRoute: () => ApiPileSessionRoute,
-} as any)
-const ApiPileScratchSessionRoute = ApiPileScratchSessionRouteImport.update({
-  id: '/api/pile/scratch/session',
-  path: '/api/pile/scratch/session',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ApiPublicIngestBatchesIdRoute =
   ApiPublicIngestBatchesIdRouteImport.update({
     id: '/$id',
     path: '/$id',
     getParentRoute: () => ApiPublicIngestBatchesRoute,
   } as any)
-const ApiPileSessionIdStructureRoute =
-  ApiPileSessionIdStructureRouteImport.update({
-    id: '/structure',
-    path: '/structure',
-    getParentRoute: () => ApiPileSessionIdRoute,
-  } as any)
-const ApiPileSessionIdSearchRoute = ApiPileSessionIdSearchRouteImport.update({
-  id: '/search',
-  path: '/search',
-  getParentRoute: () => ApiPileSessionIdRoute,
-} as any)
-const ApiPileSessionIdOcrRoute = ApiPileSessionIdOcrRouteImport.update({
-  id: '/ocr',
-  path: '/ocr',
-  getParentRoute: () => ApiPileSessionIdRoute,
-} as any)
-const ApiPileSessionIdIngestRoute = ApiPileSessionIdIngestRouteImport.update({
-  id: '/ingest',
-  path: '/ingest',
-  getParentRoute: () => ApiPileSessionIdRoute,
-} as any)
-const ApiPileSessionIdEmbedRoute = ApiPileSessionIdEmbedRouteImport.update({
-  id: '/embed',
-  path: '/embed',
-  getParentRoute: () => ApiPileSessionIdRoute,
-} as any)
-const ApiPileSessionIdAskRoute = ApiPileSessionIdAskRouteImport.update({
-  id: '/ask',
-  path: '/ask',
-  getParentRoute: () => ApiPileSessionIdRoute,
-} as any)
-const ApiPileScratchSessionIdRoute = ApiPileScratchSessionIdRouteImport.update({
-  id: '/$id',
-  path: '/$id',
-  getParentRoute: () => ApiPileScratchSessionRoute,
-} as any)
 const ApiPublicIngestBatchesIdValidateRoute =
   ApiPublicIngestBatchesIdValidateRouteImport.update({
     id: '/validate',
@@ -328,36 +262,6 @@ const ApiPublicIngestBatchesIdCommitRoute =
     id: '/commit',
     path: '/commit',
     getParentRoute: () => ApiPublicIngestBatchesIdRoute,
-  } as any)
-const ApiPileScratchSessionIdSearchRoute =
-  ApiPileScratchSessionIdSearchRouteImport.update({
-    id: '/search',
-    path: '/search',
-    getParentRoute: () => ApiPileScratchSessionIdRoute,
-  } as any)
-const ApiPileScratchSessionIdPagesRoute =
-  ApiPileScratchSessionIdPagesRouteImport.update({
-    id: '/pages',
-    path: '/pages',
-    getParentRoute: () => ApiPileScratchSessionIdRoute,
-  } as any)
-const ApiPileScratchSessionIdDocumentRoute =
-  ApiPileScratchSessionIdDocumentRouteImport.update({
-    id: '/document',
-    path: '/document',
-    getParentRoute: () => ApiPileScratchSessionIdRoute,
-  } as any)
-const ApiPileScratchDocumentIdEnqueueRoute =
-  ApiPileScratchDocumentIdEnqueueRouteImport.update({
-    id: '/api/pile/scratch/document/$id/enqueue',
-    path: '/api/pile/scratch/document/$id/enqueue',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiPileScratchDocumentIdBytesRoute =
-  ApiPileScratchDocumentIdBytesRouteImport.update({
-    id: '/api/pile/scratch/document/$id/bytes',
-    path: '/api/pile/scratch/document/$id/bytes',
-    getParentRoute: () => rootRouteImport,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -389,31 +293,16 @@ export interface FileRoutesByFullPath {
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
-  '/api/pile/session': typeof ApiPileSessionRouteWithChildren
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
   '/matters/': typeof AuthenticatedMattersIndexRoute
-  '/api/pile/scratch/session': typeof ApiPileScratchSessionRouteWithChildren
-  '/api/pile/session/$id': typeof ApiPileSessionIdRouteWithChildren
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
-  '/api/pile/scratch/session/$id': typeof ApiPileScratchSessionIdRouteWithChildren
-  '/api/pile/session/$id/ask': typeof ApiPileSessionIdAskRoute
-  '/api/pile/session/$id/embed': typeof ApiPileSessionIdEmbedRoute
-  '/api/pile/session/$id/ingest': typeof ApiPileSessionIdIngestRoute
-  '/api/pile/session/$id/ocr': typeof ApiPileSessionIdOcrRoute
-  '/api/pile/session/$id/search': typeof ApiPileSessionIdSearchRoute
-  '/api/pile/session/$id/structure': typeof ApiPileSessionIdStructureRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
-  '/api/pile/scratch/document/$id/bytes': typeof ApiPileScratchDocumentIdBytesRoute
-  '/api/pile/scratch/document/$id/enqueue': typeof ApiPileScratchDocumentIdEnqueueRoute
-  '/api/pile/scratch/session/$id/document': typeof ApiPileScratchSessionIdDocumentRoute
-  '/api/pile/scratch/session/$id/pages': typeof ApiPileScratchSessionIdPagesRoute
-  '/api/pile/scratch/session/$id/search': typeof ApiPileScratchSessionIdSearchRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
 }
@@ -446,31 +335,16 @@ export interface FileRoutesByTo {
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
-  '/api/pile/session': typeof ApiPileSessionRouteWithChildren
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
   '/matters': typeof AuthenticatedMattersIndexRoute
-  '/api/pile/scratch/session': typeof ApiPileScratchSessionRouteWithChildren
-  '/api/pile/session/$id': typeof ApiPileSessionIdRouteWithChildren
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
-  '/api/pile/scratch/session/$id': typeof ApiPileScratchSessionIdRouteWithChildren
-  '/api/pile/session/$id/ask': typeof ApiPileSessionIdAskRoute
-  '/api/pile/session/$id/embed': typeof ApiPileSessionIdEmbedRoute
-  '/api/pile/session/$id/ingest': typeof ApiPileSessionIdIngestRoute
-  '/api/pile/session/$id/ocr': typeof ApiPileSessionIdOcrRoute
-  '/api/pile/session/$id/search': typeof ApiPileSessionIdSearchRoute
-  '/api/pile/session/$id/structure': typeof ApiPileSessionIdStructureRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
-  '/api/pile/scratch/document/$id/bytes': typeof ApiPileScratchDocumentIdBytesRoute
-  '/api/pile/scratch/document/$id/enqueue': typeof ApiPileScratchDocumentIdEnqueueRoute
-  '/api/pile/scratch/session/$id/document': typeof ApiPileScratchSessionIdDocumentRoute
-  '/api/pile/scratch/session/$id/pages': typeof ApiPileScratchSessionIdPagesRoute
-  '/api/pile/scratch/session/$id/search': typeof ApiPileScratchSessionIdSearchRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
 }
@@ -505,31 +379,16 @@ export interface FileRoutesById {
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
-  '/api/pile/session': typeof ApiPileSessionRouteWithChildren
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
   '/_authenticated/matters/': typeof AuthenticatedMattersIndexRoute
-  '/api/pile/scratch/session': typeof ApiPileScratchSessionRouteWithChildren
-  '/api/pile/session/$id': typeof ApiPileSessionIdRouteWithChildren
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
-  '/api/pile/scratch/session/$id': typeof ApiPileScratchSessionIdRouteWithChildren
-  '/api/pile/session/$id/ask': typeof ApiPileSessionIdAskRoute
-  '/api/pile/session/$id/embed': typeof ApiPileSessionIdEmbedRoute
-  '/api/pile/session/$id/ingest': typeof ApiPileSessionIdIngestRoute
-  '/api/pile/session/$id/ocr': typeof ApiPileSessionIdOcrRoute
-  '/api/pile/session/$id/search': typeof ApiPileSessionIdSearchRoute
-  '/api/pile/session/$id/structure': typeof ApiPileSessionIdStructureRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
-  '/api/pile/scratch/document/$id/bytes': typeof ApiPileScratchDocumentIdBytesRoute
-  '/api/pile/scratch/document/$id/enqueue': typeof ApiPileScratchDocumentIdEnqueueRoute
-  '/api/pile/scratch/session/$id/document': typeof ApiPileScratchSessionIdDocumentRoute
-  '/api/pile/scratch/session/$id/pages': typeof ApiPileScratchSessionIdPagesRoute
-  '/api/pile/scratch/session/$id/search': typeof ApiPileScratchSessionIdSearchRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
 }
@@ -564,31 +423,16 @@ export interface FileRouteTypes {
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
-    | '/api/pile/session'
     | '/api/pile/structure'
     | '/api/review/cell'
     | '/matters/'
-    | '/api/pile/scratch/session'
-    | '/api/pile/session/$id'
     | '/api/public/calendar/sync'
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
-    | '/api/pile/scratch/session/$id'
-    | '/api/pile/session/$id/ask'
-    | '/api/pile/session/$id/embed'
-    | '/api/pile/session/$id/ingest'
-    | '/api/pile/session/$id/ocr'
-    | '/api/pile/session/$id/search'
-    | '/api/pile/session/$id/structure'
     | '/api/public/ingest/batches/$id'
-    | '/api/pile/scratch/document/$id/bytes'
-    | '/api/pile/scratch/document/$id/enqueue'
-    | '/api/pile/scratch/session/$id/document'
-    | '/api/pile/scratch/session/$id/pages'
-    | '/api/pile/scratch/session/$id/search'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
   fileRoutesByTo: FileRoutesByTo
@@ -621,31 +465,16 @@ export interface FileRouteTypes {
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
-    | '/api/pile/session'
     | '/api/pile/structure'
     | '/api/review/cell'
     | '/matters'
-    | '/api/pile/scratch/session'
-    | '/api/pile/session/$id'
     | '/api/public/calendar/sync'
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
-    | '/api/pile/scratch/session/$id'
-    | '/api/pile/session/$id/ask'
-    | '/api/pile/session/$id/embed'
-    | '/api/pile/session/$id/ingest'
-    | '/api/pile/session/$id/ocr'
-    | '/api/pile/session/$id/search'
-    | '/api/pile/session/$id/structure'
     | '/api/public/ingest/batches/$id'
-    | '/api/pile/scratch/document/$id/bytes'
-    | '/api/pile/scratch/document/$id/enqueue'
-    | '/api/pile/scratch/session/$id/document'
-    | '/api/pile/scratch/session/$id/pages'
-    | '/api/pile/scratch/session/$id/search'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
   id:
@@ -679,31 +508,16 @@ export interface FileRouteTypes {
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
-    | '/api/pile/session'
     | '/api/pile/structure'
     | '/api/review/cell'
     | '/_authenticated/matters/'
-    | '/api/pile/scratch/session'
-    | '/api/pile/session/$id'
     | '/api/public/calendar/sync'
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
-    | '/api/pile/scratch/session/$id'
-    | '/api/pile/session/$id/ask'
-    | '/api/pile/session/$id/embed'
-    | '/api/pile/session/$id/ingest'
-    | '/api/pile/session/$id/ocr'
-    | '/api/pile/session/$id/search'
-    | '/api/pile/session/$id/structure'
     | '/api/public/ingest/batches/$id'
-    | '/api/pile/scratch/document/$id/bytes'
-    | '/api/pile/scratch/document/$id/enqueue'
-    | '/api/pile/scratch/session/$id/document'
-    | '/api/pile/scratch/session/$id/pages'
-    | '/api/pile/scratch/session/$id/search'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
   fileRoutesById: FileRoutesById
@@ -724,18 +538,14 @@ export interface RootRouteChildren {
   ApiPileAskRoute: typeof ApiPileAskRoute
   ApiPileOcrRoute: typeof ApiPileOcrRoute
   ApiPileRerankRoute: typeof ApiPileRerankRoute
-  ApiPileSessionRoute: typeof ApiPileSessionRouteWithChildren
   ApiPileStructureRoute: typeof ApiPileStructureRoute
   ApiReviewCellRoute: typeof ApiReviewCellRoute
-  ApiPileScratchSessionRoute: typeof ApiPileScratchSessionRouteWithChildren
   ApiPublicCalendarSyncRoute: typeof ApiPublicCalendarSyncRoute
   ApiPublicIngestBatchesRoute: typeof ApiPublicIngestBatchesRouteWithChildren
   ApiPublicIngestIntelRoute: typeof ApiPublicIngestIntelRoute
   ApiPublicIntelRunRoute: typeof ApiPublicIntelRunRoute
   ApiPublicWebhooksCourtlistenerRoute: typeof ApiPublicWebhooksCourtlistenerRoute
   ApiPublicWebhooksDocketbirdRoute: typeof ApiPublicWebhooksDocketbirdRoute
-  ApiPileScratchDocumentIdBytesRoute: typeof ApiPileScratchDocumentIdBytesRoute
-  ApiPileScratchDocumentIdEnqueueRoute: typeof ApiPileScratchDocumentIdEnqueueRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -908,13 +718,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPileStructureRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/pile/session': {
-      id: '/api/pile/session'
-      path: '/api/pile/session'
-      fullPath: '/api/pile/session'
-      preLoaderRoute: typeof ApiPileSessionRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/api/pile/rerank': {
       id: '/api/pile/rerank'
       path: '/api/pile/rerank'
@@ -1013,75 +816,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCalendarSyncRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/pile/session/$id': {
-      id: '/api/pile/session/$id'
-      path: '/$id'
-      fullPath: '/api/pile/session/$id'
-      preLoaderRoute: typeof ApiPileSessionIdRouteImport
-      parentRoute: typeof ApiPileSessionRoute
-    }
-    '/api/pile/scratch/session': {
-      id: '/api/pile/scratch/session'
-      path: '/api/pile/scratch/session'
-      fullPath: '/api/pile/scratch/session'
-      preLoaderRoute: typeof ApiPileScratchSessionRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/api/public/ingest/batches/$id': {
       id: '/api/public/ingest/batches/$id'
       path: '/$id'
       fullPath: '/api/public/ingest/batches/$id'
       preLoaderRoute: typeof ApiPublicIngestBatchesIdRouteImport
       parentRoute: typeof ApiPublicIngestBatchesRoute
-    }
-    '/api/pile/session/$id/structure': {
-      id: '/api/pile/session/$id/structure'
-      path: '/structure'
-      fullPath: '/api/pile/session/$id/structure'
-      preLoaderRoute: typeof ApiPileSessionIdStructureRouteImport
-      parentRoute: typeof ApiPileSessionIdRoute
-    }
-    '/api/pile/session/$id/search': {
-      id: '/api/pile/session/$id/search'
-      path: '/search'
-      fullPath: '/api/pile/session/$id/search'
-      preLoaderRoute: typeof ApiPileSessionIdSearchRouteImport
-      parentRoute: typeof ApiPileSessionIdRoute
-    }
-    '/api/pile/session/$id/ocr': {
-      id: '/api/pile/session/$id/ocr'
-      path: '/ocr'
-      fullPath: '/api/pile/session/$id/ocr'
-      preLoaderRoute: typeof ApiPileSessionIdOcrRouteImport
-      parentRoute: typeof ApiPileSessionIdRoute
-    }
-    '/api/pile/session/$id/ingest': {
-      id: '/api/pile/session/$id/ingest'
-      path: '/ingest'
-      fullPath: '/api/pile/session/$id/ingest'
-      preLoaderRoute: typeof ApiPileSessionIdIngestRouteImport
-      parentRoute: typeof ApiPileSessionIdRoute
-    }
-    '/api/pile/session/$id/embed': {
-      id: '/api/pile/session/$id/embed'
-      path: '/embed'
-      fullPath: '/api/pile/session/$id/embed'
-      preLoaderRoute: typeof ApiPileSessionIdEmbedRouteImport
-      parentRoute: typeof ApiPileSessionIdRoute
-    }
-    '/api/pile/session/$id/ask': {
-      id: '/api/pile/session/$id/ask'
-      path: '/ask'
-      fullPath: '/api/pile/session/$id/ask'
-      preLoaderRoute: typeof ApiPileSessionIdAskRouteImport
-      parentRoute: typeof ApiPileSessionIdRoute
-    }
-    '/api/pile/scratch/session/$id': {
-      id: '/api/pile/scratch/session/$id'
-      path: '/$id'
-      fullPath: '/api/pile/scratch/session/$id'
-      preLoaderRoute: typeof ApiPileScratchSessionIdRouteImport
-      parentRoute: typeof ApiPileScratchSessionRoute
     }
     '/api/public/ingest/batches/$id/validate': {
       id: '/api/public/ingest/batches/$id/validate'
@@ -1096,41 +836,6 @@ declare module '@tanstack/react-router' {
       fullPath: '/api/public/ingest/batches/$id/commit'
       preLoaderRoute: typeof ApiPublicIngestBatchesIdCommitRouteImport
       parentRoute: typeof ApiPublicIngestBatchesIdRoute
-    }
-    '/api/pile/scratch/session/$id/search': {
-      id: '/api/pile/scratch/session/$id/search'
-      path: '/search'
-      fullPath: '/api/pile/scratch/session/$id/search'
-      preLoaderRoute: typeof ApiPileScratchSessionIdSearchRouteImport
-      parentRoute: typeof ApiPileScratchSessionIdRoute
-    }
-    '/api/pile/scratch/session/$id/pages': {
-      id: '/api/pile/scratch/session/$id/pages'
-      path: '/pages'
-      fullPath: '/api/pile/scratch/session/$id/pages'
-      preLoaderRoute: typeof ApiPileScratchSessionIdPagesRouteImport
-      parentRoute: typeof ApiPileScratchSessionIdRoute
-    }
-    '/api/pile/scratch/session/$id/document': {
-      id: '/api/pile/scratch/session/$id/document'
-      path: '/document'
-      fullPath: '/api/pile/scratch/session/$id/document'
-      preLoaderRoute: typeof ApiPileScratchSessionIdDocumentRouteImport
-      parentRoute: typeof ApiPileScratchSessionIdRoute
-    }
-    '/api/pile/scratch/document/$id/enqueue': {
-      id: '/api/pile/scratch/document/$id/enqueue'
-      path: '/api/pile/scratch/document/$id/enqueue'
-      fullPath: '/api/pile/scratch/document/$id/enqueue'
-      preLoaderRoute: typeof ApiPileScratchDocumentIdEnqueueRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/pile/scratch/document/$id/bytes': {
-      id: '/api/pile/scratch/document/$id/bytes'
-      path: '/api/pile/scratch/document/$id/bytes'
-      fullPath: '/api/pile/scratch/document/$id/bytes'
-      preLoaderRoute: typeof ApiPileScratchDocumentIdBytesRouteImport
-      parentRoute: typeof rootRouteImport
     }
   }
 }
@@ -1182,70 +887,6 @@ const AuthRouteChildren: AuthRouteChildren = {
 
 const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)
 
-interface ApiPileSessionIdRouteChildren {
-  ApiPileSessionIdAskRoute: typeof ApiPileSessionIdAskRoute
-  ApiPileSessionIdEmbedRoute: typeof ApiPileSessionIdEmbedRoute
-  ApiPileSessionIdIngestRoute: typeof ApiPileSessionIdIngestRoute
-  ApiPileSessionIdOcrRoute: typeof ApiPileSessionIdOcrRoute
-  ApiPileSessionIdSearchRoute: typeof ApiPileSessionIdSearchRoute
-  ApiPileSessionIdStructureRoute: typeof ApiPileSessionIdStructureRoute
-}
-
-const ApiPileSessionIdRouteChildren: ApiPileSessionIdRouteChildren = {
-  ApiPileSessionIdAskRoute: ApiPileSessionIdAskRoute,
-  ApiPileSessionIdEmbedRoute: ApiPileSessionIdEmbedRoute,
-  ApiPileSessionIdIngestRoute: ApiPileSessionIdIngestRoute,
-  ApiPileSessionIdOcrRoute: ApiPileSessionIdOcrRoute,
-  ApiPileSessionIdSearchRoute: ApiPileSessionIdSearchRoute,
-  ApiPileSessionIdStructureRoute: ApiPileSessionIdStructureRoute,
-}
-
-const ApiPileSessionIdRouteWithChildren =
-  ApiPileSessionIdRoute._addFileChildren(ApiPileSessionIdRouteChildren)
-
-interface ApiPileSessionRouteChildren {
-  ApiPileSessionIdRoute: typeof ApiPileSessionIdRouteWithChildren
-}
-
-const ApiPileSessionRouteChildren: ApiPileSessionRouteChildren = {
-  ApiPileSessionIdRoute: ApiPileSessionIdRouteWithChildren,
-}
-
-const ApiPileSessionRouteWithChildren = ApiPileSessionRoute._addFileChildren(
-  ApiPileSessionRouteChildren,
-)
-
-interface ApiPileScratchSessionIdRouteChildren {
-  ApiPileScratchSessionIdDocumentRoute: typeof ApiPileScratchSessionIdDocumentRoute
-  ApiPileScratchSessionIdPagesRoute: typeof ApiPileScratchSessionIdPagesRoute
-  ApiPileScratchSessionIdSearchRoute: typeof ApiPileScratchSessionIdSearchRoute
-}
-
-const ApiPileScratchSessionIdRouteChildren: ApiPileScratchSessionIdRouteChildren =
-  {
-    ApiPileScratchSessionIdDocumentRoute: ApiPileScratchSessionIdDocumentRoute,
-    ApiPileScratchSessionIdPagesRoute: ApiPileScratchSessionIdPagesRoute,
-    ApiPileScratchSessionIdSearchRoute: ApiPileScratchSessionIdSearchRoute,
-  }
-
-const ApiPileScratchSessionIdRouteWithChildren =
-  ApiPileScratchSessionIdRoute._addFileChildren(
-    ApiPileScratchSessionIdRouteChildren,
-  )
-
-interface ApiPileScratchSessionRouteChildren {
-  ApiPileScratchSessionIdRoute: typeof ApiPileScratchSessionIdRouteWithChildren
-}
-
-const ApiPileScratchSessionRouteChildren: ApiPileScratchSessionRouteChildren = {
-  ApiPileScratchSessionIdRoute: ApiPileScratchSessionIdRouteWithChildren,
-}
-
-const ApiPileScratchSessionRouteWithChildren =
-  ApiPileScratchSessionRoute._addFileChildren(
-    ApiPileScratchSessionRouteChildren,
-  )
-
 interface ApiPublicIngestBatchesIdRouteChildren {
   ApiPublicIngestBatchesIdCommitRoute: typeof ApiPublicIngestBatchesIdCommitRoute
   ApiPublicIngestBatchesIdValidateRoute: typeof ApiPublicIngestBatchesIdValidateRoute
@@ -1293,18 +934,14 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPileAskRoute: ApiPileAskRoute,
   ApiPileOcrRoute: ApiPileOcrRoute,
   ApiPileRerankRoute: ApiPileRerankRoute,
-  ApiPileSessionRoute: ApiPileSessionRouteWithChildren,
   ApiPileStructureRoute: ApiPileStructureRoute,
   ApiReviewCellRoute: ApiReviewCellRoute,
-  ApiPileScratchSessionRoute: ApiPileScratchSessionRouteWithChildren,
   ApiPublicCalendarSyncRoute: ApiPublicCalendarSyncRoute,
   ApiPublicIngestBatchesRoute: ApiPublicIngestBatchesRouteWithChildren,
   ApiPublicIngestIntelRoute: ApiPublicIngestIntelRoute,
   ApiPublicIntelRunRoute: ApiPublicIntelRunRoute,
   ApiPublicWebhooksCourtlistenerRoute: ApiPublicWebhooksCourtlistenerRoute,
   ApiPublicWebhooksDocketbirdRoute: ApiPublicWebhooksDocketbirdRoute,
-  ApiPileScratchDocumentIdBytesRoute: ApiPileScratchDocumentIdBytesRoute,
-  ApiPileScratchDocumentIdEnqueueRoute: ApiPileScratchDocumentIdEnqueueRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -8,7 +8,6 @@ import {
 import { mapPool } from "@/lib/pile/async";
 
 import {
-  ASK_CANDIDATES,
   ASK_PACK_CHARS,
   FILE_DIGEST_CONCURRENCY,
   askBudget,
@@ -123,32 +122,6 @@ export async function writePileAnswer(
   }
   emit("done", { chars: summary.length, pages: pages.length });
 }
-
-export async function askPile(id: string, query: string, emit: PileAskEmit, signal?: AbortSignal) {
-  const { coveringHits, getPileSession, hybridSearchPile, packHitsForAsk, pagesForHits } =
-    await import("./session.server");
-  const session = getPileSession(id);
-  if (!session) throw new Error("Session expired or not found");
-
-  emit("retrieve", { status: "running" });
-  let hits = await hybridSearchPile(id, query, ASK_CANDIDATES);
-  if (!hits.length) hits = coveringHits(id, ASK_CANDIDATES);
-  hits = packHitsForAsk(id, query, hits, askBudget(session.files.length).singlePack);
-  const pages = pagesForHits(id, hits);
-  await writePileAnswer(
-    {
-      query,
-      pages,
-      hits,
-      files: session.files,
-      structure: session.structure,
-      instructions: session.instructions,
-    },
-    emit,
-    signal,
-  );
-}
-
 
 // ---------------------------------------------------------------------------
 // Multi-file: read each document on its own, then cross-analyze the digests.
