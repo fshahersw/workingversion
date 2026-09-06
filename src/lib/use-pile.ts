@@ -33,6 +33,7 @@ import {
   saveLocalPile,
 } from "@/lib/pile/local-store";
 import { useAuth } from "@/lib/use-auth";
+import { ingestFileToKb } from "@/lib/kb/kb-client";
 import {
   PILE_TTL_MS,
   type PileFile,
@@ -68,6 +69,11 @@ export type AskTurn = {
   answer: string;
 };
 
+export type KbSaveState = {
+  status: "idle" | "saving" | "saved" | "error";
+  message?: string;
+};
+
 export type PileState = {
   phase: PilePhase;
   session: PileSession | null;
@@ -89,6 +95,7 @@ export type PileState = {
   citeReport: CiteReport | null;
   citePages: CitePage[];
   hasPack: boolean;
+  kbSave: KbSaveState;
 };
 
 const EMPTY: PileState = {
@@ -110,6 +117,7 @@ const EMPTY: PileState = {
   citeReport: null,
   citePages: [],
   hasPack: false,
+  kbSave: { status: "idle" },
 };
 
 export type AskOpts = {
@@ -1092,6 +1100,44 @@ export function usePile() {
     [pile, step],
   );
 
+  // Explicit write-through of the current working set to the durable per-user KB.
+  // The local pile stays the fast default; this persists it (cross-device, and
+  // the basis for shared workspaces). One ingest call per file.
+  const saveToKb = useCallback(async () => {
+    const pages = pagesRef.current;
+    const session = sessionRef.current;
+    if (!session?.files.length || !pages.length) return;
+    setState((s) => ({ ...s, kbSave: { status: "saving" } }));
+    try {
+      const byFile = new Map<string, { page: number; text: string }[]>();
+      for (const p of pages) {
+        if (!p.text.trim()) continue;
+        const arr = byFile.get(p.fileId) ?? [];
+        arr.push({ page: p.page, text: p.text });
+        byFile.set(p.fileId, arr);
+      }
+      let saved = 0;
+      for (const file of session.files) {
+        const fp = byFile.get(file.id);
+        if (!fp?.length) continue;
+        await ingestFileToKb({ fileName: file.name, pages: fp });
+        saved += 1;
+      }
+      setState((s) => ({
+        ...s,
+        kbSave: {
+          status: "saved",
+          message: `Saved ${saved} file${saved === 1 ? "" : "s"} to your documents`,
+        },
+      }));
+    } catch (e) {
+      setState((s) => ({
+        ...s,
+        kbSave: { status: "error", message: e instanceof Error ? e.message : "Save failed" },
+      }));
+    }
+  }, []);
+
   return {
     state,
     start,
@@ -1101,6 +1147,7 @@ export function usePile() {
     ask,
     reset,
     loadPage,
+    saveToKb,
     client: pile,
     setQuery: (query: string) => setState((s) => ({ ...s, query })),
     selectHit: (selected: string | null) => setState((s) => ({ ...s, selected })),

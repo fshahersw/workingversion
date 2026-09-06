@@ -33,7 +33,7 @@ function fileAsGroup(file: PileFile, hits: PileFileHits["hits"]): PileFileHits {
 }
 
 export function SummarizeView() {
-  const { state, start, addFiles, search, ask, reset, loadPage, setQuery, selectHit } =
+  const { state, start, addFiles, search, ask, reset, loadPage, saveToKb, setQuery, selectHit } =
     useSharedPile();
   const [mode, setMode] = useState<Mode>("ask");
   const [types, setTypes] = useState<Set<string>>(new Set());
@@ -214,13 +214,33 @@ export function SummarizeView() {
             {(state.session?.pageCount ?? 0).toLocaleString()} pages
             {state.adding ? " · adding files…" : " · kept on this device"}
           </p>
-          <button
-            type="button"
-            onClick={clearSession}
-            className="ml-auto shrink-0 text-[11.5px] font-medium text-muted-foreground transition hover:text-foreground"
-          >
-            Clear session
-          </button>
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+            {state.kbSave.status === "error" ? (
+              <span className="text-[11px] text-destructive" title={state.kbSave.message}>
+                Save failed
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void saveToKb()}
+              disabled={state.kbSave.status === "saving"}
+              title={state.kbSave.message ?? "Persist this working set to your searchable documents"}
+              className="text-[11.5px] font-medium text-brand-orange transition hover:underline disabled:opacity-50"
+            >
+              {state.kbSave.status === "saving"
+                ? "Saving…"
+                : state.kbSave.status === "saved"
+                  ? "Saved ✓"
+                  : "Save to my documents"}
+            </button>
+            <button
+              type="button"
+              onClick={clearSession}
+              className="shrink-0 text-[11.5px] font-medium text-muted-foreground transition hover:text-foreground"
+            >
+              Clear session
+            </button>
+          </div>
         </header>
       ) : null}
 
