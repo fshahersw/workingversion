@@ -26,7 +26,13 @@ import {
   type CiteReport,
 } from "@/lib/pile/cite-trust";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
-import { clearLocalPile, loadLocalPile, saveLocalPile } from "@/lib/pile/local-store";
+import {
+  clearLocalPile,
+  loadLocalPile,
+  purgeLegacyPile,
+  saveLocalPile,
+} from "@/lib/pile/local-store";
+import { useAuth } from "@/lib/use-auth";
 import {
   PILE_TTL_MS,
   type PileFile,
@@ -243,9 +249,9 @@ function filterGroups<T extends { fileId: string }>(groups: T[], fileIds?: strin
   return groups.filter((g) => allow.has(g.fileId));
 }
 
-function persistPile(session: PileSession | null, pages: PilePage[]) {
-  if (!session || !pages.length || typeof indexedDB === "undefined") return;
-  void saveLocalPile(session, pages).catch(() => undefined);
+function persistPile(owner: string | null, session: PileSession | null, pages: PilePage[]) {
+  if (!owner || !session || !pages.length || typeof indexedDB === "undefined") return;
+  void saveLocalPile(owner, session, pages).catch(() => undefined);
 }
 
 async function recoverScannedPages(args: {
@@ -372,6 +378,9 @@ async function refreshStructure(
 }
 
 export function usePile() {
+  const { user } = useAuth();
+  const ownerRef = useRef<string | null>(null);
+  ownerRef.current = user?.sub ?? null;
   const [state, setState] = useState<PileState>(EMPTY);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -394,9 +403,12 @@ export function usePile() {
 
   useEffect(() => {
     let cancelled = false;
+    const owner = user?.sub ?? null;
     void (async () => {
       if (typeof indexedDB === "undefined") return;
-      const saved = await loadLocalPile().catch(() => null);
+      void purgeLegacyPile().catch(() => undefined);
+      if (!owner) return;
+      const saved = await loadLocalPile(owner).catch(() => null);
       if (cancelled || !saved || pagesRef.current.length) return;
       pagesRef.current = saved.pages;
       sessionRef.current = saved.session;
@@ -426,7 +438,7 @@ export function usePile() {
       pileRef.current?.dispose();
       pileRef.current = null;
     };
-  }, [pile]);
+  }, [pile, user?.sub]);
 
   const step = useCallback((s: PileStep) => {
     setState((prev) => {
@@ -448,7 +460,7 @@ export function usePile() {
     pileRef.current?.dispose();
     pileRef.current = null;
     lastPackRef.current = null;
-    void clearLocalPile().catch(() => undefined);
+    if (ownerRef.current) void clearLocalPile(ownerRef.current).catch(() => undefined);
     setState(EMPTY);
   }, []);
 
@@ -565,7 +577,7 @@ export function usePile() {
         detail: `${built.pages.length} pages indexed off the main thread — nothing is saved to the server`,
       });
       setState((s) => ({ ...s, session: built.session, phase: "ready" }));
-      persistPile(built.session, pagesRef.current);
+      persistPile(ownerRef.current, built.session, pagesRef.current);
       step({ id: "structure", label: "Structure rail", status: "running" });
 
       try {
@@ -578,7 +590,7 @@ export function usePile() {
           step,
         });
         sessionRef.current = next;
-        persistPile(next, pagesRef.current);
+        persistPile(ownerRef.current, next, pagesRef.current);
         setState((s) => ({ ...s, session: next }));
       } catch (e) {
         if (controller.signal.aborted) return;
@@ -593,7 +605,7 @@ export function usePile() {
       void refreshStructure(pile(), sessionRef.current, step, (structure) => {
         structureRef.current = structure;
             if (sessionRef.current) sessionRef.current = { ...sessionRef.current, structure };
-            persistPile(sessionRef.current, pagesRef.current);
+            persistPile(ownerRef.current, sessionRef.current, pagesRef.current);
             setState((s) => ({ ...s, structure, session: sessionRef.current }));
       });
     },
@@ -709,7 +721,7 @@ export function usePile() {
         if (controller.signal.aborted) return;
       }
       setState((s) => ({ ...s, session: nextSession, adding: false, structure: null }));
-      persistPile(nextSession, pagesRef.current);
+      persistPile(ownerRef.current, nextSession, pagesRef.current);
       step({
         id: "add",
         label: `Added ${appended.files.length} file${appended.files.length === 1 ? "" : "s"}`,
@@ -727,7 +739,7 @@ export function usePile() {
           step,
         });
         sessionRef.current = afterOcr;
-        persistPile(afterOcr, pagesRef.current);
+        persistPile(ownerRef.current, afterOcr, pagesRef.current);
         setState((s) => ({ ...s, session: afterOcr }));
       } catch (e) {
         if (controller.signal.aborted) return;
@@ -743,7 +755,7 @@ export function usePile() {
       void refreshStructure(pile(), sessionRef.current, step, (structure) => {
         structureRef.current = structure;
             if (sessionRef.current) sessionRef.current = { ...sessionRef.current, structure };
-            persistPile(sessionRef.current, pagesRef.current);
+            persistPile(ownerRef.current, sessionRef.current, pagesRef.current);
             setState((s) => ({ ...s, structure, session: sessionRef.current }));
       });
     },
@@ -789,7 +801,7 @@ export function usePile() {
         pageCount: pagesRef.current.length,
       };
       sessionRef.current = next;
-      persistPile(next, pagesRef.current);
+      persistPile(ownerRef.current, next, pagesRef.current);
       setState((s) => ({
         ...s,
         session: next,
