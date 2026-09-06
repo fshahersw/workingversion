@@ -1,0 +1,871 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Lit AI application-layer foundation for a new environment. Creates a
+  DynamoDB single table, private S3 data bucket, customer-managed KMS key,
+  Cognito OIDC/PKCE resources, scoped application managed policy, and baseline
+  CloudWatch observability. This template does not adopt existing resources.
+
+Metadata:
+  DeploymentBoundary:
+    ExistingResources: >
+      Existing resources are not imported or adopted by this template. Use a
+      new environment and stack name, or complete a separately reviewed
+      CloudFormation resource-import workflow.
+    EdgeProtection: >
+      Rate limiting and WAF attachment are intentionally excluded because this
+      template does not define the application's public compute/API/CDN target.
+      Attach those controls in the deployment stack that owns that target.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming and deployment safety
+        Parameters:
+          - NamePrefix
+          - Environment
+          - DeploymentIntent
+      - Label:
+          default: Browser and Cognito configuration
+        Parameters:
+          - AppOrigin
+          - CognitoCallbackUrl
+          - CognitoLogoutUrl
+          - AllowSelfSignUp
+          - EnableAdminGroup
+      - Label:
+          default: Data retention and observability
+        Parameters:
+          - KmsDeletionWindowInDays
+          - NoncurrentVersionExpirationDays
+          - IncompleteUploadExpirationDays
+          - LogRetentionDays
+          - AlarmTopicArn
+      - Label:
+          default: Optional application integrations
+        Parameters:
+          - BedrockModelResourceArns
+          - BedrockRerankResourceArns
+          - RdsClusterArn
+          - DatabaseSecretArns
+          - DatabaseSecretKmsKeyArns
+    ParameterLabels:
+      DeploymentIntent:
+        default: Confirm this is a new environment
+      BedrockModelResourceArns:
+        default: Bedrock model and inference-profile ARNs
+      DatabaseSecretKmsKeyArns:
+        default: KMS keys protecting database secrets
+
+Parameters:
+  NamePrefix:
+    Type: String
+    MinLength: 3
+    MaxLength: 16
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: >
+      Use 3-16 lowercase letters, numbers, or hyphens; start with a letter and
+      end with a letter or number.
+    Description: Stable lowercase application prefix used in physical names.
+
+  Environment:
+    Type: String
+    MinLength: 3
+    MaxLength: 10
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: >
+      Use 3-10 lowercase letters, numbers, or hyphens; start with a letter and
+      end with a letter or number.
+    Description: New environment identifier, such as test, staging, or prod.
+
+  DeploymentIntent:
+    Type: String
+    AllowedValues:
+      - new-environment
+    Description: >
+      Required acknowledgement that this template creates new resources and is
+      not an adoption mechanism for existing development resources.
+
+  AppOrigin:
+    Type: String
+    AllowedPattern: "^https?://[^/]+$"
+    ConstraintDescription: Supply one origin with scheme and host, without a path or trailing slash.
+    Description: Exact browser origin permitted by the S3 CORS policy.
+
+  CognitoCallbackUrl:
+    Type: String
+    AllowedPattern: "^https?://.+$"
+    ConstraintDescription: Supply a complete HTTP or HTTPS callback URL.
+    Description: Exact OIDC authorization-code callback URL.
+
+  CognitoLogoutUrl:
+    Type: String
+    AllowedPattern: "^https?://.+$"
+    ConstraintDescription: Supply a complete HTTP or HTTPS post-logout URL.
+    Description: Exact Cognito post-logout redirect URL.
+
+  AllowSelfSignUp:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >
+      Whether users can register themselves. The production-safe default
+      requires an administrator to create users.
+
+  EnableAdminGroup:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Create the Cognito group named admin, which the application recognizes.
+
+  KmsDeletionWindowInDays:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    MaxValue: 30
+    Description: Waiting period before a deleted KMS key can be destroyed.
+
+  NoncurrentVersionExpirationDays:
+    Type: Number
+    Default: 90
+    MinValue: 30
+    MaxValue: 3650
+    Description: Days to retain noncurrent S3 object versions.
+
+  IncompleteUploadExpirationDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+    Description: Days before S3 aborts incomplete multipart uploads.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 120
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1096
+      - 1827
+      - 2192
+      - 2557
+      - 2922
+      - 3288
+      - 3653
+    Description: Retention period for the pre-provisioned application log group.
+
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:sns:[^:]+:[0-9]{12}:[A-Za-z0-9_-]+$"
+    ConstraintDescription: Supply an SNS topic ARN or leave empty for alarms without actions.
+    Description: Optional existing SNS topic ARN for alarm and recovery notifications.
+
+  BedrockModelResourceArns:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^\\s,]+(,arn:[^\\s,]+)*$"
+    ConstraintDescription: Supply comma-delimited ARNs without spaces, or leave empty.
+    Description: >
+      Optional comma-delimited exact model and inference-profile ARNs permitted
+      for InvokeModel and InvokeModelWithResponseStream. Include every backing
+      model ARN required by a cross-Region inference profile.
+
+  BedrockRerankResourceArns:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^\\s,]+(,arn:[^\\s,]+)*$"
+    ConstraintDescription: Supply comma-delimited ARNs without spaces, or leave empty.
+    Description: Optional comma-delimited exact Bedrock reranking model ARNs.
+
+  RdsClusterArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:rds:[^:]+:[0-9]{12}:cluster:.+$"
+    ConstraintDescription: Supply an Aurora DB cluster ARN or leave empty.
+    Description: Optional existing Aurora cluster ARN permitted for the RDS Data API.
+
+  DatabaseSecretArns:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^\\s,]+(,arn:[^\\s,]+)*$"
+    ConstraintDescription: Supply comma-delimited ARNs without spaces, or leave empty.
+    Description: Optional comma-delimited exact Secrets Manager secret ARNs readable by the app.
+
+  DatabaseSecretKmsKeyArns:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^\\s,]+(,arn:[^\\s,]+)*$"
+    ConstraintDescription: Supply comma-delimited ARNs without spaces, or leave empty.
+    Description: >
+      Optional comma-delimited customer-managed KMS key ARNs protecting the
+      database secrets. Leave empty for secrets using the AWS managed key.
+
+Conditions:
+  CreateAdminGroup: !Equals
+    - !Ref EnableAdminGroup
+    - "true"
+  PermitSelfSignUp: !Equals
+    - !Ref AllowSelfSignUp
+    - "true"
+  HasAlarmTopic: !Not
+    - !Equals
+      - !Ref AlarmTopicArn
+      - ""
+  HasBedrockModels: !Not
+    - !Equals
+      - !Ref BedrockModelResourceArns
+      - ""
+  HasBedrockRerankModels: !Not
+    - !Equals
+      - !Ref BedrockRerankResourceArns
+      - ""
+  HasRdsCluster: !Not
+    - !Equals
+      - !Ref RdsClusterArn
+      - ""
+  HasDatabaseSecrets: !Not
+    - !Equals
+      - !Ref DatabaseSecretArns
+      - ""
+  HasDatabaseSecretKmsKeys: !Not
+    - !Equals
+      - !Ref DatabaseSecretKmsKeyArns
+      - ""
+
+Resources:
+  AppKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${NamePrefix}-${Environment} application data encryption"
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      MultiRegion: false
+      PendingWindowInDays: !Ref KmsDeletionWindowInDays
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountIAMPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogsEncryption
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.${AWS::URLSuffix}"
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub >
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/lit-ai/${NamePrefix}/${Environment}/app*
+      Tags:
+        - Key: Name
+          Value: !Sub "${NamePrefix}-${Environment}-app"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AppKmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}/${Environment}/app"
+      TargetKeyId: !Ref AppKmsKey
+
+  AppTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${NamePrefix}-${Environment}-app"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt AppKmsKey.Arn
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${NamePrefix}-${Environment}-app"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AppDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${NamePrefix}-${Environment}-${AWS::AccountId}-${AWS::Region}-data"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt AppKmsKey.Arn
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - DELETE
+              - GET
+              - HEAD
+              - PUT
+            AllowedOrigins:
+              - !Ref AppOrigin
+            ExposedHeaders:
+              - ETag
+              - x-amz-request-id
+              - x-amz-server-side-encryption
+              - x-amz-version-id
+            MaxAge: 3600
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: !Ref IncompleteUploadExpirationDays
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref NoncurrentVersionExpirationDays
+      MetricsConfigurations:
+        - Id: EntireBucket
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub "${NamePrefix}-${Environment}-app-data"
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AppDataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref AppDataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt AppDataBucket.Arn
+              - !Sub "${AppDataBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  AppUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${NamePrefix}-${Environment}"
+      DeletionProtection: ACTIVE
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: !If
+          - PermitSelfSignUp
+          - false
+          - true
+      AutoVerifiedAttributes:
+        - email
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      MfaConfiguration: OPTIONAL
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 14
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+          StringAttributeConstraints:
+            MinLength: "3"
+            MaxLength: "320"
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "256"
+        - Name: entra_oid
+          AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "128"
+        - Name: tid
+          AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "64"
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+      UserPoolTags:
+        Environment: !Ref Environment
+        DeploymentIntent: !Ref DeploymentIntent
+        ManagedBy: CloudFormation
+
+  AppUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${NamePrefix}-${Environment}-web"
+      UserPoolId: !Ref AppUserPool
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Ref CognitoCallbackUrl
+      DefaultRedirectURI: !Ref CognitoCallbackUrl
+      LogoutURLs:
+        - !Ref CognitoLogoutUrl
+      SupportedIdentityProviders:
+        - COGNITO
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AuthSessionValidity: 3
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  AppUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub "${NamePrefix}-${Environment}-${AWS::AccountId}"
+      UserPoolId: !Ref AppUserPool
+
+  AppAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Condition: CreateAdminGroup
+    Properties:
+      Description: Application administrators recognized by the admin claim check.
+      GroupName: admin
+      Precedence: 1
+      UserPoolId: !Ref AppUserPool
+
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/lit-ai/${NamePrefix}/${Environment}/app"
+      KmsKeyId: !GetAtt AppKmsKey.Arn
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AppAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${NamePrefix}-${Environment}-app-access"
+      Path: !Sub "/lit-ai/${Environment}/"
+      Description: !Sub "Least-privilege application data access for ${NamePrefix}-${Environment}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DynamoTableData
+            Effect: Allow
+            Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:UpdateItem
+            Resource:
+              - !GetAtt AppTable.Arn
+          - Sid: DynamoIndexRead
+            Effect: Allow
+            Action:
+              - dynamodb:Query
+            Resource:
+              - !Sub "${AppTable.Arn}/index/*"
+          - Sid: S3BucketRead
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource:
+              - !GetAtt AppDataBucket.Arn
+          - Sid: S3ObjectData
+            Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub "${AppDataBucket.Arn}/*"
+          - Sid: S3KmsKeyUse
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+            Resource:
+              - !GetAtt AppKmsKey.Arn
+            Condition:
+              StringEquals:
+                "kms:ViaService": !Sub "s3.${AWS::Region}.${AWS::URLSuffix}"
+              StringLike:
+                "kms:EncryptionContext:aws:s3:arn":
+                  - !GetAtt AppDataBucket.Arn
+                  - !Sub "${AppDataBucket.Arn}/*"
+          - Sid: ApplicationLogWrites
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:DescribeLogStreams
+              - logs:PutLogEvents
+            Resource:
+              - !GetAtt AppLogGroup.Arn
+          - !If
+            - HasBedrockModels
+            - Sid: BedrockModelInvocation
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: !Split
+                - ","
+                - !Ref BedrockModelResourceArns
+            - !Ref AWS::NoValue
+          - !If
+            - HasBedrockRerankModels
+            - Sid: BedrockRerank
+              Effect: Allow
+              Action:
+                - bedrock:Rerank
+              Resource: !Split
+                - ","
+                - !Ref BedrockRerankResourceArns
+            - !Ref AWS::NoValue
+          - !If
+            - HasRdsCluster
+            - Sid: RdsDataApi
+              Effect: Allow
+              Action:
+                - rds-data:BatchExecuteStatement
+                - rds-data:BeginTransaction
+                - rds-data:CommitTransaction
+                - rds-data:ExecuteStatement
+                - rds-data:RollbackTransaction
+              Resource:
+                - !Ref RdsClusterArn
+            - !Ref AWS::NoValue
+          - !If
+            - HasDatabaseSecrets
+            - Sid: DatabaseSecretRead
+              Effect: Allow
+              Action:
+                - secretsmanager:DescribeSecret
+                - secretsmanager:GetSecretValue
+              Resource: !Split
+                - ","
+                - !Ref DatabaseSecretArns
+            - !Ref AWS::NoValue
+          - !If
+            - HasDatabaseSecretKmsKeys
+            - Sid: DatabaseSecretKmsDecrypt
+              Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:DescribeKey
+              Resource: !Split
+                - ","
+                - !Ref DatabaseSecretKmsKeyArns
+              Condition:
+                StringEquals:
+                  "kms:ViaService": !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+            - !Ref AWS::NoValue
+
+  DynamoReadThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-ddb-read-throttles"
+      AlarmDescription: DynamoDB read requests were throttled.
+      Namespace: AWS/DynamoDB
+      MetricName: ReadThrottleEvents
+      Dimensions:
+        - Name: TableName
+          Value: !Ref AppTable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  DynamoWriteThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-ddb-write-throttles"
+      AlarmDescription: DynamoDB write requests were throttled.
+      Namespace: AWS/DynamoDB
+      MetricName: WriteThrottleEvents
+      Dimensions:
+        - Name: TableName
+          Value: !Ref AppTable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  S3ServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-s3-5xx"
+      AlarmDescription: S3 returned one or more server errors for the application bucket.
+      Namespace: AWS/S3
+      MetricName: 5xxErrors
+      Dimensions:
+        - Name: BucketName
+          Value: !Ref AppDataBucket
+        - Name: FilterId
+          Value: EntireBucket
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  DynamoTableName:
+    Description: SW_DDB_TABLE
+    Value: !Ref AppTable
+
+  DynamoTableArn:
+    Description: Application DynamoDB table ARN.
+    Value: !GetAtt AppTable.Arn
+
+  S3BucketName:
+    Description: SW_S3_BUCKET
+    Value: !Ref AppDataBucket
+
+  S3BucketArn:
+    Description: Application data bucket ARN.
+    Value: !GetAtt AppDataBucket.Arn
+
+  KmsKeyArn:
+    Description: Customer-managed key used by DynamoDB, S3, and CloudWatch Logs.
+    Value: !GetAtt AppKmsKey.Arn
+
+  KmsAlias:
+    Description: Stable alias for the application KMS key.
+    Value: !Ref AppKmsAlias
+
+  CognitoRegion:
+    Description: COGNITO_REGION
+    Value: !Ref AWS::Region
+
+  CognitoUserPoolId:
+    Description: COGNITO_USER_POOL_ID
+    Value: !Ref AppUserPool
+
+  CognitoUserPoolArn:
+    Description: Cognito user pool ARN.
+    Value: !GetAtt AppUserPool.Arn
+
+  CognitoClientId:
+    Description: COGNITO_CLIENT_ID
+    Value: !Ref AppUserPoolClient
+
+  CognitoDomain:
+    Description: COGNITO_DOMAIN, without an https scheme.
+    Value: !Sub "${AppUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+
+  CognitoIssuer:
+    Description: OIDC issuer used to validate Cognito ID tokens.
+    Value: !GetAtt AppUserPool.ProviderURL
+
+  CognitoCallbackUrl:
+    Description: COGNITO_REDIRECT_URI
+    Value: !Ref CognitoCallbackUrl
+
+  CognitoLogoutUrl:
+    Description: COGNITO_LOGOUT_URI
+    Value: !Ref CognitoLogoutUrl
+
+  AdminGroupName:
+    Condition: CreateAdminGroup
+    Description: Cognito group mapped by the application to its admin role.
+    Value: !Ref AppAdminGroup
+
+  ApplicationAccessPolicyArn:
+    Description: Attach this managed policy to the separately owned application runtime role.
+    Value: !Ref AppAccessPolicy
+
+  ApplicationLogGroupName:
+    Description: Pre-provisioned log group; the deployment stack must connect a log producer.
+    Value: !Ref AppLogGroup
+
+  ApplicationLogGroupArn:
+    Description: ARN of the pre-provisioned application log group.
+    Value: !GetAtt AppLogGroup.Arn
