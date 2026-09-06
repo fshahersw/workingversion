@@ -454,6 +454,34 @@ export async function insertChunks(
   });
 }
 
+export type KbDeletedDocument = {
+  doc_id: string;
+  s3_key: string | null;
+};
+
+/**
+ * Delete every document owned by the principal in a workspace. Chunk rows are
+ * removed by the documents -> chunks ON DELETE CASCADE constraint. Returning
+ * the document ids lets the cross-store cleanup derive page-object keys even
+ * when a save stopped before its DynamoDB manifest was finalized.
+ */
+export async function deleteWorkspaceDocuments(
+  sub: string,
+  workspaceId: string,
+): Promise<KbDeletedDocument[]> {
+  requireConfig();
+  const sql = `
+    DELETE FROM kb.documents
+    WHERE owner_sub = :owner AND workspace_id = CAST(:workspace AS uuid)
+    RETURNING doc_id, s3_key
+  `;
+  const parameters: SqlParameter[] = [
+    param("owner", sub),
+    param("workspace", workspaceId),
+  ];
+  return withPrincipal(sub, (tx) => queryJson<KbDeletedDocument>(sql, parameters, tx));
+}
+
 export type KbDocumentRow = {
   doc_id: string;
   file_name: string;

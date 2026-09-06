@@ -1,12 +1,12 @@
 // Client-callable server functions for saved KB workspaces, gated by requireAuth
 // and scoped to the Cognito principal. Save orchestrates: ingest each file's
-// pages (chunks+embeddings -> Aurora, scoped to a fresh per-workspace kb id),
-// store the pages in S3 for reload, then write the workspace record.
+// pages (chunks+embeddings -> Aurora), store pages in S3 for reload, and
+// checkpoint the DynamoDB workspace record that was reserved before ingest.
 import { createServerFn } from "@tanstack/react-start";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import type { SwUser } from "@/lib/auth/cognito.server";
-import type { WorkspaceSurface } from "@/lib/kb/workspace.server";
+import type { WorkspaceDoc, WorkspaceSurface } from "@/lib/kb/workspace.server";
 
 function principalOf(context: unknown): string {
   return (context as { user: SwUser }).user.sub;
@@ -50,53 +50,46 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
     const { putWorkspacePages, saveWorkspace } = await import("@/lib/kb/workspace.server");
     const kbWorkspaceId = crypto.randomUUID();
 
-    const out: {
-      docId: string;
-      fileName: string;
-      pageCount: number;
-      chunkCount: number;
-      pagesKey: string;
-      bytesKey?: string;
-      mime?: string;
-      size?: number;
-    }[] = [];
-    for (const f of data.files) {
-      const pages = (f.pages ?? []).filter((p) => p && Number(p.page) > 0 && String(p.text).trim());
+    const docs: WorkspaceDoc[] = [];
+    for (const file of data.files) {
+      const pages = (file.pages ?? []).filter(
+        (page) => page && Number(page.page) > 0 && String(page.text).trim(),
+      );
       if (!pages.length) continue;
       const res = await ingestPages(sub, {
         workspaceId: kbWorkspaceId,
         surface: data.surface,
-        fileName: f.fileName,
-        ...(f.mime ? { mime: f.mime } : {}),
-        ...(f.sha256 ? { sha256: f.sha256 } : {}),
-        ...(f.byteSize !== undefined ? { byteSize: f.byteSize } : {}),
+        fileName: file.fileName,
+        ...(file.mime ? { mime: file.mime } : {}),
+        ...(file.sha256 ? { sha256: file.sha256 } : {}),
+        ...(file.byteSize !== undefined ? { byteSize: file.byteSize } : {}),
         pages,
       });
       const pagesKey = await putWorkspacePages(sub, res.docId, pages);
-      out.push({
+      docs.push({
         docId: res.docId,
-        fileName: f.fileName,
+        fileName: file.fileName,
         pageCount: res.pageCount,
         chunkCount: res.chunkCount,
         pagesKey,
-        ...(f.bytesKey ? { bytesKey: f.bytesKey } : {}),
-        ...(f.mime ? { mime: f.mime } : {}),
-        ...(f.byteSize !== undefined ? { size: f.byteSize } : {}),
+        ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
+        ...(file.mime ? { mime: file.mime } : {}),
+        ...(file.byteSize !== undefined ? { size: file.byteSize } : {}),
       });
     }
-    if (!out.length) throw new Error("nothing to save (no extractable pages)");
+    if (!docs.length) throw new Error("nothing to save (no extractable pages)");
     const { itemId } = await saveWorkspace(sub, {
       name: data.name,
       surface: data.surface,
       kbWorkspaceId,
       folderId: data.folderId,
-      docs: out,
+      docs,
     });
     return {
       itemId,
       kbWorkspaceId,
-      docCount: out.length,
-      chunkCount: out.reduce((n, d) => n + d.chunkCount, 0),
+      docCount: docs.length,
+      chunkCount: docs.reduce((total, doc) => total + doc.chunkCount, 0),
     };
   });
 
@@ -140,5 +133,7 @@ export const deleteWorkspaceFn = createServerFn({ method: "POST" })
   })
   .handler(async ({ context, data }) => {
     const { deleteWorkspace } = await import("@/lib/kb/workspace.server");
-    return deleteWorkspace(principalOf(context), data.itemId);
+    const result = await deleteWorkspace(principalOf(context), data.itemId);
+    if (!result.ok) throw new Error("Workspace deletion did not complete.");
+    return result;
   });

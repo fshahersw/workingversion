@@ -7,8 +7,15 @@
 import { ulid } from "ulid";
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 
-import { putItem, getItem, queryPrefix, deleteItem } from "@/lib/data/dynamo.server";
-import { BUCKET, s3, presignGet, deleteObject } from "@/lib/data/s3.server";
+import {
+  putItem,
+  getItem,
+  queryPrefix,
+  deleteItem,
+} from "@/lib/data/dynamo.server";
+import { bucketName, s3, presignGet, deleteObject } from "@/lib/data/s3.server";
+import { deleteWorkspaceDocuments } from "@/lib/kb/aurora.server";
+import { mapPool, withRetry } from "@/lib/pile/async";
 
 const userPK = (p: string) => `USER#${p}`;
 const itemSK = (id: string) => `ITEM#${id}`;
@@ -40,16 +47,35 @@ export type WorkspaceDetail = WorkspaceSummary & { kbWorkspaceId: string; docs: 
 
 type PageText = { page: number; text: string };
 
+export function workspacePagesKey(principal: string, docId: string): string {
+  return `kb/pages/${principal}/${docId}.json`;
+}
+
+function storageKeyOwnedBy(principal: string, key: string): boolean {
+  return (
+    key.startsWith(`kb/pages/${principal}/`) ||
+    key.startsWith(`uploads/${principal}/`)
+  );
+}
+
+function requireOwnedStorageKeys(principal: string, keys: Array<string | undefined>): string[] {
+  const out = [...new Set(keys.filter((key): key is string => Boolean(key)))];
+  if (out.some((key) => !storageKeyOwnedBy(principal, key))) {
+    throw new Error("workspace contains an invalid storage key");
+  }
+  return out;
+}
+
 /** Store one doc's extracted pages as JSON in S3 for pile rehydrate. */
 export async function putWorkspacePages(
   principal: string,
   docId: string,
   pages: PageText[],
 ): Promise<string> {
-  const key = `kb/pages/${principal}/${docId}.json`;
+  const key = workspacePagesKey(principal, docId);
   await s3().send(
     new PutObjectCommand({
-      Bucket: BUCKET,
+      Bucket: bucketName(),
       Key: key,
       Body: JSON.stringify(pages),
       ContentType: "application/json",
@@ -58,7 +84,7 @@ export async function putWorkspacePages(
   return key;
 }
 
-/** Create the workspace record (a library item) pointing at the persisted docs. */
+/** Create a completed workspace record after all document artifacts are saved. */
 export async function saveWorkspace(
   principal: string,
   args: {
@@ -69,10 +95,14 @@ export async function saveWorkspace(
     docs: WorkspaceDoc[];
   },
 ): Promise<{ itemId: string }> {
+  requireOwnedStorageKeys(
+    principal,
+    args.docs.flatMap((doc) => [doc.pagesKey, doc.bytesKey]),
+  );
   const itemId = ulid();
   const now = new Date().toISOString();
   const folderId = args.folderId ?? "ROOT";
-  const pageCount = args.docs.reduce((n, d) => n + (d.pageCount || 0), 0);
+  const pageCount = args.docs.reduce((total, doc) => total + (doc.pageCount || 0), 0);
   await putItem({
     PK: userPK(principal),
     SK: itemSK(itemId),
@@ -82,9 +112,13 @@ export async function saveWorkspace(
     itemId,
     name: (args.name || "Untitled workspace").slice(0, 120),
     surface: args.surface,
-    kbWorkspaceId: args.kbWorkspaceId,
     folderId,
-    workspace: JSON.stringify({ surface: args.surface, kbWorkspaceId: args.kbWorkspaceId, docs: args.docs }),
+    kbWorkspaceId: args.kbWorkspaceId,
+    workspace: JSON.stringify({
+      surface: args.surface,
+      kbWorkspaceId: args.kbWorkspaceId,
+      docs: args.docs,
+    }),
     docCount: args.docs.length,
     pageCount,
     saved: true,
@@ -118,20 +152,31 @@ export async function listWorkspaces(
     .map(toSummary);
 }
 
+async function getWorkspaceState(
+  principal: string,
+  itemId: string,
+): Promise<WorkspaceDetail | null> {
+  const row = await getItem(userPK(principal), itemSK(itemId));
+  if (!row || row.type !== "workspace" || row.owner !== principal) return null;
+  let docs: WorkspaceDoc[] = [];
+  try {
+    docs = (JSON.parse((row.workspace as string) || "{}") as { docs?: WorkspaceDoc[] }).docs ?? [];
+  } catch {
+    docs = [];
+  }
+  return {
+    ...toSummary(row),
+    kbWorkspaceId: (row.kbWorkspaceId as string) ?? "",
+    docs,
+  };
+}
+
 /** Full workspace including its doc manifest (for reload / download). */
 export async function getWorkspace(
   principal: string,
   itemId: string,
 ): Promise<WorkspaceDetail | null> {
-  const r = await getItem(userPK(principal), itemSK(itemId));
-  if (!r || r.type !== "workspace") return null;
-  let docs: WorkspaceDoc[] = [];
-  try {
-    docs = (JSON.parse((r.workspace as string) || "{}") as { docs?: WorkspaceDoc[] }).docs ?? [];
-  } catch {
-    docs = [];
-  }
-  return { ...toSummary(r), kbWorkspaceId: (r.kbWorkspaceId as string) ?? "", docs };
+  return getWorkspaceState(principal, itemId);
 }
 
 /** Fetch a doc's stored pages for pile rehydrate (ownership-checked). */
@@ -143,8 +188,12 @@ export async function getWorkspacePages(
   const ws = await getWorkspace(principal, itemId);
   const doc = ws?.docs.find((d) => d.docId === docId);
   if (!doc) throw new Error("document not found in workspace");
-  if (!doc.pagesKey.startsWith(`kb/pages/${principal}/`)) throw new Error("invalid pages key");
-  const r = await s3().send(new GetObjectCommand({ Bucket: BUCKET, Key: doc.pagesKey }));
+  if (!doc.pagesKey.startsWith(`kb/pages/${principal}/`)) {
+    throw new Error("invalid pages key");
+  }
+  const r = await s3().send(
+    new GetObjectCommand({ Bucket: bucketName(), Key: doc.pagesKey }),
+  );
   const text = await r.Body?.transformToString();
   return text ? (JSON.parse(text) as PageText[]) : [];
 }
@@ -158,20 +207,174 @@ export async function getWorkspaceDownloadUrl(
   const ws = await getWorkspace(principal, itemId);
   const doc = ws?.docs.find((d) => d.docId === docId);
   if (!doc?.bytesKey) return null;
+  if (!doc.bytesKey.startsWith(`uploads/${principal}/`)) {
+    throw new Error("invalid download key");
+  }
   const url = await presignGet(doc.bytesKey, doc.fileName, doc.mime);
   return { url };
 }
 
-/** Delete a workspace: its S3 pages + bytes, then the record. Best-effort blobs. */
-export async function deleteWorkspace(principal: string, itemId: string): Promise<{ ok: true }> {
-  const ws = await getWorkspace(principal, itemId);
-  if (ws) {
-    for (const d of ws.docs) {
-      for (const key of [d.pagesKey, d.bytesKey]) {
-        if (key) await deleteObject(key).catch(() => undefined);
-      }
+export type WorkspaceDeleteFailure = {
+  stage: "dynamo" | "aurora" | "s3";
+  target: "metadata" | "workspace-data" | "pages" | "bytes";
+  summary: string;
+};
+
+export type WorkspaceDeleteResult = {
+  ok: boolean;
+  alreadyDeleted: boolean;
+  deleted: {
+    auroraDocuments: number;
+    s3Objects: number;
+    metadata: boolean;
+  };
+  failures: WorkspaceDeleteFailure[];
+};
+
+function storageTarget(
+  principal: string,
+  key: string,
+): "pages" | "bytes" | undefined {
+  if (key.startsWith(`kb/pages/${principal}/`)) return "pages";
+  if (key.startsWith(`uploads/${principal}/`)) return "bytes";
+  return undefined;
+}
+
+/**
+ * Delete in dependency order: Aurora documents (chunks cascade), S3 objects,
+ * then DynamoDB metadata. Metadata is retained whenever an earlier stage fails
+ * so an identical delete request can safely resume.
+ */
+export async function deleteWorkspace(
+  principal: string,
+  itemId: string,
+): Promise<WorkspaceDeleteResult> {
+  let state: Awaited<ReturnType<typeof getWorkspaceState>>;
+  try {
+    state = await withRetry(() => getWorkspaceState(principal, itemId));
+  } catch {
+    return {
+      ok: false,
+      alreadyDeleted: false,
+      deleted: { auroraDocuments: 0, s3Objects: 0, metadata: false },
+      failures: [
+        {
+          stage: "dynamo",
+          target: "metadata",
+          summary: "Could not read workspace metadata.",
+        },
+      ],
+    };
+  }
+  if (!state) {
+    return {
+      ok: true,
+      alreadyDeleted: true,
+      deleted: { auroraDocuments: 0, s3Objects: 0, metadata: true },
+      failures: [],
+    };
+  }
+
+  const failures: WorkspaceDeleteFailure[] = [];
+  let deletedDocuments: Awaited<ReturnType<typeof deleteWorkspaceDocuments>> = [];
+  if (!state.kbWorkspaceId) {
+    failures.push({
+      stage: "aurora",
+      target: "workspace-data",
+      summary: "Workspace metadata has no KB workspace id.",
+    });
+  } else {
+    try {
+      deletedDocuments = await deleteWorkspaceDocuments(
+        principal,
+        state.kbWorkspaceId,
+      );
+    } catch {
+      failures.push({
+        stage: "aurora",
+        target: "workspace-data",
+        summary: "Could not delete indexed workspace data.",
+      });
     }
   }
-  await deleteItem(userPK(principal), itemSK(itemId));
-  return { ok: true };
+
+  const storage = new Map<string, "pages" | "bytes">();
+  const addStorageKey = (key: string | undefined, expected?: "pages" | "bytes") => {
+    if (!key) return;
+    const target = storageTarget(principal, key);
+    if (!target || (expected && target !== expected)) {
+      failures.push({
+        stage: "s3",
+        target: expected ?? "pages",
+        summary: "Workspace metadata contains an invalid storage key.",
+      });
+      return;
+    }
+    storage.set(key, target);
+  };
+
+  for (const doc of state.docs) {
+    addStorageKey(doc.pagesKey, "pages");
+    addStorageKey(doc.bytesKey, "bytes");
+  }
+  for (const doc of deletedDocuments) {
+    addStorageKey(workspacePagesKey(principal, doc.doc_id), "pages");
+    addStorageKey(doc.s3_key ?? undefined, "pages");
+  }
+
+  const storageResults = await mapPool(
+    [...storage.entries()],
+    3,
+    async ([key, target]) => {
+      try {
+        await withRetry(() => deleteObject(key), { tries: 3, baseMs: 200 });
+        return { ok: true as const, target };
+      } catch {
+        return { ok: false as const, target };
+      }
+    },
+  );
+  let s3Objects = 0;
+  for (const result of storageResults) {
+    if (result.ok) {
+      s3Objects += 1;
+    } else {
+      failures.push({
+        stage: "s3",
+        target: result.target,
+        summary:
+          result.target === "pages"
+            ? "Could not delete a saved pages object."
+            : "Could not delete an original-file object.",
+      });
+    }
+  }
+
+  let metadata = false;
+  if (!failures.length) {
+    try {
+      await withRetry(() => deleteItem(userPK(principal), itemSK(itemId)), {
+        tries: 3,
+        baseMs: 200,
+      });
+      metadata = true;
+    } catch {
+      failures.push({
+        stage: "dynamo",
+        target: "metadata",
+        summary: "Could not delete workspace metadata.",
+      });
+    }
+  }
+
+  return {
+    ok: failures.length === 0,
+    alreadyDeleted: false,
+    deleted: {
+      auroraDocuments: deletedDocuments.length,
+      s3Objects,
+      metadata,
+    },
+    failures,
+  };
 }

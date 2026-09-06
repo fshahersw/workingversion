@@ -3,6 +3,7 @@
 //   node --experimental-strip-types --test src/lib/kb/aurora.server.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   param,
@@ -13,6 +14,7 @@ import {
   insertDocument,
   insertChunks,
   withPrincipal,
+  deleteWorkspaceDocuments,
 } from "./aurora.server.ts";
 
 test("param infers the Data API field type", () => {
@@ -62,8 +64,24 @@ test("write calls reject when unconfigured", async () => {
       ]),
     /not configured/,
   );
+  await assert.rejects(
+    () => deleteWorkspaceDocuments("u1", "w1"),
+    /not configured/,
+  );
 });
 
 test("insertChunks short-circuits on empty rows", async () => {
   await insertChunks("u1", "d1", "w1", "workingset", []); // no throw even unconfigured
+});
+
+test("workspace deletion is owner-filtered and runs under the RLS principal", () => {
+  const source = readFileSync(new URL("./aurora.server.ts", import.meta.url), "utf8");
+  const start = source.indexOf("export async function deleteWorkspaceDocuments");
+  const end = source.indexOf("\nexport type KbDocumentRow", start);
+  assert.notEqual(start, -1);
+  const block = source.slice(start, end);
+  assert.match(block, /DELETE FROM kb\.documents/);
+  assert.match(block, /owner_sub = :owner/);
+  assert.match(block, /workspace_id = CAST\(:workspace AS uuid\)/);
+  assert.match(block, /withPrincipal\(sub/);
 });

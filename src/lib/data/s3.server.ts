@@ -26,9 +26,6 @@ export function bucketName(): string {
   return loadS3Config().bucket;
 }
 
-/** Compatibility for callers migrated in the following storage commit. */
-export const BUCKET = bucketName();
-
 export function s3(): S3Client {
   const { region } = loadS3Config();
   if (!_s3 || _s3Region !== region) {
