@@ -42,11 +42,10 @@ import {
   saveWorkspaceFn,
   getWorkspaceFn,
   getWorkspacePagesFn,
+  getWorkspaceStatusFn,
 } from "@/lib/kb/workspace.functions";
-import {
-  streamSavedWorkspaceAsk,
-  type KbAskSource,
-} from "@/lib/kb/kb-client";
+import { SYNC_INGEST_MAX_CHARS, SYNC_INGEST_MAX_PAGES } from "@/lib/kb/ingest-state";
+import { streamSavedWorkspaceAsk, type KbAskSource } from "@/lib/kb/kb-client";
 import { createUploadFn } from "@/lib/library/library.functions";
 import {
   PILE_TTL_MS,
@@ -85,7 +84,7 @@ export type AskTurn = {
 };
 
 export type KbSaveState = {
-  status: "idle" | "saving" | "saved" | "error";
+  status: "idle" | "saving" | "queued" | "converting" | "embedding" | "saved" | "error";
   message?: string;
 };
 
@@ -93,6 +92,8 @@ type PendingWorkspaceSave = {
   key: string;
   requestId: string;
   bytesKeyByFileId: Record<string, string>;
+  sha256ByFileId: Record<string, string>;
+  uploadByFileId: Map<string, Promise<string | undefined>>;
   submitted: boolean;
 };
 
@@ -152,6 +153,37 @@ function newId(): string {
   return crypto.randomUUID();
 }
 
+async function rawFileSha256(file: File): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    const error = new Error("aborted");
+    error.name = "AbortError";
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", aborted, { once: true });
+    function cleanup() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", aborted);
+    }
+    function done() {
+      cleanup();
+      resolve();
+    }
+    function aborted() {
+      cleanup();
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    }
+  });
+}
+
 type Extracted = { file: File; res: Awaited<ReturnType<typeof extractFile>> };
 
 function pagesFromExtracted(
@@ -187,11 +219,7 @@ function buildLocalPile(
   instructions?: string,
 ): { session: PileSession; pages: PilePage[]; sourceFiles: Map<string, File> } {
   const now = Date.now();
-  const { files, pages, sourceFiles } = pagesFromExtracted(
-    extracted,
-    MAX_PAGES,
-    MAX_FILES,
-  );
+  const { files, pages, sourceFiles } = pagesFromExtracted(extracted, MAX_PAGES, MAX_FILES);
   return {
     session: {
       id: `local-${newId()}`,
@@ -430,6 +458,7 @@ export function usePile() {
   stateRef.current = state;
   const ingestAbort = useRef<AbortController | null>(null);
   const askAbort = useRef<AbortController | null>(null);
+  const saveAbort = useRef<AbortController | null>(null);
   const pagesRef = useRef<PilePage[]>([]);
   const sessionRef = useRef<PileSession | null>(null);
   const structureRef = useRef<PileStructure | null>(null);
@@ -486,6 +515,7 @@ export function usePile() {
     })();
     return () => {
       cancelled = true;
+      saveAbort.current?.abort();
       pileRef.current?.dispose();
       pileRef.current = null;
     };
@@ -503,8 +533,10 @@ export function usePile() {
   const reset = useCallback(() => {
     ingestAbort.current?.abort();
     askAbort.current?.abort();
+    saveAbort.current?.abort();
     ingestAbort.current = null;
     askAbort.current = null;
+    saveAbort.current = null;
     pagesRef.current = [];
     sessionRef.current = null;
     contentRevisionRef.current += 1;
@@ -529,6 +561,7 @@ export function usePile() {
         });
         return;
       }
+      saveAbort.current?.abort();
       const controller = new AbortController();
       ingestAbort.current = controller;
       pagesRef.current = [];
@@ -610,7 +643,9 @@ export function usePile() {
         detail: [
           `${Math.min(pageTotal, MAX_PAGES)} pages from ${ok.length} file${ok.length === 1 ? "" : "s"} — kept in this tab only`,
           overBudget ? `${overBudget} pages over the ${MAX_PAGES}-page session budget` : "",
-          failures.length ? `${failures.length} file${failures.length === 1 ? "" : "s"} skipped` : "",
+          failures.length
+            ? `${failures.length} file${failures.length === 1 ? "" : "s"} skipped`
+            : "",
         ]
           .filter(Boolean)
           .join(" · "),
@@ -663,9 +698,9 @@ export function usePile() {
 
       void refreshStructure(pile(), sessionRef.current, step, (structure) => {
         structureRef.current = structure;
-            if (sessionRef.current) sessionRef.current = { ...sessionRef.current, structure };
-            persistPile(ownerRef.current, sessionRef.current, pagesRef.current);
-            setState((s) => ({ ...s, structure, session: sessionRef.current }));
+        if (sessionRef.current) sessionRef.current = { ...sessionRef.current, structure };
+        persistPile(ownerRef.current, sessionRef.current, pagesRef.current);
+        setState((s) => ({ ...s, structure, session: sessionRef.current }));
       });
     },
     [pile, step],
@@ -680,7 +715,9 @@ export function usePile() {
       }
 
       const have = new Set(sess.files.map((f) => f.name.toLowerCase()));
-      const unique = incoming.filter((f) => fileKind(f) !== null && !have.has(f.name.toLowerCase()));
+      const unique = incoming.filter(
+        (f) => fileKind(f) !== null && !have.has(f.name.toLowerCase()),
+      );
       const slots = Math.max(0, MAX_FILES - sess.files.length);
       const files = unique.slice(0, slots);
       if (!files.length) {
@@ -693,6 +730,7 @@ export function usePile() {
         return;
       }
 
+      saveAbort.current?.abort();
       const controller = new AbortController();
       ingestAbort.current = controller;
       setState((s) => ({
@@ -701,7 +739,13 @@ export function usePile() {
         error: null,
         files: [
           ...s.files,
-          ...files.map((f) => ({ name: f.name, pages: 0, empty: 0, done: 0, status: "reading" as const })),
+          ...files.map((f) => ({
+            name: f.name,
+            pages: 0,
+            empty: 0,
+            done: 0,
+            status: "reading" as const,
+          })),
         ],
       }));
       step({
@@ -760,7 +804,12 @@ export function usePile() {
 
       const ok = extracted.filter((x): x is Extracted => !!x);
       if (!ok.length) {
-        step({ id: "add", label: "Adding files", status: "error", detail: "None of the new files could be read." });
+        step({
+          id: "add",
+          label: "Adding files",
+          status: "error",
+          detail: "None of the new files could be read.",
+        });
         setState((s) => ({ ...s, adding: false }));
         return;
       }
@@ -824,9 +873,9 @@ export function usePile() {
       step({ id: "structure", label: "Structure rail", status: "running" });
       void refreshStructure(pile(), sessionRef.current, step, (structure) => {
         structureRef.current = structure;
-            if (sessionRef.current) sessionRef.current = { ...sessionRef.current, structure };
-            persistPile(ownerRef.current, sessionRef.current, pagesRef.current);
-            setState((s) => ({ ...s, structure, session: sessionRef.current }));
+        if (sessionRef.current) sessionRef.current = { ...sessionRef.current, structure };
+        persistPile(ownerRef.current, sessionRef.current, pagesRef.current);
+        setState((s) => ({ ...s, structure, session: sessionRef.current }));
       });
     },
     [pile, start, step],
@@ -852,6 +901,7 @@ export function usePile() {
       const havePage = new Set(pagesRef.current.map((p) => `${p.fileId}:${p.page}`));
       const newPages = pages.filter((p) => !havePage.has(`${p.fileId}:${p.page}`));
       if (!newFiles.length && !newPages.length) return;
+      saveAbort.current?.abort();
       await pile().addPages(newPages.length ? newPages : pages);
       pagesRef.current = [...pagesRef.current, ...newPages];
       contentRevisionRef.current += 1;
@@ -976,34 +1026,25 @@ export function usePile() {
         if (sess && binding && kbDocIds) {
           let kbDeltaStarted = false;
           let kbDone = false;
-          let kbError:
-            | { message: string; status: number; recoverable: boolean }
-            | undefined;
+          let kbError: { message: string; status: number; recoverable: boolean } | undefined;
           let kbCitePages: CitePage[] = [];
           const selectedDocSet = new Set(kbDocIds);
           const reusableChunks =
-            opts.followUp &&
-            lastPackRef.current?.kbChunkIds &&
-            lastPackRef.current.kbDocIds
-              ? lastPackRef.current.kbChunkIds.filter(
-                  (_chunkId, index) =>
-                    selectedDocSet.has(lastPackRef.current!.kbDocIds![index]!),
+            opts.followUp && lastPackRef.current?.kbChunkIds && lastPackRef.current.kbDocIds
+              ? lastPackRef.current.kbChunkIds.filter((_chunkId, index) =>
+                  selectedDocSet.has(lastPackRef.current!.kbDocIds![index]!),
                 )
               : [];
           if (reusableChunks.length) {
             step({ id: "ask", label: "Follow-up on the same saved passages", status: "running" });
           }
-          const instructions = [sess.instructions, job?.instructions]
-            .filter(Boolean)
-            .join("\n\n");
+          const instructions = [sess.instructions, job?.instructions].filter(Boolean).join("\n\n");
           await streamSavedWorkspaceAsk(
             {
               itemId: binding.itemId,
               query: q,
               docIds: kbDocIds,
-              ...(reusableChunks.length
-                ? { sourceChunkIds: reusableChunks }
-                : {}),
+              ...(reusableChunks.length ? { sourceChunkIds: reusableChunks } : {}),
               ...(instructions ? { instructions } : {}),
               ...(opts.followUp && prev.query && prev.answer
                 ? {
@@ -1029,9 +1070,7 @@ export function usePile() {
                   ? (data["sources"] as KbAskSource[])
                   : [];
                 const fileIdByDocId = new Map(
-                  Object.entries(binding.docIdByFileId).map(
-                    ([fileId, docId]) => [docId, fileId],
-                  ),
+                  Object.entries(binding.docIdByFileId).map(([fileId, docId]) => [docId, fileId]),
                 );
                 const sources = rawSources.filter(
                   (source) =>
@@ -1070,10 +1109,7 @@ export function usePile() {
                     ocr: false,
                   };
                   pagesByFile.set(fileId, [...(pagesByFile.get(fileId) ?? []), page]);
-                  hitsByFile.set(fileId, [
-                    ...(hitsByFile.get(fileId) ?? []),
-                    kbHits[index]!,
-                  ]);
+                  hitsByFile.set(fileId, [...(hitsByFile.get(fileId) ?? []), kbHits[index]!]);
                   texts[`${fileId}:${source.page}`] = source.text;
                 }
                 const selectedFiles = sess.files.filter((file) =>
@@ -1086,10 +1122,7 @@ export function usePile() {
                     fileName: file.name,
                     pageCount: file.pageCount,
                     matched: fileHits.length > 0,
-                    topScore: fileHits.reduce(
-                      (best, hit) => Math.max(best, hit.score),
-                      0,
-                    ),
+                    topScore: fileHits.reduce((best, hit) => Math.max(best, hit.score), 0),
                     hits: fileHits,
                     pages: pagesByFile.get(file.id) ?? [],
                   };
@@ -1132,12 +1165,7 @@ export function usePile() {
                 step({
                   id: `file-${String(data["fileId"] ?? name)}`,
                   label: name,
-                  status:
-                    status === "error"
-                      ? "error"
-                      : status === "done"
-                        ? "done"
-                        : "running",
+                  status: status === "error" ? "error" : status === "done" ? "done" : "running",
                   detail:
                     status === "done"
                       ? data["matched"]
@@ -1165,8 +1193,7 @@ export function usePile() {
                 kbError = {
                   message,
                   status,
-                  recoverable:
-                    data["recoverable"] === true || status >= 500,
+                  recoverable: data["recoverable"] === true || status >= 500,
                 };
                 return;
               }
@@ -1179,7 +1206,11 @@ export function usePile() {
                     status: "done",
                   });
                 }
-                step({ id: "ask", label: "Retrieving saved passages and drafting", status: "done" });
+                step({
+                  id: "ask",
+                  label: "Retrieving saved passages and drafting",
+                  status: "done",
+                });
                 setState((state) => {
                   const report = verifyAnswerCites(state.answer, kbCitePages);
                   return {
@@ -1247,11 +1278,12 @@ export function usePile() {
           const packed = await pile().packAskByFile(
             q,
             structureRef.current,
-            fileCount > 1
-              ? budget.perFilePages
-              : Math.max(budget.perFilePages, ASK_MIN_HITS),
+            fileCount > 1 ? budget.perFilePages : Math.max(budget.perFilePages, ASK_MIN_HITS),
           );
-          packs = filterGroups(packed.groups.filter((g) => g.pages.length), opts.fileIds);
+          packs = filterGroups(
+            packed.groups.filter((g) => g.pages.length),
+            opts.fileIds,
+          );
           texts = packed.texts;
           const flat = packs.flatMap((g) => g.hits);
           hits = await rerankHits(
@@ -1309,7 +1341,9 @@ export function usePile() {
           opts.followUp && prev.query
             ? `Prior question: ${prev.query}\nPrior answer:\n${prev.answer.slice(0, 2500)}`
             : "";
-        const instructions = [sess?.instructions, job?.instructions, prior].filter(Boolean).join("\n\n");
+        const instructions = [sess?.instructions, job?.instructions, prior]
+          .filter(Boolean)
+          .join("\n\n");
 
         await streamSSE(
           "/api/pile/ask",
@@ -1349,7 +1383,9 @@ export function usePile() {
                 setState((s) => ({ ...s, hits: nextHits }));
                 void pile()
                   .textsFor(nextHits)
-                  .then(({ texts: t }) => setState((s) => ({ ...s, pageTexts: { ...s.pageTexts, ...t } })))
+                  .then(({ texts: t }) =>
+                    setState((s) => ({ ...s, pageTexts: { ...s.pageTexts, ...t } })),
+                  )
                   .catch(() => undefined);
               }
             } else if (evt.event === "fanout") {
@@ -1440,18 +1476,17 @@ export function usePile() {
   const saveWorkspace = useCallback(async (opts: { name: string; folderId?: string }) => {
     const pages = pagesRef.current;
     const session = sessionRef.current;
-    if (!session?.files.length || !pages.length) return;
+    if (!session?.files.length) return;
+    saveAbort.current?.abort();
+    const controller = new AbortController();
+    saveAbort.current = controller;
     const snapshotRevision = contentRevisionRef.current;
     const attemptKey = JSON.stringify({
       sessionId: session.id,
       revision: snapshotRevision,
       name: opts.name,
       folderId: opts.folderId ?? "ROOT",
-      files: session.files.map((file) => [
-        file.id,
-        file.name,
-        file.pageCount,
-      ]),
+      files: session.files.map((file) => [file.id, file.name, file.pageCount]),
       pages: pages.length,
     });
     let attempt = pendingWorkspaceSaveRef.current;
@@ -1460,6 +1495,8 @@ export function usePile() {
         key: attemptKey,
         requestId: crypto.randomUUID(),
         bytesKeyByFileId: {},
+        sha256ByFileId: {},
+        uploadByFileId: new Map(),
         submitted: false,
       };
       pendingWorkspaceSaveRef.current = attempt;
@@ -1473,48 +1510,80 @@ export function usePile() {
         arr.push({ page: p.page, text: p.text });
         byFile.set(p.fileId, arr);
       }
-      const unreadableFiles = session.files.filter(
-        (file) => !byFile.get(file.id)?.length,
-      );
-      if (unreadableFiles.length) {
-        throw new Error(
-          `Cannot save: ${unreadableFiles.length} document${unreadableFiles.length === 1 ? "" : "s"} have no readable text.`,
-        );
-      }
       const files: {
         clientFileId: string;
         fileName: string;
         mime?: string;
+        sha256?: string;
         byteSize?: number;
         bytesKey?: string;
         pages: { page: number; text: string }[];
       }[] = [];
       for (const file of session.files) {
-        const fp = byFile.get(file.id);
-        if (!fp?.length) continue;
-        let bytesKey = attempt.bytesKeyByFileId[file.id];
+        const fp = byFile.get(file.id) ?? [];
+        let bytesKey: string | undefined = attempt.bytesKeyByFileId[file.id];
+        let sha256 = attempt.sha256ByFileId[file.id];
         const blob = filesByIdRef.current.get(file.id);
-        if (blob && !bytesKey && !attempt.submitted) {
-          try {
-            const up = await createUploadFn({ data: { name: file.name, size: blob.size } });
-            const put = await fetch(up.uploadUrl, { method: "PUT", body: blob });
-            if (put.ok) {
-              bytesKey = up.s3Key;
-              attempt.bytesKeyByFileId[file.id] = bytesKey;
-            }
-          } catch {
-            /* best-effort byte preservation; pages+chunks still save */
-          }
+        if (blob && !sha256) {
+          sha256 = await rawFileSha256(blob);
+          attempt.sha256ByFileId[file.id] = sha256;
         }
+        if (blob && !bytesKey) {
+          let upload = attempt.uploadByFileId.get(file.id);
+          if (!upload) {
+            upload = (async () => {
+              try {
+                const up = await createUploadFn({
+                  data: {
+                    name: file.name,
+                    size: blob.size,
+                    ...(sha256 ? { sha256 } : {}),
+                  },
+                });
+                const put = await fetch(up.uploadUrl, {
+                  method: "PUT",
+                  body: blob,
+                  signal: controller.signal,
+                  ...(up.uploadHeaders ? { headers: up.uploadHeaders } : {}),
+                });
+                if (put.ok) {
+                  attempt.bytesKeyByFileId[file.id] = up.s3Key;
+                  return up.s3Key;
+                }
+              } catch {
+                /* best-effort byte preservation; pages+chunks still save */
+              }
+              return undefined;
+            })();
+            attempt.uploadByFileId.set(file.id, upload);
+            void upload.then((key) => {
+              if (!key && attempt.uploadByFileId.get(file.id) === upload) {
+                attempt.uploadByFileId.delete(file.id);
+              }
+            });
+          }
+          bytesKey = await upload;
+          if (controller.signal.aborted) return;
+        }
+        const totalChars = fp.reduce((total, page) => total + page.text.length, 0);
+        const hasLowQualityExtraction =
+          file.emptyPages > 0 || fp.some((page) => isLowQualityText(page.text));
+        const asyncCandidate =
+          hasLowQualityExtraction ||
+          fp.length === 0 ||
+          fp.length > SYNC_INGEST_MAX_PAGES ||
+          totalChars > SYNC_INGEST_MAX_CHARS;
         files.push({
           clientFileId: file.id,
           fileName: file.name,
           ...(blob?.type ? { mime: blob.type } : {}),
+          ...(sha256 ? { sha256 } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
           ...(bytesKey ? { bytesKey } : {}),
-          pages: fp,
+          pages: asyncCandidate ? [] : fp,
         });
       }
+      if (controller.signal.aborted) return;
       attempt.submitted = true;
       const res = await saveWorkspaceFn({
         data: {
@@ -1525,15 +1594,90 @@ export function usePile() {
           files,
         },
       });
+      if (controller.signal.aborted) return;
+      let status: {
+        status: "saving" | "ready" | "error";
+        stage: "queued" | "converting" | "embedding" | "ready" | "error";
+        pendingCount: number;
+        docCount: number;
+        chunkCount: number;
+        documents: {
+          clientFileId: string;
+          fileName: string;
+          status: "queued" | "converting" | "embedding" | "ready" | "error";
+          docId?: string;
+          pageCount: number;
+          chunkCount: number;
+          errorSummary?: string;
+        }[];
+        errorSummary?: string;
+      } = {
+        status: res.status,
+        stage: res.stage,
+        pendingCount: res.pendingCount,
+        docCount: res.docCount,
+        chunkCount: res.chunkCount,
+        documents: res.documents,
+        ...(res.errorSummary ? { errorSummary: res.errorSummary } : {}),
+      };
+      for (let poll = 0; status.status === "saving" && poll < 180; poll++) {
+        const activeStage =
+          status.stage === "embedding"
+            ? "embedding"
+            : status.stage === "converting"
+              ? "converting"
+              : "queued";
+        setState((current) => ({
+          ...current,
+          kbSave: {
+            status: activeStage,
+            message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} pending`,
+          },
+        }));
+        await abortableDelay(5_000, controller.signal);
+        const polled = await withRetry(
+          () => getWorkspaceStatusFn({ data: { itemId: res.itemId } }),
+          { tries: 3, baseMs: 500, signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
+        if (!polled) throw new Error("Saved workspace status is unavailable.");
+        status = polled;
+      }
+      if (controller.signal.aborted) return;
+      if (status.status === "saving") {
+        setState((current) => ({
+          ...current,
+          kbSave: {
+            status:
+              status.stage === "embedding"
+                ? "embedding"
+                : status.stage === "converting"
+                  ? "converting"
+                  : "queued",
+            message: "Workspace ingest is continuing in the background.",
+          },
+        }));
+        return;
+      }
+      if (status.status === "error") {
+        pendingWorkspaceSaveRef.current = null;
+        setState((current) => ({
+          ...current,
+          kbSave: {
+            status: "error",
+            message: status.errorSummary ?? "Workspace ingest did not complete.",
+          },
+        }));
+        return;
+      }
       const docIdByFileId = Object.fromEntries(
-        res.documents.map((doc) => [doc.clientFileId, doc.docId]),
+        status.documents.flatMap((doc) =>
+          doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
+        ),
       );
-      const bindingComplete = session.files.every((file) =>
-        Boolean(docIdByFileId[file.id]),
-      );
+      const bindingComplete = session.files.every((file) => Boolean(docIdByFileId[file.id]));
       const snapshotStillCurrent =
-        contentRevisionRef.current === snapshotRevision &&
-        sessionRef.current?.id === session.id;
+        contentRevisionRef.current === snapshotRevision && sessionRef.current?.id === session.id;
       if (bindingComplete && snapshotStillCurrent) {
         const savedSession: PileSession = {
           ...session,
@@ -1555,13 +1699,14 @@ export function usePile() {
           status: "saved",
           message:
             bindingComplete && snapshotStillCurrent
-              ? `Saved “${opts.name}” · ${res.docCount} doc${res.docCount === 1 ? "" : "s"} · ${res.chunkCount} passages`
+              ? `Saved “${opts.name}” · ${status.docCount} doc${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages`
               : bindingComplete
                 ? `Saved “${opts.name}”, but this Working Set changed during save. Save it again to use hybrid Ask.`
                 : `Saved “${opts.name}”, but the current pile could not be bound. Reload it from the Library to use hybrid Ask.`,
         },
       }));
     } catch (e) {
+      if (controller.signal.aborted) return;
       const message = e instanceof Error ? e.message : "Save failed";
       if (message.includes("does not match its reservation")) {
         pendingWorkspaceSaveRef.current = null;
@@ -1570,111 +1715,111 @@ export function usePile() {
         ...s,
         kbSave: { status: "error", message },
       }));
+    } finally {
+      if (saveAbort.current === controller) {
+        saveAbort.current = null;
+      }
     }
   }, []);
 
   // One-click reload replaces the active pile atomically. An explicit merge
   // action can be added later; implicit merging would make the saved KB binding
   // incomplete and could silently omit locally added documents from retrieval.
-  const reloadWorkspace = useCallback(
-    async (itemId: string) => {
-      setState((s) => ({ ...s, phase: "reading", error: null }));
-      try {
-        const ws = await getWorkspaceFn({ data: { itemId } });
-        if (!ws || ws.status !== "ready") {
-          setState((s) => ({ ...s, phase: "error", error: "Workspace not found" }));
-          return;
-        }
-        const loaded = await mapPool(ws.docs, 6, async (doc) => {
-          const d = doc;
-          const pg = await getWorkspacePagesFn({ data: { itemId, docId: d.docId } });
-          if (!pg?.length) throw new Error(`Stored pages are missing for ${d.fileName}`);
-          return {
-            file: {
-              id: d.docId,
-              name: d.fileName,
-              pageCount: pg.length,
-              emptyPages: 0,
-              ocrPages: 0,
-            } satisfies PileFile,
-            pages: pg.map(
-              (page): PilePage => ({
-                fileId: d.docId,
-                fileName: d.fileName,
-                page: page.page,
-                text: page.text,
-                ocr: false,
-              }),
-            ),
-          };
-        });
-        const files = loaded.map((entry) => entry.file);
-        const pages = loaded.flatMap((entry) => entry.pages);
-        if (!files.length || files.length !== ws.docs.length) {
-          setState((s) => ({ ...s, phase: "error", error: "Nothing to load in that workspace" }));
-          return;
-        }
-        const replacement = new PileClient();
-        for (let index = 0; index < pages.length; index += 500) {
-          await replacement.addPages(pages.slice(index, index + 500));
-        }
-        const now = Date.now();
-        const session: PileSession = {
-          id: `workspace-${itemId}`,
-          createdAt: now,
-          expiresAt: now + PILE_TTL_MS,
-          matterLabel: null,
-          instructions: null,
-          files,
-          pageCount: pages.length,
-          structure: null,
-          savedWorkspace: {
-            itemId,
-            kbWorkspaceId: ws.kbWorkspaceId,
-            surface: ws.surface,
-            docIdByFileId: Object.fromEntries(
-              files.map((file) => [file.id, file.id]),
-            ),
-          },
-        };
-        ingestAbort.current?.abort();
-        askAbort.current?.abort();
-        pileRef.current?.dispose();
-        pileRef.current = replacement;
-        pagesRef.current = pages;
-        sessionRef.current = session;
-        contentRevisionRef.current += 1;
-        structureRef.current = null;
-        lastPackRef.current = null;
-        pendingWorkspaceSaveRef.current = null;
-        filesByIdRef.current.clear();
-        persistPile(ownerRef.current, session, pages);
-        setState({
-          ...EMPTY,
-          phase: "ready",
-          session,
-          files: files.map((file) => ({
-            name: file.name,
-            pages: file.pageCount,
-            empty: 0,
-            done: file.pageCount,
-            status: "ready",
-          })),
-          kbSave: {
-            status: "saved",
-            message: `Loaded “${ws.name}” · ${files.length} doc${files.length === 1 ? "" : "s"}`,
-          },
-        });
-      } catch (e) {
-        setState((s) => ({
-          ...s,
-          phase: "error",
-          error: e instanceof Error ? e.message : "Could not reload workspace",
-        }));
+  const reloadWorkspace = useCallback(async (itemId: string) => {
+    saveAbort.current?.abort();
+    setState((s) => ({ ...s, phase: "reading", error: null }));
+    try {
+      const ws = await getWorkspaceFn({ data: { itemId } });
+      if (!ws || ws.status !== "ready") {
+        setState((s) => ({ ...s, phase: "error", error: "Workspace not found" }));
+        return;
       }
-    },
-    [],
-  );
+      const loaded = await mapPool(ws.docs, 6, async (doc) => {
+        const d = doc;
+        const pg = await getWorkspacePagesFn({ data: { itemId, docId: d.docId } });
+        if (!pg?.length) throw new Error(`Stored pages are missing for ${d.fileName}`);
+        return {
+          file: {
+            id: d.docId,
+            name: d.fileName,
+            pageCount: pg.length,
+            emptyPages: 0,
+            ocrPages: 0,
+          } satisfies PileFile,
+          pages: pg.map(
+            (page): PilePage => ({
+              fileId: d.docId,
+              fileName: d.fileName,
+              page: page.page,
+              text: page.text,
+              ocr: false,
+            }),
+          ),
+        };
+      });
+      const files = loaded.map((entry) => entry.file);
+      const pages = loaded.flatMap((entry) => entry.pages);
+      if (!files.length || files.length !== ws.docs.length) {
+        setState((s) => ({ ...s, phase: "error", error: "Nothing to load in that workspace" }));
+        return;
+      }
+      const replacement = new PileClient();
+      for (let index = 0; index < pages.length; index += 500) {
+        await replacement.addPages(pages.slice(index, index + 500));
+      }
+      const now = Date.now();
+      const session: PileSession = {
+        id: `workspace-${itemId}`,
+        createdAt: now,
+        expiresAt: now + PILE_TTL_MS,
+        matterLabel: null,
+        instructions: null,
+        files,
+        pageCount: pages.length,
+        structure: null,
+        savedWorkspace: {
+          itemId,
+          kbWorkspaceId: ws.kbWorkspaceId,
+          surface: ws.surface,
+          docIdByFileId: Object.fromEntries(files.map((file) => [file.id, file.id])),
+        },
+      };
+      ingestAbort.current?.abort();
+      askAbort.current?.abort();
+      pileRef.current?.dispose();
+      pileRef.current = replacement;
+      pagesRef.current = pages;
+      sessionRef.current = session;
+      contentRevisionRef.current += 1;
+      structureRef.current = null;
+      lastPackRef.current = null;
+      pendingWorkspaceSaveRef.current = null;
+      filesByIdRef.current.clear();
+      persistPile(ownerRef.current, session, pages);
+      setState({
+        ...EMPTY,
+        phase: "ready",
+        session,
+        files: files.map((file) => ({
+          name: file.name,
+          pages: file.pageCount,
+          empty: 0,
+          done: file.pageCount,
+          status: "ready",
+        })),
+        kbSave: {
+          status: "saved",
+          message: `Loaded “${ws.name}” · ${files.length} doc${files.length === 1 ? "" : "s"}`,
+        },
+      });
+    } catch (e) {
+      setState((s) => ({
+        ...s,
+        phase: "error",
+        error: e instanceof Error ? e.message : "Could not reload workspace",
+      }));
+    }
+  }, []);
 
   return {
     state,

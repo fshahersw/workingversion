@@ -1,0 +1,1202 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Production asynchronous Bedrock Data Automation ingest lane for Lit AI.
+  Creates the exact job-correlation table, EventBridge-to-SQS completion path,
+  bounded worker Lambda, scheduled stale-job reconciler, encryption, retained
+  logs, least-privilege policies, and alarms. This template does not deploy or
+  apply the Aurora migration.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    why: Reliably complete owner-scoped BDA document ingest after browser exit or duplicate delivery.
+    must:
+      - Correlate a BDA job through the dedicated table before any FORCE-RLS Aurora call.
+      - Keep queue payloads compact and free of principals, file names, and document content.
+      - Retain encrypted state and logs and bound all worker concurrency.
+    mutable: review-required
+  DeploymentBoundary:
+    ExistingResources: >
+      App data, app table, Aurora, secrets, and artifact bucket are accepted
+      only as producer-stack parameters. This stack never discovers or adopts
+      resources by physical name.
+    NoDeployment: >
+      Repository validation does not authorize creating a stack, change set,
+      artifact upload, or database migration.
+    UnavoidableWildcards: >
+      KMS key-policy statements use Resource "*" because a key policy is
+      intrinsically scoped to its own key. X-Ray PutTraceSegments and
+      PutTelemetryRecords do not support resource-level permissions. Worker S3
+      object access is limited to the app bucket's KB prefixes because the
+      runtime principal segment is known only after exact job correlation.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming and deployment safety
+        Parameters:
+          - NamePrefix
+          - Environment
+          - DeploymentIntent
+      - Label:
+          default: Versioned worker artifact
+        Parameters:
+          - ArtifactBucketName
+          - ArtifactObjectKey
+          - ArtifactObjectVersion
+          - Architecture
+      - Label:
+          default: Producer stack outputs
+        Parameters:
+          - AppTableName
+          - AppTableArn
+          - AppDataBucketName
+          - AppDataBucketArn
+          - AppKmsKeyArn
+          - KbClusterArn
+          - KbSecretArn
+          - KbSecretKmsKeyArn
+          - KbDatabase
+      - Label:
+          default: Bedrock configuration
+        Parameters:
+          - BdaProjectArn
+          - BdaProfileArn
+          - BedrockEmbeddingModelArn
+      - Label:
+          default: Retention and operations
+        Parameters:
+          - IngestKmsKeyArn
+          - KmsDeletionWindowInDays
+          - JobTtlDays
+          - LogRetentionDays
+          - AlarmTopicArn
+
+Parameters:
+  NamePrefix:
+    Type: String
+    MinLength: 3
+    MaxLength: 16
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: Use 3-16 lowercase letters, numbers, or hyphens.
+
+  Environment:
+    Type: String
+    AllowedValues:
+      - staging
+      - prod
+
+  DeploymentIntent:
+    Type: String
+    AllowedValues:
+      - new-environment
+    Description: Confirms that this stack is not an existing-resource adoption mechanism.
+
+  ArtifactBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+
+  ArtifactObjectKey:
+    Type: String
+    MinLength: 1
+    MaxLength: 1024
+    AllowedPattern: "^[^\\r\\n]+\\.zip$"
+
+  ArtifactObjectVersion:
+    Type: String
+    MinLength: 1
+    MaxLength: 1024
+    AllowedPattern: "^[^\\r\\n]+$"
+
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues:
+      - arm64
+      - x86_64
+
+  AppTableName:
+    Type: String
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+
+  AppTableArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:dynamodb:[^:]+:[0-9]{12}:table/[A-Za-z0-9_.-]+$"
+
+  AppDataBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+
+  AppDataBucketArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:s3:::[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+
+  AppKmsKeyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[A-Fa-f0-9-]+$"
+
+  KbClusterArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:rds:[^:]+:[0-9]{12}:cluster:.+$"
+
+  KbSecretArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+
+  KbSecretKmsKeyArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[A-Fa-f0-9-]+$"
+
+  KbDatabase:
+    Type: String
+    Default: kb
+    MinLength: 1
+    MaxLength: 63
+    AllowedPattern: "^[A-Za-z][A-Za-z0-9_]*$"
+
+  BdaProjectArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:[0-9]{12}:data-automation-project/[A-Za-z0-9_-]+$"
+
+  BdaProfileArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:[^:]*:data-automation-profile/[A-Za-z0-9._/-]+$"
+
+  BedrockEmbeddingModelArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:(?:[0-9]{12})?:[A-Za-z0-9._/-]+$"
+    Description: Exact Titan embedding model or inference-profile ARN.
+
+  IngestKmsKeyArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[A-Fa-f0-9-]+$"
+    Description: >
+      Optional existing CMK whose key policy already permits the documented
+      Logs, EventBridge, Lambda, DynamoDB, and SQS use. Empty creates a
+      dedicated retained CMK with those grants.
+
+  KmsDeletionWindowInDays:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    MaxValue: 30
+
+  JobTtlDays:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    MaxValue: 365
+
+  LogRetentionDays:
+    Type: Number
+    Default: 365
+    AllowedValues:
+      - 30
+      - 60
+      - 90
+      - 120
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1096
+      - 1827
+      - 2192
+      - 2557
+      - 2922
+      - 3288
+      - 3653
+
+  AlarmTopicArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:sns:[^:]+:[0-9]{12}:[A-Za-z0-9_-]+$"
+
+Conditions:
+  CreateIngestKey: !Equals [!Ref IngestKmsKeyArn, ""]
+  HasSecretKmsKey: !Not [!Equals [!Ref KbSecretKmsKeyArn, ""]]
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+
+Resources:
+  IngestKmsKey:
+    Type: AWS::KMS::Key
+    Condition: CreateIngestKey
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Encrypt ingest correlation, queues, Lambda environment variables, and retained logs.
+        must:
+          - Keep rotation enabled and retain the key on replacement or stack deletion.
+        mutable: change-with-constraints
+    Properties:
+      Description: !Sub "${NamePrefix}-${Environment} KB ingest encryption"
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      PendingWindowInDays: !Ref KmsDeletionWindowInDays
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountIamPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowEncryptedWorkerLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.${AWS::URLSuffix}"
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/lit-ai/${NamePrefix}/${Environment}/kb-ingest*"
+          - Sid: AllowEventBridgeEncryptedQueueTarget
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+              ArnLike:
+                "aws:SourceArn":
+                  - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${NamePrefix}-${Environment}-bda-*"
+                  - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${NamePrefix}-${Environment}-kb-ingest-reconcile"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IngestKmsAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateIngestKey
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}/${Environment}/kb-ingest"
+      TargetKeyId: !Ref IngestKmsKey
+
+  IngestJobsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Map one exact BDA invocation/job id to its owner and owned artifact coordinates.
+        must:
+          - Keep PITR, TTL, deletion protection, and customer-managed KMS encryption.
+          - Never store document content or file names.
+        mutable: review-required
+    Properties:
+      TableName: !Sub "${NamePrefix}-${Environment}-kb-ingest-jobs"
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: updatedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: StatusUpdated
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: updatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !If
+          - CreateIngestKey
+          - !GetAtt IngestKmsKey.Arn
+          - !Ref IngestKmsKeyArn
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IngestDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "${NamePrefix}-${Environment}-kb-ingest-dlq"
+      KmsMasterKeyId: !If
+        - CreateIngestKey
+        - !GetAtt IngestKmsKey.Arn
+        - !Ref IngestKmsKeyArn
+      KmsDataKeyReusePeriodSeconds: 300
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IngestQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "${NamePrefix}-${Environment}-kb-ingest"
+      KmsMasterKeyId: !If
+        - CreateIngestKey
+        - !GetAtt IngestKmsKey.Arn
+        - !Ref IngestKmsKeyArn
+      KmsDataKeyReusePeriodSeconds: 300
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 900
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestDeadLetterQueue.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  BdaSuccessRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-bda-succeeded"
+      Description: Route successful BDA job ids to the compact ingest queue.
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.bedrock
+        detail-type:
+          - Bedrock Data Automation Job Succeeded
+      Targets:
+        - Id: KbIngestSuccessQueue
+          Arn: !GetAtt IngestQueue.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt IngestDeadLetterQueue.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 12
+          InputTransformer:
+            InputPathsMap:
+              correlationId: $.id
+              jobId: $.detail.job_id
+            InputTemplate: !Sub '{"version":1,"invocationArn":"arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:data-automation-invocation/<jobId>","outcome":"success","correlationId":<correlationId>}'
+
+  BdaFailureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-bda-failed"
+      Description: Route BDA client/service failure job ids to the compact ingest queue.
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.bedrock
+        detail-type:
+          - Bedrock Data Automation Job Failed With Client Error
+          - Bedrock Data Automation Job Failed With Service Error
+      Targets:
+        - Id: KbIngestFailureQueue
+          Arn: !GetAtt IngestQueue.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt IngestDeadLetterQueue.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 12
+          InputTransformer:
+            InputPathsMap:
+              correlationId: $.id
+              jobId: $.detail.job_id
+            InputTemplate: !Sub '{"version":1,"invocationArn":"arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:data-automation-invocation/<jobId>","outcome":"failure","correlationId":<correlationId>}'
+
+  IngestQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IngestQueue
+        - !Ref IngestDeadLetterQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "sqs:*"
+            Resource:
+              - !GetAtt IngestQueue.Arn
+              - !GetAtt IngestDeadLetterQueue.Arn
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+          - Sid: AllowExactEventBridgeRules
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource:
+              - !GetAtt IngestQueue.Arn
+              - !GetAtt IngestDeadLetterQueue.Arn
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+              ArnEquals:
+                "aws:SourceArn":
+                  - !GetAtt BdaSuccessRule.Arn
+                  - !GetAtt BdaFailureRule.Arn
+                  - !GetAtt ReconcileSchedule.Arn
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/lit-ai/${NamePrefix}/${Environment}/kb-ingest-worker"
+      KmsKeyId: !If
+        - CreateIngestKey
+        - !GetAtt IngestKmsKey.Arn
+        - !Ref IngestKmsKeyArn
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ReconcilerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/lit-ai/${NamePrefix}/${Environment}/kb-ingest-reconciler"
+      KmsKeyId: !If
+        - CreateIngestKey
+        - !GetAtt IngestKmsKey.Arn
+        - !Ref IngestKmsKeyArn
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-kb-ingest-worker"
+      Path: !Sub "/lit-ai/${Environment}/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: exact-ingest-worker-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ConsumeCompletionQueue
+                Effect: Allow
+                Action:
+                  - sqs:ChangeMessageVisibility
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ReceiveMessage
+                Resource: !GetAtt IngestQueue.Arn
+              - Sid: CorrelationTable
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt IngestJobsTable.Arn
+              - Sid: OwnerWorkspaceCheckpoints
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource: !Ref AppTableArn
+              - Sid: ReadBdaOutput
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${AppDataBucketArn}/kb/bda-output/*"
+              - Sid: WriteCanonicalPages
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${AppDataBucketArn}/kb/pages/*"
+              - Sid: ForceRlsDataApi
+                Effect: Allow
+                Action:
+                  - rds-data:BatchExecuteStatement
+                  - rds-data:BeginTransaction
+                  - rds-data:CommitTransaction
+                  - rds-data:ExecuteStatement
+                  - rds-data:RollbackTransaction
+                Resource: !Ref KbClusterArn
+              - Sid: KbAppSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref KbSecretArn
+              - !If
+                - HasSecretKmsKey
+                - Sid: KbSecretDecrypt
+                  Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:DescribeKey
+                  Resource: !Ref KbSecretKmsKeyArn
+                  Condition:
+                    StringEquals:
+                      "kms:ViaService": !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                - !Ref AWS::NoValue
+              - Sid: BdaStatus
+                Effect: Allow
+                Action:
+                  - bedrock:GetDataAutomationStatus
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:data-automation-invocation/*"
+              - Sid: EmbedChunks
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Ref BedrockEmbeddingModelArn
+              - Sid: AppDataKms
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref AppKmsKeyArn
+                Condition:
+                  StringEquals:
+                    "kms:ViaService":
+                      - !Sub "s3.${AWS::Region}.${AWS::URLSuffix}"
+                      - !Sub "dynamodb.${AWS::Region}.${AWS::URLSuffix}"
+              - Sid: IngestDataKms
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !If
+                  - CreateIngestKey
+                  - !GetAtt IngestKmsKey.Arn
+                  - !Ref IngestKmsKeyArn
+              - Sid: WorkerLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${WorkerLogGroup}:*"
+              - Sid: WorkerXray
+                Effect: Allow
+                Action:
+                  - xray:PutTelemetryRecords
+                  - xray:PutTraceSegments
+                Resource: "*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ReconcilerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-kb-ingest-reconciler"
+      Path: !Sub "/lit-ai/${Environment}/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: exact-reconciler-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: QueryStaleJobs
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt IngestJobsTable.Arn
+                  - !Sub "${IngestJobsTable.Arn}/index/StatusUpdated"
+              - Sid: OwnerWorkspaceCheckpoints
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource: !Ref AppTableArn
+              - Sid: RestartAmbiguousBdaInvocation
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeDataAutomationAsync
+                Resource:
+                  - !Ref BdaProjectArn
+                  - !Ref BdaProfileArn
+              - Sid: ReadQueuedBdaInput
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${AppDataBucketArn}/uploads/*"
+              - Sid: WriteRestartedBdaOutput
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${AppDataBucketArn}/kb/bda-output/*"
+              - Sid: ReadBdaStatus
+                Effect: Allow
+                Action:
+                  - bedrock:GetDataAutomationStatus
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:data-automation-invocation/*"
+              - Sid: EnqueueObservedCompletion
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt IngestQueue.Arn
+              - Sid: ForceRlsDataApi
+                Effect: Allow
+                Action:
+                  - rds-data:BeginTransaction
+                  - rds-data:CommitTransaction
+                  - rds-data:ExecuteStatement
+                  - rds-data:RollbackTransaction
+                Resource: !Ref KbClusterArn
+              - Sid: KbAppSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref KbSecretArn
+              - !If
+                - HasSecretKmsKey
+                - Sid: KbSecretDecrypt
+                  Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:DescribeKey
+                  Resource: !Ref KbSecretKmsKeyArn
+                  Condition:
+                    StringEquals:
+                      "kms:ViaService": !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                - !Ref AWS::NoValue
+              - Sid: AppDataKms
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref AppKmsKeyArn
+                Condition:
+                  StringEquals:
+                    "kms:ViaService":
+                      - !Sub "dynamodb.${AWS::Region}.${AWS::URLSuffix}"
+                      - !Sub "s3.${AWS::Region}.${AWS::URLSuffix}"
+              - Sid: ReconcilerKms
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                Resource: !If
+                  - CreateIngestKey
+                  - !GetAtt IngestKmsKey.Arn
+                  - !Ref IngestKmsKeyArn
+              - Sid: ReconcilerLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ReconcilerLogGroup}:*"
+              - Sid: ReconcilerXray
+                Effect: Allow
+                Action:
+                  - xray:PutTelemetryRecords
+                  - xray:PutTraceSegments
+                Resource: "*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-${Environment}-kb-ingest-worker"
+      Description: Resolve exact BDA job mappings and finish owner-scoped KB ingest.
+      Runtime: nodejs22.x
+      Architectures:
+        - !Ref Architecture
+      Handler: sqs.handler
+      Role: !GetAtt WorkerRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref ArtifactObjectKey
+        S3ObjectVersion: !Ref ArtifactObjectVersion
+      KmsKeyArn: !If
+        - CreateIngestKey
+        - !GetAtt IngestKmsKey.Arn
+        - !Ref IngestKmsKeyArn
+      MemorySize: 2048
+      Timeout: 840
+      ReservedConcurrentExecutions: 4
+      EphemeralStorage:
+        Size: 2048
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        ApplicationLogLevel: WARN
+        LogFormat: JSON
+        LogGroup: !Ref WorkerLogGroup
+        SystemLogLevel: WARN
+      Environment:
+        Variables:
+          NODE_ENV: production
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+          BEDROCK_REGION: !Ref AWS::Region
+          SW_DDB_TABLE: !Ref AppTableName
+          SW_S3_BUCKET: !Ref AppDataBucketName
+          KB_CLUSTER_ARN: !Ref KbClusterArn
+          KB_SECRET_ARN: !Ref KbSecretArn
+          KB_DATABASE: !Ref KbDatabase
+          KB_INGEST_JOBS_TABLE: !Ref IngestJobsTable
+          KB_INGEST_QUEUE_URL: !Ref IngestQueue
+          KB_INGEST_STALE_AFTER_SECONDS: "900"
+          KB_INGEST_JOB_TTL_DAYS: !Ref JobTtlDays
+          BDA_PROJECT_ARN: !Ref BdaProjectArn
+          BDA_PROFILE_ARN: !Ref BdaProfileArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  WorkerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt IngestQueue.Arn
+      FunctionName: !Ref WorkerFunction
+      Enabled: true
+      BatchSize: 2
+      MaximumBatchingWindowInSeconds: 1
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      ScalingConfig:
+        MaximumConcurrency: 3
+
+  ReconcilerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-${Environment}-kb-ingest-reconciler"
+      Description: Poll stale BDA jobs and enqueue the same compact completion event.
+      Runtime: nodejs22.x
+      Architectures:
+        - !Ref Architecture
+      Handler: reconcile.handler
+      Role: !GetAtt ReconcilerRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucketName
+        S3Key: !Ref ArtifactObjectKey
+        S3ObjectVersion: !Ref ArtifactObjectVersion
+      KmsKeyArn: !If
+        - CreateIngestKey
+        - !GetAtt IngestKmsKey.Arn
+        - !Ref IngestKmsKeyArn
+      MemorySize: 512
+      Timeout: 120
+      ReservedConcurrentExecutions: 1
+      TracingConfig:
+        Mode: Active
+      LoggingConfig:
+        ApplicationLogLevel: WARN
+        LogFormat: JSON
+        LogGroup: !Ref ReconcilerLogGroup
+        SystemLogLevel: WARN
+      Environment:
+        Variables:
+          NODE_ENV: production
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+          BEDROCK_REGION: !Ref AWS::Region
+          SW_DDB_TABLE: !Ref AppTableName
+          SW_S3_BUCKET: !Ref AppDataBucketName
+          KB_CLUSTER_ARN: !Ref KbClusterArn
+          KB_SECRET_ARN: !Ref KbSecretArn
+          KB_DATABASE: !Ref KbDatabase
+          KB_INGEST_JOBS_TABLE: !Ref IngestJobsTable
+          KB_INGEST_QUEUE_URL: !Ref IngestQueue
+          KB_INGEST_STALE_AFTER_SECONDS: "900"
+          KB_INGEST_JOB_TTL_DAYS: !Ref JobTtlDays
+          BDA_PROJECT_ARN: !Ref BdaProjectArn
+          BDA_PROFILE_ARN: !Ref BdaProfileArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: DeploymentIntent
+          Value: !Ref DeploymentIntent
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ReconcileSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-kb-ingest-reconcile"
+      Description: Reconcile stale best-effort BDA service events.
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Id: ReconcilerLambda
+          Arn: !GetAtt ReconcilerFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt IngestDeadLetterQueue.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600
+            MaximumRetryAttempts: 12
+
+  ReconcileInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ReconcilerFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !GetAtt ReconcileSchedule.Arn
+
+  AppIngestAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${NamePrefix}-${Environment}-kb-ingest-app-access"
+      Path: !Sub "/lit-ai/${Environment}/"
+      Description: Register and correlate asynchronous BDA jobs from the app runtime.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CorrelationTableRegistration
+            Effect: Allow
+            Action:
+              - dynamodb:DeleteItem
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+            Resource: !GetAtt IngestJobsTable.Arn
+          - Sid: StartConfiguredBdaJob
+            Effect: Allow
+            Action:
+              - bedrock:InvokeDataAutomationAsync
+            Resource:
+              - !Ref BdaProjectArn
+              - !Ref BdaProfileArn
+          - Sid: CorrelationTableKms
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource: !If
+              - CreateIngestKey
+              - !GetAtt IngestKmsKey.Arn
+              - !Ref IngestKmsKeyArn
+
+  IngestDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-kb-ingest-dlq-visible"
+      AlarmDescription: One or more compact ingest events reached the DLQ.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+
+  WorkerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-kb-ingest-worker-errors"
+      AlarmDescription: The ingest worker returned one or more invocation errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WorkerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+
+  WorkerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-kb-ingest-worker-throttles"
+      AlarmDescription: The bounded ingest worker exhausted reserved concurrency.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WorkerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+
+  ReconcilerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-kb-ingest-reconciler-errors"
+      AlarmDescription: The scheduled ingest reconciler returned an invocation error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ReconcilerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+
+  ReconcilerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-kb-ingest-reconciler-throttles"
+      AlarmDescription: The scheduled ingest reconciler was throttled.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ReconcilerFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+
+  EventBridgeFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-kb-ingest-eventbridge-failures"
+      AlarmDescription: A BDA completion or reconciliation target invocation failed.
+      Metrics:
+        - Id: succeededRule
+          MetricStat:
+            Metric:
+              Namespace: AWS/Events
+              MetricName: FailedInvocations
+              Dimensions:
+                - Name: RuleName
+                  Value: !Ref BdaSuccessRule
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: failedRule
+          MetricStat:
+            Metric:
+              Namespace: AWS/Events
+              MetricName: FailedInvocations
+              Dimensions:
+                - Name: RuleName
+                  Value: !Ref BdaFailureRule
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: reconcileRule
+          MetricStat:
+            Metric:
+              Namespace: AWS/Events
+              MetricName: FailedInvocations
+              Dimensions:
+                - Name: RuleName
+                  Value: !Ref ReconcileSchedule
+            Period: 60
+            Stat: Sum
+          ReturnData: false
+        - Id: totalFailures
+          Expression: succeededRule + failedRule + reconcileRule
+          Label: EventBridge failed invocations
+          ReturnData: true
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+
+  IngestQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${NamePrefix}-${Environment}-kb-ingest-queue-age"
+      AlarmDescription: The oldest ingest completion event has waited over ten minutes.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IngestQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 600
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+      OKActions: !If
+        - HasAlarmTopic
+        - - !Ref AlarmTopicArn
+        - !Ref AWS::NoValue
+
+Outputs:
+  IngestJobsTableName:
+    Description: KB_INGEST_JOBS_TABLE
+    Value: !Ref IngestJobsTable
+
+  IngestJobsTableArn:
+    Description: Dedicated encrypted job-correlation table ARN.
+    Value: !GetAtt IngestJobsTable.Arn
+
+  IngestQueueUrl:
+    Description: KB_INGEST_QUEUE_URL
+    Value: !Ref IngestQueue
+
+  IngestQueueArn:
+    Description: Compact completion-event queue ARN.
+    Value: !GetAtt IngestQueue.Arn
+
+  IngestDeadLetterQueueArn:
+    Description: Worker redrive queue ARN.
+    Value: !GetAtt IngestDeadLetterQueue.Arn
+
+  AppIngestAccessPolicyArn:
+    Description: Attach to the app runtime role for exact job registration.
+    Value: !Ref AppIngestAccessPolicy
+
+  WorkerFunctionArn:
+    Description: Bounded-concurrency SQS worker ARN.
+    Value: !GetAtt WorkerFunction.Arn
+
+  ReconcilerFunctionArn:
+    Description: Scheduled stale-job reconciler ARN.
+    Value: !GetAtt ReconcilerFunction.Arn
+
+  EffectiveIngestKmsKeyArn:
+    Description: CMK used by the ingest table, queues, functions, and logs.
+    Value: !If
+      - CreateIngestKey
+      - !GetAtt IngestKmsKey.Arn
+      - !Ref IngestKmsKeyArn

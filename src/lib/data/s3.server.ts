@@ -11,7 +11,10 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { loadS3Config } from "../config.server";
@@ -35,13 +38,45 @@ export function s3(): S3Client {
   return _s3;
 }
 
-/** Presigned URL for a direct browser PUT. No Content-Type is signed. */
-export async function presignPut(key: string): Promise<string> {
+/** Presigned URL for a direct browser PUT. Content-Type remains unsigned; an
+ * optional SHA-256 checksum header is signed for async-ingest integrity. */
+export async function presignPut(key: string, checksumSha256?: string): Promise<string> {
   return getSignedUrl(
     s3(),
-    new PutObjectCommand({ Bucket: bucketName(), Key: key }),
+    new PutObjectCommand({
+      Bucket: bucketName(),
+      Key: key,
+      ...(checksumSha256 ? { ChecksumSHA256: checksumSha256 } : {}),
+    }),
     { expiresIn: PUT_TTL },
   );
+}
+
+/**
+ * Verify an async upload without reading its body. The presigned PUT binds the
+ * checksum header, and S3 validates/stores that checksum before this HEAD call.
+ */
+export async function verifyUploadedObject(
+  key: string,
+  expectedSize: number,
+  expectedSha256Hex: string,
+): Promise<void> {
+  if (!/^[0-9a-f]{64}$/i.test(expectedSha256Hex)) {
+    throw new Error("invalid expected object checksum");
+  }
+  const expectedChecksumSha256 = Buffer.from(expectedSha256Hex, "hex").toString("base64");
+  const result = await s3().send(
+    new HeadObjectCommand({
+      Bucket: bucketName(),
+      Key: key,
+      ChecksumMode: "ENABLED",
+    }),
+  );
+  if (result.ContentLength !== expectedSize || result.ChecksumSHA256 !== expectedChecksumSha256) {
+    const error = new Error("uploaded object integrity check failed");
+    error.name = "ObjectIntegrityError";
+    throw error;
+  }
 }
 
 /** Presigned URL to download an object as an attachment with a clean filename. */
@@ -65,4 +100,40 @@ export async function presignGet(
 
 export async function deleteObject(key: string): Promise<void> {
   await s3().send(new DeleteObjectCommand({ Bucket: bucketName(), Key: key }));
+}
+
+/** Delete every object under an already ownership-validated prefix. */
+export async function deletePrefix(prefix: string): Promise<number> {
+  if (!prefix || !prefix.endsWith("/") || prefix.includes("..")) {
+    throw new Error("invalid object prefix");
+  }
+  let continuationToken: string | undefined;
+  let deleted = 0;
+  do {
+    const listed = await s3().send(
+      new ListObjectsV2Command({
+        Bucket: bucketName(),
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }),
+    );
+    const keys = (listed.Contents ?? []).flatMap((object) =>
+      object.Key ? [{ Key: object.Key }] : [],
+    );
+    if (keys.length) {
+      const response = await s3().send(
+        new DeleteObjectsCommand({
+          Bucket: bucketName(),
+          Delete: { Objects: keys, Quiet: true },
+        }),
+      );
+      if (response.Errors?.length) {
+        throw new Error("one or more prefix objects could not be deleted");
+      }
+      deleted += keys.length;
+    }
+    continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (continuationToken);
+  return deleted;
 }

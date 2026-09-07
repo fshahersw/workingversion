@@ -124,11 +124,12 @@ export function SummarizeView() {
   const readerPage = selectedFile ? Number(readerPageRaw) || 1 : 1;
   const readerGroup = dockFile ? fileAsGroup(dockFile, state.hits) : undefined;
   const overlayOpen = !!selectedFile;
+  const dockFileId = dockFile?.id;
 
   useEffect(() => {
-    if (!dockFile) return;
-    void loadPage(dockFile.id, readerPage);
-  }, [dockFile?.id, readerPage, loadPage]);
+    if (!dockFileId) return;
+    void loadPage(dockFileId, readerPage);
+  }, [dockFileId, readerPage, loadPage]);
 
   const openPage = (fileId: string, page: number) => {
     selectHit(`${fileId}:${page}`);
@@ -246,6 +247,11 @@ export function SummarizeView() {
                 {state.kbSave.message}
               </span>
             ) : null}
+            {["queued", "converting", "embedding"].includes(state.kbSave.status) ? (
+              <span className="hidden max-w-[280px] truncate text-[11px] text-muted-foreground sm:inline">
+                {state.kbSave.message ?? "Workspace ingest is pending."}
+              </span>
+            ) : null}
             {state.kbSave.status === "error" ? (
               <span className="text-[11px] text-destructive" title={state.kbSave.message}>
                 {state.kbSave.message ?? "Save failed"}
@@ -257,10 +263,20 @@ export function SummarizeView() {
                 setWsName(files[0]?.name?.replace(/\.[^.]+$/, "") ?? "");
                 setSaveOpen((v) => !v);
               }}
-              disabled={state.kbSave.status === "saving"}
+              disabled={["saving", "queued", "converting", "embedding"].includes(
+                state.kbSave.status,
+              )}
               className="text-[11.5px] font-medium text-brand-orange transition hover:underline disabled:opacity-50"
             >
-              {state.kbSave.status === "saving" ? "Saving…" : "Save workspace"}
+              {state.kbSave.status === "saving"
+                ? "Saving…"
+                : state.kbSave.status === "queued"
+                  ? "Queued"
+                  : state.kbSave.status === "converting"
+                    ? "Converting…"
+                    : state.kbSave.status === "embedding"
+                      ? "Embedding…"
+                      : "Save workspace"}
             </button>
             <button
               type="button"

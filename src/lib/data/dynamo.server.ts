@@ -76,7 +76,7 @@ export async function getItem(
 export async function queryPrefix(
   pk: string,
   skPrefix: string,
-  opts?: { limit?: number; scanForward?: boolean },
+  opts?: { limit?: number; scanForward?: boolean; consistent?: boolean },
 ): Promise<Item[]> {
   const items: Item[] = [];
   let ExclusiveStartKey: Record<string, unknown> | undefined;
@@ -86,6 +86,7 @@ export async function queryPrefix(
       KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
       ExpressionAttributeValues: { ":pk": pk, ":p": skPrefix },
       ScanIndexForward: opts?.scanForward ?? true,
+      ConsistentRead: opts?.consistent ?? false,
       ExclusiveStartKey,
     };
     if (opts?.limit) input.Limit = opts.limit;
@@ -161,20 +162,32 @@ export async function updateItem(
 }
 
 export async function deleteItem(pk: string, sk: string): Promise<void> {
-  await doc().send(
-    new DeleteCommand({ TableName: tableName(), Key: { PK: pk, SK: sk } }),
-  );
+  await doc().send(new DeleteCommand({ TableName: tableName(), Key: { PK: pk, SK: sk } }));
 }
 
 export async function batchDelete(keys: { PK: string; SK: string }[]): Promise<void> {
   const table = tableName();
   for (let i = 0; i < keys.length; i += 25) {
-    const chunk = keys.slice(i, i + 25);
-    if (!chunk.length) continue;
-    await doc().send(
-      new BatchWriteCommand({
-        RequestItems: { [table]: chunk.map((Key) => ({ DeleteRequest: { Key } })) },
-      }),
-    );
+    let pending = keys.slice(i, i + 25);
+    for (let attempt = 0; pending.length && attempt < 8; attempt++) {
+      const response = await doc().send(
+        new BatchWriteCommand({
+          RequestItems: { [table]: pending.map((Key) => ({ DeleteRequest: { Key } })) },
+        }),
+      );
+      const unprocessed = response.UnprocessedItems?.[table] ?? [];
+      pending = unprocessed.flatMap((request) => {
+        const key = request.DeleteRequest?.Key;
+        return typeof key?.["PK"] === "string" && typeof key["SK"] === "string"
+          ? [{ PK: key["PK"], SK: key["SK"] }]
+          : [];
+      });
+      if (pending.length && attempt < 7) {
+        await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
+      }
+    }
+    if (pending.length) {
+      throw new Error("one or more DynamoDB items could not be deleted");
+    }
   }
 }

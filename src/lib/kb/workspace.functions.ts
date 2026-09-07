@@ -6,17 +6,23 @@ import { createServerFn } from "@tanstack/react-start";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import type { SwUser } from "@/lib/auth/cognito.server";
+import { requireClientFileId } from "@/lib/kb/ingest-keys";
+import { isUuid, workspaceSaveFingerprint } from "@/lib/kb/workspace-lifecycle";
 import {
-  isUuid,
-  workspaceSaveFingerprint,
-} from "@/lib/kb/workspace-lifecycle";
-import type { WorkspaceDoc, WorkspaceSurface } from "@/lib/kb/workspace.server";
+  ASYNC_INGEST_MAX_BYTES,
+  ASYNC_INGEST_MAX_MARKDOWN_CHARS,
+  isSha256,
+  selectIngestLane,
+} from "@/lib/kb/ingest-state";
+import type { WorkspaceSurface } from "@/lib/kb/workspace.server";
 
 function principalOf(context: unknown): string {
   return (context as { user: SwUser }).user.sub;
 }
 
 const SURFACES = new Set<WorkspaceSurface>(["workingset", "deposition", "review"]);
+const MAX_WORKSPACE_FILES = 100;
+const SAFE_METADATA = /^[^\p{Cc}]{1,256}$/u;
 
 type SaveFile = {
   clientFileId: string;
@@ -25,7 +31,7 @@ type SaveFile = {
   sha256?: string;
   byteSize?: number;
   bytesKey?: string;
-  pages: { page: number; text: string }[];
+  pages?: { page: number; text: string }[];
 };
 
 export const saveWorkspaceFn = createServerFn({ method: "POST" })
@@ -44,23 +50,58 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       if (!isUuid(requestId)) throw new Error("valid requestId required");
       const files = Array.isArray(d?.files) ? d.files : [];
       if (!files.length) throw new Error("no files to save");
-      const clientFileIds = files.map((file) =>
-        String(file?.clientFileId ?? "").trim(),
-      );
-      if (clientFileIds.some((id) => !id)) {
-        throw new Error("clientFileId required for every file");
-      }
+      if (files.length > MAX_WORKSPACE_FILES) throw new Error("too many files to save");
+      const clientFileIds = files.map((file) => String(file?.clientFileId ?? "").trim());
+      for (const id of clientFileIds) requireClientFileId(id);
       if (new Set(clientFileIds).size !== clientFileIds.length) {
         throw new Error("clientFileId must be unique for every file");
       }
+      const fileNames = files.map((file) => String(file?.fileName ?? "").trim());
+      if (fileNames.some((name) => !SAFE_METADATA.test(name))) {
+        throw new Error("fileName required for every file");
+      }
+      for (const file of files) {
+        if (file.sha256 !== undefined && !isSha256(file.sha256)) {
+          throw new Error("invalid raw file sha256");
+        }
+        if (
+          file.byteSize !== undefined &&
+          (!Number.isSafeInteger(file.byteSize) ||
+            file.byteSize < 1 ||
+            file.byteSize > ASYNC_INGEST_MAX_BYTES)
+        ) {
+          throw new Error("invalid file byte size");
+        }
+        if (
+          file.mime !== undefined &&
+          (!SAFE_METADATA.test(file.mime) || !/^[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+$/.test(file.mime))
+        ) {
+          throw new Error("invalid file MIME type");
+        }
+        if (file.bytesKey !== undefined && typeof file.bytesKey !== "string") {
+          throw new Error("invalid file storage key");
+        }
+        const submittedChars = (Array.isArray(file.pages) ? file.pages : []).reduce(
+          (total, page) => total + String(page?.text ?? "").length,
+          0,
+        );
+        if (submittedChars > ASYNC_INGEST_MAX_MARKDOWN_CHARS) {
+          throw new Error("submitted page text exceeds the request limit");
+        }
+      }
+      const folderId = String(d.folderId || "ROOT").trim();
+      if (!SAFE_METADATA.test(folderId)) throw new Error("valid folderId required");
       return {
         requestId,
         name: (d.name || "Untitled workspace").slice(0, 120),
         surface,
-        folderId: d.folderId || "ROOT",
+        folderId,
         files: files.map((file, index) => ({
           ...file,
           clientFileId: clientFileIds[index]!,
+          fileName: fileNames[index]!,
+          ...(file.sha256 ? { sha256: file.sha256.toLowerCase() } : {}),
+          pages: Array.isArray(file.pages) ? file.pages : [],
         })),
       };
     },
@@ -69,16 +110,22 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
     const sub = principalOf(context);
     const [
       { ingestPages },
-      { updateDocumentStatus },
+      { updateDocumentIngest },
+      { registerAsyncIngest },
       {
-        finalizeWorkspace,
+        checkpointWorkspaceDocument,
+        finalizeWorkspaceFromCheckpoints,
+        getWorkspaceIngestStatus,
+        listWorkspaceDocumentCheckpoints,
         putWorkspacePages,
         reserveWorkspace,
+        reserveWorkspaceDocument,
       },
       { mapPool },
     ] = await Promise.all([
       import("@/lib/kb/ingest.server"),
       import("@/lib/kb/aurora.server"),
+      import("@/lib/kb/ingest-async.server"),
       import("@/lib/kb/workspace.server"),
       import("@/lib/pile/async"),
     ]);
@@ -89,22 +136,40 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       );
       return { ...file, pages };
     });
-    const unreadable = files.filter((file) => !file.pages.length);
-    if (unreadable.length) {
+    const prepared = files.map((file) => {
+      const totalChars = file.pages.reduce((total, page) => total + page.text.length, 0);
+      return {
+        ...file,
+        lane: selectIngestLane({
+          readablePages: file.pages.length,
+          totalChars,
+          ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
+          ...(file.sha256 ? { sha256: file.sha256 } : {}),
+        }),
+      };
+    });
+    const rejected = prepared.filter((file) => file.lane.lane === "reject");
+    if (rejected.length) {
       throw new Error(
-        `cannot save: ${unreadable.length} document${unreadable.length === 1 ? "" : "s"} have no extractable pages`,
+        `Cannot save: ${rejected.length} document${rejected.length === 1 ? "" : "s"} require original bytes and a raw SHA-256 for asynchronous ingest.`,
       );
+    }
+    const incompleteAsync = prepared.filter(
+      (file) =>
+        file.lane.lane === "async" &&
+        (!file.bytesKey || !file.sha256 || !file.byteSize || file.byteSize < 1),
+    );
+    if (incompleteAsync.length) {
+      throw new Error("Asynchronous ingest requires verified byte size, storage key, and SHA-256.");
     }
 
     const { requestFingerprint, fileFingerprints } = workspaceSaveFingerprint({
       name: data.name,
       surface: data.surface,
       folderId: data.folderId,
-      files,
+      files: prepared,
     });
-    const cleanupKeys = files.flatMap((file) =>
-      file.bytesKey ? [file.bytesKey] : [],
-    );
+    const cleanupKeys = prepared.flatMap((file) => (file.bytesKey ? [file.bytesKey] : []));
     const reservation = await reserveWorkspace(sub, {
       requestId: data.requestId,
       requestFingerprint,
@@ -112,96 +177,117 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       surface: data.surface,
       folderId: data.folderId,
       cleanupKeys,
+      expectedDocCount: prepared.length,
     });
-    if (reservation.status === "ready") {
+    const responseFromStatus = async () => {
+      const status = await getWorkspaceIngestStatus(sub, reservation.itemId);
+      if (!status) throw new Error("workspace save reservation was not found");
       return {
         itemId: reservation.itemId,
         kbWorkspaceId: reservation.kbWorkspaceId,
-        docCount: reservation.docs.length,
-        chunkCount: reservation.docs.reduce(
-          (total, doc) => total + doc.chunkCount,
-          0,
-        ),
-        documents: reservation.docs.flatMap((doc) =>
-          doc.sourceFileId
-            ? [{ clientFileId: doc.sourceFileId, docId: doc.docId }]
-            : [],
-        ),
+        status: status.status,
+        stage: status.stage,
+        pendingCount: status.pendingCount,
+        docCount: status.docCount,
+        chunkCount: status.chunkCount,
+        documents: status.documents,
+        ...(status.errorSummary ? { errorSummary: status.errorSummary } : {}),
       };
+    };
+    if (reservation.status === "ready" || reservation.status === "error") {
+      return responseFromStatus();
     }
 
-    type Outcome =
-      | { ok: true; doc: WorkspaceDoc }
-      | { ok: false };
-    const outcomes = await mapPool<(typeof files)[number], Outcome>(
-      files,
-      3,
-      async (file, index) => {
-        try {
-          const res = await ingestPages(sub, {
+    await mapPool(prepared, 6, async (file) => {
+      await reserveWorkspaceDocument(sub, {
+        itemId: reservation.itemId,
+        clientFileId: file.clientFileId,
+        fileName: file.fileName,
+        ...(file.mime ? { mime: file.mime } : {}),
+        ...(file.byteSize !== undefined ? { size: file.byteSize } : {}),
+        ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
+      });
+    });
+    const existing = new Map(
+      (await listWorkspaceDocumentCheckpoints(sub, reservation.itemId)).map((checkpoint) => [
+        checkpoint.clientFileId,
+        checkpoint,
+      ]),
+    );
+
+    await mapPool(prepared, 3, async (file, index) => {
+      const checkpoint = existing.get(file.clientFileId);
+      if (checkpoint?.status === "ready" || checkpoint?.status === "error") {
+        return;
+      }
+      try {
+        if (file.lane.lane === "async") {
+          await registerAsyncIngest({
+            ownerSub: sub,
+            workspaceItemId: reservation.itemId,
             workspaceId: reservation.kbWorkspaceId,
-            surface: data.surface,
+            clientFileId: file.clientFileId,
             fileName: file.fileName,
+            surface: data.surface,
             ...(file.mime ? { mime: file.mime } : {}),
-            sha256: fileFingerprints[index],
-            ...(file.byteSize !== undefined
-              ? { byteSize: file.byteSize }
-              : {}),
-            pages: file.pages,
+            documentSha256: fileFingerprints[index]!,
+            requestFingerprint,
+            sha256: file.sha256!,
+            byteSize: file.byteSize!,
+            inputKey: file.bytesKey!,
           });
-          const pagesKey = await putWorkspacePages(sub, res.docId, file.pages);
-          await updateDocumentStatus(sub, res.docId, "ready", {
+          return;
+        }
+        await checkpointWorkspaceDocument(sub, {
+          itemId: reservation.itemId,
+          clientFileId: file.clientFileId,
+          status: "embedding",
+        });
+        const res = await ingestPages(sub, {
+          workspaceId: reservation.kbWorkspaceId,
+          surface: data.surface,
+          fileName: file.fileName,
+          ...(file.mime ? { mime: file.mime } : {}),
+          sha256: fileFingerprints[index],
+          ...(file.byteSize !== undefined ? { byteSize: file.byteSize } : {}),
+          pages: file.pages,
+        });
+        const pagesKey = await putWorkspacePages(sub, res.docId, file.pages);
+        await updateDocumentIngest(
+          sub,
+          res.docId,
+          {
+            status: "ready",
             pageCount: res.pageCount,
             s3Key: pagesKey,
-          });
-          return {
-            ok: true,
-            doc: {
-              docId: res.docId,
-              sourceFileId: file.clientFileId,
-              fileName: file.fileName,
-              pageCount: res.pageCount,
-              chunkCount: res.chunkCount,
-              pagesKey,
-              ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
-              ...(file.mime ? { mime: file.mime } : {}),
-              ...(file.byteSize !== undefined ? { size: file.byteSize } : {}),
-            },
-          };
-        } catch {
-          return { ok: false };
-        }
-      },
-    );
-    const docs = outcomes.flatMap((outcome) =>
-      outcome.ok ? [outcome.doc] : [],
-    );
-    const failed = outcomes.length - docs.length;
-    const errorSummary = failed
-      ? `Workspace save incomplete: ${failed} of ${outcomes.length} documents failed.`
-      : undefined;
-
-    await finalizeWorkspace(sub, {
-      itemId: reservation.itemId,
-      requestFingerprint,
-      status: failed ? "error" : "ready",
-      docs,
-      cleanupKeys,
-      ...(errorSummary ? { errorSummary } : {}),
+            markCompleted: true,
+          },
+          ["ready"],
+        );
+        await checkpointWorkspaceDocument(sub, {
+          itemId: reservation.itemId,
+          clientFileId: file.clientFileId,
+          status: "ready",
+          docId: res.docId,
+          fileName: file.fileName,
+          ...(file.mime ? { mime: file.mime } : {}),
+          ...(file.byteSize !== undefined ? { size: file.byteSize } : {}),
+          ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
+          pagesKey,
+          pageCount: res.pageCount,
+          chunkCount: res.chunkCount,
+        });
+      } catch {
+        await checkpointWorkspaceDocument(sub, {
+          itemId: reservation.itemId,
+          clientFileId: file.clientFileId,
+          status: "error",
+          errorKind: file.lane.lane === "async" ? "configuration" : "processing",
+        }).catch(() => {});
+      }
     });
-    if (errorSummary) throw new Error(errorSummary);
-
-    return {
-      itemId: reservation.itemId,
-      kbWorkspaceId: reservation.kbWorkspaceId,
-      docCount: docs.length,
-      chunkCount: docs.reduce((total, doc) => total + doc.chunkCount, 0),
-      documents: docs.flatMap((doc) =>
-        doc.sourceFileId
-          ? [{ clientFileId: doc.sourceFileId, docId: doc.docId }]
-          : [],
-      ),
-    };
+    await finalizeWorkspaceFromCheckpoints(sub, reservation.itemId);
+    return responseFromStatus();
   });
 
 export const listWorkspacesFn = createServerFn({ method: "POST" })
@@ -223,6 +309,17 @@ export const getWorkspaceFn = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { getWorkspace } = await import("@/lib/kb/workspace.server");
     return getWorkspace(principalOf(context), data.itemId);
+  });
+
+export const getWorkspaceStatusFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { itemId: string }) => {
+    if (!d?.itemId) throw new Error("itemId required");
+    return { itemId: d.itemId };
+  })
+  .handler(async ({ context, data }) => {
+    const { getWorkspaceIngestStatus } = await import("@/lib/kb/workspace.server");
+    return getWorkspaceIngestStatus(principalOf(context), data.itemId);
   });
 
 export const getWorkspacePagesFn = createServerFn({ method: "POST" })

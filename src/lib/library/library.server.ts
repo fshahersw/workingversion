@@ -70,7 +70,7 @@ function toLibraryItem(r: Record<string, unknown>): LibraryItem {
 }
 
 function safeName(name: string): string {
-  return (name || "file").replace(/[^\w.\-]+/g, "_").slice(0, 120) || "file";
+  return (name || "file").replace(/[^\w.-]+/g, "_").slice(0, 120) || "file";
 }
 
 /**
@@ -80,15 +80,31 @@ function safeName(name: string): string {
  */
 export async function createUpload(
   principal: string,
-  args: { name: string; size: number },
-): Promise<{ itemId: string; s3Key: string; uploadUrl: string }> {
-  if (args.size > MAX_UPLOAD_BYTES) {
+  args: { name: string; size: number; sha256?: string },
+): Promise<{
+  itemId: string;
+  s3Key: string;
+  uploadUrl: string;
+  uploadHeaders?: Record<string, string>;
+}> {
+  if (!Number.isSafeInteger(args.size) || args.size < 1 || args.size > MAX_UPLOAD_BYTES) {
     throw new Error(`File too large (max ${Math.floor(MAX_UPLOAD_BYTES / 1024 / 1024)} MB)`);
+  }
+  if (args.sha256 !== undefined && !/^[0-9a-f]{64}$/i.test(args.sha256)) {
+    throw new Error("Invalid upload SHA-256");
   }
   const itemId = ulid();
   const s3Key = `uploads/${principal}/${itemId}/${safeName(args.name)}`;
-  const uploadUrl = await presignPut(s3Key);
-  return { itemId, s3Key, uploadUrl };
+  const checksumSha256 = args.sha256
+    ? Buffer.from(args.sha256, "hex").toString("base64")
+    : undefined;
+  const uploadUrl = await presignPut(s3Key, checksumSha256);
+  return {
+    itemId,
+    s3Key,
+    uploadUrl,
+    ...(checksumSha256 ? { uploadHeaders: { "x-amz-checksum-sha256": checksumSha256 } } : {}),
+  };
 }
 
 /** Step 2: record the uploaded file as a `file` library item. */
@@ -121,10 +137,7 @@ export async function registerUpload(
 }
 
 /** Presigned download URL for an uploaded file item. */
-export async function getDownloadUrl(
-  principal: string,
-  itemId: string,
-): Promise<{ url: string }> {
+export async function getDownloadUrl(principal: string, itemId: string): Promise<{ url: string }> {
   const r = await getItem(userPK(principal), itemSK(itemId));
   if (!r || !r.s3Key) throw new Error("File not found");
   const url = await presignGet(

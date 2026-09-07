@@ -6,6 +6,10 @@ It is entirely separate from the legacy Supabase primary and corpus projects (wh
 are being retired) and is reached **directly by the app via the RDS Data API**, not
 PostgREST. Design: [`docs/kb-ingest-design.md`](../../docs/kb-ingest-design.md).
 
+> **NO DEPLOY / NO MIGRATION FOR ASYNC-BDA:** Validate locally only. Do not
+> invoke AWS, create a change set, upload worker artifacts, deploy
+> `db/kb/infra/kb-ingest.cfn.yaml`, or apply `0002_kb_async_ingest.sql`.
+
 ## What lives here
 
 - `kb.documents` — one row per uploaded file (metadata + status). Page text /
@@ -18,13 +22,29 @@ PostgREST. Design: [`docs/kb-ingest-design.md`](../../docs/kb-ingest-design.md).
   (Data API 1 MiB / 64 KB caps — see below), with an optional doc-id restrict.
 - `kb.fetch_chunks(...)` — full chunk bodies for the reranked top-K (bounded id
   list) at synthesis time.
+- `0002_kb_async_ingest.sql` adds owner-scoped BDA input/output/invocation
+  metadata, client file correlation, timestamps, constrained ingest statuses,
+  owner-prefix checks, and supporting indexes.
+  FORCE RLS and `kb_app` grants are reasserted.
 
 ## Provisioning — CloudFormation (prod-quality, private)
 
-IaC lives at [`infra/kb-aurora.cfn.yaml`](infra/kb-aurora.cfn.yaml): Aurora
+Aurora IaC lives at [`infra/kb-aurora.cfn.yaml`](infra/kb-aurora.cfn.yaml): Aurora
 PostgreSQL Serverless v2, **private** (no public access), **RDS-managed master
 password**, Data API enabled, deletion protection, backups, optional scale-to-0,
 a generated `kb_app` secret, and a least-privilege app access policy.
+
+Async ingest IaC lives at
+[`infra/kb-ingest.cfn.yaml`](infra/kb-ingest.cfn.yaml). It defines a dedicated
+CMK-encrypted job table with `StatusUpdated`, encrypted SQS/DLQ, exact BDA
+EventBridge rules with bounded target retry/DLQ, bounded worker/reconciler
+Lambdas, retained encrypted logs, least-privilege policies, and
+error/throttle/age/delivery alarms. It consumes producer outputs and does not
+adopt existing resources.
+When supplying an external `IngestKmsKeyArn`, preconfigure its key policy for
+the regional Logs principal and the three exact EventBridge rule ARNs, and
+enable account IAM policies for the app/worker/reconciler roles. The template
+cannot modify an external key; see `docs/kb/OPERATIONS.md`.
 
 Validate, then deploy (needs two subnets in different AZs; `MinCapacity=0` for a
 dev cluster that auto-pauses, or `0.5` in prod to avoid the ~15s resume):
@@ -32,9 +52,11 @@ dev cluster that auto-pauses, or `0.5` in prod to avoid the ~15s resume):
 ```bash
 aws cloudformation validate-template --template-body file://db/kb/infra/kb-aurora.cfn.yaml --profile AdministratorAccess-475976462949 --region us-east-1
 ```
+
 ```bash
 aws cloudformation deploy --stack-name sw-kb --template-file db/kb/infra/kb-aurora.cfn.yaml --capabilities CAPABILITY_NAMED_IAM --parameter-overrides VpcId=<VPC_ID> SubnetIds=<SUBNET_A>,<SUBNET_B> MinCapacity=0 MaxCapacity=4 --profile AdministratorAccess-475976462949 --region us-east-1
 ```
+
 ```bash
 aws cloudformation describe-stacks --stack-name sw-kb --query "Stacks[0].Outputs" --output table --profile AdministratorAccess-475976462949 --region us-east-1
 ```
@@ -45,7 +67,8 @@ Note the outputs: `ClusterArn`, `ClusterEndpoint`, `KbAppSecretArn`,
 ## Applying the migration (private — no public access)
 
 **Recommended — apply over the Data API (no VPC / psql / CloudShell).**
-`scripts/kb-apply-migration.mjs` splits this file into single statements
+`scripts/kb-apply-migration.mjs` applies the reviewed fixed sequence
+`0001_kb_init.sql`, then `0002_kb_async_ingest.sql`, and splits each file into single statements
 (dollar-quote + comment aware; the Data API forbids multi-statement calls) and runs
 each with the RDS-managed master secret, then sets the `kb_app` password from its
 secret and runs a smoke query. Runs from anywhere with your AWS creds:
@@ -55,7 +78,8 @@ AWS_PROFILE=AdministratorAccess-475976462949 AWS_REGION=us-east-1 KB_CLUSTER_ARN
 ```
 
 It auto-resolves the master secret from the cluster. `--dry-run` parses without any
-AWS calls. Idempotent (the schema uses IF NOT EXISTS / OR REPLACE).
+AWS calls. Idempotent (the schema uses IF NOT EXISTS / OR REPLACE and guarded
+constraints).
 `KB_APP_SECRET_ARN` is accepted only as a temporary compatibility fallback;
 `KB_SECRET_ARN` is canonical for both migration and application runtime.
 
@@ -76,6 +100,7 @@ and do NOT enable public accessibility (Security Hub RDS.2).
 3. Apply the schema into `kb` (the CFN already created the `kb` database):
    ```bash
    psql "host=<ClusterEndpoint> port=5432 dbname=kb user=kbmaster password=<MASTER_PW> sslmode=require" -f db/kb/0001_kb_init.sql
+   psql "host=<ClusterEndpoint> port=5432 dbname=kb user=kbmaster password=<MASTER_PW> sslmode=require" -f db/kb/0002_kb_async_ingest.sql
    ```
 4. Set the `kb_app` role's password to the generated secret value so the Data API
    can authenticate as it (read `<KbAppSecretArn>` for `<KBAPP_PW>`):
@@ -91,14 +116,18 @@ Migration is idempotent — safe to re-run.
 
 ## Wiring the app
 
-1. Attach `<AppAccessPolicyArn>` to the app runtime role (dev SSO already has
-   admin; prod needs this scoped policy).
+1. Attach Aurora `<AppAccessPolicyArn>` plus async-ingest
+   `<AppIngestAccessPolicyArn>` to the app runtime role.
 2. Set env (your `.env` — not touched by this repo):
    ```
    KB_CLUSTER_ARN=<ClusterArn>
    KB_SECRET_ARN=<KbAppSecretArn>
    KB_DATABASE=kb
+   KB_INGEST_JOBS_TABLE=<IngestJobsTableName>
+   KB_INGEST_QUEUE_URL=<IngestQueueUrl>
    ```
+   Async clients use checksum-bound presigned PUTs. The app and reconciler
+   verify the S3 checksum and byte size with `HeadObject` before starting BDA.
 3. Smoke-test the Data API path end to end (a `0` count = role/grants/Data API OK):
    ```bash
    aws rds-data execute-statement --resource-arn <ClusterArn> --secret-arn <KbAppSecretArn> --database kb --sql "select count(*) from kb.documents" --profile AdministratorAccess-475976462949 --region us-east-1
@@ -142,4 +171,12 @@ to the functions (belt and suspenders).
 
 - `0001_kb_init.sql` — schema, indexes, `hybrid_search` + `fetch_chunks`, `kb_app`
   role, FORCE RLS.
-- Future: `0002_*` shared-workspace membership (extends the RLS USING clause).
+- `0002_kb_async_ingest.sql` — additive async BDA metadata, status constraints,
+  owned-prefix and client-correlation constraints, indexes, and
+  FORCE-RLS/grant reassertion.
+
+For this phase, only parse the ordered sequence:
+
+```bash
+node scripts/kb-apply-migration.mjs --dry-run
+```

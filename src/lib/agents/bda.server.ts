@@ -36,7 +36,11 @@ function s3Uri(key: string): string {
 }
 
 /** Upload raw bytes to the S3 input area. */
-export async function putObject(key: string, body: Uint8Array, contentType?: string): Promise<void> {
+export async function putObject(
+  key: string,
+  body: Uint8Array,
+  contentType?: string,
+): Promise<void> {
   await s3().send(
     new PutObjectCommand({
       Bucket: bucketName(),
@@ -47,18 +51,19 @@ export async function putObject(key: string, body: Uint8Array, contentType?: str
   );
 }
 
+const MAX_RESULT_OBJECT_BYTES = 32 * 1024 * 1024;
+
 async function getJson(key: string): Promise<unknown> {
-  const r = await s3().send(
-    new GetObjectCommand({ Bucket: bucketName(), Key: key }),
-  );
+  const r = await s3().send(new GetObjectCommand({ Bucket: bucketName(), Key: key }));
+  if (typeof r.ContentLength === "number" && r.ContentLength > MAX_RESULT_OBJECT_BYTES) {
+    throw new Error("BDA result object exceeds the processing limit");
+  }
   const text = await r.Body?.transformToString();
   return text ? JSON.parse(text) : null;
 }
 
 async function getText(key: string): Promise<string> {
-  const r = await s3().send(
-    new GetObjectCommand({ Bucket: bucketName(), Key: key }),
-  );
+  const r = await s3().send(new GetObjectCommand({ Bucket: bucketName(), Key: key }));
   return (await r.Body?.transformToString()) ?? "";
 }
 
@@ -78,7 +83,11 @@ export async function putText(key: string, text: string): Promise<void> {
  *  passages (chunked by blank line / heading) so a long doc answers a query
  *  without injecting the whole thing into context. Runs server-side (durable;
  *  no sandbox dependency). */
-export async function searchMarkdownKey(key: string, query: string, maxChars = 4000): Promise<string> {
+export async function searchMarkdownKey(
+  key: string,
+  query: string,
+  maxChars = 4000,
+): Promise<string> {
   const text = await getText(key).catch(() => "");
   if (!text) return "";
   return searchText(text, query, maxChars);
@@ -87,9 +96,14 @@ export async function searchMarkdownKey(key: string, query: string, maxChars = 4
 export function searchText(text: string, query: string, maxChars = 4000): string {
   const q = (query || "").trim();
   if (!q) return text.slice(0, maxChars);
-  const terms = Array.from(new Set((q.toLowerCase().match(/\w+/g) ?? []).filter((t) => t.length > 2)));
+  const terms = Array.from(
+    new Set((q.toLowerCase().match(/\w+/g) ?? []).filter((t) => t.length > 2)),
+  );
   if (!terms.length) return text.slice(0, maxChars);
-  const chunks = text.split(/\n\s*\n/).map((c) => c.trim()).filter(Boolean);
+  const chunks = text
+    .split(/\n\s*\n/)
+    .map((c) => c.trim())
+    .filter(Boolean);
   const scored = chunks
     .map((c) => {
       const cl = c.toLowerCase();
@@ -110,18 +124,42 @@ export function searchText(text: string, query: string, maxChars = 4000): string
   return picked.join("\n\n---\n\n");
 }
 
-/** s3://bucket/key -> key (this bucket only). */
+/** s3://bucket/key -> key, rejecting any cross-bucket result pointer. */
 function keyOf(uri: string): string {
-  const m = uri.match(/^s3:\/\/[^/]+\/(.+)$/);
-  return m?.[1] ?? uri;
+  const match = uri.match(/^s3:\/\/([^/]+)\/(.+)$/);
+  if (!match) return uri;
+  if (match[1] !== bucketName()) {
+    throw new Error("BDA result points outside the configured bucket");
+  }
+  return match[2]!;
 }
 
 export type BdaJob = { invocationArn: string; outputPrefix: string };
+export type StartExtractionOptions = {
+  /** Stable idempotency token. Supplying it enables EventBridge notifications. */
+  clientToken?: string;
+  eventBridgeEnabled?: boolean;
+};
+
+function requireClientToken(token: string): string {
+  if (!/^[A-Za-z0-9_-]{33,256}$/.test(token)) {
+    throw new Error("invalid BDA client token");
+  }
+  return token;
+}
 
 /** Kick off async extraction of an S3 object. Returns the invocation ARN + the
  *  output prefix to read once complete. */
-export async function startExtraction(inputKey: string, outputPrefix: string): Promise<BdaJob> {
+export async function startExtraction(
+  inputKey: string,
+  outputPrefix: string,
+  options: StartExtractionOptions = {},
+): Promise<BdaJob> {
   const config = loadBdaConfig();
+  const eventBridgeEnabled = options.eventBridgeEnabled ?? Boolean(options.clientToken);
+  if (eventBridgeEnabled && !options.clientToken) {
+    throw new Error("EventBridge BDA jobs require a deterministic client token");
+  }
   const res = await client().send(
     new InvokeDataAutomationAsyncCommand({
       inputConfiguration: { s3Uri: s3Uri(inputKey) },
@@ -131,19 +169,38 @@ export async function startExtraction(inputKey: string, outputPrefix: string): P
         stage: "LIVE",
       },
       dataAutomationProfileArn: config.profileArn,
+      ...(options.clientToken ? { clientToken: requireClientToken(options.clientToken) } : {}),
+      ...(eventBridgeEnabled
+        ? {
+            notificationConfiguration: {
+              eventBridgeConfiguration: { eventBridgeEnabled: true },
+            },
+          }
+        : {}),
     }),
   );
   return { invocationArn: res.invocationArn ?? "", outputPrefix };
 }
 
-export type BdaStatus = "Created" | "InProgress" | "Success" | "ServiceError" | "ClientError" | string;
+export type BdaStatus =
+  | "Created"
+  | "InProgress"
+  | "Success"
+  | "ServiceError"
+  | "ClientError"
+  | string;
 
-export async function getStatus(invocationArn: string): Promise<{ status: BdaStatus; outputS3Uri?: string; error?: string }> {
+export async function getStatus(
+  invocationArn: string,
+): Promise<{ status: BdaStatus; outputS3Uri?: string; error?: string }> {
   const r = await client().send(new GetDataAutomationStatusCommand({ invocationArn }));
+  const status = (r.status as BdaStatus) ?? "InProgress";
   return {
-    status: (r.status as BdaStatus) ?? "InProgress",
+    status,
     ...(r.outputConfiguration?.s3Uri ? { outputS3Uri: r.outputConfiguration.s3Uri } : {}),
-    ...(r.errorType || r.errorMessage ? { error: `${r.errorType ?? ""} ${r.errorMessage ?? ""}`.trim() } : {}),
+    ...(status === "ClientError" || status === "ServiceError"
+      ? { error: "Document conversion failed." }
+      : {}),
   };
 }
 
@@ -158,24 +215,35 @@ export type BdaResult = {
 /** Read + parse the standard_output for a completed job. `outputS3Uri` is the
  *  job root returned by GetDataAutomationStatus; it contains job_metadata.json
  *  which points at the per-segment standard_output/result.json. */
-export async function readResult(outputS3Uri: string, opts?: { includeRaw?: boolean }): Promise<BdaResult> {
+export async function readResult(
+  outputS3Uri: string,
+  opts?: { includeRaw?: boolean; expectedOutputPrefix?: string },
+): Promise<BdaResult> {
+  const requireExpectedPrefix = (key: string): string => {
+    if (opts?.expectedOutputPrefix && !key.startsWith(opts.expectedOutputPrefix)) {
+      throw new Error("BDA result points outside the owned output prefix");
+    }
+    return key;
+  };
   // GetDataAutomationStatus returns the job_metadata.json key directly.
-  const metaKey = keyOf(outputS3Uri);
-  const meta = (await getJson(metaKey).catch(() => null)) as
-    | { output_metadata?: { segment_metadata?: { standard_output_path?: string }[] }[] }
-    | null;
+  const metaKey = requireExpectedPrefix(keyOf(outputS3Uri));
+  const meta = (await getJson(metaKey).catch(() => null)) as {
+    output_metadata?: { segment_metadata?: { standard_output_path?: string }[] }[];
+  } | null;
 
   // Collect every segment's standard_output result.json (usually one).
   const resultKeys: string[] = [];
   for (const om of meta?.output_metadata ?? []) {
     for (const seg of om.segment_metadata ?? []) {
-      if (seg.standard_output_path) resultKeys.push(keyOf(seg.standard_output_path));
+      if (seg.standard_output_path) {
+        resultKeys.push(requireExpectedPrefix(keyOf(seg.standard_output_path)));
+      }
     }
   }
   if (!resultKeys.length) {
     // Fallback: derive from the metadata's own directory.
     const dir = metaKey.replace(/job_metadata\.json$/, "").replace(/\/$/, "");
-    resultKeys.push(`${dir}/0/standard_output/0/result.json`);
+    resultKeys.push(requireExpectedPrefix(`${dir}/0/standard_output/0/result.json`));
   }
 
   let markdown = "";
@@ -194,15 +262,24 @@ export async function readResult(outputS3Uri: string, opts?: { includeRaw?: bool
     for (const t of extractTables(doc)) tablesCsv.push(t);
   }
 
-  return { markdown: markdown.trim(), summary: summary.trim(), pages, tablesCsv, ...(opts?.includeRaw ? { raw } : {}) };
+  return {
+    markdown: markdown.trim(),
+    summary: summary.trim(),
+    pages,
+    tablesCsv,
+    ...(opts?.includeRaw ? { raw } : {}),
+  };
 }
 
 // --- tolerant extractors (BDA result shape varies by version; keep defensive) ---
 function extractMarkdown(doc: Record<string, unknown>): string {
   // Whole-doc markdown representation, else concatenate page markdown/text.
-  const docRep = (doc["document"] as { representation?: { markdown?: string; text?: string } } | undefined)?.representation;
+  const docRep = (
+    doc["document"] as { representation?: { markdown?: string; text?: string } } | undefined
+  )?.representation;
   if (docRep?.markdown) return docRep.markdown + "\n\n";
-  const pages = (doc["pages"] as { representation?: { markdown?: string; text?: string } }[] | undefined) ?? [];
+  const pages =
+    (doc["pages"] as { representation?: { markdown?: string; text?: string } }[] | undefined) ?? [];
   const parts = pages.map((p, i) => {
     const rep = p.representation;
     const body = rep?.markdown ?? rep?.text ?? "";
@@ -225,7 +302,10 @@ function countPages(doc: Record<string, unknown>): number {
 }
 function extractTables(doc: Record<string, unknown>): string[] {
   const out: string[] = [];
-  const els = (doc["elements"] as { type?: string; representation?: { csv?: string; text?: string } }[] | undefined) ?? [];
+  const els =
+    (doc["elements"] as
+      | { type?: string; representation?: { csv?: string; text?: string } }[]
+      | undefined) ?? [];
   for (const e of els) {
     if ((e.type ?? "").toLowerCase() === "table") {
       const csv = e.representation?.csv ?? e.representation?.text;

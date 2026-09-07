@@ -21,11 +21,8 @@ import {
   RollbackTransactionCommand,
   type SqlParameter,
 } from "@aws-sdk/client-rds-data";
-import {
-  loadKbConfig,
-  type EnvSource,
-  type KbConfig,
-} from "../config.server.ts";
+import { loadKbConfig, type EnvSource, type KbConfig } from "../config.server.ts";
+import { isIngestStatus, terminalErrorSummary, type IngestStatus } from "./ingest-state.ts";
 
 export function kbConfigured(env?: EnvSource): boolean {
   const config = env ? loadKbConfig(env) : loadKbConfig();
@@ -45,7 +42,8 @@ function client(region: string): RDSDataClient {
 // Scale-to-0: the first Data API call after idle must wait for the cluster to
 // resume (~15s), which surfaces as a transient error. Retry those (and throttle
 // / 5xx) so the user's first save/search after idle doesn't just fail.
-const RESUME_RE = /resum|not currently available|is not available|throttl|too many requests|timeout|serviceunavailable/i;
+const RESUME_RE =
+  /resum|not currently available|is not available|throttl|too many requests|timeout|serviceunavailable/i;
 
 async function sendWithRetry<T>(fn: () => Promise<T>, tries = 8, delayMs = 3000): Promise<T> {
   for (let attempt = 0; ; attempt++) {
@@ -67,9 +65,7 @@ async function sendWithRetry<T>(fn: () => Promise<T>, tries = 8, delayMs = 3000)
 function requireConfig(): KbConfig {
   const config = loadKbConfig();
   if (!config.clusterArn || !config.secretArn || !config.database) {
-    throw new Error(
-      "KB is not configured (set KB_CLUSTER_ARN, KB_SECRET_ARN, KB_DATABASE).",
-    );
+    throw new Error("KB is not configured (set KB_CLUSTER_ARN, KB_SECRET_ARN, KB_DATABASE).");
   }
   return config;
 }
@@ -77,10 +73,7 @@ function requireConfig(): KbConfig {
 // --- parameters --------------------------------------------------------------
 
 /** Build a named Data API parameter, inferring the field type. */
-export function param(
-  name: string,
-  value: string | number | boolean | null,
-): SqlParameter {
+export function param(name: string, value: string | number | boolean | null): SqlParameter {
   if (value === null) return { name, value: { isNull: true } };
   if (typeof value === "boolean") return { name, value: { booleanValue: value } };
   if (typeof value === "number") {
@@ -155,11 +148,7 @@ export async function withPrincipal<T>(
   if (!transactionId) throw new Error("KB: could not begin transaction");
   try {
     // set_config(..., is_local=true) == SET LOCAL: scoped to this transaction.
-    await execute(
-      "SELECT set_config('app.user', :sub, true)",
-      [param("sub", sub)],
-      transactionId,
-    );
+    await execute("SELECT set_config('app.user', :sub, true)", [param("sub", sub)], transactionId);
     const out = await fn(transactionId);
     await sendWithRetry(() =>
       client(config.region).send(
@@ -243,7 +232,10 @@ export async function hybridSearch(args: HybridSearchArgs): Promise<KbHit[]> {
     param("workspace", args.workspaceId),
     param("surface", args.surface),
     param("query", args.query),
-    param("embedding", args.embedding && args.embedding.length ? vectorLiteral(args.embedding) : null),
+    param(
+      "embedding",
+      args.embedding && args.embedding.length ? vectorLiteral(args.embedding) : null,
+    ),
     param("match", match),
     param("rrf_k", rrfK),
     param("snippet", snippetChars),
@@ -325,7 +317,12 @@ export type KbDocumentInput = {
   pageCount?: number | null;
   s3Key?: string | null;
   converter?: string | null;
-  status?: string;
+  status?: IngestStatus;
+  bdaInvocationArn?: string | null;
+  bdaInputKey?: string | null;
+  bdaOutputPrefix?: string | null;
+  bdaOutputS3Uri?: string | null;
+  bdaClientFileId?: string | null;
 };
 
 /**
@@ -336,12 +333,40 @@ export async function insertDocument(sub: string, d: KbDocumentInput): Promise<s
   requireConfig();
   const sql = `
     INSERT INTO kb.documents
-      (owner_sub, workspace_id, surface, file_name, mime, sha256, byte_size, page_count, s3_key, converter, status)
+      (owner_sub, workspace_id, surface, file_name, mime, sha256, byte_size,
+       page_count, s3_key, converter, status, bda_invocation_arn, bda_input_key,
+       bda_output_prefix, bda_output_s3_uri, bda_client_file_id)
     VALUES
-      (:owner, CAST(:workspace AS uuid), :surface, :file_name, :mime, :sha256, :byte_size, :page_count, :s3_key, :converter, :status)
+      (:owner, CAST(:workspace AS uuid), :surface, :file_name, :mime, :sha256,
+       :byte_size, :page_count, :s3_key, :converter, :status,
+       :bda_invocation_arn, :bda_input_key, :bda_output_prefix,
+       :bda_output_s3_uri, :bda_client_file_id)
     ON CONFLICT (owner_sub, workspace_id, sha256) DO UPDATE SET
-      status = EXCLUDED.status, page_count = EXCLUDED.page_count, s3_key = EXCLUDED.s3_key,
-      converter = EXCLUDED.converter, updated_at = now()
+      status = CASE
+        WHEN kb.documents.status IN ('ready', 'error') THEN kb.documents.status
+        ELSE EXCLUDED.status
+      END,
+      page_count = COALESCE(EXCLUDED.page_count, kb.documents.page_count),
+      s3_key = COALESCE(EXCLUDED.s3_key, kb.documents.s3_key),
+      converter = COALESCE(EXCLUDED.converter, kb.documents.converter),
+      bda_invocation_arn = COALESCE(
+        EXCLUDED.bda_invocation_arn,
+        kb.documents.bda_invocation_arn
+      ),
+      bda_input_key = COALESCE(EXCLUDED.bda_input_key, kb.documents.bda_input_key),
+      bda_output_prefix = COALESCE(
+        EXCLUDED.bda_output_prefix,
+        kb.documents.bda_output_prefix
+      ),
+      bda_output_s3_uri = COALESCE(
+        EXCLUDED.bda_output_s3_uri,
+        kb.documents.bda_output_s3_uri
+      ),
+      bda_client_file_id = COALESCE(
+        EXCLUDED.bda_client_file_id,
+        kb.documents.bda_client_file_id
+      ),
+      updated_at = now()
     RETURNING doc_id
   `;
   const parameters: SqlParameter[] = [
@@ -356,10 +381,13 @@ export async function insertDocument(sub: string, d: KbDocumentInput): Promise<s
     param("s3_key", d.s3Key ?? null),
     param("converter", d.converter ?? null),
     param("status", d.status ?? "queued"),
+    param("bda_invocation_arn", d.bdaInvocationArn ?? null),
+    param("bda_input_key", d.bdaInputKey ?? null),
+    param("bda_output_prefix", d.bdaOutputPrefix ?? null),
+    param("bda_output_s3_uri", d.bdaOutputS3Uri ?? null),
+    param("bda_client_file_id", d.bdaClientFileId ?? null),
   ];
-  const rows = await withPrincipal(sub, (tx) =>
-    queryJson<{ doc_id: string }>(sql, parameters, tx),
-  );
+  const rows = await withPrincipal(sub, (tx) => queryJson<{ doc_id: string }>(sql, parameters, tx));
   const id = rows[0]?.doc_id;
   if (!id) throw new Error("insertDocument returned no doc_id");
   return id;
@@ -368,12 +396,17 @@ export async function insertDocument(sub: string, d: KbDocumentInput): Promise<s
 export async function updateDocumentStatus(
   sub: string,
   docId: string,
-  status: string,
+  status: IngestStatus,
   extra?: { s3Key?: string; pageCount?: number; error?: string },
 ): Promise<void> {
+  if (!isIngestStatus(status)) throw new Error("invalid document ingest status");
   requireConfig();
   const sets = ["status = :status", "updated_at = now()"];
-  const parameters: SqlParameter[] = [param("status", status), param("doc_id", docId)];
+  const parameters: SqlParameter[] = [
+    param("status", status),
+    param("doc_id", docId),
+    param("owner", sub),
+  ];
   if (extra?.s3Key !== undefined) {
     sets.push("s3_key = :s3_key");
     parameters.push(param("s3_key", extra.s3Key));
@@ -384,10 +417,199 @@ export async function updateDocumentStatus(
   }
   if (extra?.error !== undefined) {
     sets.push("error = :error");
-    parameters.push(param("error", extra.error.slice(0, 2000)));
+    const approved = new Set([
+      terminalErrorSummary("conversion"),
+      terminalErrorSummary("processing"),
+      terminalErrorSummary("limits"),
+      terminalErrorSummary("configuration"),
+      terminalErrorSummary("unknown"),
+    ]).has(extra.error);
+    parameters.push(
+      param("error", approved ? extra.error.slice(0, 160) : terminalErrorSummary("unknown")),
+    );
   }
-  const sql = `UPDATE kb.documents SET ${sets.join(", ")} WHERE doc_id = CAST(:doc_id AS uuid)`;
+  if (status !== "error") sets.push("error = NULL");
+  if (status === "ready" || status === "error") {
+    sets.push("ingest_completed_at = COALESCE(ingest_completed_at, now())");
+  }
+  const sql = `
+    UPDATE kb.documents
+    SET ${sets.join(", ")}
+    WHERE owner_sub = :owner AND doc_id = CAST(:doc_id AS uuid)
+  `;
   await withPrincipal(sub, (tx) => execute(sql, parameters, tx));
+}
+
+export type KbDocumentRecord = {
+  doc_id: string;
+  owner_sub: string;
+  workspace_id: string;
+  surface: KbSurface;
+  file_name: string;
+  mime: string | null;
+  sha256: string | null;
+  byte_size: number | null;
+  page_count: number | null;
+  s3_key: string | null;
+  converter: string | null;
+  status: IngestStatus;
+  bda_invocation_arn: string | null;
+  bda_input_key: string | null;
+  bda_output_prefix: string | null;
+  bda_output_s3_uri: string | null;
+  bda_client_file_id: string | null;
+};
+
+const DOCUMENT_RECORD_COLUMNS = `
+  doc_id, owner_sub, workspace_id, surface, file_name, mime, sha256, byte_size,
+  page_count, s3_key, converter, status, bda_invocation_arn, bda_input_key,
+  bda_output_prefix, bda_output_s3_uri, bda_client_file_id
+`;
+
+/** Exact owner-scoped lookup used after a worker resolves the principal from
+ * the dedicated ingest-job mapping. There is deliberately no ARN-only lookup. */
+export async function getDocumentById(
+  sub: string,
+  docId: string,
+): Promise<KbDocumentRecord | null> {
+  requireConfig();
+  const rows = await withPrincipal(sub, (tx) =>
+    queryJson<KbDocumentRecord>(
+      `SELECT ${DOCUMENT_RECORD_COLUMNS}
+       FROM kb.documents
+       WHERE owner_sub = :owner AND doc_id = CAST(:doc_id AS uuid)
+       LIMIT 1`,
+      [param("owner", sub), param("doc_id", docId)],
+      tx,
+    ),
+  );
+  return rows[0] ?? null;
+}
+
+/** Owner/workspace-scoped hash lookup for idempotent registration. */
+export async function getDocumentByWorkspaceSha(
+  sub: string,
+  workspaceId: string,
+  sha256: string,
+): Promise<KbDocumentRecord | null> {
+  requireConfig();
+  const rows = await withPrincipal(sub, (tx) =>
+    queryJson<KbDocumentRecord>(
+      `SELECT ${DOCUMENT_RECORD_COLUMNS}
+       FROM kb.documents
+       WHERE owner_sub = :owner
+         AND workspace_id = CAST(:workspace AS uuid)
+         AND sha256 = :sha256
+       LIMIT 1`,
+      [param("owner", sub), param("workspace", workspaceId), param("sha256", sha256.toLowerCase())],
+      tx,
+    ),
+  );
+  return rows[0] ?? null;
+}
+
+export type DocumentIngestPatch = {
+  status?: IngestStatus;
+  s3Key?: string | null;
+  pageCount?: number | null;
+  converter?: string | null;
+  bdaInvocationArn?: string | null;
+  bdaInputKey?: string | null;
+  bdaOutputPrefix?: string | null;
+  bdaOutputS3Uri?: string | null;
+  bdaClientFileId?: string | null;
+  errorKind?: "conversion" | "processing" | "limits" | "configuration" | "unknown";
+  markStarted?: boolean;
+  markCompleted?: boolean;
+};
+
+/**
+ * Patch one exact owned document. Optional expected statuses make worker
+ * transitions conditional without ever bypassing FORCE RLS.
+ */
+export async function updateDocumentIngest(
+  sub: string,
+  docId: string,
+  patch: DocumentIngestPatch,
+  expectedStatuses?: readonly IngestStatus[],
+): Promise<boolean> {
+  requireConfig();
+  if (patch.status !== undefined && !isIngestStatus(patch.status)) {
+    throw new Error("invalid document ingest status");
+  }
+  const sets = ["updated_at = now()"];
+  const parameters: SqlParameter[] = [param("owner", sub), param("doc_id", docId)];
+  const add = (column: string, name: string, value: string | number | boolean | null) => {
+    sets.push(`${column} = :${name}`);
+    parameters.push(param(name, value));
+  };
+  if (patch.status !== undefined) add("status", "status", patch.status);
+  if (patch.s3Key !== undefined) add("s3_key", "s3_key", patch.s3Key);
+  if (patch.pageCount !== undefined) {
+    add("page_count", "page_count", patch.pageCount);
+  }
+  if (patch.converter !== undefined) {
+    add("converter", "converter", patch.converter);
+  }
+  if (patch.bdaInvocationArn !== undefined) {
+    add("bda_invocation_arn", "bda_invocation_arn", patch.bdaInvocationArn);
+  }
+  if (patch.bdaInputKey !== undefined) {
+    add("bda_input_key", "bda_input_key", patch.bdaInputKey);
+  }
+  if (patch.bdaOutputPrefix !== undefined) {
+    add("bda_output_prefix", "bda_output_prefix", patch.bdaOutputPrefix);
+  }
+  if (patch.bdaOutputS3Uri !== undefined) {
+    add("bda_output_s3_uri", "bda_output_s3_uri", patch.bdaOutputS3Uri);
+  }
+  if (patch.bdaClientFileId !== undefined) {
+    add("bda_client_file_id", "bda_client_file_id", patch.bdaClientFileId);
+  }
+  if (patch.errorKind !== undefined) {
+    add("error", "error", terminalErrorSummary(patch.errorKind));
+  } else if (patch.status && patch.status !== "error") {
+    sets.push("error = NULL");
+  }
+  if (patch.markStarted) {
+    sets.push("ingest_started_at = COALESCE(ingest_started_at, now())");
+  }
+  if (patch.markCompleted) {
+    sets.push("ingest_completed_at = COALESCE(ingest_completed_at, now())");
+  }
+  const validSources: Readonly<Record<IngestStatus, readonly IngestStatus[]>> = {
+    queued: ["queued"],
+    converting: ["queued", "converting"],
+    embedding: ["queued", "converting", "embedding"],
+    ready: ["embedding", "ready"],
+    error: ["queued", "converting", "embedding", "error"],
+  };
+  const guardedStatuses = patch.status
+    ? (expectedStatuses ?? validSources[patch.status]).filter((status) =>
+        validSources[patch.status!].includes(status),
+      )
+    : expectedStatuses;
+  if (patch.status && !guardedStatuses?.length) return false;
+  let expectedSql = "";
+  if (guardedStatuses?.length) {
+    parameters.push({
+      name: "expected_statuses",
+      value: { arrayValue: { stringValues: [...guardedStatuses] } },
+    });
+    expectedSql = "AND status = ANY(CAST(:expected_statuses AS text[]))";
+  }
+  const result = await withPrincipal(sub, (tx) =>
+    execute(
+      `UPDATE kb.documents
+       SET ${sets.join(", ")}
+       WHERE owner_sub = :owner
+         AND doc_id = CAST(:doc_id AS uuid)
+         ${expectedSql}`,
+      parameters,
+      tx,
+    ),
+  );
+  return (result.numberOfRecordsUpdated ?? 0) > 0;
 }
 
 export type KbChunkRow = {
@@ -403,6 +625,28 @@ export type KbChunkRow = {
 };
 
 const CHUNK_INSERT_BATCH = 25;
+
+async function insertChunkBatches(
+  config: KbConfig,
+  transactionId: string,
+  sql: string,
+  sets: SqlParameter[][],
+): Promise<void> {
+  for (let i = 0; i < sets.length; i += CHUNK_INSERT_BATCH) {
+    await sendWithRetry(() =>
+      client(config.region).send(
+        new BatchExecuteStatementCommand({
+          resourceArn: config.clusterArn,
+          secretArn: config.secretArn,
+          database: config.database,
+          sql,
+          parameterSets: sets.slice(i, i + CHUNK_INSERT_BATCH),
+          transactionId,
+        }),
+      ),
+    );
+  }
+}
 
 /** Batch-insert chunks (idempotent on (doc_id, chunk_index)), under the tenant
  *  principal so the RLS WITH CHECK passes. Batched to respect the Data API
@@ -420,10 +664,15 @@ export async function insertChunks(
     INSERT INTO kb.chunks
       (doc_id, owner_sub, workspace_id, surface, chunk_index, page_start, page_end,
        kind, content, context, conf, token_count, embedding)
-    VALUES
-      (CAST(:doc_id AS uuid), :owner, CAST(:workspace AS uuid), :surface, :chunk_index,
-       :page_start, :page_end, :kind, :content, :context, :conf, :token_count,
-       CAST(:embedding AS vector))
+    SELECT
+      d.doc_id, :owner, CAST(:workspace AS uuid), :surface, :chunk_index,
+      :page_start, :page_end, :kind, :content, :context, :conf, :token_count,
+      CAST(:embedding AS vector)
+    FROM kb.documents d
+    WHERE d.doc_id = CAST(:doc_id AS uuid)
+      AND d.owner_sub = :owner
+      AND d.workspace_id = CAST(:workspace AS uuid)
+      AND d.surface = :surface
     ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
       content = EXCLUDED.content, context = EXCLUDED.context, conf = EXCLUDED.conf,
       token_count = EXCLUDED.token_count, embedding = EXCLUDED.embedding
@@ -444,19 +693,71 @@ export async function insertChunks(
     param("embedding", r.embedding ? vectorLiteral(r.embedding) : null),
   ]);
   await withPrincipal(sub, async (tx) => {
-    for (let i = 0; i < sets.length; i += CHUNK_INSERT_BATCH) {
-      await sendWithRetry(() =>
-        client(config.region).send(
-          new BatchExecuteStatementCommand({
-            resourceArn: config.clusterArn,
-            secretArn: config.secretArn,
-            database: config.database,
-            sql,
-            parameterSets: sets.slice(i, i + CHUNK_INSERT_BATCH),
-            transactionId: tx,
-          }),
-        ),
-      );
+    await insertChunkBatches(config, tx, sql, sets);
+  });
+}
+
+/**
+ * Atomically replace every chunk for an exact owned document. Replays cannot
+ * leave stale tail chunks when a converter emits fewer rows on a later run.
+ */
+export async function replaceDocumentChunks(
+  sub: string,
+  docId: string,
+  workspaceId: string,
+  surface: KbSurface,
+  rows: KbChunkRow[],
+): Promise<void> {
+  const config = requireConfig();
+  const insertSql = `
+    INSERT INTO kb.chunks
+      (doc_id, owner_sub, workspace_id, surface, chunk_index, page_start, page_end,
+       kind, content, context, conf, token_count, embedding)
+    SELECT
+      d.doc_id, :owner, CAST(:workspace AS uuid), :surface, :chunk_index,
+      :page_start, :page_end, :kind, :content, :context, :conf, :token_count,
+      CAST(:embedding AS vector)
+    FROM kb.documents d
+    WHERE d.doc_id = CAST(:doc_id AS uuid)
+      AND d.owner_sub = :owner
+      AND d.workspace_id = CAST(:workspace AS uuid)
+      AND d.surface = :surface
+    ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
+      content = EXCLUDED.content, context = EXCLUDED.context, conf = EXCLUDED.conf,
+      token_count = EXCLUDED.token_count, embedding = EXCLUDED.embedding
+  `;
+  const sets: SqlParameter[][] = rows.map((row) => [
+    param("doc_id", docId),
+    param("owner", sub),
+    param("workspace", workspaceId),
+    param("surface", surface),
+    param("chunk_index", row.chunkIndex),
+    param("page_start", row.pageStart),
+    param("page_end", row.pageEnd),
+    param("kind", row.kind),
+    param("content", row.content),
+    param("context", row.context ?? null),
+    param("conf", row.conf ?? null),
+    param("token_count", row.tokenCount ?? null),
+    param("embedding", row.embedding ? vectorLiteral(row.embedding) : null),
+  ]);
+  await withPrincipal(sub, async (tx) => {
+    await execute(
+      `DELETE FROM kb.chunks
+       WHERE owner_sub = :owner
+         AND workspace_id = CAST(:workspace AS uuid)
+         AND surface = :surface
+         AND doc_id = CAST(:doc_id AS uuid)`,
+      [
+        param("owner", sub),
+        param("workspace", workspaceId),
+        param("surface", surface),
+        param("doc_id", docId),
+      ],
+      tx,
+    );
+    if (sets.length) {
+      await insertChunkBatches(config, tx, insertSql, sets);
     }
   });
 }
@@ -464,6 +765,8 @@ export async function insertChunks(
 export type KbDeletedDocument = {
   doc_id: string;
   s3_key: string | null;
+  bda_input_key: string | null;
+  bda_output_prefix: string | null;
 };
 
 /**
@@ -480,12 +783,9 @@ export async function deleteWorkspaceDocuments(
   const sql = `
     DELETE FROM kb.documents
     WHERE owner_sub = :owner AND workspace_id = CAST(:workspace AS uuid)
-    RETURNING doc_id, s3_key
+    RETURNING doc_id, s3_key, bda_input_key, bda_output_prefix
   `;
-  const parameters: SqlParameter[] = [
-    param("owner", sub),
-    param("workspace", workspaceId),
-  ];
+  const parameters: SqlParameter[] = [param("owner", sub), param("workspace", workspaceId)];
   return withPrincipal(sub, (tx) => queryJson<KbDeletedDocument>(sql, parameters, tx));
 }
 

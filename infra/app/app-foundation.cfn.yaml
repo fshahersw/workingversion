@@ -44,6 +44,7 @@ Metadata:
           - KmsDeletionWindowInDays
           - NoncurrentVersionExpirationDays
           - ArtifactNoncurrentVersionExpirationDays
+          - BdaOutputExpirationDays
           - IncompleteUploadExpirationDays
           - LogRetentionDays
           - AlarmTopicArn
@@ -162,6 +163,15 @@ Parameters:
     Description: >
       Days to retain superseded deployment ZIP versions. Current versions are
       never expired by this template.
+
+  BdaOutputExpirationDays:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    MaxValue: 365
+    Description: >
+      Days to retain current BDA conversion output after canonical pages and
+      chunks are persisted, including output orphaned by a pending-job delete.
 
   LogRetentionDays:
     Type: Number
@@ -505,6 +515,10 @@ Resources:
             Status: Enabled
             NoncurrentVersionExpiration:
               NoncurrentDays: !Ref NoncurrentVersionExpirationDays
+          - Id: ExpireBdaOutput
+            Status: Enabled
+            Prefix: kb/bda-output/
+            ExpirationInDays: !Ref BdaOutputExpirationDays
       MetricsConfigurations:
         - Id: EntireBucket
       OwnershipControls:

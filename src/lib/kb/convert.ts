@@ -3,7 +3,7 @@
 // worker; these functions just map already-parsed data to canonical blocks so
 // they are unit-testable and reused across converters.
 
-import type { Block, CanonicalDoc, Page, TableData } from "./canonical";
+import type { Block, CanonicalDoc, Page, TableData } from "./canonical.ts";
 
 export type DocMeta = {
   fileName: string;
@@ -19,7 +19,12 @@ function parseTable(lines: string[], start: number): { table: TableData; next: n
   const isSep = (l: string) => /^\s*\|?[\s:|-]+\|?\s*$/.test(l) && l.includes("-");
   if (!isRow(lines[start] ?? "") || !isSep(lines[start + 1] ?? "")) return null;
   const cells = (l: string) =>
-    l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+    l
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
   const header = cells(lines[start]!);
   const rows: string[][] = [];
   let i = start + 2;
@@ -134,9 +139,15 @@ export function sheetsToCanonical(sheets: SheetInput[], meta: DocMeta): Canonica
     pageNo++;
     const header = rows[0]!.map((c) => String(c ?? "").trim());
     const body = rows.slice(1).map((r) => r.map((c) => String(c ?? "").trim()));
-    const blocks: Block[] = [{ kind: "heading", text: sheet.name.trim() || `Sheet ${pageNo}`, level: 1 }];
+    const blocks: Block[] = [
+      { kind: "heading", text: sheet.name.trim() || `Sheet ${pageNo}`, level: 1 },
+    ];
     const text = rows.map((r) => r.join(" | ")).join("\n");
-    blocks.push({ kind: "table", text, table: { header, rows: body, caption: sheet.name.trim() || undefined } });
+    blocks.push({
+      kind: "table",
+      text,
+      table: { header, rows: body, caption: sheet.name.trim() || undefined },
+    });
     pages.push({ pageNo, blocks, source: "sheet" });
   }
   return {
@@ -162,7 +173,10 @@ export function pagesToCanonical(pages: PageText[], meta: DocMeta): CanonicalDoc
   for (const p of pages) {
     const text = (p.text ?? "").replace(/\r\n?/g, "\n").trim();
     if (!text) continue;
-    const paras = text.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
+    const paras = text
+      .split(/\n\s*\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
     const blocks: Block[] = (paras.length ? paras : [text]).map((t) => ({ kind: "para", text: t }));
     out.push({ pageNo: p.page, blocks, source: "text" });
   }

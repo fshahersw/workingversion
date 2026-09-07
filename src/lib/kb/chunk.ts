@@ -13,7 +13,7 @@
 //  - Page is the citation anchor; prose chunks never span pages (pageStart ===
 //    pageEnd). Content is capped well under the Data API 64 KB/row limit.
 
-import type { Block, CanonicalDoc } from "./canonical";
+import type { Block, CanonicalDoc } from "./canonical.ts";
 
 export type KbChunkInput = {
   chunkIndex: number;

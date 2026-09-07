@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  KbAskError,
-  selectWorkspaceDocuments,
-} from "./ask-selection.ts";
-import type { WorkspaceDetail, WorkspaceDoc } from "./workspace.server.ts";
+import { KbAskError, selectWorkspaceDocuments } from "./ask-selection.ts";
+import type { WorkspaceDetailWithProgress, WorkspaceDoc } from "./workspace.server.ts";
 
 function doc(docId: string, fileName: string): WorkspaceDoc {
   return {
@@ -17,7 +14,7 @@ function doc(docId: string, fileName: string): WorkspaceDoc {
   };
 }
 
-function workspace(docs: WorkspaceDoc[]): WorkspaceDetail {
+function workspace(docs: WorkspaceDoc[]): WorkspaceDetailWithProgress {
   return {
     itemId: "workspace-1",
     name: "Daubert set",
@@ -27,8 +24,17 @@ function workspace(docs: WorkspaceDoc[]): WorkspaceDetail {
     docCount: docs.length,
     pageCount: docs.reduce((total, item) => total + item.pageCount, 0),
     status: "ready",
+    pendingCount: 0,
     kbWorkspaceId: "11111111-1111-4111-8111-111111111111",
     docs,
+    documentProgress: docs.map((item) => ({
+      clientFileId: item.sourceFileId ?? item.docId,
+      fileName: item.fileName,
+      status: "ready",
+      docId: item.docId,
+      pageCount: item.pageCount,
+      chunkCount: item.chunkCount,
+    })),
   };
 }
 
@@ -39,18 +45,18 @@ test("selectWorkspaceDocuments defaults to the full saved manifest", () => {
 
 test("selectWorkspaceDocuments keeps requested order and drops duplicates", () => {
   const docs = [doc("a", "one.pdf"), doc("b", "two.pdf"), doc("c", "three.pdf")];
-  assert.deepEqual(
-    selectWorkspaceDocuments(workspace(docs), ["c", "a", "c"]),
-    [docs[2], docs[0]],
-  );
+  assert.deepEqual(selectWorkspaceDocuments(workspace(docs), ["c", "a", "c"]), [docs[2], docs[0]]);
 });
 
 test("selectWorkspaceDocuments rejects empty or foreign document selections", () => {
   const saved = workspace([doc("a", "one.pdf")]);
   assert.throws(() => selectWorkspaceDocuments(saved, []), KbAskError);
-  assert.throws(() => selectWorkspaceDocuments(saved, ["missing"]), (error: unknown) => {
-    assert.ok(error instanceof KbAskError);
-    assert.equal(error.status, 403);
-    return true;
-  });
+  assert.throws(
+    () => selectWorkspaceDocuments(saved, ["missing"]),
+    (error: unknown) => {
+      assert.ok(error instanceof KbAskError);
+      assert.equal(error.status, 403);
+      return true;
+    },
+  );
 });

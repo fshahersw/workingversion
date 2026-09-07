@@ -1,6 +1,10 @@
 # Per-User Document KB — Ingest, Chunking, Embedding, Retrieval (design)
 
-Status: DESIGN (not built). Scope locked 2026-09-06 with Firas.
+Status: ASYNC-BDA IMPLEMENTED LOCALLY (not deployed or migrated), 2026-09-06.
+
+> **NO DEPLOY / NO MIGRATION:** The implementation is source plus local
+> validation only. No AWS invocation, change set, artifact upload, stack
+> deployment, or application of `0002_kb_async_ingest.sql` was performed.
 
 Frontier-quality bulk document analysis for the **Discovery → Working Set** tab.
 Users upload up to **100 files / 20,000 pages** of mixed types (native PDF, scanned
@@ -24,7 +28,7 @@ Related: [[seegerweissai-discovery-kb]] (current-state map + KB decision),
   work cannot run on the Cloudflare/nitro scaffold; this is AWS compute with a scoped
   IAM role.
 - **Scope:** Working Set tab ONLY. Schema is keyed by `(owner_sub, workspace_id,
-  surface)` with `surface ∈ {workingset, deposition, review}` so Deposition and
+surface)` with `surface ∈ {workingset, deposition, review}` so Deposition and
   Tabular Review adopt the same store later with no schema rework.
 - **Conversion:** **BDA-first.** BDA converts all PDF (native + scanned) / image /
   DOCX uploads → markdown + per-table CSV + confidence. SheetJS for XLSX, direct parse
@@ -62,14 +66,14 @@ Block = {
 
 ## 2. File → canonical: routing matrix
 
-| Input | Converter | Notes |
-|---|---|---|
-| PDF (native + scanned) | **BDA** | markdown + per-table CSV + figure crops + per-page confidence |
-| Image / screenshot (png/jpg/tiff) | **BDA** | OCR + tables + confidence; VL escalation if low-conf |
-| DOCX | **BDA** (internally → PDF) | native tables preserved |
-| XLSX | SheetJS | structured cells/sheets — NOT OCR; one `table` block per sheet, row-range anchors |
-| PPTX | LibreOffice/soffice → PDF → BDA | per-slide; rare in litigation |
-| TXT / MD | direct parser | — |
+| Input                             | Converter                       | Notes                                                                             |
+| --------------------------------- | ------------------------------- | --------------------------------------------------------------------------------- |
+| PDF (native + scanned)            | **BDA**                         | markdown + per-table CSV + figure crops + per-page confidence                     |
+| Image / screenshot (png/jpg/tiff) | **BDA**                         | OCR + tables + confidence; VL escalation if low-conf                              |
+| DOCX                              | **BDA** (internally → PDF)      | native tables preserved                                                           |
+| XLSX                              | SheetJS                         | structured cells/sheets — NOT OCR; one `table` block per sheet, row-range anchors |
+| PPTX                              | LibreOffice/soffice → PDF → BDA | per-slide; rare in litigation                                                     |
+| TXT / MD                          | direct parser                   | —                                                                                 |
 
 **BDA is the single first-class converter** for all document-shaped uploads (PDF
 native + scanned, images, DOCX) — the vast majority of legal uploads. Managed, async,
@@ -79,6 +83,7 @@ structural markdown + per-table CSV + figure crops + **per-page confidence**.
 the Fargate/torch cluster from the design.
 
 Only **XLSX / PPTX / TXT** fall outside BDA:
+
 - **XLSX** is structured data — parse natively (SheetJS), do not OCR. One `table`
   block per sheet, row/col anchors; large sheets → row-group chunks (§4).
 - **PPTX** (rare) → `soffice --headless` convert to PDF → BDA. Defer if unneeded in v1.
@@ -193,37 +198,66 @@ by RRF (constant 60) in one SQL call, scoped by `(owner_sub, workspace_id, surfa
 Per-file candidate pooling so a 5,000-page PDF can't drown a short exhibit (keep the
 good per-file design from today's `pile-index.ts`).
 
-## 7. Ingest pipeline (SQS + Lambda, BDA-managed conversion)
+## 7. Ingest pipeline (implemented async-BDA slice)
 
 ```
-POST /api/kb/ingest  (browser → S3 presigned upload of raw bytes)
-  -> register kb_documents(status=queued) ; classify type
+saveWorkspaceFn / POST /api/kb/ingest
+  -> browser computes raw-byte SHA-256 with Web Crypto
+  -> browser PUTs bytes to uploads/<sub>/... using a checksum-bound signed header
+  -> reserve named workspace + one WSDOC child per expected document
+  -> register kb.documents(status=queued) under withPrincipal(<sub>)
+  -> conditionally reserve dedicated ingest job
+     (owner/doc/workspace/request+source hashes/owned keys; no content/file name)
+  -> HeadObject verifies S3 checksum + byte size without reading the object body
   -> BDA-eligible (PDF/image/DOCX): InvokeDataAutomationAsync(S3 in, S3 out)
-       status=converting ; BDA runs managed
+       deterministic clientToken
+       notificationConfiguration.eventBridgeConfiguration.eventBridgeEnabled=true
+       output kb/bda-output/<sub>/<docId>/
+       status=converting ; browser may close
   -> XLSX/TXT: parse inline (fast) -> straight to chunk stage
-BDA completion (EventBridge on job done, NOT client polling):
-  -> Lambda: read BDA result.json/markdown/CSV from S3 -> canonical blocks
-     (per-page confidence; pages < threshold -> VL escalation pass)
-Chunk/embed Lambda (SQS):
+BDA success/client-error/service-error (best effort):
+  -> EventBridge input transform -> compact SQS event
+     {version, invocationArn, outcome, correlationId}
+  -> bounded Lambda exact-gets job alias + principal mapping
+  -> every Aurora operation uses withPrincipal(ownerSub)
+  -> GetDataAutomationStatus + validate owned output prefix
+  -> read result.json/markdown -> canonical blocks
   chunk:   per-page, table-aware                          -> chunk rows
-  context: Nemotron Nano 3 one-liner/chunk (batched)      -> chunk.context
+  context: deterministic document/section/page prefix     -> chunk.context
   embed:   Titan v2, bounded-concurrency pool + backoff   -> chunk.embedding
-  persist: page markdown -> S3 (SSE-KMS); chunks -> Aurora (batch upsert)
-  status:  ready ; counts surfaced to the UI
+  persist: pages -> kb/pages/<sub>/<docId>.json; atomically replace chunks
+  status: child ready -> aggregate parent -> job ready
+Scheduled reconciliation:
+  -> StatusUpdated GSI finds stale queued/converting/embedding jobs
+  -> queued/no ARN: repeat deterministic InvokeDataAutomationAsync and attach alias
+  -> converting/embedding: GetDataAutomationStatus
+     -> enqueue the same compact idempotent event
 ```
 
-- **No Fargate, no torch, no Docling.** BDA does conversion managed/async; Lambdas
-  only orchestrate + chunk + embed. Lambda's 15-min limit is a non-issue because it
-  never blocks on BDA — BDA runs on its own and fires an **EventBridge** completion
-  event that triggers the next Lambda.
-- Sha-dedup at doc AND chunk level. Idempotent: completion re-runs re-use S3 output.
+- **No Fargate, no torch, no Docling, no Step Functions.** BDA runs separately;
+  one SQS record finishes one bounded document. Page/markdown/chunk ceilings
+  fail closed before Lambda's 15-minute limit.
+- Document and chunk writes are idempotent. Duplicate EventBridge/SQS delivery
+  is lease/condition protected; an atomic replace prevents stale tail chunks.
+- BDA direct service events are best effort. SQS has partial batch failure,
+  bounded event-source concurrency, encryption, TLS-only policy, redrive/DLQ,
+  EventBridge target retries/DLQ, and age/error/throttle/delivery alarms.
+- The dedicated job table is CMK encrypted with PITR, TTL, deletion protection,
+  and a `StatusUpdated` GSI. It stores owner and owned coordinates but no
+  document content or file name. The queue never carries the owner.
 - Embed stage: bounded concurrency (Titan has no real-time batch) + backoff, or a
   Bedrock Batch inference job for very large offline loads.
 - Client model mirrors the proven scratch flow: presign upload → poll progress →
   search. Instant client BM25 pile covers the gap while BDA runs.
-- IAM: Lambda role scoped to Bedrock invoke (BDA/Titan/VL/Nemotron/Rerank), the KB S3
-  prefix, SQS, EventBridge, and Aurora (IAM DB auth). No static creds. No PHI in logs;
-  scrub converter/model error detail before logging.
+- Parent workspaces aggregate per-document checkpoints and cannot become ready
+  until every expected document succeeds. Pending deletion removes exact job
+  mappings first; already-running BDA work is not assumed cancellable and may
+  require lifecycle cleanup if it writes after deletion.
+- IAM: app starts BDA and writes exact job mappings; worker reads BDA output,
+  invokes only the configured embed model, updates owner checkpoints, and uses
+  the Data API/`kb_app` secret. No static credentials. Events, logs, metrics,
+  and DLQ payloads exclude principals, file names, page/document text, and raw
+  service errors.
 
 ## 8. Retrieval + bulk query (two modes)
 

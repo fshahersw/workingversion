@@ -28,8 +28,21 @@ import { RDSDataClient, ExecuteStatementCommand } from "@aws-sdk/client-rds-data
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const fileIdx = args.indexOf("--file");
-const FILE = fileIdx >= 0 ? args[fileIdx + 1] : "db/kb/0001_kb_init.sql";
+const explicitFile = fileIdx >= 0 ? args[fileIdx + 1] : undefined;
 const REGION = process.env.AWS_REGION ?? "us-east-1";
+const ORDERED_MIGRATIONS = ["db/kb/0001_kb_init.sql", "db/kb/0002_kb_async_ingest.sql"];
+
+function migrationFiles() {
+  if (fileIdx >= 0 && (!explicitFile || explicitFile.startsWith("--"))) {
+    throw new Error("--file requires a SQL migration path");
+  }
+  if (!explicitFile) return [...ORDERED_MIGRATIONS];
+  const normalized = explicitFile.replaceAll("\\", "/");
+  if (!ORDERED_MIGRATIONS.includes(normalized)) {
+    throw new Error("--file must select 0001_kb_init.sql or 0002_kb_async_ingest.sql");
+  }
+  return [normalized];
+}
 
 /** Split SQL into top-level statements: tracks -- line comments, single-quoted
  *  literals, and $$ dollar-quoted bodies so semicolons inside them don't split. */
@@ -110,14 +123,30 @@ function aws(argv) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
-  const statements = splitSql(readFileSync(FILE, "utf8"));
-  console.log(`Parsed ${statements.length} statement(s) from ${FILE}`);
+  const migrations = migrationFiles().map((file) => ({
+    file,
+    statements: splitSql(readFileSync(file, "utf8")),
+  }));
+  if (!migrations.length) {
+    throw new Error("No ordered KB migrations were selected");
+  }
+  const statementCount = migrations.reduce(
+    (total, migration) => total + migration.statements.length,
+    0,
+  );
+  console.log(
+    `Parsed ${statementCount} statement(s) from ${migrations.length} ordered migration(s)`,
+  );
 
   if (dryRun) {
-    statements.forEach((s, i) => {
-      const first = s.split("\n").find((l) => l.replace(/--.*/, "").trim()) ?? s;
-      console.log(`  ${String(i + 1).padStart(2)}. ${first.trim().slice(0, 72)}`);
-    });
+    for (const migration of migrations) {
+      console.log(`  ${migration.file}`);
+      migration.statements.forEach((statement, index) => {
+        const first =
+          statement.split("\n").find((line) => line.replace(/--.*/, "").trim()) ?? statement;
+        console.log(`    ${String(index + 1).padStart(2)}. ${first.trim().slice(0, 72)}`);
+      });
+    }
     console.log("\n--dry-run: no AWS calls made.");
     return;
   }
@@ -160,16 +189,20 @@ async function main() {
   }
 
   console.log(`Applying to ${clusterId} / ${database} via Data API...`);
-  for (let i = 0; i < statements.length; i++) {
-    const first = statements[i].split("\n").find((l) => l.replace(/--.*/, "").trim()) ?? "";
-    process.stdout.write(`  [${i + 1}/${statements.length}] ${first.trim().slice(0, 64)} ... `);
-    await exec(masterSecretArn, statements[i]);
-    console.log("ok");
+  let applied = 0;
+  for (const migration of migrations) {
+    console.log(`  ${migration.file}`);
+    for (const statement of migration.statements) {
+      applied += 1;
+      const first = statement.split("\n").find((line) => line.replace(/--.*/, "").trim()) ?? "";
+      process.stdout.write(`    [${applied}/${statementCount}] ${first.trim().slice(0, 64)} ... `);
+      await exec(masterSecretArn, statement);
+      console.log("ok");
+    }
   }
   console.log("Schema applied.");
 
-  const appSecretArn =
-    process.env.KB_SECRET_ARN || process.env.KB_APP_SECRET_ARN;
+  const appSecretArn = process.env.KB_SECRET_ARN || process.env.KB_APP_SECRET_ARN;
   if (appSecretArn) {
     const raw = aws([
       "secretsmanager",
@@ -183,7 +216,9 @@ async function main() {
     ]);
     const pw = JSON.parse(raw).password;
     if (!/^[A-Za-z0-9]+$/.test(pw)) {
-      throw new Error("kb_app password has unexpected characters; aborting to avoid a broken ALTER.");
+      throw new Error(
+        "kb_app password has unexpected characters; aborting to avoid a broken ALTER.",
+      );
     }
     process.stdout.write("  Setting kb_app login password ... ");
     await exec(masterSecretArn, `ALTER ROLE kb_app WITH LOGIN PASSWORD '${pw}'`);

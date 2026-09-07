@@ -92,6 +92,18 @@
     "ParameterValue": "kb"
   },
   {
+    "ParameterKey": "KbIngestAccessPolicyArn",
+    "ParameterValue": "arn:aws:iam::000000000000:policy/lit-ai/staging/replace-with-kb-ingest-app-access"
+  },
+  {
+    "ParameterKey": "KbIngestJobsTableName",
+    "ParameterValue": "replace-with-staging-kb-ingest-jobs"
+  },
+  {
+    "ParameterKey": "KbIngestQueueUrl",
+    "ParameterValue": "https://sqs.us-east-1.amazonaws.com/000000000000/replace-with-staging-kb-ingest"
+  },
+  {
     "ParameterKey": "BedrockRegion",
     "ParameterValue": "us-east-1"
   },

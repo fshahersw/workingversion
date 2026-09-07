@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import type { IngestStatus } from "./ingest-state.ts";
+
 export type WorkspaceFingerprintPage = {
   page: number;
   text: string;
@@ -22,10 +24,7 @@ function field(hash: ReturnType<typeof createHash>, value: string | number | und
   hash.update("|");
 }
 
-export function workspaceFileFingerprint(
-  file: WorkspaceFingerprintFile,
-  index: number,
-): string {
+export function workspaceFileFingerprint(file: WorkspaceFingerprintFile, index: number): string {
   const hash = createHash("sha256");
   field(hash, index);
   field(hash, file.clientFileId);
@@ -62,7 +61,43 @@ export function workspaceSaveFingerprint(args: {
 }
 
 export function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    value,
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+export type WorkspaceCheckpointState = {
+  clientFileId: string;
+  status: IngestStatus;
+};
+
+export type WorkspaceCheckpointAggregate = {
+  status: "saving" | "ready" | "error";
+  pendingCount: number;
+  readyCount: number;
+  failedCount: number;
+};
+
+export function aggregateWorkspaceCheckpoints(
+  expectedCount: number,
+  checkpoints: readonly WorkspaceCheckpointState[],
+): WorkspaceCheckpointAggregate {
+  const unique = new Map(
+    checkpoints.map((checkpoint) => [checkpoint.clientFileId, checkpoint.status]),
   );
+  const statuses = [...unique.values()];
+  const readyCount = statuses.filter((status) => status === "ready").length;
+  const failedCount = statuses.filter((status) => status === "error").length;
+  const missing = Math.max(0, expectedCount - statuses.length);
+  const pendingCount =
+    missing + statuses.filter((status) => status !== "ready" && status !== "error").length;
+  return {
+    status:
+      failedCount > 0
+        ? "error"
+        : expectedCount > 0 && readyCount === expectedCount
+          ? "ready"
+          : "saving",
+    pendingCount,
+    readyCount,
+    failedCount,
+  };
 }

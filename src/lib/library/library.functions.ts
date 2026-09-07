@@ -55,11 +55,15 @@ export const deleteLibraryItemFn = createServerFn({ method: "POST" })
 
 export const createUploadFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { name: string; size: number }) => {
+  .inputValidator((d: { name: string; size: number; sha256?: string }) => {
     if (!d?.name) throw new Error("name required");
     const size = Number(d.size);
-    if (!Number.isFinite(size) || size < 0) throw new Error("invalid size");
-    return { name: d.name, size };
+    if (!Number.isSafeInteger(size) || size < 1) throw new Error("invalid size");
+    const sha256 = d.sha256 === undefined ? undefined : String(d.sha256).toLowerCase();
+    if (sha256 !== undefined && !/^[0-9a-f]{64}$/.test(sha256)) {
+      throw new Error("invalid sha256");
+    }
+    return { name: d.name, size, ...(sha256 ? { sha256 } : {}) };
   })
   .handler(async ({ context, data }) => {
     const { createUpload } = await import("@/lib/library/library.server");

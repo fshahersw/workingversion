@@ -21,7 +21,10 @@ function applyLocalEnv() {
     if (!s || s.startsWith("#") || !s.includes("=")) continue;
     const i = s.indexOf("=");
     const key = s.slice(0, i).trim();
-    const value = s.slice(i + 1).trim().replace(/^['"]|['"]$/g, "");
+    const value = s
+      .slice(i + 1)
+      .trim()
+      .replace(/^['"]|['"]$/g, "");
     if (key && value) process.env[key] = value;
   }
 }
@@ -40,6 +43,7 @@ export default defineConfig({
     preset: "node-server",
   },
   vite: {
+    ...(process.env["LITAI_LAMBDA_BUILD"] === "true" ? { envDir: false } : {}),
     ssr: { external: ["node:sqlite"] },
   },
 });

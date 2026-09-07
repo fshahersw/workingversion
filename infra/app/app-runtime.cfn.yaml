@@ -65,6 +65,9 @@ Metadata:
           - KbClusterArn
           - KbSecretArn
           - KbDatabase
+          - KbIngestAccessPolicyArn
+          - KbIngestJobsTableName
+          - KbIngestQueueUrl
       - Label:
           default: AI and application configuration
         Parameters:
@@ -297,6 +300,25 @@ Parameters:
     MaxLength: 63
     AllowedPattern: "^[A-Za-z][A-Za-z0-9_]*$"
     Description: Database output from the KB stack.
+
+  KbIngestAccessPolicyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:iam::[0-9]{12}:policy/.+$"
+    ConstraintDescription: Supply the AppIngestAccessPolicyArn output from the KB ingest stack.
+    Description: Producer-owned policy for exact ingest-job registration.
+
+  KbIngestJobsTableName:
+    Type: String
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+    Description: IngestJobsTableName output; exported as KB_INGEST_JOBS_TABLE.
+
+  KbIngestQueueUrl:
+    Type: String
+    AllowedPattern: "^https://[^\\s]+$"
+    ConstraintDescription: Supply the HTTPS IngestQueueUrl output from the KB ingest stack.
+    Description: IngestQueueUrl output; exported as KB_INGEST_QUEUE_URL.
 
   BedrockRegion:
     Type: String
@@ -551,6 +573,7 @@ Resources:
       ManagedPolicyArns:
         - !Ref AppAccessPolicyArn
         - !Ref KbAccessPolicyArn
+        - !Ref KbIngestAccessPolicyArn
       Policies:
         - PolicyName: runtime-telemetry
           PolicyDocument:
@@ -640,6 +663,8 @@ Resources:
           KB_CLUSTER_ARN: !Ref KbClusterArn
           KB_SECRET_ARN: !Ref KbSecretArn
           KB_DATABASE: !Ref KbDatabase
+          KB_INGEST_JOBS_TABLE: !Ref KbIngestJobsTableName
+          KB_INGEST_QUEUE_URL: !Ref KbIngestQueueUrl
           BEDROCK_REGION: !Ref BedrockRegion
           BDA_PROJECT_ARN: !Ref BdaProjectArn
           BDA_PROFILE_ARN: !Ref BdaProfileArn

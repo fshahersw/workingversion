@@ -93,6 +93,98 @@ export function ingestFileToKb(
   );
 }
 
+export type KbAsyncPrepareResult = {
+  uploadId: string;
+  inputKey: string;
+  uploadUrl: string;
+  uploadHeaders: Record<string, string>;
+};
+
+export function prepareAsyncKbIngest(
+  input: { fileName: string; byteSize: number; sha256: string },
+  signal?: AbortSignal,
+): Promise<KbAsyncPrepareResult> {
+  return postJson<KbAsyncPrepareResult>("/api/kb/ingest", { action: "prepare", ...input }, signal);
+}
+
+export async function uploadPreparedAsyncKbFile(
+  prepared: KbAsyncPrepareResult,
+  file: Blob,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(prepared.uploadUrl, {
+    method: "PUT",
+    body: file,
+    headers: prepared.uploadHeaders,
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok) throw new Error(`upload failed [${response.status}]`);
+}
+
+export type KbAsyncStartInput = {
+  workspaceItemId: string;
+  clientFileId: string;
+  uploadId: string;
+  fileName: string;
+  inputKey: string;
+  sha256: string;
+  mime?: string;
+  byteSize?: number;
+};
+
+export type KbAsyncStartResult = {
+  docId: string;
+  status: "queued" | "converting" | "embedding" | "ready" | "error";
+};
+
+export function startAsyncKbIngest(
+  input: KbAsyncStartInput,
+  signal?: AbortSignal,
+): Promise<KbAsyncStartResult> {
+  return postJson<KbAsyncStartResult>("/api/kb/ingest", { action: "start", ...input }, signal);
+}
+
+export type KbWorkspaceIngestStatus = {
+  itemId: string;
+  status: "saving" | "ready" | "error";
+  stage: "queued" | "converting" | "embedding" | "ready" | "error";
+  pendingCount: number;
+  docCount: number;
+  chunkCount: number;
+  documents: {
+    clientFileId: string;
+    fileName: string;
+    status: "queued" | "converting" | "embedding" | "ready" | "error";
+    docId?: string;
+    pageCount: number;
+    chunkCount: number;
+    errorSummary?: string;
+  }[];
+  errorSummary?: string;
+};
+
+export function getAsyncKbIngestStatus(
+  workspaceItemId: string,
+  signal?: AbortSignal,
+): Promise<KbWorkspaceIngestStatus> {
+  return postJson<KbWorkspaceIngestStatus>(
+    "/api/kb/ingest",
+    { action: "status", workspaceItemId },
+    signal,
+  );
+}
+
+export function getAsyncKbIngestStatuses(
+  workspaceItemIds: string[],
+  signal?: AbortSignal,
+): Promise<{ workspaces: KbWorkspaceIngestStatus[] }> {
+  return postJson<{ workspaces: KbWorkspaceIngestStatus[] }>(
+    "/api/kb/ingest",
+    { action: "status-batch", workspaceItemIds },
+    signal,
+  );
+}
+
 export type KbDocument = {
   doc_id: string;
   file_name: string;

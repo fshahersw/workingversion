@@ -2,8 +2,8 @@
 // prefix, embed (Titan v2) with bounded concurrency + retry, and preserve order.
 // The Titan call is injectable so this is unit-testable without Bedrock.
 
-import type { KbChunkInput } from "./chunk";
-import type { KbChunkRow } from "./aurora.server";
+import type { KbChunkInput } from "./chunk.ts";
+import type { KbChunkRow } from "./aurora.server.ts";
 
 type EmbedFn = (text: string, signal?: AbortSignal) => Promise<number[] | null>;
 
@@ -23,7 +23,11 @@ export function contextualize(fileName: string, chunk: KbChunkInput): string {
   return bits.filter(Boolean).join(" — ");
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
   const out = new Array<R>(items.length);
   let cursor = 0;
   await Promise.all(
