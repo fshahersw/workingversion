@@ -27,14 +27,15 @@ import {
   persistMode,
   type ComposerMode,
 } from "./composer-kit";
-import { AgentTimeline } from "./AgentTimeline";
 import { ConversationHistory } from "./ConversationHistory";
 import { AnswerMarkdown } from "./AnswerMarkdown";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ThinkingStream } from "./ThinkingStream";
-import { ReasoningStream } from "./ReasoningStream";
 import { AnswerActions } from "./AnswerActions";
 import { WorkspaceRail } from "./WorkspaceRail";
+import { ResearchActivity } from "./ResearchActivity";
+import { StructuredChoicePanel } from "./StructuredChoicePanel";
+import { choiceResponseText } from "@/lib/agents/research-activity";
 
 
 const MIN_LEFT = 45;
@@ -363,6 +364,10 @@ export function ChatView({
                       matter={matter}
                       conversationId={conversationId}
                       onWorkspaceChange={() => setRailKey((k) => k + 1)}
+                      onChoice={(request, optionId) => {
+                        const response = choiceResponseText(request, optionId);
+                        if (response) onSend(response);
+                      }}
                     />
                   ),
                 )}
@@ -728,6 +733,7 @@ function AssistantMessage({
   matter,
   conversationId,
   onWorkspaceChange,
+  onChoice,
 }: {
   msg: Message;
   onCite: (ref: string) => void;
@@ -736,6 +742,7 @@ function AssistantMessage({
   matter: MatterScope | null;
   conversationId: string | null;
   onWorkspaceChange: () => void;
+  onChoice: (request: NonNullable<Message["choice"]>, optionId: string) => void;
 }) {
 
   const rounds = msg.rounds ?? [];
@@ -748,21 +755,12 @@ function AssistantMessage({
         </div>
       )}
       {rounds.length > 0 && (
-        <AgentTimeline
+        <ResearchActivity
           rounds={rounds}
-          collapsed={
-            Boolean(msg.collapseTimeline) ||
-            msg.status === "writing" ||
-            msg.status === "done"
-          }
           settled={msg.status === "writing" || msg.status === "done"}
           sourceCount={(msg.sources ?? []).length}
         />
       )}
-      <ReasoningStream
-        text={msg.reasoning ?? ""}
-        active={msg.status === "thinking" || msg.status === "writing"}
-      />
       <ThinkingStream
         text={msg.thinking ?? ""}
         active={msg.status === "thinking"}
@@ -794,6 +792,13 @@ function AssistantMessage({
         {msg.artifacts && msg.artifacts.length > 0 && (
           <ArtifactPanel artifacts={msg.artifacts} />
         )}
+        {msg.choice ? (
+          <StructuredChoicePanel
+            request={msg.choice}
+            disabled={msg.status === "thinking" || msg.status === "writing"}
+            onSelect={(optionId) => onChoice(msg.choice!, optionId)}
+          />
+        ) : null}
         {msg.status === "error" && (
           <div className="mt-2 flex items-start gap-2 text-sm text-red-600">
             <AlertCircle className="mt-[2px] h-4 w-4 shrink-0" />

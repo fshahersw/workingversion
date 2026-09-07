@@ -5,6 +5,7 @@ import {
   type SSEEvent,
 } from "@/lib/orchestrate";
 import type { Artifact, Attachment, MatterScope, Message, Round, Source } from "@/lib/chat-types";
+import { normalizeChoiceRequest } from "@/lib/agents/research-activity";
 import {
   loadConversation,
   saveFollowups,
@@ -97,12 +98,17 @@ function applyEvent(m: Message, e: SSEEvent): Message {
     case "mode":
       return { ...m, mode: d.mode ? String(d.mode) : m.mode, modeReason: d.reason ? String(d.reason) : m.modeReason };
     case "round": {
+      const roundNumber = Number(d.round) || m.rounds.length + 1;
+      const existing = m.rounds.find((candidate) => candidate.round === roundNumber);
+      const now = Date.now();
       const round: Round = {
-        round: Number(d.round) || m.rounds.length + 1,
+        round: roundNumber,
         phase: d.phase ? String(d.phase) : undefined,
         reasoning: String(d.reasoning ?? ""),
         scratch_note: d.scratch_note as string | undefined,
         done: Boolean(d.done),
+        startedAt: existing?.startedAt ?? now,
+        completedAt: d.done ? now : existing?.completedAt,
         dispatch:
           (d.dispatch as { agent: string; focus: string }[] | undefined) ?? [],
         agents: {},
@@ -115,7 +121,6 @@ function applyEvent(m: Message, e: SSEEvent): Message {
           tools: [],
         };
       }
-      const existing = m.rounds.find((r) => r.round === round.round);
       const rounds = existing
         ? m.rounds.map((r) =>
             r.round === round.round
@@ -229,6 +234,10 @@ function applyEvent(m: Message, e: SSEEvent): Message {
       const byId = new Map((m.artifacts ?? []).map((x) => [x.id, x]));
       for (const a of incoming) byId.set(a.id, a);
       return { ...m, artifacts: [...byId.values()] };
+    }
+    case "choice": {
+      const choice = normalizeChoiceRequest(d.choice ?? d);
+      return choice ? { ...m, choice } : m;
     }
     case "done":
       return { ...m, status: "done", collapseTimeline: true };

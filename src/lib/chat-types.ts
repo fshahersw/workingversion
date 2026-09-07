@@ -154,6 +154,8 @@ export type Round = {
   reasoning: string;
   scratch_note?: string;
   done?: boolean;
+  startedAt?: number;
+  completedAt?: number;
   dispatch: { agent: string; focus: string }[];
   agents: Record<string, AgentRun>;
 };
@@ -191,6 +193,12 @@ export type Artifact = {
   size?: number;
 };
 
+export type ChoiceRequest = {
+  id: string;
+  prompt: string;
+  options: { id: string; label: string; description?: string }[];
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -200,6 +208,8 @@ export type Message = {
   answer: string;
   /** Charts + files produced by run_python during this turn. */
   artifacts?: Artifact[];
+  /** A structured choice emitted by the orchestrator. Absent unless a real event supplied it. */
+  choice?: ChoiceRequest;
   /** Effort mode this turn actually ran at (fast | think | conversational) and why. */
   mode?: string;
   modeReason?: string;
@@ -207,7 +217,7 @@ export type Message = {
   deliverable?: string;
   /** Live, streamed research narration ("thinking steps") shown before the answer. */
   thinking?: string;
-  /** The model's actual adaptive-thinking reasoning, streamed live (frontier feel). */
+  /** Internal model reasoning. Retained for compatibility but never rendered to users. */
   reasoning?: string;
   status: "thinking" | "writing" | "done" | "error";
   error?: string;
