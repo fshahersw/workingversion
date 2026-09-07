@@ -12,6 +12,7 @@ import { LocateFixed, Minus, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { nodeFileMap, witnessColumns } from "@/lib/pile/dep-intel";
 import { displayCite, type DepAnalysis, type DepGraphNode } from "@/lib/pile/deposition-analysis";
 import { CLUSTER_PALETTE, clusterGraph } from "@/lib/pile/graph-cluster";
 import { enumeratePaths, rankPaths, serialisePath } from "@/lib/pile/graph-paths";
@@ -128,9 +129,19 @@ export function KnowledgeGraph({
     () => [...conflictEdgesFromAnalysis(analysis), ...corroborationEdgesFromAnalysis(analysis)],
     [analysis],
   );
+  // Same attribution the Intelligence tab uses: a node belongs to a witness's
+  // transcript when it is that witness or one edge away, so "shared" and the
+  // witness layout agree across both views.
+  const fileMap = useMemo(() => {
+    const cols = witnessColumns(
+      analysis,
+      (transcripts ?? []).map((t) => ({ fileName: t.fileName, witness: t.witness ?? null })),
+    );
+    return nodeFileMap(analysis, cols);
+  }, [analysis, transcripts]);
   const visible = useMemo(
-    () => visibleGraph(analysis, synthetic, view),
-    [analysis, synthetic, view],
+    () => visibleGraph(analysis, synthetic, view, (node) => fileMap.get(node.id) ?? []),
+    [analysis, synthetic, view, fileMap],
   );
   const clusters = useMemo(
     () => clusterGraph(visible, (id) => visible.files.get(id) ?? []),
@@ -139,7 +150,8 @@ export function KnowledgeGraph({
   const clusterOf = useMemo(() => {
     const map = new Map<string, string>();
     clusters.forEach((cluster, index) => {
-      for (const id of cluster.nodeIds) map.set(id, CLUSTER_PALETTE[index % CLUSTER_PALETTE.length]!);
+      for (const id of cluster.nodeIds)
+        map.set(id, CLUSTER_PALETTE[index % CLUSTER_PALETTE.length]!);
     });
     return map;
   }, [clusters]);
@@ -151,7 +163,9 @@ export function KnowledgeGraph({
     const ordered = transcripts?.length
       ? transcripts.map((transcript) => transcript.fileName)
       : [...new Set([...visible.files.values()].flat())].sort();
-    return new Map(ordered.map((file, index) => [file, CLUSTER_PALETTE[index % CLUSTER_PALETTE.length]!]));
+    return new Map(
+      ordered.map((file, index) => [file, CLUSTER_PALETTE[index % CLUSTER_PALETTE.length]!]),
+    );
   }, [transcripts, visible.files]);
   const byId = useMemo(() => new Map(layout.items.map((item) => [item.id, item])), [layout.items]);
   const nodeById = useMemo(
@@ -160,7 +174,8 @@ export function KnowledgeGraph({
   );
   const focusId = active ?? hover;
   const linked = useMemo(
-    () => hopSet(focusId, visible.edges, view.hops) ?? new Set(visible.nodes.map((node) => node.id)),
+    () =>
+      hopSet(focusId, visible.edges, view.hops) ?? new Set(visible.nodes.map((node) => node.id)),
     [focusId, visible.edges, visible.nodes, view.hops],
   );
   const matches = useMemo(() => {
@@ -173,7 +188,10 @@ export function KnowledgeGraph({
     );
   }, [search, visible.nodes]);
   const sharedIds = useMemo(
-    () => visible.nodes.filter((node) => (visible.files.get(node.id) ?? []).length > 1).map((node) => node.id),
+    () =>
+      visible.nodes
+        .filter((node) => (visible.files.get(node.id) ?? []).length > 1)
+        .map((node) => node.id),
     [visible.files, visible.nodes],
   );
   const paths = useMemo(() => {
@@ -221,11 +239,14 @@ export function KnowledgeGraph({
     const box = viewportRef.current?.getBoundingClientRect();
     if (!box) return;
     const factor = event.deltaY < 0 ? 1.25 : 1 / 1.25;
-    setCamera((current) => zoomAt(current, event.clientX - box.left, event.clientY - box.top, factor));
+    setCamera((current) =>
+      zoomAt(current, event.clientX - box.left, event.clientY - box.top, factor),
+    );
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a")) return;
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a"))
+      return;
     setDragging({ x: event.clientX, y: event.clientY, cam: camera });
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -282,12 +303,7 @@ export function KnowledgeGraph({
   };
   const conflictCount = visible.edges.filter((edge) => edge.class === "contradicts").length;
   const agreeCount = visible.edges.filter((edge) => edge.class === "corroborates").length;
-  const fits =
-    camera.k >= 0.98 &&
-    camera.x > -8 &&
-    camera.y > -8 &&
-    camera.x < 40 &&
-    camera.y < 40;
+  const fits = camera.k >= 0.98 && camera.x > -8 && camera.y > -8 && camera.x < 40 && camera.y < 40;
 
   const kindCounts = (Object.keys(KIND_LABEL) as DepGraphNode["kind"][]).map((kind) => ({
     kind,
@@ -324,13 +340,18 @@ export function KnowledgeGraph({
           min={0}
           max={5}
           value={view.minDegree}
-          onChange={(event) => setView((current) => ({ ...current, minDegree: Number(event.target.value) }))}
+          onChange={(event) =>
+            setView((current) => ({ ...current, minDegree: Number(event.target.value) }))
+          }
         />
       </label>
       <select
         value={view.layout}
         onChange={(event) =>
-          setView((current) => ({ ...current, layout: event.target.value as GraphViewSettings["layout"] }))
+          setView((current) => ({
+            ...current,
+            layout: event.target.value as GraphViewSettings["layout"],
+          }))
         }
         className="h-7 border border-border bg-card px-2 text-[11px]"
         aria-label="Graph layout"
@@ -343,7 +364,10 @@ export function KnowledgeGraph({
       <select
         value={view.colorBy}
         onChange={(event) =>
-          setView((current) => ({ ...current, colorBy: event.target.value as GraphViewSettings["colorBy"] }))
+          setView((current) => ({
+            ...current,
+            colorBy: event.target.value as GraphViewSettings["colorBy"],
+          }))
         }
         className="h-7 border border-border bg-card px-2 text-[11px]"
         aria-label="Colour by"
@@ -390,7 +414,9 @@ export function KnowledgeGraph({
                 <span className="truncate">{cluster.label}</span>
                 <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
                   {cluster.nodeIds.length}
-                  {cluster.conflicts ? ` · ${cluster.conflicts} conflict${cluster.conflicts === 1 ? "" : "s"}` : ""}
+                  {cluster.conflicts
+                    ? ` · ${cluster.conflicts} conflict${cluster.conflicts === 1 ? "" : "s"}`
+                    : ""}
                 </span>
               </button>
             </li>
@@ -405,7 +431,8 @@ export function KnowledgeGraph({
         <div>
           <p className="text-[14px] font-semibold text-foreground">{focusNode.label}</p>
           <p className="text-[11px] text-muted-foreground">
-            {KIND_LABEL[focusNode.kind]} · {focusEdges.length} link{focusEdges.length === 1 ? "" : "s"}
+            {KIND_LABEL[focusNode.kind]} · {focusEdges.length} link
+            {focusEdges.length === 1 ? "" : "s"}
             {(visible.files.get(focusNode.id) ?? []).length > 1
               ? ` · ${(visible.files.get(focusNode.id) ?? []).length} witnesses`
               : ""}
@@ -429,17 +456,41 @@ export function KnowledgeGraph({
           ) : null}
           {onOpenTab ? (
             <>
-              <Button type="button" variant="outline" size="sm" className="h-7 rounded-sm" onClick={() => onOpenTab("contradictions")}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 rounded-sm"
+                onClick={() => onOpenTab("contradictions")}
+              >
                 Conflicts
               </Button>
-              <Button type="button" variant="outline" size="sm" className="h-7 rounded-sm" onClick={() => onOpenTab("exhibits")}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 rounded-sm"
+                onClick={() => onOpenTab("exhibits")}
+              >
                 Exhibits
               </Button>
-              <Button type="button" variant="outline" size="sm" className="h-7 rounded-sm" onClick={() => onOpenTab("chronology")}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 rounded-sm"
+                onClick={() => onOpenTab("chronology")}
+              >
                 Timeline
               </Button>
               {multi ? (
-                <Button type="button" variant="outline" size="sm" className="h-7 rounded-sm" onClick={() => onOpenTab("witnesses")}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 rounded-sm"
+                  onClick={() => onOpenTab("witnesses")}
+                >
                   Witnesses
                 </Button>
               ) : null}
@@ -447,13 +498,18 @@ export function KnowledgeGraph({
           ) : null}
         </div>
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Links</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Links
+          </p>
           <ul className="mt-1 space-y-1.5">
             {focusEdges.map((edge, index) => {
               const otherId = edge.from === focusNode.id ? edge.to : edge.from;
               const other = nodeById.get(otherId);
               return (
-                <li key={`${edge.from}-${edge.to}-${index}`} className="text-[12px] text-muted-foreground">
+                <li
+                  key={`${edge.from}-${edge.to}-${index}`}
+                  className="text-[12px] text-muted-foreground"
+                >
                   <span
                     className={`font-medium ${
                       edge.class === "contradicts"
@@ -463,9 +519,15 @@ export function KnowledgeGraph({
                           : "text-foreground"
                     }`}
                   >
-                    {edge.class === "contradicts" && edge.title ? `contradicts (${edge.title})` : edge.label}
+                    {edge.class === "contradicts" && edge.title
+                      ? `contradicts (${edge.title})`
+                      : edge.label}
                   </span>{" "}
-                  <button type="button" className="hover:underline" onClick={() => setActive(otherId)}>
+                  <button
+                    type="button"
+                    className="hover:underline"
+                    onClick={() => setActive(otherId)}
+                  >
                     {other?.label ?? otherId}
                   </button>
                   {edge.cite ? (
@@ -484,10 +546,15 @@ export function KnowledgeGraph({
         </div>
         {paths.length ? (
           <div>
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Paths</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              Paths
+            </p>
             <ul className="mt-1 space-y-1.5">
               {paths.map((path) => (
-                <li key={path.nodes.join(">")} className="text-[11.5px] leading-relaxed text-muted-foreground">
+                <li
+                  key={path.nodes.join(">")}
+                  className="text-[11.5px] leading-relaxed text-muted-foreground"
+                >
                   {serialisePath(path, (id) => nodeById.get(id)?.label ?? id)}
                 </li>
               ))}
@@ -504,14 +571,18 @@ export function KnowledgeGraph({
 
   if (!layout.items.length) {
     return (
-      <p className="text-[13px] text-muted-foreground">No connections extracted from this testimony.</p>
+      <p className="text-[13px] text-muted-foreground">
+        No connections extracted from this testimony.
+      </p>
     );
   }
 
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-1 py-2">
-        {wideToolbar ? filters : (
+        {wideToolbar ? (
+          filters
+        ) : (
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="outline" size="sm" className="h-8 rounded-sm">
@@ -540,16 +611,44 @@ export function KnowledgeGraph({
           />
         </form>
         <div className="ml-auto flex items-center gap-1">
-          <Button type="button" variant="ghost" size="icon" className="size-8" aria-label="Zoom in" onClick={() => zoomBy(1.25)}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            aria-label="Zoom in"
+            onClick={() => zoomBy(1.25)}
+          >
             <Plus className="h-3.5 w-3.5" />
           </Button>
-          <Button type="button" variant="ghost" size="icon" className="size-8" aria-label="Zoom out" onClick={() => zoomBy(1 / 1.25)}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            aria-label="Zoom out"
+            onClick={() => zoomBy(1 / 1.25)}
+          >
             <Minus className="h-3.5 w-3.5" />
           </Button>
-          <Button type="button" variant="ghost" size="icon" className="size-8" aria-label="Fit" onClick={fit}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            aria-label="Fit"
+            onClick={fit}
+          >
             <LocateFixed className="h-3.5 w-3.5" />
           </Button>
-          <Button type="button" variant="ghost" size="sm" className="h-8 rounded-sm px-2" aria-label="1:1" onClick={() => setCamera({ x: 0, y: 0, k: 1 })}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 rounded-sm px-2"
+            aria-label="1:1"
+            onClick={() => setCamera({ x: 0, y: 0, k: 1 })}
+          >
             1:1
           </Button>
         </div>
@@ -601,7 +700,15 @@ export function KnowledgeGraph({
                 );
               })}
               <defs>
-                <marker id="kg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <marker
+                  id="kg-arrow"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse"
+                >
                   <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
                 </marker>
               </defs>
@@ -638,8 +745,16 @@ export function KnowledgeGraph({
               const degree = visible.degree.get(item.id) ?? 0;
               const files = visible.files.get(item.id) ?? [];
               const selected = active === item.id;
-              const dim = focusId ? !linked.has(item.id) : !matches.has(item.id) && search.trim().length > 0;
-              const showLabel = shouldShowNodeLabel(camera.k, degree, selected, files.length > 1, view.labels);
+              const dim = focusId
+                ? !linked.has(item.id)
+                : !matches.has(item.id) && search.trim().length > 0;
+              const showLabel = shouldShowNodeLabel(
+                camera.k,
+                degree,
+                selected,
+                files.length > 1,
+                view.labels,
+              );
               const width = 168 + Math.min(28, degree * 5);
               const height = camera.k < 0.4 && !selected ? 18 : 56 + Math.min(14, degree * 2);
               const lines = wrapGraphLabel(item.label);
@@ -664,7 +779,9 @@ export function KnowledgeGraph({
                   onDoubleClick={() => {
                     setActive(item.id);
                     const box = viewportRef.current?.getBoundingClientRect();
-                    const neighbors = layout.items.filter((other) => linked.has(other.id) || other.id === item.id);
+                    const neighbors = layout.items.filter(
+                      (other) => linked.has(other.id) || other.id === item.id,
+                    );
                     const minX = Math.min(...neighbors.map((other) => other.x)) - 80;
                     const minY = Math.min(...neighbors.map((other) => other.y)) - 60;
                     const maxX = Math.max(...neighbors.map((other) => other.x)) + 80;
@@ -698,7 +815,9 @@ export function KnowledgeGraph({
                         ))}
                       </span>
                       {multi && files.length > 1 ? (
-                        <span className="mt-0.5 text-[10px] text-muted-foreground">{files.length} witnesses</span>
+                        <span className="mt-0.5 text-[10px] text-muted-foreground">
+                          {files.length} witnesses
+                        </span>
                       ) : null}
                     </>
                   ) : (

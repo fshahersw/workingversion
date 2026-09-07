@@ -1,7 +1,8 @@
 import { Calendar, Check, Copy, Inbox, Pin } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { KnowledgeGraph } from "./KnowledgeGraph";
+import { DepIntel } from "./DepIntel";
+import { KnowledgeGraph, type GraphFocus } from "./KnowledgeGraph";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AnswerMarkdown } from "@/components/chat/AnswerMarkdown";
 import {
@@ -23,6 +24,7 @@ export type AnalysisTab =
   | "admissions"
   | "impeachment"
   | "themes"
+  | "intel"
   | "witnesses"
   | "contradictions"
   | "graph"
@@ -41,6 +43,7 @@ const TABS: {
   { id: "admissions", label: "Admissions", count: (a) => a.admissions.length, pass: "case" },
   { id: "impeachment", label: "Impeachment", count: (a) => a.impeachment.length, pass: "case" },
   { id: "themes", label: "Themes", count: (a) => a.themes.length, pass: "record" },
+  { id: "intel", label: "Intelligence", pass: "connections" },
   { id: "witnesses", label: "Witnesses", count: (a) => a.witnesses.length, pass: "connections" },
   {
     id: "contradictions",
@@ -57,7 +60,7 @@ const GROUPS: { label: string; ids: AnalysisTab[] }[] = [
   { label: "Overview", ids: ["ask", "summary"] },
   { label: "Case", ids: ["admissions", "impeachment"] },
   { label: "Record", ids: ["themes", "chronology", "exhibits"] },
-  { label: "Map", ids: ["witnesses", "contradictions", "graph"] },
+  { label: "Map", ids: ["intel", "witnesses", "contradictions", "graph"] },
 ];
 
 function CiteButton({
@@ -416,9 +419,14 @@ export function DepositionAnalysisPane({
   onAsk?: (question: string) => void;
 }) {
   const [tab, setTab] = useState<AnalysisTab>("summary");
+  const [graphFocus, setGraphFocus] = useState<GraphFocus | null>(null);
   const selectTab = (next: AnalysisTab) => {
     setTab(next);
     onTabChange?.(next);
+  };
+  const openGraphAt = (nodeId: string) => {
+    setGraphFocus({ id: nodeId, n: Date.now() });
+    selectTab("graph");
   };
   // Jump to Ask only on the transition into a new ask — not on every render,
   // otherwise manual tab clicks get snapped back while an answer is present.
@@ -444,7 +452,11 @@ export function DepositionAnalysisPane({
       ? "Witness profile"
       : tab === "ask"
         ? "Ask the transcripts"
-        : TABS.find((t) => t.id === tab)?.label;
+        : tab === "intel"
+          ? (transcripts?.length ?? 0) > 1
+            ? "Cross-deposition intelligence"
+            : "Record intelligence"
+          : TABS.find((t) => t.id === tab)?.label;
 
   return (
     <section className="flex h-full min-h-0 min-w-0 overflow-hidden bg-card">
@@ -630,6 +642,24 @@ export function DepositionAnalysisPane({
             )
           ) : null}
 
+          {tab === "intel" ? (
+            tabRunning && !analysis?.contradictions.length && !analysis?.graph.nodes.length ? (
+              <PassSkeleton label="cross-deposition intelligence" />
+            ) : analysis ? (
+              <DepIntel
+                analysis={analysis}
+                transcripts={transcripts ?? []}
+                passes={passes}
+                onCite={onCite}
+                onOpenTab={selectTab}
+                onOpenGraph={openGraphAt}
+                onAsk={onAsk}
+              />
+            ) : (
+              <EmptyList label="intelligence" />
+            )
+          ) : null}
+
           {tab === "witnesses" ? (
             tabRunning && !analysis?.witnesses.length ? (
               <PassSkeleton label="witnesses" />
@@ -669,6 +699,7 @@ export function DepositionAnalysisPane({
                 transcripts={transcripts}
                 onAsk={onAsk}
                 onOpenTab={selectTab}
+                focus={graphFocus}
               />
             ) : (
               <EmptyList label="connections" />

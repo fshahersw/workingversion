@@ -1,9 +1,30 @@
-import type { DepAnalysis, DepContradiction, DepGraphNode } from "./deposition-analysis.ts";
+import type {
+  DepAnalysis,
+  DepContradiction,
+  DepGraphEdge,
+  DepGraphNode,
+} from "./deposition-analysis.ts";
 import { isCorroborationEdge, personNodeMatchesName } from "./graph-view.ts";
+
+/**
+ * Cross-deposition intelligence. Pure and deterministic: nothing here calls a
+ * model, and every number is a count over material the analysis already holds
+ * (witness cards, adjudicated contradictions, and the knowledge graph).
+ *
+ * Attribution model. Findings and exhibits carry page:line cites but no file,
+ * so per-witness numbers are derived from the three places the record does
+ * name a transcript: witness cards (`fileName`), contradiction sides
+ * (`fileName` + `witness`), and person nodes matched to those witnesses. A
+ * graph node "belongs" to a transcript when it is that witness's own node or
+ * sits one edge away from it, which is how the model links testimony to the
+ * entities it mentions.
+ */
 
 export type Severity = "high" | "medium" | "low";
 
 export type WitnessCol = { fileName: string; label: string };
+
+export type TranscriptRef = { fileName: string; witness: string | null };
 
 /**
  * Short column handle for a witness: the surname with honorifics and
@@ -24,7 +45,7 @@ export function witnessHandle(name: string): string {
 
 export function witnessColumns(
   analysis: DepAnalysis,
-  transcripts: { fileName: string; witness: string | null }[] = [],
+  transcripts: TranscriptRef[] = [],
 ): WitnessCol[] {
   const cols: WitnessCol[] = [];
   const seen = new Set<string>();
@@ -51,26 +72,114 @@ export function witnessColumns(
   return cols;
 }
 
+export const labelFor =
+  (cols: WitnessCol[]) =>
+  (fileName: string): string =>
+    cols.find((col) => col.fileName === fileName)?.label ?? fileName;
+
+/** Every name the record uses for the witness behind a transcript column. */
+function witnessNames(analysis: DepAnalysis, col: WitnessCol): string[] {
+  const names = new Set<string>([col.label]);
+  for (const witness of analysis.witnesses) {
+    if (witness.fileName === col.fileName && witness.name) names.add(witness.name);
+  }
+  for (const item of analysis.contradictions) {
+    for (const side of [item.a, item.b]) {
+      if (side.fileName === col.fileName && side.witness) names.add(side.witness);
+    }
+  }
+  return [...names];
+}
+
+/** Person nodes that stand for each transcript's witness. */
+export function witnessNodeIds(
+  analysis: DepAnalysis,
+  cols: WitnessCol[] = witnessColumns(analysis),
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const col of cols) {
+    const names = witnessNames(analysis, col);
+    const ids = new Set<string>();
+    for (const node of analysis.graph.nodes) {
+      if (node.kind !== "person") continue;
+      if (names.some((name) => personNodeMatchesName(node.label, name))) ids.add(node.id);
+    }
+    out.set(col.fileName, ids);
+  }
+  return out;
+}
+
+function adjacency(edges: DepGraphEdge[]): Map<string, Set<string>> {
+  const adj = new Map<string, Set<string>>();
+  for (const edge of edges) {
+    if (!adj.has(edge.from)) adj.set(edge.from, new Set());
+    if (!adj.has(edge.to)) adj.set(edge.to, new Set());
+    adj.get(edge.from)!.add(edge.to);
+    adj.get(edge.to)!.add(edge.from);
+  }
+  return adj;
+}
+
+/**
+ * Transcripts each graph node is attributed to, in column order: the witness's
+ * own node plus everything one edge away from it. Nodes with no path to any
+ * witness node are unattributed (empty list).
+ */
+export function nodeFileMap(
+  analysis: DepAnalysis,
+  cols: WitnessCol[] = witnessColumns(analysis),
+): Map<string, string[]> {
+  const owners = witnessNodeIds(analysis, cols);
+  const adj = adjacency(analysis.graph.edges);
+  const files = new Map<string, Set<string>>();
+  const add = (nodeId: string, fileName: string) => {
+    if (!files.has(nodeId)) files.set(nodeId, new Set());
+    files.get(nodeId)!.add(fileName);
+  };
+  for (const col of cols) {
+    for (const witnessId of owners.get(col.fileName) ?? []) {
+      add(witnessId, col.fileName);
+      for (const neighbor of adj.get(witnessId) ?? []) add(neighbor, col.fileName);
+    }
+  }
+  const order = new Map(cols.map((col, index) => [col.fileName, index]));
+  const out = new Map<string, string[]>();
+  for (const node of analysis.graph.nodes) {
+    const owned = [...(files.get(node.id) ?? [])].sort(
+      (a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0),
+    );
+    out.set(node.id, owned);
+  }
+  return out;
+}
+
 export function conflictSeverity(item: DepContradiction): Severity {
   const omission = item.tags.some((tag) => /omission/i.test(tag));
-  const hot = item.tags.some((tag) => /impeach|notice|knowledge|liabilit|causation|damages/i.test(tag));
+  const hot = item.tags.some((tag) =>
+    /impeach|notice|knowledge|liabilit|causation|damages/i.test(tag),
+  );
   if (!omission && hot) return "high";
   if (omission && hot) return "high";
   if (omission) return "low";
   return "medium";
 }
 
-export function priorityQueue(analysis: DepAnalysis, cap = 40): Array<{
+export type IntelIssue = {
   id: string;
   title: string;
   detail: string;
-  kind: "conflict" | "gap";
+  kind: "conflict" | "omission" | "gap";
   severity: Severity;
   files: string[];
+  /** Side A's cite (conflicts) or the finding's cite (gaps). */
   cite: string;
   fileName: string;
-}> {
-  const gaps = [...analysis.admissions, ...analysis.impeachment, ...analysis.themes]
+  /** Side B, when the issue is a contradiction. */
+  other?: { cite: string; fileName: string };
+};
+
+export function priorityQueue(analysis: DepAnalysis, cap = 40): IntelIssue[] {
+  const gaps: IntelIssue[] = [...analysis.admissions, ...analysis.impeachment, ...analysis.themes]
     .filter((item) => item.use === "gap")
     .map((item) => ({
       id: `gap:${item.id}`,
@@ -82,15 +191,18 @@ export function priorityQueue(analysis: DepAnalysis, cap = 40): Array<{
       cite: item.cite,
       fileName: "",
     }));
-  const conflicts = analysis.contradictions.map((item) => ({
+  const conflicts: IntelIssue[] = analysis.contradictions.map((item) => ({
     id: item.id,
     title: item.title,
     detail: item.summary,
-    kind: "conflict" as const,
+    kind: item.tags.some((tag) => /omission/i.test(tag))
+      ? ("omission" as const)
+      : ("conflict" as const),
     severity: conflictSeverity(item),
-    files: [item.a.fileName, item.b.fileName].filter(Boolean),
+    files: [...new Set([item.a.fileName, item.b.fileName].filter(Boolean))],
     cite: item.a.cite,
     fileName: item.a.fileName,
+    other: item.b.cite ? { cite: item.b.cite, fileName: item.b.fileName } : undefined,
   }));
   const rank = { high: 0, medium: 1, low: 2 };
   return [...conflicts, ...gaps]
@@ -103,21 +215,17 @@ export function priorityQueue(analysis: DepAnalysis, cap = 40): Array<{
     .slice(0, cap);
 }
 
-export function sharedEntities(
-  analysis: DepAnalysis,
-  minFiles = 2,
-): Array<{
+export type SharedEntity = {
   node: DepGraphNode;
   files: string[];
   degree: number;
   conflicted: boolean;
-}> {
-  const degree = new Map<string, number>();
-  for (const edge of analysis.graph.edges) {
-    degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1);
-    degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1);
-  }
-  const conflicted = new Set<string>();
+  /** Edges tying the node to each transcript's witness node. */
+  mentions: Record<string, number>;
+};
+
+function conflictedNodeIds(analysis: DepAnalysis): Set<string> {
+  const out = new Set<string>();
   for (const item of analysis.contradictions) {
     for (const node of analysis.graph.nodes) {
       if (node.kind !== "person") continue;
@@ -125,30 +233,51 @@ export function sharedEntities(
         personNodeMatchesName(node.label, item.a.witness) ||
         personNodeMatchesName(node.label, item.b.witness)
       ) {
-        conflicted.add(node.id);
+        out.add(node.id);
       }
     }
   }
-  const cols = witnessColumns(analysis);
+  return out;
+}
+
+export function sharedEntities(
+  analysis: DepAnalysis,
+  cols: WitnessCol[] = witnessColumns(analysis),
+  minFiles = 2,
+): SharedEntity[] {
+  const degree = new Map<string, number>();
+  for (const edge of analysis.graph.edges) {
+    degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1);
+    degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1);
+  }
+  const owners = witnessNodeIds(analysis, cols);
+  const files = nodeFileMap(analysis, cols);
+  const conflicted = conflictedNodeIds(analysis);
   return analysis.graph.nodes
     .map((node) => {
-      const files =
-        node.kind === "person"
-          ? cols
-              .filter((col) => personNodeMatchesName(node.label, col.label))
-              .map((col) => col.fileName)
-          : cols.length > 1
-            ? cols.map((col) => col.fileName)
-            : [];
-      const unique = [...new Set(files)];
+      const owned = files.get(node.id) ?? [];
+      const mentions: Record<string, number> = {};
+      for (const fileName of owned) {
+        const ids = owners.get(fileName) ?? new Set<string>();
+        if (ids.has(node.id)) {
+          mentions[fileName] = degree.get(node.id) ?? 0;
+          continue;
+        }
+        mentions[fileName] = analysis.graph.edges.filter(
+          (edge) =>
+            (edge.from === node.id && ids.has(edge.to)) ||
+            (edge.to === node.id && ids.has(edge.from)),
+        ).length;
+      }
       return {
         node,
-        files: unique,
+        files: owned,
         degree: degree.get(node.id) ?? 0,
         conflicted: conflicted.has(node.id),
+        mentions,
       };
     })
-    .filter((row) => row.files.length >= minFiles || (row.node.kind !== "person" && cols.length >= minFiles))
+    .filter((row) => row.files.length >= minFiles)
     .sort(
       (a, b) =>
         Number(b.conflicted) - Number(a.conflicted) ||
@@ -158,24 +287,143 @@ export function sharedEntities(
     );
 }
 
-export function compareWitnesses(analysis: DepAnalysis, a: string, b: string) {
-  const conflicts = analysis.contradictions.filter((item) => {
-    const files = [item.a.fileName, item.b.fileName, item.a.witness, item.b.witness];
-    const hasA = files.some((value) => value === a || personNodeMatchesName(value, a));
-    const hasB = files.some((value) => value === b || personNodeMatchesName(value, b));
-    return hasA && hasB;
-  });
-  return { conflicts };
+function sideIsFile(
+  side: { witness: string; fileName: string },
+  fileName: string,
+  label: string,
+): boolean {
+  if (side.fileName) return side.fileName === fileName;
+  return !!side.witness && personNodeMatchesName(side.witness, label);
 }
 
-export function intelSummary(analysis: DepAnalysis, transcripts: { fileName: string; witness: string | null }[]) {
+export type WitnessProfile = {
+  fileName: string;
+  label: string;
+  /** Graph nodes attributed to this transcript. */
+  entities: number;
+  /** Of those, nodes another transcript also reaches. */
+  shared: number;
+  conflicts: number;
+  corroborations: number;
+  /** Other transcripts tied to this one by shared entities, conflicts, or agreements. */
+  connectedTo: string[];
+  /** 0–100; the best-connected witness in the set is 100. */
+  centrality: number;
+};
+
+export function witnessProfiles(
+  analysis: DepAnalysis,
+  cols: WitnessCol[] = witnessColumns(analysis),
+): WitnessProfile[] {
+  const files = nodeFileMap(analysis, cols);
+  const agreeEdges = analysis.graph.edges.filter((edge) => isCorroborationEdge(edge));
+  const raw = cols.map((col) => {
+    const connected = new Set<string>();
+    let entities = 0;
+    let shared = 0;
+    for (const node of analysis.graph.nodes) {
+      const owned = files.get(node.id) ?? [];
+      if (!owned.includes(col.fileName)) continue;
+      entities += 1;
+      if (owned.length > 1) {
+        shared += 1;
+        for (const other of owned) if (other !== col.fileName) connected.add(other);
+      }
+    }
+    let conflicts = 0;
+    for (const item of analysis.contradictions) {
+      const inA = sideIsFile(item.a, col.fileName, col.label);
+      const inB = sideIsFile(item.b, col.fileName, col.label);
+      if (!inA && !inB) continue;
+      conflicts += 1;
+      const other = inA ? item.b : item.a;
+      if (other.fileName && other.fileName !== col.fileName) connected.add(other.fileName);
+    }
+    let corroborations = 0;
+    for (const edge of agreeEdges) {
+      const from = files.get(edge.from) ?? [];
+      const to = files.get(edge.to) ?? [];
+      if (!from.includes(col.fileName) && !to.includes(col.fileName)) continue;
+      corroborations += 1;
+      for (const other of [...from, ...to]) if (other !== col.fileName) connected.add(other);
+    }
+    const connectedTo = [...connected].sort(
+      (a, b) => cols.findIndex((c) => c.fileName === a) - cols.findIndex((c) => c.fileName === b),
+    );
+    const score = shared * 2 + connectedTo.length * 3 + conflicts + corroborations;
+    return { ...col, entities, shared, conflicts, corroborations, connectedTo, score };
+  });
+  const max = Math.max(0, ...raw.map((row) => row.score));
+  return raw
+    .map(({ score, ...row }) => ({
+      ...row,
+      centrality: max > 0 ? Math.round((score / max) * 100) : 0,
+    }))
+    .sort((a, b) => b.centrality - a.centrality || a.label.localeCompare(b.label));
+}
+
+export type WitnessComparison = {
+  shared: DepGraphNode[];
+  onlyA: DepGraphNode[];
+  onlyB: DepGraphNode[];
+  conflicts: DepContradiction[];
+  corroborations: DepGraphEdge[];
+};
+
+export function compareWitnesses(
+  analysis: DepAnalysis,
+  a: string,
+  b: string,
+  cols: WitnessCol[] = witnessColumns(analysis),
+): WitnessComparison {
+  const label = labelFor(cols);
+  const files = nodeFileMap(analysis, cols);
+  const shared: DepGraphNode[] = [];
+  const onlyA: DepGraphNode[] = [];
+  const onlyB: DepGraphNode[] = [];
+  for (const node of analysis.graph.nodes) {
+    const owned = files.get(node.id) ?? [];
+    const inA = owned.includes(a);
+    const inB = owned.includes(b);
+    if (inA && inB) shared.push(node);
+    else if (inA) onlyA.push(node);
+    else if (inB) onlyB.push(node);
+  }
+  const conflicts = analysis.contradictions.filter((item) => {
+    const hasA = sideIsFile(item.a, a, label(a)) || sideIsFile(item.b, a, label(a));
+    const hasB = sideIsFile(item.a, b, label(b)) || sideIsFile(item.b, b, label(b));
+    return hasA && hasB;
+  });
+  const corroborations = analysis.graph.edges.filter((edge) => {
+    if (!isCorroborationEdge(edge)) return false;
+    const from = files.get(edge.from) ?? [];
+    const to = files.get(edge.to) ?? [];
+    const touchesA = from.includes(a) || to.includes(a);
+    const touchesB = from.includes(b) || to.includes(b);
+    return touchesA && touchesB;
+  });
+  return { shared, onlyA, onlyB, conflicts, corroborations };
+}
+
+export type IntelSummary = {
+  witnesses: number;
+  entities: number;
+  shared: number;
+  conflicts: number;
+  high: number;
+  corroborations: number;
+  edges: number;
+};
+
+export function intelSummary(analysis: DepAnalysis, transcripts: TranscriptRef[]): IntelSummary {
   const cols = witnessColumns(analysis, transcripts);
-  const shared = sharedEntities(analysis);
+  const shared = sharedEntities(analysis, cols);
   return {
     witnesses: Math.max(cols.length, analysis.witnesses.length),
     entities: analysis.graph.nodes.length,
     shared: shared.length,
     conflicts: analysis.contradictions.length,
+    high: analysis.contradictions.filter((item) => conflictSeverity(item) === "high").length,
     corroborations: analysis.graph.edges.filter((edge) => isCorroborationEdge(edge)).length,
     edges: analysis.graph.edges.length,
   };
