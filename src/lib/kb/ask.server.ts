@@ -69,8 +69,13 @@ export async function askSavedWorkspace(
   if (workspace.status !== "ready") {
     throw new KbAskError("Workspace is not ready to search.", 409, true);
   }
-  if (workspace.surface !== "workingset" || !workspace.kbWorkspaceId) {
-    throw new KbAskError("Workspace is not a searchable Working Set.", 400);
+  // Working Set and Deposition workspaces share the same chunk index and the
+  // same answer writer; review tables are queried through their own pipeline.
+  if (
+    (workspace.surface !== "workingset" && workspace.surface !== "deposition") ||
+    !workspace.kbWorkspaceId
+  ) {
+    throw new KbAskError("Workspace is not searchable from Ask.", 400);
   }
 
   const documents = selectWorkspaceDocuments(workspace, input.docIds);

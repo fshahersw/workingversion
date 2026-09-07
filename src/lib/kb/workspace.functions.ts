@@ -6,6 +6,7 @@ import { createServerFn } from "@tanstack/react-start";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import type { SwUser } from "@/lib/auth/cognito.server";
+import { parseDepositionRecord } from "@/lib/kb/deposition-record";
 import { requireClientFileId } from "@/lib/kb/ingest-keys";
 import { isUuid, workspaceSaveFingerprint } from "@/lib/kb/workspace-lifecycle";
 import {
@@ -331,6 +332,37 @@ export const getWorkspacePagesFn = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { getWorkspacePages } = await import("@/lib/kb/workspace.server");
     return getWorkspacePages(principalOf(context), data.itemId, data.docId);
+  });
+
+/**
+ * Store the verified deposition analysis for an owned deposition workspace.
+ * Called after each pass lands so a refresh mid-analysis loses nothing; the
+ * server keeps only the newest run and rejects writes from superseded runs.
+ */
+export const saveWorkspaceAnalysisFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { itemId: string; record: unknown }) => {
+    const itemId = String(d?.itemId ?? "").trim();
+    if (!isUuid(itemId)) throw new Error("valid itemId required");
+    const record = parseDepositionRecord(d?.record);
+    if (!record) throw new Error("invalid deposition record");
+    return { itemId, record };
+  })
+  .handler(async ({ context, data }) => {
+    const { putWorkspaceAnalysis } = await import("@/lib/kb/workspace.server");
+    return putWorkspaceAnalysis(principalOf(context), data.itemId, data.record);
+  });
+
+export const getWorkspaceAnalysisFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { itemId: string }) => {
+    const itemId = String(d?.itemId ?? "").trim();
+    if (!isUuid(itemId)) throw new Error("valid itemId required");
+    return { itemId };
+  })
+  .handler(async ({ context, data }) => {
+    const { getWorkspaceAnalysis } = await import("@/lib/kb/workspace.server");
+    return getWorkspaceAnalysis(principalOf(context), data.itemId);
   });
 
 export const deleteWorkspaceFn = createServerFn({ method: "POST" })

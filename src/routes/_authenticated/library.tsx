@@ -31,6 +31,7 @@ import {
   listItemsFn,
   registerUploadFn,
 } from "@/lib/library/library.functions";
+import { discoveryTabFor, stashWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { deleteWorkspaceFn, listWorkspacesFn } from "@/lib/kb/workspace.functions";
 import type { WorkspaceSummary, WorkspaceSurface } from "@/lib/kb/workspace.server";
 
@@ -145,12 +146,8 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
   }, [load]);
 
   const openWorkspace = (id: string) => {
-    try {
-      sessionStorage.setItem("kb:reloadWorkspace", id);
-    } catch {
-      /* sessionStorage may be unavailable */
-    }
-    void navigate({ to: "/docs" });
+    stashWorkspaceHandoff(surface, id);
+    void navigate({ to: "/docs", search: { tab: discoveryTabFor(surface) } });
   };
   const remove = async (id: string) => {
     setBusyId(id);

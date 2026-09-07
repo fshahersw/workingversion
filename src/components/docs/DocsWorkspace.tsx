@@ -52,8 +52,10 @@ export function DocsWorkspace({ tab, onTabChange }: { tab: DocsTab; onTabChange:
           <DocSearchTab />
         </TabsContent>
 
+        {/* Kept mounted: a multi-pass analysis must survive a tab switch. */}
         <TabsContent
           value="deposition"
+          forceMount
           className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden data-[state=inactive]:hidden"
         >
           <DepositionAnalysisTab />

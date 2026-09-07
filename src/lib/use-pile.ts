@@ -44,6 +44,7 @@ import {
   getWorkspacePagesFn,
   getWorkspaceStatusFn,
 } from "@/lib/kb/workspace.functions";
+import { abortableDelay, rawFileSha256 } from "@/lib/kb/client-upload";
 import { SYNC_INGEST_MAX_CHARS, SYNC_INGEST_MAX_PAGES } from "@/lib/kb/ingest-state";
 import { streamSavedWorkspaceAsk, type KbAskSource } from "@/lib/kb/kb-client";
 import { createUploadFn } from "@/lib/library/library.functions";
@@ -151,37 +152,6 @@ export type AskOpts = {
 
 function newId(): string {
   return crypto.randomUUID();
-}
-
-async function rawFileSha256(file: File): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    const error = new Error("aborted");
-    error.name = "AbortError";
-    return Promise.reject(error);
-  }
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(done, ms);
-    signal.addEventListener("abort", aborted, { once: true });
-    function cleanup() {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", aborted);
-    }
-    function done() {
-      cleanup();
-      resolve();
-    }
-    function aborted() {
-      cleanup();
-      const error = new Error("aborted");
-      error.name = "AbortError";
-      reject(error);
-    }
-  });
 }
 
 type Extracted = { file: File; res: Awaited<ReturnType<typeof extractFile>> };
@@ -1732,6 +1702,14 @@ export function usePile() {
       const ws = await getWorkspaceFn({ data: { itemId } });
       if (!ws || ws.status !== "ready") {
         setState((s) => ({ ...s, phase: "error", error: "Workspace not found" }));
+        return;
+      }
+      if (ws.surface !== "workingset") {
+        setState((s) => ({
+          ...s,
+          phase: "error",
+          error: "That saved item is not a working set. Open it from its own Discovery tab.",
+        }));
         return;
       }
       const loaded = await mapPool(ws.docs, 6, async (doc) => {

@@ -25,6 +25,7 @@ import {
   WORKING_SET_FILES_KEY,
   writeLayoutPreference,
 } from "@/lib/pile/discovery-layout";
+import { takeWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { suggestQuestions } from "@/lib/pile/suggest-questions";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
 import type { PileFile, PileFileHits } from "@/lib/pile/types";
@@ -67,13 +68,7 @@ export function SummarizeView() {
 
   // One-click reload: the Library "Open" hands off a workspace id via sessionStorage.
   useEffect(() => {
-    let id: string | null = null;
-    try {
-      id = sessionStorage.getItem("kb:reloadWorkspace");
-      if (id) sessionStorage.removeItem("kb:reloadWorkspace");
-    } catch {
-      /* sessionStorage unavailable */
-    }
+    const id = takeWorkspaceHandoff("workingset");
     if (id) void reloadWorkspace(id);
   }, [reloadWorkspace]);
   const [mode, setMode] = useState<Mode>("ask");

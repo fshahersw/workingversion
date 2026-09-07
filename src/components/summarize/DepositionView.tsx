@@ -1,29 +1,89 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertCircle,
+  Check,
   Download,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
   RotateCcw,
   Search,
+  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DepositionAnalysisPane, type AnalysisTab } from "./DepositionAnalysisPane";
 import { DepositionDropPanel } from "./DepositionDropPanel";
 import { TranscriptPane } from "./TranscriptPane";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { takeWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import {
   DEPOSITION_TRANSCRIPT_KEY,
   readLayoutPreference,
   writeLayoutPreference,
 } from "@/lib/pile/discovery-layout";
-import { useDeposition } from "@/lib/use-deposition";
+import { useDeposition, type DepSaved } from "@/lib/use-deposition";
 
 const EASE = [0.22, 0.61, 0.36, 1] as const;
+
+/**
+ * Where this deposition set stands in the Library: saving, saved (with the
+ * analysis write state), or failed with a retry. Silent while idle so a set
+ * that has not finished reading shows nothing.
+ */
+function SavedStatus({ saved, onRetry }: { saved: DepSaved; onRetry: () => void }) {
+  if (saved.status === "idle") return null;
+  const base = "hidden items-center gap-1.5 pr-2 text-[12px] sm:inline-flex";
+  if (saved.status === "saving" || saved.status === "queued" || saved.status === "embedding") {
+    return (
+      <span className={`${base} text-muted-foreground`} aria-live="polite">
+        <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" />
+        {saved.status === "saving" ? "Saving to Library…" : "Indexing…"}
+      </span>
+    );
+  }
+  if (saved.status === "error") {
+    return (
+      <span className={`${base} text-destructive`} title={saved.message ?? undefined}>
+        <AlertCircle className="h-3.5 w-3.5" />
+        Not saved
+        <button type="button" onClick={onRetry} className="font-medium underline-offset-2 hover:underline">
+          Retry
+        </button>
+      </span>
+    );
+  }
+  const analysisNote =
+    saved.analysis === "saving" || saved.analysis === "pending"
+      ? "analysis saving…"
+      : saved.analysis === "error"
+        ? "analysis not saved"
+        : saved.analysis === "saved" && saved.analysisSavedAt
+          ? `analysis ${new Date(saved.analysisSavedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+          : null;
+  const title = [saved.name, saved.message].filter(Boolean).join(" · ");
+  return (
+    <span
+      className={`${base} ${saved.analysis === "error" ? "text-destructive" : "text-muted-foreground"}`}
+      title={title || undefined}
+    >
+      <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2.5} />
+      Saved{analysisNote ? ` · ${analysisNote}` : ""}
+    </span>
+  );
+}
 
 export function DepositionView() {
   const {
@@ -40,7 +100,16 @@ export function DepositionView() {
     setQuery,
     setActiveFile,
     selectCite,
+    reloadWorkspace,
+    saveWorkspace,
+    deleteSaved,
   } = useDeposition();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  // One-click reopen: the Library "Open" hands off a saved deposition id.
+  useEffect(() => {
+    const id = takeWorkspaceHandoff("deposition");
+    if (id) void reloadWorkspace(id);
+  }, [reloadWorkspace]);
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("summary");
   const [mobilePane, setMobilePane] = useState<"transcript" | "analysis">("analysis");
   const [transcriptOpen, setTranscriptOpen] = useState(() =>
@@ -176,6 +245,7 @@ export function DepositionView() {
                   OCR {state.ocr.done}/{state.ocr.total}
                 </span>
               ) : null}
+              <SavedStatus saved={state.saved} onRetry={() => void saveWorkspace()} />
               {analyzing || running ? (
                 <span className="inline-flex items-center gap-1.5 pr-2 text-[12px] text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" />
@@ -214,11 +284,47 @@ export function DepositionView() {
                 size="sm"
                 className="h-8 rounded-sm"
                 onClick={reset}
+                title={state.saved.itemId ? "Close this set. The saved copy stays in your Library." : undefined}
               >
                 Clear
               </Button>
+              {state.saved.itemId ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 rounded-sm text-muted-foreground hover:text-destructive"
+                  aria-label="Delete saved copy"
+                  title="Delete the saved copy from your Library"
+                  disabled={state.saved.status === "saving"}
+                  onClick={() => setConfirmDelete(true)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              ) : null}
             </div>
           </header>
+          <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete saved deposition?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  {state.saved.name ? `“${state.saved.name}” ` : "This set "}
+                  will be removed from your Library: the transcripts, index, and verified analysis.
+                  This cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  onClick={() => void deleteSaved()}
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
           {desktopLayout && transcriptOpen ? (
             <ResizablePanelGroup

@@ -20,6 +20,12 @@ import {
 import { bucketName, s3, presignGet, deleteObject, deletePrefix } from "@/lib/data/s3.server";
 import { deleteWorkspaceDocuments } from "@/lib/kb/aurora.server";
 import {
+  acceptDepositionRecordWrite,
+  DEPOSITION_RECORD_MAX_BYTES,
+  parseDepositionRecord,
+  type DepositionRecord,
+} from "@/lib/kb/deposition-record";
+import {
   decideIngestTransition,
   isIngestStatus,
   isSha256,
@@ -50,6 +56,15 @@ export type WorkspaceDoc = {
   size?: number;
 };
 
+/** Small, listable facts about a stored deposition analysis (no findings). */
+export type WorkspaceAnalysisMeta = {
+  version: number;
+  runId: string;
+  runStartedAt: number;
+  complete: boolean;
+  updatedAt: string;
+};
+
 export type WorkspaceSummary = {
   itemId: string;
   name: string;
@@ -61,6 +76,7 @@ export type WorkspaceSummary = {
   status: WorkspaceStatus;
   pendingCount: number;
   errorSummary?: string;
+  analysis?: WorkspaceAnalysisMeta;
 };
 
 export type WorkspaceDetail = WorkspaceSummary & { kbWorkspaceId: string; docs: WorkspaceDoc[] };
@@ -96,6 +112,16 @@ export function workspacePagesKey(principal: string, docId: string): string {
   return `kb/pages/${principal}/${docId}.json`;
 }
 
+/** Every analysis object for a workspace lives under this prefix (deleted as a unit). */
+export function workspaceAnalysisPrefix(principal: string, itemId: string): string {
+  return `kb/analysis/${principal}/${itemId}/`;
+}
+
+/** One object per analyze() run so a slow, superseded run can never clobber a newer one. */
+export function workspaceAnalysisKey(principal: string, itemId: string, runId: string): string {
+  return `${workspaceAnalysisPrefix(principal, itemId)}${runId}.json`;
+}
+
 function storageKeyOwnedBy(principal: string, key: string): boolean {
   const parts = key.split("/");
   const hasUnsafeCharacter = [...key].some((character) => {
@@ -114,6 +140,7 @@ function storageKeyOwnedBy(principal: string, key: string): boolean {
   }
   return (
     key.startsWith(`kb/pages/${principal}/`) ||
+    key.startsWith(`kb/analysis/${principal}/`) ||
     key.startsWith(`kb/bda-output/${principal}/`) ||
     key.startsWith(`uploads/${principal}/`)
   );
@@ -772,12 +799,35 @@ export async function finalizeWorkspace(
   );
 }
 
+function analysisMetaOf(r: Record<string, unknown>): WorkspaceAnalysisMeta | undefined {
+  const raw = r.analysis;
+  if (!raw || typeof raw !== "object") return undefined;
+  const a = raw as Record<string, unknown>;
+  if (
+    typeof a.version !== "number" ||
+    typeof a.runId !== "string" ||
+    typeof a.runStartedAt !== "number" ||
+    typeof a.updatedAt !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    version: a.version,
+    runId: a.runId,
+    runStartedAt: a.runStartedAt,
+    complete: a.complete === true,
+    updatedAt: a.updatedAt,
+  };
+}
+
 function toSummary(r: Record<string, unknown>): WorkspaceSummary {
   const status = WORKSPACE_STATUSES.has(r.status as WorkspaceStatus)
     ? (r.status as WorkspaceStatus)
     : "ready";
   const summary = safeErrorSummary(r.errorSummary);
+  const analysis = analysisMetaOf(r);
   return {
+    ...(analysis ? { analysis } : {}),
     itemId: r.itemId as string,
     name: (r.name as string) ?? "Untitled workspace",
     surface: (r.surface as WorkspaceSurface) ?? "workingset",
@@ -934,6 +984,147 @@ export async function getWorkspacePages(
   return text ? (JSON.parse(text) as PageText[]) : [];
 }
 
+export type PutWorkspaceAnalysisResult =
+  | { ok: true; analysis: WorkspaceAnalysisMeta }
+  | { ok: false; reason: "stale-run"; analysis: WorkspaceAnalysisMeta };
+
+/**
+ * Store a validated deposition record for a workspace the caller owns. The
+ * object is written under a per-run key first; the DynamoDB pointer is then
+ * advanced with the same optimistic revision loop the ingest checkpoints use,
+ * so a concurrent finalize cannot drop it and an older run cannot win.
+ */
+export async function putWorkspaceAnalysis(
+  principal: string,
+  itemId: string,
+  record: DepositionRecord,
+): Promise<PutWorkspaceAnalysisResult> {
+  const body = JSON.stringify(record);
+  if (Buffer.byteLength(body, "utf8") > DEPOSITION_RECORD_MAX_BYTES) {
+    throw new Error("deposition analysis exceeds the stored record limit");
+  }
+  const first = await withRetry(() => getItem(userPK(principal), itemSK(itemId), { consistent: true }));
+  if (!first || first.type !== "workspace" || first.owner !== principal) {
+    throw new Error("workspace was not found");
+  }
+  if (first.surface !== "deposition") {
+    throw new Error("analysis can only be stored on a deposition workspace");
+  }
+  const priorMeta = analysisMetaOf(first);
+  if (priorMeta && !acceptDepositionRecordWrite(priorMeta, record)) {
+    return { ok: false, reason: "stale-run", analysis: priorMeta };
+  }
+
+  const key = workspaceAnalysisKey(principal, itemId, record.runId);
+  await withRetry(() =>
+    s3().send(
+      new PutObjectCommand({
+        Bucket: bucketName(),
+        Key: key,
+        Body: body,
+        ContentType: "application/json",
+      }),
+    ),
+  );
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existing =
+      attempt === 0
+        ? first
+        : await withRetry(() => getItem(userPK(principal), itemSK(itemId), { consistent: true }));
+    if (!existing || existing.type !== "workspace" || existing.owner !== principal) {
+      throw new Error("workspace was not found");
+    }
+    const current = analysisMetaOf(existing);
+    if (current && !acceptDepositionRecordWrite(current, record)) {
+      // A newer run landed while we were writing; our object is orphaned under
+      // its own key and will be removed with the workspace.
+      return { ok: false, reason: "stale-run", analysis: current };
+    }
+    const payload = parseWorkspacePayload(existing);
+    const cleanupKeys = requireOwnedStorageKeys(principal, [
+      ...payload.cleanupKeys,
+      workspaceAnalysisPrefix(principal, itemId),
+    ]);
+    const meta: WorkspaceAnalysisMeta = {
+      version: record.version,
+      runId: record.runId,
+      runStartedAt: record.runStartedAt,
+      complete: record.complete,
+      updatedAt: new Date().toISOString(),
+    };
+    const observedRevision =
+      typeof existing.workspaceRevision === "number" &&
+      Number.isSafeInteger(existing.workspaceRevision) &&
+      existing.workspaceRevision >= 0
+        ? existing.workspaceRevision
+        : undefined;
+    if (existing.workspaceRevision !== undefined && observedRevision === undefined) {
+      throw new Error("workspace has an invalid revision");
+    }
+    try {
+      await dynamo().send(
+        new PutCommand({
+          TableName: tableName(),
+          Item: {
+            ...existing,
+            analysis: { ...meta, key },
+            workspaceRevision: (observedRevision ?? 0) + 1,
+            updatedAt: meta.updatedAt,
+            workspace: JSON.stringify({ ...payload, cleanupKeys } satisfies WorkspacePayload),
+          },
+          ConditionExpression:
+            observedRevision === undefined
+              ? "attribute_not_exists(workspaceRevision)"
+              : "workspaceRevision = :observedRevision",
+          ...(observedRevision !== undefined
+            ? { ExpressionAttributeValues: { ":observedRevision": observedRevision } }
+            : {}),
+        }),
+      );
+      if (current && current.runId !== record.runId) {
+        // Best-effort: drop the superseded run's object now rather than at delete.
+        await deleteObject(workspaceAnalysisKey(principal, itemId, current.runId)).catch(() => {});
+      }
+      return { ok: true, analysis: meta };
+    } catch (error) {
+      if ((error as { name?: string } | undefined)?.name !== "ConditionalCheckFailedException") {
+        throw error;
+      }
+    }
+  }
+  throw new Error("workspace analysis update conflicted");
+}
+
+/** Load the stored deposition record for an owned workspace, if any. */
+export async function getWorkspaceAnalysis(
+  principal: string,
+  itemId: string,
+): Promise<DepositionRecord | null> {
+  const row = await getItem(userPK(principal), itemSK(itemId), { consistent: true });
+  if (!row || row.type !== "workspace" || row.owner !== principal) return null;
+  const meta = analysisMetaOf(row);
+  if (!meta) return null;
+  const key = workspaceAnalysisKey(principal, itemId, meta.runId);
+  if (!key.startsWith(workspaceAnalysisPrefix(principal, itemId))) return null;
+  let text: string | undefined;
+  try {
+    const r = await s3().send(new GetObjectCommand({ Bucket: bucketName(), Key: key }));
+    text = await r.Body?.transformToString();
+  } catch (error) {
+    if ((error as { name?: string } | undefined)?.name === "NoSuchKey") return null;
+    throw error;
+  }
+  if (!text) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return parseDepositionRecord(parsed);
+}
+
 /** Presigned download for a doc's original bytes, if stored. */
 export async function getWorkspaceDownloadUrl(
   principal: string,
@@ -958,10 +1149,13 @@ export type WorkspaceDeleteFailure = {
     | "pages"
     | "bytes"
     | "bda-output"
+    | "analysis"
     | "checkpoints"
     | "job-correlation";
   summary: string;
 };
+
+type StorageTarget = "pages" | "bytes" | "bda-output" | "analysis";
 
 export type WorkspaceDeleteResult = {
   ok: boolean;
@@ -974,13 +1168,11 @@ export type WorkspaceDeleteResult = {
   failures: WorkspaceDeleteFailure[];
 };
 
-function storageTarget(
-  principal: string,
-  key: string,
-): "pages" | "bytes" | "bda-output" | undefined {
+function storageTarget(principal: string, key: string): StorageTarget | undefined {
   if (key.startsWith(`kb/pages/${principal}/`)) return "pages";
   if (key.startsWith(`uploads/${principal}/`)) return "bytes";
   if (key.startsWith(`kb/bda-output/${principal}/`)) return "bda-output";
+  if (key.startsWith(`kb/analysis/${principal}/`)) return "analysis";
   return undefined;
 }
 
@@ -1100,8 +1292,8 @@ export async function deleteWorkspace(
     };
   }
 
-  const storage = new Map<string, "pages" | "bytes" | "bda-output">();
-  const addStorageKey = (key: string | undefined, expected?: "pages" | "bytes" | "bda-output") => {
+  const storage = new Map<string, StorageTarget>();
+  const addStorageKey = (key: string | undefined, expected?: StorageTarget) => {
     if (!key) return;
     const target = storageTarget(principal, key);
     if (!target || (expected && target !== expected)) {
@@ -1116,6 +1308,9 @@ export async function deleteWorkspace(
   };
 
   for (const key of state.payload.cleanupKeys) addStorageKey(key);
+  // Deposition analyses live under a deterministic prefix; sweep it even when
+  // an interrupted analysis write never advanced the metadata pointer.
+  addStorageKey(workspaceAnalysisPrefix(principal, itemId), "analysis");
   for (const doc of state.detail.docs) {
     addStorageKey(doc.pagesKey, "pages");
     addStorageKey(doc.bytesKey, "bytes");
@@ -1135,7 +1330,7 @@ export async function deleteWorkspace(
   const storageResults = await mapPool([...storage.entries()], 3, async ([key, target]) => {
     try {
       const count =
-        target === "bda-output"
+        target === "bda-output" || target === "analysis"
           ? await withRetry(() => deletePrefix(key), {
               tries: 3,
               baseMs: 200,
@@ -1165,7 +1360,9 @@ export async function deleteWorkspace(
             ? "Could not delete a saved pages object."
             : result.target === "bda-output"
               ? "Could not delete BDA output objects."
-              : "Could not delete an original-file object.",
+              : result.target === "analysis"
+                ? "Could not delete stored analysis objects."
+                : "Could not delete an original-file object.",
       });
     }
   }

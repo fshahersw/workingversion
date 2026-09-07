@@ -1,6 +1,26 @@
 import { useCallback, useRef, useState } from "react";
 
 import { extractFile, transcriptFileKind } from "@/lib/extract-text";
+import { abortableDelay, rawFileSha256, uploadOriginalBytes } from "@/lib/kb/client-upload";
+import {
+  buildDepositionRecord,
+  depositionWorkspaceName,
+  kbSourcesToDepositionHits,
+  type DepositionRecord,
+  type DepositionRecordPass,
+  type DepositionRecordPassStatus,
+} from "@/lib/kb/deposition-record";
+import { SYNC_INGEST_MAX_CHARS, SYNC_INGEST_MAX_PAGES } from "@/lib/kb/ingest-state";
+import { streamSavedWorkspaceAsk, type KbAskSource } from "@/lib/kb/kb-client";
+import {
+  deleteWorkspaceFn,
+  getWorkspaceAnalysisFn,
+  getWorkspaceFn,
+  getWorkspacePagesFn,
+  getWorkspaceStatusFn,
+  saveWorkspaceAnalysisFn,
+  saveWorkspaceFn,
+} from "@/lib/kb/workspace.functions";
 import { streamSSE } from "@/lib/orchestrate";
 import { AdaptiveLimiter, mapPool, withRetry } from "@/lib/pile/async";
 import { packAskHits, pagesForClientHits } from "@/lib/pile/client-search";
@@ -41,10 +61,29 @@ import { forEachRenderedPdfPage } from "@/lib/pile-render";
 
 export type DepPhase = "idle" | "reading" | "indexing" | "ready" | "analyzing" | "asking" | "error";
 export type DepSpeakerFilter = "any" | "question" | "answer" | "objection";
-export type DepPass = "case" | "record" | "connections" | "cross";
-export type DepPassStatus = "idle" | "running" | "done" | "error";
+export type DepPass = DepositionRecordPass;
+export type DepPassStatus = DepositionRecordPassStatus;
 export type DepStep = { id: string; label: string; detail?: string; status: "running" | "done" | "error" };
 export type DepTranscript = TranscriptParse & { fileId: string };
+
+/** Durable copy of this deposition set: transcript bytes, pages, chunk index, analysis. */
+export type DepSaveStatus = "idle" | "saving" | "queued" | "embedding" | "ready" | "error";
+export type DepAnalysisSaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
+export type DepSaved = {
+  status: DepSaveStatus;
+  itemId: string | null;
+  kbWorkspaceId: string | null;
+  name: string | null;
+  /** Browser file id -> KB document id, complete only when status is "ready". */
+  docIdByFileId: Record<string, string>;
+  message: string | null;
+  analysis: DepAnalysisSaveStatus;
+  analysisSavedAt: string | null;
+  /** True when this session was rehydrated from the Library. */
+  loaded: boolean;
+  /** Ask is answered from the saved hybrid index rather than the in-tab BM25. */
+  hybridAsk: boolean;
+};
 
 export type DepState = {
   phase: DepPhase;
@@ -72,6 +111,7 @@ export type DepState = {
   instructions: string;
   ocr: { done: number; total: number } | null;
   analyzeProgress: { done: number; total: number } | null;
+  saved: DepSaved;
 };
 
 const IDLE_PASSES: Record<DepPass, DepPassStatus> = {
@@ -79,6 +119,19 @@ const IDLE_PASSES: Record<DepPass, DepPassStatus> = {
   record: "idle",
   connections: "idle",
   cross: "idle",
+};
+
+const EMPTY_SAVED: DepSaved = {
+  status: "idle",
+  itemId: null,
+  kbWorkspaceId: null,
+  name: null,
+  docIdByFileId: {},
+  message: null,
+  analysis: "idle",
+  analysisSavedAt: null,
+  loaded: false,
+  hybridAsk: false,
 };
 
 const EMPTY: DepState = {
@@ -107,6 +160,7 @@ const EMPTY: DepState = {
   instructions: "",
   ocr: null,
   analyzeProgress: null,
+  saved: EMPTY_SAVED,
 };
 
 const PASS_QUERY: Record<DepPass, string> = {
@@ -115,6 +169,11 @@ const PASS_QUERY: Record<DepPass, string> = {
   connections: "Map witnesses, material contradictions, and a knowledge graph of people, companies, documents, and themes.",
   cross: "Compare these depositions. Find only material conflicts or omissions across witnesses, and one shared knowledge graph.",
 };
+
+/** Debounce for mid-analysis record writes; the final write is immediate. */
+const ANALYSIS_PERSIST_DEBOUNCE_MS = 1_500;
+const SAVE_POLL_MS = 5_000;
+const SAVE_POLL_MAX = 180;
 
 function newId(): string {
   return crypto.randomUUID();
@@ -172,16 +231,45 @@ async function json<T>(url: string, init?: RequestInit, opts?: { tries?: number 
   );
 }
 
+function seedWitnesses(list: DepTranscript[]): DepAnalysis["witnesses"] {
+  return list.map((t, i) => ({
+    id: `w-seed-${i}`,
+    name: t.witness || t.fileName.replace(/\.[^.]+$/, ""),
+    role: "",
+    fileName: t.fileName,
+    summary: t.caption.replace(/\s+/g, " ").trim().slice(0, 280),
+    quote: "",
+    cite: t.citeReady && t.lines[0] ? `${t.lines[0]!.page}:${t.lines[0]!.line}` : "",
+  }));
+}
+
+type SaveAttempt = {
+  requestId: string;
+  bytesKeyByFileId: Record<string, string>;
+  sha256ByFileId: Record<string, string>;
+};
+
+type AnalysisRun = { runId: string; startedAt: number };
+
 export function useDeposition() {
   const [state, setState] = useState<DepState>(EMPTY);
   const ingestAbort = useRef<AbortController | null>(null);
   const analyzeAbort = useRef<AbortController | null>(null);
   const askAbort = useRef<AbortController | null>(null);
+  const saveAbort = useRef<AbortController | null>(null);
+  const filesRef = useRef<Map<string, File>>(new Map());
   const pdfFilesRef = useRef<Map<string, File>>(new Map());
   const pagesRef = useRef<PilePage[]>([]);
   const transcriptsRef = useRef<DepTranscript[]>([]);
   const instructionsRef = useRef("");
   const analysisRef = useRef<DepAnalysis>(EMPTY_ANALYSIS);
+  const passesRef = useRef<Record<DepPass, DepPassStatus>>(IDLE_PASSES);
+  const savedRef = useRef<DepSaved>(EMPTY_SAVED);
+  const saveAttemptRef = useRef<SaveAttempt | null>(null);
+  const runRef = useRef<AnalysisRun | null>(null);
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistInflight = useRef<Promise<void> | null>(null);
+  const persistDirty = useRef<{ complete: boolean } | null>(null);
 
   const step = useCallback((s: DepStep) => {
     setState((prev) => {
@@ -191,18 +279,46 @@ export function useDeposition() {
     });
   }, []);
 
+  const setSaved = useCallback((patch: Partial<DepSaved> | ((prev: DepSaved) => Partial<DepSaved>)) => {
+    const next = { ...savedRef.current, ...(typeof patch === "function" ? patch(savedRef.current) : patch) };
+    savedRef.current = next;
+    setState((s) => ({ ...s, saved: next }));
+  }, []);
+
+  const setPasses = useCallback((patch: Partial<Record<DepPass, DepPassStatus>>) => {
+    passesRef.current = { ...passesRef.current, ...patch };
+    const next = passesRef.current;
+    setState((s) => ({ ...s, passes: next }));
+  }, []);
+
+  const clearPersistTimer = () => {
+    if (persistTimer.current) {
+      clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+    }
+  };
+
   const reset = useCallback(() => {
     ingestAbort.current?.abort();
     analyzeAbort.current?.abort();
     askAbort.current?.abort();
+    saveAbort.current?.abort();
     ingestAbort.current = null;
     analyzeAbort.current = null;
     askAbort.current = null;
+    saveAbort.current = null;
+    clearPersistTimer();
+    persistDirty.current = null;
+    filesRef.current = new Map();
     pdfFilesRef.current = new Map();
     pagesRef.current = [];
     transcriptsRef.current = [];
     instructionsRef.current = "";
     analysisRef.current = EMPTY_ANALYSIS;
+    passesRef.current = IDLE_PASSES;
+    savedRef.current = EMPTY_SAVED;
+    saveAttemptRef.current = null;
+    runRef.current = null;
     setState(EMPTY);
   }, []);
 
@@ -224,6 +340,271 @@ export function useDeposition() {
     return transcripts;
   }, []);
 
+  // ---- Durable record -------------------------------------------------------
+
+  const recordTranscripts = useCallback((): DepositionRecord["transcripts"] => {
+    const map = savedRef.current.docIdByFileId;
+    return transcriptsRef.current.map((t) => ({
+      docId: map[t.fileId] ?? t.fileId,
+      fileName: t.fileName,
+      witness: t.witness ?? "",
+      citeReady: t.citeReady,
+      lineCount: t.lines.length,
+    }));
+  }, []);
+
+  /**
+   * Write the current analysis to the saved workspace. Serialized: one write in
+   * flight at a time, and anything that changes meanwhile is written afterwards.
+   * Until the workspace record exists the write is parked as "pending" and is
+   * flushed as soon as the save completes.
+   */
+  const persistAnalysisNow = useCallback(
+    async (complete: boolean): Promise<void> => {
+      const run = runRef.current;
+      const itemId = savedRef.current.itemId;
+      if (!run || !transcriptsRef.current.length) return;
+      if (!itemId) {
+        persistDirty.current = { complete };
+        if (savedRef.current.analysis !== "pending") setSaved({ analysis: "pending" });
+        return;
+      }
+      if (persistInflight.current) {
+        persistDirty.current = { complete: complete || (persistDirty.current?.complete ?? false) };
+        return;
+      }
+      const record = buildDepositionRecord({
+        runId: run.runId,
+        runStartedAt: run.startedAt,
+        complete,
+        instructions: instructionsRef.current,
+        transcripts: recordTranscripts(),
+        passes: passesRef.current,
+        analysis: analysisRef.current,
+      });
+      setSaved({ analysis: "saving" });
+      const task = (async () => {
+        try {
+          const res = await withRetry(() => saveWorkspaceAnalysisFn({ data: { itemId, record } }), {
+            tries: 3,
+            baseMs: 500,
+          });
+          if (savedRef.current.itemId !== itemId) return;
+          if (res.ok) {
+            setSaved({ analysis: "saved", analysisSavedAt: res.analysis.updatedAt, message: null });
+          } else {
+            // A newer run owns the stored record; this run's output is superseded.
+            setSaved({ analysis: "saved", analysisSavedAt: res.analysis.updatedAt });
+          }
+        } catch (e) {
+          if (savedRef.current.itemId !== itemId) return;
+          setSaved({
+            analysis: "error",
+            message: e instanceof Error ? e.message : "Could not save the analysis.",
+          });
+        } finally {
+          persistInflight.current = null;
+        }
+      })();
+      persistInflight.current = task;
+      await task;
+      const dirty = persistDirty.current;
+      if (dirty && savedRef.current.itemId === itemId) {
+        persistDirty.current = null;
+        await persistAnalysisNow(dirty.complete);
+      }
+    },
+    [recordTranscripts, setSaved],
+  );
+
+  const persistAnalysis = useCallback(
+    (complete: boolean) => {
+      clearPersistTimer();
+      if (complete) {
+        void persistAnalysisNow(true);
+        return;
+      }
+      persistTimer.current = setTimeout(() => {
+        persistTimer.current = null;
+        void persistAnalysisNow(false);
+      }, ANALYSIS_PERSIST_DEBOUNCE_MS);
+    },
+    [persistAnalysisNow],
+  );
+
+  /**
+   * Save this deposition set as a workspace: original bytes (best-effort),
+   * parsed pages, and the chunk index (BM25 + embeddings) so Ask can use the
+   * hybrid retriever and the Library can reopen the set without re-reading.
+   * Runs automatically once reading and OCR settle; retry reuses the request id.
+   */
+  const saveWorkspace = useCallback(async (): Promise<void> => {
+    const transcripts = transcriptsRef.current;
+    if (!transcripts.length) return;
+    if (savedRef.current.loaded || savedRef.current.status === "ready") return;
+    saveAbort.current?.abort();
+    const controller = new AbortController();
+    saveAbort.current = controller;
+    let attempt = saveAttemptRef.current;
+    if (!attempt) {
+      attempt = { requestId: newId(), bytesKeyByFileId: {}, sha256ByFileId: {} };
+      saveAttemptRef.current = attempt;
+    }
+    const name = depositionWorkspaceName(transcripts);
+    setSaved({ status: "saving", name, message: null });
+    step({ id: "save", label: "Saving to your library", status: "running", detail: "transcripts, pages, index" });
+    try {
+      const byFile = new Map<string, { page: number; text: string }[]>();
+      for (const p of pagesRef.current) {
+        if (!p.text.trim()) continue;
+        const arr = byFile.get(p.fileId) ?? [];
+        arr.push({ page: p.page, text: p.text });
+        byFile.set(p.fileId, arr);
+      }
+      const files = await mapPool(transcripts, 3, async (t) => {
+        const blob = filesRef.current.get(t.fileId);
+        const fp = byFile.get(t.fileId) ?? [];
+        let sha256 = attempt!.sha256ByFileId[t.fileId];
+        if (blob && !sha256) {
+          sha256 = await rawFileSha256(blob);
+          attempt!.sha256ByFileId[t.fileId] = sha256;
+        }
+        let bytesKey: string | undefined = attempt!.bytesKeyByFileId[t.fileId];
+        if (blob && !bytesKey) {
+          bytesKey = await uploadOriginalBytes(
+            { name: t.fileName, blob, ...(sha256 ? { sha256 } : {}) },
+            controller.signal,
+          );
+          if (bytesKey) attempt!.bytesKeyByFileId[t.fileId] = bytesKey;
+        }
+        const totalChars = fp.reduce((total, page) => total + page.text.length, 0);
+        // Transcripts are indexed from the text the reader shows (including OCR
+        // repairs) so chunk cites line up with the transcript. Only oversize
+        // files fall back to the asynchronous lane over the original bytes.
+        const oversize = fp.length > SYNC_INGEST_MAX_PAGES || totalChars > SYNC_INGEST_MAX_CHARS;
+        return {
+          clientFileId: t.fileId,
+          fileName: t.fileName,
+          ...(blob?.type ? { mime: blob.type } : {}),
+          ...(sha256 ? { sha256 } : {}),
+          ...(blob ? { byteSize: blob.size } : {}),
+          ...(bytesKey ? { bytesKey } : {}),
+          pages: oversize ? [] : fp,
+        };
+      });
+      if (controller.signal.aborted) return;
+      const res = await saveWorkspaceFn({
+        data: { requestId: attempt.requestId, name, surface: "deposition", files },
+      });
+      if (controller.signal.aborted) return;
+      let status: Omit<typeof res, "kbWorkspaceId"> = res;
+      for (let poll = 0; status.status === "saving" && poll < SAVE_POLL_MAX; poll++) {
+        setSaved({
+          status: status.stage === "embedding" ? "embedding" : "queued",
+          itemId: res.itemId,
+          kbWorkspaceId: res.kbWorkspaceId,
+          message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} pending`,
+        });
+        await abortableDelay(SAVE_POLL_MS, controller.signal);
+        const polled = await withRetry(() => getWorkspaceStatusFn({ data: { itemId: res.itemId } }), {
+          tries: 3,
+          baseMs: 500,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        if (!polled) throw new Error("Saved workspace status is unavailable.");
+        status = polled;
+      }
+      if (controller.signal.aborted) return;
+      if (status.status === "saving") {
+        setSaved({
+          status: "queued",
+          itemId: res.itemId,
+          kbWorkspaceId: res.kbWorkspaceId,
+          message: "Indexing is continuing in the background.",
+        });
+        step({ id: "save", label: "Saving to your library", status: "done", detail: "indexing in background" });
+        return;
+      }
+      if (status.status === "error") {
+        saveAttemptRef.current = null;
+        setSaved({
+          status: "error",
+          itemId: res.itemId,
+          kbWorkspaceId: res.kbWorkspaceId,
+          message: status.errorSummary ?? "Some transcripts could not be indexed.",
+        });
+        step({
+          id: "save",
+          label: "Saving to your library",
+          status: "error",
+          ...(status.errorSummary ? { detail: status.errorSummary } : {}),
+        });
+        return;
+      }
+      const docIdByFileId = Object.fromEntries(
+        status.documents.flatMap((doc) =>
+          doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
+        ),
+      );
+      const bound = transcriptsRef.current.every((t) => Boolean(docIdByFileId[t.fileId]));
+      setSaved({
+        status: "ready",
+        itemId: res.itemId,
+        kbWorkspaceId: res.kbWorkspaceId,
+        docIdByFileId,
+        hybridAsk: bound,
+        message: bound
+          ? null
+          : "Saved, but not every transcript is indexed. Ask uses in-tab retrieval.",
+      });
+      step({
+        id: "save",
+        label: "Saved to your library",
+        status: "done",
+        detail: `${status.docCount} transcript${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages`,
+      });
+      const dirty = persistDirty.current;
+      if (dirty || savedRef.current.analysis === "pending") {
+        persistDirty.current = null;
+        void persistAnalysisNow(dirty?.complete ?? false);
+      }
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      const message = e instanceof Error ? e.message : "Save failed";
+      if (message.includes("does not match its reservation")) saveAttemptRef.current = null;
+      setSaved({ status: "error", message });
+      step({ id: "save", label: "Saving to your library", status: "error", detail: message });
+    } finally {
+      if (saveAbort.current === controller) saveAbort.current = null;
+    }
+  }, [persistAnalysisNow, setSaved, step]);
+
+  /** Remove the saved copy (bytes, pages, index, analysis) and clear this tab. */
+  const deleteSaved = useCallback(async (): Promise<boolean> => {
+    const itemId = savedRef.current.itemId;
+    if (!itemId) {
+      reset();
+      return true;
+    }
+    saveAbort.current?.abort();
+    clearPersistTimer();
+    setSaved({ status: "saving", message: "Deleting saved copy…" });
+    try {
+      await deleteWorkspaceFn({ data: { itemId } });
+      reset();
+      return true;
+    } catch (e) {
+      setSaved({
+        status: "error",
+        message: e instanceof Error ? e.message : "Could not delete the saved copy.",
+      });
+      return false;
+    }
+  }, [reset, setSaved]);
+
+  // ---- Analysis -------------------------------------------------------------
+
   const analyze = useCallback(async () => {
     const transcripts = transcriptsRef.current;
     if (!transcripts.length) {
@@ -233,30 +614,24 @@ export function useDeposition() {
     analyzeAbort.current?.abort();
     const controller = new AbortController();
     analyzeAbort.current = controller;
+    clearPersistTimer();
+    persistDirty.current = null;
+    const run: AnalysisRun = { runId: newId(), startedAt: Date.now() };
+    runRef.current = run;
     const focus = instructionsRef.current;
-    analysisRef.current = {
-      ...EMPTY_ANALYSIS,
-      witnesses: transcripts.map((t, i) => ({
-        id: `w-seed-${i}`,
-        name: t.witness || t.fileName.replace(/\.[^.]+$/, ""),
-        role: "",
-        fileName: t.fileName,
-        summary: t.caption.replace(/\s+/g, " ").trim().slice(0, 280),
-        quote: "",
-        cite: t.citeReady && t.lines[0] ? `${t.lines[0]!.page}:${t.lines[0]!.line}` : "",
-      })),
+    analysisRef.current = { ...EMPTY_ANALYSIS, witnesses: seedWitnesses(transcripts) };
+    passesRef.current = {
+      case: "running",
+      record: "running",
+      connections: "running",
+      cross: transcripts.length > 1 ? "idle" : "done",
     };
     setState((s) => ({
       ...s,
       phase: "analyzing",
       analysis: { ...analysisRef.current },
       error: null,
-      passes: {
-        case: "running",
-        record: "running",
-        connections: "running",
-        cross: transcripts.length > 1 ? "idle" : "done",
-      },
+      passes: passesRef.current,
       analyzeProgress: { done: 0, total: 1 },
     }));
 
@@ -321,15 +696,18 @@ export function useDeposition() {
         },
         controller.signal,
       );
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || runRef.current !== run) return;
       const verified = verifyDepAnalysis(parseDepAnalysis(raw), list);
       analysisRef.current = mergeDepAnalysis(analysisRef.current, verified);
+      if (mark && pass !== "cover" && pass !== "synth") passesRef.current = { ...passesRef.current, [pass]: "done" };
+      const passes = passesRef.current;
       setState((s) => ({
         ...s,
         analysis: analysisRef.current,
         role: analysisRef.current.role || s.role,
-        passes: mark && pass !== "cover" && pass !== "synth" ? { ...s.passes, [pass]: "done" } : s.passes,
+        passes,
       }));
+      persistAnalysis(false);
     };
 
     const windows = transcripts.flatMap((t) =>
@@ -348,30 +726,28 @@ export function useDeposition() {
     setState((s) => ({ ...s, analyzeProgress: { done: 0, total: Math.max(1, windows.length + extra) } }));
 
     try {
-      if (windows.length) {
-        await mapPool(
-          windows,
-          ANALYZE_WINDOW_CONCURRENCY,
-          async (w) => {
-            await runPass("cover", [w.t], w.pack.hits, w.pack.pages);
-            bump();
-          },
-          controller.signal,
-        );
-      }
+      await mapPool(
+        windows,
+        ANALYZE_WINDOW_CONCURRENCY,
+        async (w) => {
+          await runPass("cover", [w.t], w.pack.hits, w.pack.pages);
+          bump();
+        },
+        controller.signal,
+      );
     } catch {
       if (controller.signal.aborted) {
         setState((s) => (s.phase === "analyzing" ? { ...s, phase: "ready", analyzeProgress: null } : s));
         return;
       }
+      setPasses({ case: "error", record: "error", connections: "error" });
       setState((s) => ({ ...s, phase: "error", error: "Analysis failed", analyzeProgress: null }));
+      persistAnalysis(true);
       return;
     }
+    if (controller.signal.aborted) return;
 
-    setState((s) => ({
-      ...s,
-      passes: { ...s.passes, case: "running", record: "done", connections: "done" },
-    }));
+    setPasses({ case: "running", record: "done", connections: "done" });
     try {
       const findings = compactDepAnalysis(analysisRef.current);
       await runPass(
@@ -383,11 +759,12 @@ export function useDeposition() {
     } catch {
       /* covering windows still stand */
     }
+    if (controller.signal.aborted) return;
     bump();
-    setState((s) => ({ ...s, passes: { ...s.passes, case: "done" } }));
+    setPasses({ case: "done" });
 
     if (transcripts.length > 1) {
-      setState((s) => ({ ...s, passes: { ...s.passes, cross: "running" } }));
+      setPasses({ cross: "running" });
       const findings = compactDepAnalysis(analysisRef.current);
       try {
         await runPass(
@@ -400,6 +777,8 @@ export function useDeposition() {
       } catch {
         /* per-window results still usable */
       }
+      if (controller.signal.aborted) return;
+      if (passesRef.current.cross === "running") setPasses({ cross: "error" });
       bump();
     }
 
@@ -408,7 +787,10 @@ export function useDeposition() {
       return;
     }
     setState((s) => ({ ...s, phase: "ready", analysis: analysisRef.current, analyzeProgress: null }));
-  }, []);
+    persistAnalysis(true);
+  }, [persistAnalysis, setPasses]);
+
+  // ---- Upload -> read -> OCR -> save -> analyze -------------------------------
 
   const start = useCallback(
     async (incoming: File[], instructions?: string) => {
@@ -417,13 +799,22 @@ export function useDeposition() {
         setState({ ...EMPTY, phase: "error", error: "Drop depositions as PDF, Word, or TXT." });
         return;
       }
+      saveAbort.current?.abort();
+      analyzeAbort.current?.abort();
+      clearPersistTimer();
+      persistDirty.current = null;
       const controller = new AbortController();
       ingestAbort.current = controller;
+      filesRef.current = new Map();
       pdfFilesRef.current = new Map(files.filter((f) => transcriptFileKind(f) === "pdf").map((f) => [f.name, f]));
       pagesRef.current = [];
       transcriptsRef.current = [];
       instructionsRef.current = instructions?.trim() || "";
       analysisRef.current = EMPTY_ANALYSIS;
+      passesRef.current = IDLE_PASSES;
+      savedRef.current = EMPTY_SAVED;
+      saveAttemptRef.current = null;
+      runRef.current = null;
       setState({
         ...EMPTY,
         phase: "reading",
@@ -470,39 +861,20 @@ export function useDeposition() {
 
       let remaining = DEP_MAX_PAGES;
       const pages: PilePage[] = [];
-      const pageTexts: Record<string, string> = {};
       for (const item of extracted) {
         if (!item) continue;
         const fileId = newId();
+        filesRef.current.set(fileId, item.file);
         const take = item.res.pages.slice(0, Math.max(0, remaining));
         remaining -= take.length;
         for (const p of take) {
           const text = (p.text ?? "").trim();
-          const page: PilePage = { fileId, fileName: item.res.name, page: p.page, text, ocr: false };
-          pages.push(page);
-          pageTexts[`${item.res.name}:${p.page}`] = text;
-          pageTexts[`${fileId}:${p.page}`] = text;
+          pages.push({ fileId, fileName: item.res.name, page: p.page, text, ocr: false });
         }
       }
       pagesRef.current = pages;
       const pageTotal = pages.length;
-      step({
-        id: "read",
-        label: "Reading files",
-        status: "done",
-        detail: `${pageTotal} pages — kept in this tab only`,
-      });
-
-      const seedWitnesses = (list: DepTranscript[]) =>
-        list.map((t, i) => ({
-          id: `w-seed-${i}`,
-          name: t.witness || t.fileName.replace(/\.[^.]+$/, ""),
-          role: "",
-          fileName: t.fileName,
-          summary: t.caption.replace(/\s+/g, " ").trim().slice(0, 280),
-          quote: "",
-          cite: t.citeReady && t.lines[0] ? `${t.lines[0]!.page}:${t.lines[0]!.line}` : "",
-        }));
+      step({ id: "read", label: "Reading files", status: "done", detail: `${pageTotal} pages` });
 
       const publish = (list: DepTranscript[], ocr?: DepState["ocr"]) => {
         if (!list.length) return;
@@ -560,6 +932,8 @@ export function useDeposition() {
       const ocrPick = ocrJobs.slice(0, OCR_PAGE_CAP);
       if (!ocrPick.length) {
         if (!startedAnalyze) void analyze();
+        // The transcript text is final; index and store it now.
+        void saveWorkspace();
         return;
       }
 
@@ -635,63 +1009,255 @@ export function useDeposition() {
       transcripts = rebuildTranscripts();
       publish(transcripts, null);
       if (!startedAnalyze) void analyze();
+      // Save after OCR so the stored pages and chunks match what the reader shows.
+      void saveWorkspace();
+    },
+    [analyze, rebuildTranscripts, saveWorkspace, step],
+  );
+
+  // ---- Reopen from the Library ------------------------------------------------
+
+  const reloadWorkspace = useCallback(
+    async (itemId: string) => {
+      ingestAbort.current?.abort();
+      analyzeAbort.current?.abort();
+      askAbort.current?.abort();
+      saveAbort.current?.abort();
+      clearPersistTimer();
+      persistDirty.current = null;
+      filesRef.current = new Map();
+      pdfFilesRef.current = new Map();
+      pagesRef.current = [];
+      transcriptsRef.current = [];
+      analysisRef.current = EMPTY_ANALYSIS;
+      passesRef.current = IDLE_PASSES;
+      savedRef.current = EMPTY_SAVED;
+      saveAttemptRef.current = null;
+      runRef.current = null;
+      setState({ ...EMPTY, phase: "reading" });
+      step({ id: "read", label: "Opening saved deposition", status: "running" });
+      try {
+        const ws = await getWorkspaceFn({ data: { itemId } });
+        if (!ws) throw new Error("Saved deposition was not found.");
+        if (ws.surface !== "deposition") throw new Error("That workspace is not a deposition set.");
+        if (ws.status !== "ready") throw new Error("Saved deposition is still indexing. Try again shortly.");
+        const loaded = await mapPool(ws.docs, 4, async (doc) => {
+          const pg = await getWorkspacePagesFn({ data: { itemId, docId: doc.docId } });
+          if (!pg?.length) throw new Error(`Stored pages are missing for ${doc.fileName}`);
+          return {
+            doc,
+            pages: pg.map(
+              (page): PilePage => ({
+                fileId: doc.docId,
+                fileName: doc.fileName,
+                page: page.page,
+                text: page.text,
+                ocr: false,
+              }),
+            ),
+          };
+        });
+        const pages = loaded.flatMap((entry) => entry.pages);
+        if (!pages.length) throw new Error("Nothing to load in that deposition set.");
+        pagesRef.current = pages;
+        const transcripts = rebuildTranscripts();
+        if (!transcripts.length) throw new Error("No readable pages in that deposition set.");
+        const primary = transcripts[0]!;
+        const meta = extractCaptionMeta(transcripts.map((t) => t.caption).join(" "));
+        savedRef.current = {
+          status: "ready",
+          itemId,
+          kbWorkspaceId: ws.kbWorkspaceId,
+          name: ws.name,
+          docIdByFileId: Object.fromEntries(transcripts.map((t) => [t.fileId, t.fileId])),
+          message: null,
+          analysis: "idle",
+          analysisSavedAt: null,
+          loaded: true,
+          hybridAsk: true,
+        };
+        step({ id: "read", label: "Opened saved deposition", status: "done", detail: `${pages.length} pages` });
+
+        const record = await getWorkspaceAnalysisFn({ data: { itemId } }).catch(() => null);
+        if (record) {
+          analysisRef.current = record.analysis.witnesses.length
+            ? record.analysis
+            : { ...record.analysis, witnesses: seedWitnesses(transcripts) };
+          instructionsRef.current = record.instructions;
+          runRef.current = { runId: record.runId, startedAt: record.runStartedAt };
+          // A run interrupted by a refresh is shown as it was left; the user can Re-run.
+          passesRef.current = Object.fromEntries(
+            (Object.keys(record.passes) as DepPass[]).map((pass) => [
+              pass,
+              record.passes[pass] === "running" ? "error" : record.passes[pass],
+            ]),
+          ) as Record<DepPass, DepPassStatus>;
+          savedRef.current = {
+            ...savedRef.current,
+            analysis: "saved",
+            analysisSavedAt: record.savedAt,
+            message: record.complete ? null : "Analysis was interrupted before it finished. Re-run to complete it.",
+          };
+        } else {
+          analysisRef.current = { ...EMPTY_ANALYSIS, witnesses: seedWitnesses(transcripts) };
+        }
+        setState({
+          ...EMPTY,
+          phase: "ready",
+          files: loaded.map((entry) => ({
+            name: entry.doc.fileName,
+            pages: entry.pages.length,
+            empty: 0,
+            done: entry.pages.length,
+            status: "ready",
+          })),
+          transcripts,
+          activeFileId: primary.fileId,
+          analysis: analysisRef.current,
+          passes: passesRef.current,
+          role: analysisRef.current.role,
+          witness: transcripts.length === 1 ? primary.witness : `${transcripts.length} witnesses`,
+          citeReady: transcripts.some((t) => t.citeReady),
+          pageCount: pages.length,
+          mdl: meta.mdl,
+          taken: meta.taken,
+          instructions: instructionsRef.current,
+          saved: savedRef.current,
+        });
+        if (!record) void analyze();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Could not open the saved deposition.";
+        step({ id: "read", label: "Opening saved deposition", status: "error", detail: msg });
+        setState((s) => ({ ...s, phase: "error", error: msg }));
+      }
     },
     [analyze, rebuildTranscripts, step],
   );
 
-  const ask = useCallback(async (query: string) => {
-    if (!pagesRef.current.length || !query.trim()) return;
-    askAbort.current?.abort();
-    const controller = new AbortController();
-    askAbort.current = controller;
-    setState((s) => ({ ...s, phase: "asking", query, answer: "", hits: [], asking: true, error: null }));
-    step({ id: "ask", label: "Retrieving testimony and drafting", status: "running" });
-    try {
-      const hits = packAskHits(pagesRef.current, query);
-      const packed = pagesForClientHits(pagesRef.current, hits);
-      await streamSSE(
-        "/api/pile/ask",
-        {
-          query,
-          mode: "ask",
-          pages: packed.map((p) => {
-            const hit = hits.find((h) => h.fileName === p.fileName && h.page === p.page);
-            return { fileName: p.fileName, page: p.page, text: p.text, ocr: p.ocr, cite: hit?.cite };
-          }),
-          hits,
-          files: transcriptsRef.current.map((t) => ({ name: t.fileName, pageCount: t.lines.length })),
-          instructions: instructionsRef.current || null,
-          citeReady: transcriptsRef.current.some((t) => t.citeReady),
-        },
-        (evt) => {
-          const d = (evt.data ?? {}) as Record<string, unknown>;
-          if (evt.event === "delta") setState((s) => ({ ...s, answer: s.answer + String(d["text"] ?? "") }));
-          else if (evt.event === "retrieve" && d["status"] === "done") {
-            const next = Array.isArray(d["hits"]) ? (d["hits"] as PileHit[]) : [];
-            if (next.length) setState((s) => ({ ...s, hits: next }));
-          } else if (evt.event === "error") {
-            const msg = String(d["message"] ?? "Ask failed");
-            step({ id: "ask", label: "Retrieving testimony and drafting", status: "error", detail: msg });
-            setState((s) => ({ ...s, phase: "error", error: msg, asking: false }));
-          } else if (evt.event === "done") {
-            step({ id: "ask", label: "Retrieving testimony and drafting", status: "done" });
-            setState((s) => ({ ...s, phase: "ready", asking: false }));
-          }
-        },
-        controller.signal,
-      );
-    } catch (e) {
-      if (controller.signal.aborted) {
-        setState((s) => ({ ...s, phase: "ready", asking: false }));
+  // ---- Ask ------------------------------------------------------------------
+
+  const ask = useCallback(
+    async (query: string) => {
+      if (!pagesRef.current.length || !query.trim()) return;
+      askAbort.current?.abort();
+      const controller = new AbortController();
+      askAbort.current = controller;
+      setState((s) => ({ ...s, phase: "asking", query, answer: "", hits: [], asking: true, error: null }));
+      step({ id: "ask", label: "Retrieving testimony and drafting", status: "running" });
+
+      const finish = () => {
+        step({ id: "ask", label: "Retrieving testimony and drafting", status: "done" });
+        setState((s) => (s.phase === "asking" ? { ...s, phase: "ready", asking: false } : { ...s, asking: false }));
+      };
+      const fail = (msg: string) => {
+        step({ id: "ask", label: "Retrieving testimony and drafting", status: "error", detail: msg });
+        setState((s) => ({ ...s, phase: "error", error: msg, asking: false }));
+      };
+
+      const askLocal = async () => {
+        const hits = packAskHits(pagesRef.current, query);
+        const packed = pagesForClientHits(pagesRef.current, hits);
+        await streamSSE(
+          "/api/pile/ask",
+          {
+            query,
+            mode: "ask",
+            pages: packed.map((p) => {
+              const hit = hits.find((h) => h.fileName === p.fileName && h.page === p.page);
+              return { fileName: p.fileName, page: p.page, text: p.text, ocr: p.ocr, cite: hit?.cite };
+            }),
+            hits,
+            files: transcriptsRef.current.map((t) => ({ name: t.fileName, pageCount: t.lines.length })),
+            instructions: instructionsRef.current || null,
+            citeReady: transcriptsRef.current.some((t) => t.citeReady),
+          },
+          (evt) => {
+            const d = (evt.data ?? {}) as Record<string, unknown>;
+            if (evt.event === "delta") setState((s) => ({ ...s, answer: s.answer + String(d["text"] ?? "") }));
+            else if (evt.event === "retrieve" && d["status"] === "done") {
+              const next = Array.isArray(d["hits"]) ? (d["hits"] as PileHit[]) : [];
+              if (next.length) setState((s) => ({ ...s, hits: next }));
+            } else if (evt.event === "error") {
+              throw new Error(String(d["message"] ?? "Ask failed"));
+            }
+          },
+          controller.signal,
+        );
+      };
+
+      // Saved sets answer from the hybrid index (BM25 + embeddings + rerank) over
+      // the stored chunks. Any failure before the first token falls back to the
+      // in-tab retriever so Ask never dead-ends on a backend hiccup.
+      const askSaved = async (): Promise<boolean> => {
+        const saved = savedRef.current;
+        if (saved.status !== "ready" || !saved.itemId || !saved.hybridAsk) return false;
+        const transcripts = transcriptsRef.current;
+        const docIds = transcripts.map((t) => saved.docIdByFileId[t.fileId]).filter(Boolean);
+        if (docIds.length !== transcripts.length) return false;
+        const outcome: { streamed: boolean; softError: string | null } = { streamed: false, softError: null };
+        try {
+          await streamSavedWorkspaceAsk(
+            {
+              itemId: saved.itemId,
+              query,
+              docIds,
+              instructions: instructionsRef.current || null,
+            },
+            (evt) => {
+              const d = (evt.data ?? {}) as Record<string, unknown>;
+              if (evt.event === "delta") {
+                outcome.streamed = true;
+                setState((s) => ({ ...s, answer: s.answer + String(d["text"] ?? "") }));
+              } else if (evt.event === "retrieve" && d["status"] === "done") {
+                const sources = Array.isArray(d["sources"]) ? (d["sources"] as KbAskSource[]) : [];
+                const hits = kbSourcesToDepositionHits(
+                  sources,
+                  transcripts.map((t) => ({
+                    fileId: t.fileId,
+                    docId: saved.docIdByFileId[t.fileId]!,
+                    fileName: t.fileName,
+                    lines: t.lines,
+                  })),
+                );
+                if (hits.length) setState((s) => ({ ...s, hits }));
+              } else if (evt.event === "error") {
+                outcome.softError = String(d["message"] ?? "Saved deposition Ask failed");
+              }
+            },
+            controller.signal,
+          );
+        } catch (e) {
+          if (controller.signal.aborted) throw e;
+          if (outcome.streamed) throw e;
+          return false;
+        }
+        if (outcome.softError && !outcome.streamed) return false;
+        if (outcome.softError) throw new Error(outcome.softError);
+        return true;
+      };
+
+      try {
+        const answered = await askSaved();
+        if (controller.signal.aborted) {
+          setState((s) => ({ ...s, phase: "ready", asking: false }));
+          return;
+        }
+        if (!answered) {
+          step({ id: "ask", label: "Retrieving testimony and drafting", status: "running", detail: "in-tab retrieval" });
+          await askLocal();
+        }
+      } catch (e) {
+        if (controller.signal.aborted) {
+          setState((s) => ({ ...s, phase: "ready", asking: false }));
+          return;
+        }
+        fail(e instanceof Error ? e.message : "Ask failed");
         return;
       }
-      const msg = e instanceof Error ? e.message : "Ask failed";
-      step({ id: "ask", label: "Retrieving testimony and drafting", status: "error", detail: msg });
-      setState((s) => ({ ...s, phase: "error", error: msg, asking: false }));
-      return;
-    }
-    setState((s) => (s.phase === "asking" ? { ...s, phase: "ready", asking: false } : { ...s, asking: false }));
-  }, [step]);
+      finish();
+    },
+    [step],
+  );
 
   const exportMemo = useCallback(() => {
     const analysis = state.analysis;
@@ -717,6 +1283,9 @@ export function useDeposition() {
     ask,
     reset,
     exportMemo,
+    saveWorkspace,
+    reloadWorkspace,
+    deleteSaved,
     setSearch: (search: string) => setState((s) => ({ ...s, search })),
     setRegex: (regex: boolean) => setState((s) => ({ ...s, regex })),
     setSpeaker: (speaker: DepSpeakerFilter) => setState((s) => ({ ...s, speaker })),
