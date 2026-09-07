@@ -106,3 +106,7 @@ export const ANALYZE_WINDOW = 16;
 export const ANALYZE_WINDOW_CONCURRENCY = 8;
 /** Start analysis on a dirty PDF after this many OCR pages land. */
 export const DEP_OCR_ANALYZE_AFTER = 10;
+/** Graph-reasoning Ask channel (13-kg-enhancements-spec §4.1). */
+export const ASK_GRAPH_PATHS = 12;
+export const ASK_GRAPH_PATH_LEN = 3;
+export const ASK_GRAPH_PAIRS = 8;

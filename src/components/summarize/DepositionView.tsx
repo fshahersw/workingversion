@@ -1,11 +1,26 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertCircle, Download, Loader2, RotateCcw, Search } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import {
+  AlertCircle,
+  Download,
+  Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  RotateCcw,
+  Search,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DepositionAnalysisPane, type AnalysisTab } from "./DepositionAnalysisPane";
 import { DepositionDropPanel } from "./DepositionDropPanel";
 import { TranscriptPane } from "./TranscriptPane";
 import { Button } from "@/components/ui/button";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
+import { useMediaQuery } from "@/hooks/use-media-query";
+import {
+  DEPOSITION_TRANSCRIPT_KEY,
+  readLayoutPreference,
+  writeLayoutPreference,
+} from "@/lib/pile/discovery-layout";
 import { useDeposition } from "@/lib/use-deposition";
 
 const EASE = [0.22, 0.61, 0.36, 1] as const;
@@ -27,9 +42,15 @@ export function DepositionView() {
     selectCite,
   } = useDeposition();
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("summary");
+  const [mobilePane, setMobilePane] = useState<"transcript" | "analysis">("analysis");
+  const [transcriptOpen, setTranscriptOpen] = useState(() =>
+    readLayoutPreference(DEPOSITION_TRANSCRIPT_KEY, true),
+  );
+  const desktopLayout = useMediaQuery("(min-width: 1024px)");
   const askRef = useRef<HTMLInputElement>(null);
   const handleTabChange = useCallback((tab: AnalysisTab) => {
     setAnalysisTab(tab);
+    setMobilePane("analysis");
     if (tab === "ask") askRef.current?.focus();
   }, []);
   const workbench = !!active;
@@ -40,6 +61,63 @@ export function DepositionView() {
     state.transcripts.length > 1
       ? `${state.transcripts.length} transcripts`
       : state.witness || state.files[0]?.name || "Deposition";
+
+  useEffect(() => {
+    writeLayoutPreference(DEPOSITION_TRANSCRIPT_KEY, transcriptOpen);
+  }, [transcriptOpen]);
+
+  const handleCite = useCallback(
+    (cite: string, fileName?: string) => {
+      selectCite(cite, fileName);
+      setTranscriptOpen(true);
+      if (!desktopLayout) setMobilePane("transcript");
+    },
+    [desktopLayout, selectCite],
+  );
+
+  const transcriptPane = workbench ? (
+    <TranscriptPane
+      transcript={active!}
+      files={state.transcripts.map((transcript) => ({
+        fileId: transcript.fileId,
+        fileName: transcript.fileName,
+        witness: transcript.witness,
+      }))}
+      activeFileId={state.activeFileId}
+      search={state.search}
+      regex={state.regex}
+      speaker={state.speaker}
+      selectedCite={state.selectedCite}
+      onSearch={setSearch}
+      onRegex={setRegex}
+      onSpeaker={setSpeaker}
+      onSelectFile={setActiveFile}
+    />
+  ) : null;
+
+  const analysisPane = workbench ? (
+    <DepositionAnalysisPane
+      analyzing={analyzing}
+      analysis={state.analysis}
+      passes={state.passes}
+      role={state.role || state.analysis?.role || ""}
+      answer={state.answer}
+      hits={state.hits}
+      asking={state.asking}
+      onCite={handleCite}
+      onTabChange={handleTabChange}
+      transcripts={state.transcripts.map((transcript) => ({
+        fileId: transcript.fileId,
+        fileName: transcript.fileName,
+        witness: transcript.witness,
+      }))}
+      onAsk={(question) => {
+        setQuery(question);
+        setMobilePane("analysis");
+        void ask(question);
+      }}
+    />
+  ) : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -60,11 +138,26 @@ export function DepositionView() {
       )}
 
       {workbench ? (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden border border-border/80 bg-white">
-          <header className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border/80 px-4">
-            <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-sm border border-border/80 bg-white">
+          <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border/80 px-3 py-2 sm:px-4">
+            <div className="flex min-w-[14rem] flex-1 items-center gap-2">
+              {desktopLayout ? (
+                <button
+                  type="button"
+                  onClick={() => setTranscriptOpen((open) => !open)}
+                  aria-expanded={transcriptOpen}
+                  aria-label={transcriptOpen ? "Hide transcript" : "Show transcript"}
+                  className="grid h-7 w-7 shrink-0 place-items-center text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {transcriptOpen ? (
+                    <PanelLeftClose className="h-3.5 w-3.5" />
+                  ) : (
+                    <PanelLeftOpen className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              ) : null}
               <h2 className="truncate text-[14px] font-semibold text-foreground">{fileLabel}</h2>
-              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+              <span className="border-l border-border pl-2 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
                 {state.transcripts.length > 1 ? "Set" : "Witness"}
               </span>
               <p className="hidden truncate text-[12px] text-muted-foreground sm:block">
@@ -85,7 +178,7 @@ export function DepositionView() {
               ) : null}
               {analyzing || running ? (
                 <span className="inline-flex items-center gap-1.5 pr-2 text-[12px] text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" />
                   {state.passes.cross === "running"
                     ? "Cross-checking transcripts…"
                     : state.analyzeProgress
@@ -97,7 +190,7 @@ export function DepositionView() {
                   type="button"
                   variant="ghost"
                   size="sm"
-                  className="h-8 rounded-md"
+                  className="h-8 rounded-sm"
                   onClick={() => void analyze()}
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
@@ -108,7 +201,7 @@ export function DepositionView() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-8 rounded-md"
+                className="h-8 rounded-sm"
                 disabled={!state.analysis?.summary && !state.analysis?.admissions.length}
                 onClick={exportMemo}
               >
@@ -119,7 +212,7 @@ export function DepositionView() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-8 rounded-md"
+                className="h-8 rounded-sm"
                 onClick={reset}
               >
                 Clear
@@ -127,78 +220,119 @@ export function DepositionView() {
             </div>
           </header>
 
+          {desktopLayout && transcriptOpen ? (
+            <ResizablePanelGroup
+              id="deposition-workbench"
+              orientation="horizontal"
+              className="min-h-0 flex-1"
+            >
+              <ResizablePanel
+                id="deposition-transcript"
+                defaultSize="31%"
+                minSize="280px"
+                maxSize={analysisTab === "graph" ? "34%" : "54%"}
+              >
+                <div className="h-full min-h-0">{transcriptPane}</div>
+              </ResizablePanel>
+              <ResizableHandle
+                withHandle
+                aria-label="Resize transcript and analysis"
+                className="z-20 w-1 bg-border transition-colors hover:bg-brand-navy/20 data-[resize-handle-active]:bg-brand-navy/30"
+              />
+              <ResizablePanel
+                id="deposition-analysis"
+                defaultSize="69%"
+                minSize={analysisTab === "graph" ? "520px" : "440px"}
+              >
+                <div className="h-full min-h-0">{analysisPane}</div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          ) : desktopLayout ? (
+            <div className="min-h-0 flex-1">{analysisPane}</div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div
+                className="grid h-11 shrink-0 grid-cols-2 border-b border-border/80 bg-white p-1"
+                role="tablist"
+                aria-label="Deposition workspace panes"
+              >
+                {(["transcript", "analysis"] as const).map((pane) => (
+                  <button
+                    key={pane}
+                    id={`deposition-${pane}-tab`}
+                    type="button"
+                    role="tab"
+                    aria-selected={mobilePane === pane}
+                    aria-controls={`deposition-${pane}-panel`}
+                    onClick={() => setMobilePane(pane)}
+                    className={`border-b-2 text-[12px] font-medium capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                      mobilePane === pane
+                        ? "border-brand-navy bg-slate-50 text-brand-navy"
+                        : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    }`}
+                  >
+                    {pane}
+                  </button>
+                ))}
+              </div>
+              <div
+                id="deposition-transcript-panel"
+                role="tabpanel"
+                aria-labelledby="deposition-transcript-tab"
+                hidden={mobilePane !== "transcript"}
+                className="min-h-0 flex-1"
+              >
+                {transcriptPane}
+              </div>
+              <div
+                id="deposition-analysis-panel"
+                role="tabpanel"
+                aria-labelledby="deposition-analysis-tab"
+                hidden={mobilePane !== "analysis"}
+                className="min-h-0 flex-1"
+              >
+                {analysisPane}
+              </div>
+            </div>
+          )}
+
           <form
-            className="flex h-12 shrink-0 items-center gap-3 border-b border-border/80 bg-white px-4"
-            onSubmit={(e) => {
-              e.preventDefault();
+            className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border/80 bg-white px-3 py-1.5 sm:flex-nowrap sm:gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setMobilePane("analysis");
               void ask(state.query);
             }}
           >
             <label
               htmlFor="dep-ask"
-              className="w-[7.25rem] shrink-0 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400"
+              className="shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-slate-400"
             >
-              Ask the set
+              Ask
             </label>
-            <div className="relative min-w-0 flex-1">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <div className="relative min-w-[12rem] flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
               <input
                 id="dep-ask"
                 ref={askRef}
                 value={state.query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Notice, product ID, conflicts across witnesses…"
-                className="h-9 w-full rounded-md border border-slate-200 bg-white pl-9 pr-3 text-[13px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-brand-navy/35 focus:ring-2 focus:ring-brand-navy/10"
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Ask across testimony, issues, conflicts, or exhibits"
+                className="h-8 w-full rounded-sm border border-slate-200 bg-white pl-8 pr-3 text-[12.5px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-brand-navy/35 focus:ring-1 focus:ring-brand-navy/10"
               />
             </div>
             <Button
               type="submit"
-              className="h-9 rounded-md px-3.5"
+              className="h-8 rounded-sm px-3"
               disabled={!state.query.trim() || state.asking}
             >
               {state.asking ? "Asking…" : "Ask"}
             </Button>
           </form>
-
-          <div
-            className={`grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] overflow-hidden ${
-              analysisTab === "graph"
-                ? "grid-cols-[minmax(240px,28%)_minmax(0,1fr)]"
-                : "grid-cols-[minmax(300px,38%)_minmax(0,1fr)]"
-            }`}
-          >
-            <TranscriptPane
-              transcript={active!}
-              files={state.transcripts.map((t) => ({
-                fileId: t.fileId,
-                fileName: t.fileName,
-                witness: t.witness,
-              }))}
-              activeFileId={state.activeFileId}
-              search={state.search}
-              regex={state.regex}
-              speaker={state.speaker}
-              selectedCite={state.selectedCite}
-              onSearch={setSearch}
-              onRegex={setRegex}
-              onSpeaker={setSpeaker}
-              onSelectFile={setActiveFile}
-            />
-            <DepositionAnalysisPane
-              analyzing={analyzing}
-              analysis={state.analysis}
-              passes={state.passes}
-              role={state.role || state.analysis?.role || ""}
-              answer={state.answer}
-              hits={state.hits}
-              asking={state.asking}
-              onCite={selectCite}
-              onTabChange={handleTabChange}
-            />
-          </div>
         </div>
       ) : ingesting ? (
-        <div className="mx-auto w-full max-w-[720px] rounded-2xl border border-border bg-card p-5">
+        <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto py-1 sm:py-4">
+          <div className="mx-auto w-full max-w-[820px] rounded-sm border border-border bg-card p-4 sm:p-5">
           <p className="mb-2 text-[13px] font-semibold text-foreground">Reading transcripts</p>
           <DepositionDropPanel
             onStart={() => {}}
@@ -215,7 +349,7 @@ export function DepositionView() {
               {state.steps.map((s) => (
                 <li key={s.id} className="flex items-start gap-2 text-[12.5px]">
                   {s.status === "running" ? (
-                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-brand-navy" />
+                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand-navy motion-safe:animate-spin" />
                   ) : s.status === "error" ? (
                     <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
                   ) : (
@@ -231,21 +365,22 @@ export function DepositionView() {
               ))}
             </ul>
           ) : null}
+          </div>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto">
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto py-1 lg:items-center lg:py-6">
           <AnimatePresence initial={false}>
             <motion.div
               key="dep-drop"
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.32, ease: EASE }}
-              className="w-full max-w-[720px] pb-6"
+              className="w-full max-w-[820px] pb-6"
             >
               <DepositionDropPanel onStart={(f, i) => void start(f, i)} busy={false} files={[]} />
-              <p className="mt-3 text-center text-[12px] leading-relaxed text-muted-foreground">
-                Upload deposition transcripts. The AI extracts witness details, page:line citations,
-                and cross-transcript patterns.
+              <p className="mx-auto mt-3 max-w-2xl text-center text-[12px] leading-relaxed text-muted-foreground">
+                Build a cite-addressable transcript record, then review admissions, conflicts,
+                chronology, exhibits, and connections.
               </p>
             </motion.div>
           </AnimatePresence>

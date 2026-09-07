@@ -398,6 +398,8 @@ export function DepositionAnalysisPane({
   asking,
   onCite,
   onTabChange,
+  transcripts,
+  onAsk,
 }: {
   analyzing: boolean;
   analysis: DepAnalysis | null;
@@ -408,6 +410,10 @@ export function DepositionAnalysisPane({
   asking?: boolean;
   onCite: (cite: string, fileName?: string) => void;
   onTabChange?: (tab: AnalysisTab) => void;
+  /** Source transcripts; enables cross-witness graph controls when there are several. */
+  transcripts?: { fileId: string; fileName: string; witness?: string | null }[];
+  /** Runs an Ask from the graph dossier ("Ask about this"). */
+  onAsk?: (question: string) => void;
 }) {
   const [tab, setTab] = useState<AnalysisTab>("summary");
   const selectTab = (next: AnalysisTab) => {
@@ -656,7 +662,14 @@ export function DepositionAnalysisPane({
             tabRunning && !analysis?.graph.nodes.length ? (
               <PassSkeleton label="connections" />
             ) : analysis?.graph.nodes.length ? (
-              <KnowledgeGraph analysis={analysis} onCite={onCite} />
+              <KnowledgeGraph
+                analysis={analysis}
+                onCite={onCite}
+                multi={(transcripts?.length ?? 0) > 1}
+                transcripts={transcripts}
+                onAsk={onAsk}
+                onOpenTab={selectTab}
+              />
             ) : (
               <EmptyList label="connections" />
             )
