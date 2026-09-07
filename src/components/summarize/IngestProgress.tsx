@@ -13,7 +13,7 @@ export function IngestProgress({ files, indexing }: { files: PileFileState[]; in
   const collapse = failed.length > 3 && !showErrors;
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,0.05)]">
+    <div className="overflow-hidden rounded-sm border border-border bg-card">
       <div className="border-b border-border px-5 py-4">
         <div className="flex items-baseline justify-between gap-3">
           <p className="text-[13px] font-semibold text-foreground">
@@ -23,9 +23,9 @@ export function IngestProgress({ files, indexing }: { files: PileFileState[]; in
             {total ? `${done.toLocaleString()} / ${total.toLocaleString()} pages` : "starting…"}
           </span>
         </div>
-        <div className="mt-2.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div className="mt-2.5 h-1 w-full overflow-hidden bg-muted">
           <div
-            className="h-full rounded-full bg-brand-orange transition-all duration-300"
+            className="h-full bg-brand-orange transition-all duration-300"
             style={{ width: `${pct}%` }}
           />
         </div>
@@ -47,9 +47,9 @@ export function IngestProgress({ files, indexing }: { files: PileFileState[]; in
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[12.5px] font-medium text-foreground">{f.name}</p>
                 {f.status === "ready" ? null : (
-                  <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-muted">
+                  <div className="mt-1.5 h-1 w-full overflow-hidden bg-muted">
                     <div
-                      className="h-full rounded-full bg-brand-navy/40 transition-all duration-300"
+                      className="h-full bg-brand-navy/40 transition-all duration-300"
                       style={{ width: `${filePct}%` }}
                     />
                   </div>

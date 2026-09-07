@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 
 import { countMatches, Highlight } from "./highlight";
 import { fileFormat } from "./RefineRail";
+import { AnswerMarkdown } from "@/components/chat/AnswerMarkdown";
 import { formatRetrievedPage } from "@/lib/pile/page-format";
 import type { PileFileHits } from "@/lib/pile/types";
 
@@ -44,6 +45,11 @@ export function DocumentReader({
   const idx = available.indexOf(page);
   const raw = pageTexts[`${group.fileId}:${page}`] ?? pageTexts[`${group.fileName}:${page}`] ?? "";
   const text = raw ? formatRetrievedPage(raw) : "";
+  // Only route through the markdown renderer when the page carries a real
+  // table (header separator row). Anything else stays as literal source text
+  // with query highlighting; bullets or stray `*` in a filing must not be
+  // reinterpreted as markup.
+  const structured = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/m.test(text);
   const onThisPage = countMatches(text, query);
 
   const step = (delta: number) => {
@@ -68,7 +74,7 @@ export function DocumentReader({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card">
-      <div className="flex items-start gap-2 border-b border-border/70 px-4 py-3">
+      <div className="flex min-h-16 items-start gap-2 border-b border-border/70 px-4 py-3 sm:px-5">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
             Document reader
@@ -90,14 +96,14 @@ export function DocumentReader({
             type="button"
             onClick={onClose}
             aria-label="Close reader"
-            className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="shrink-0 rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <X className="h-4 w-4" strokeWidth={1.75} />
           </button>
         ) : null}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/70 px-4 py-2">
+      <div className="flex min-h-11 flex-wrap items-center gap-2 border-b border-border/70 bg-muted/15 px-4 py-2 sm:px-5">
         <div className="flex items-center gap-1">
           <button
             type="button"
@@ -108,7 +114,7 @@ export function DocumentReader({
           >
             <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} />
           </button>
-          <span className="rounded border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11.5px] tabular-nums text-foreground">
+          <span className="border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11.5px] tabular-nums text-foreground">
             {page}
           </span>
           <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
@@ -152,20 +158,24 @@ export function DocumentReader({
         <button
           type="button"
           onClick={() => void copy()}
-          className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11.5px] font-medium text-foreground transition-colors hover:bg-muted"
+          className="ml-auto inline-flex shrink-0 items-center gap-1.5 border border-border px-2 py-1 text-[11.5px] font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <Copy className="h-3 w-3" strokeWidth={1.75} />
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
 
-      <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        {text ? (
-          <p className="select-text whitespace-pre-wrap break-words text-[13.5px] font-[450] leading-[1.75] text-foreground">
+      <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+        {text && structured ? (
+          <div className="mx-auto max-w-[78ch] select-text">
+            <AnswerMarkdown text={text} onCite={() => {}} />
+          </div>
+        ) : text ? (
+          <p className="mx-auto max-w-[78ch] select-text whitespace-pre-wrap break-words text-[13.5px] font-[450] leading-[1.8] text-foreground">
             <Highlight text={text} query={query} />
           </p>
         ) : (
-          <p className="text-[12.5px] text-muted-foreground">
+          <p className="mx-auto max-w-[78ch] text-[12.5px] text-muted-foreground" role="status">
             {`${group.fileId}:${page}` in pageTexts || `${group.fileName}:${page}` in pageTexts
               ? "This page has no extracted text."
               : "Loading this page…"}

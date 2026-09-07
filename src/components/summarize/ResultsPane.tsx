@@ -1,4 +1,4 @@
-import { ChevronDown, Copy, Download, FileDown } from "lucide-react";
+import { ChevronDown, Copy, Download, FileDown, Loader2 } from "lucide-react";
 import { useState } from "react";
 
 import { Highlight } from "./highlight";
@@ -8,6 +8,7 @@ import type { Source } from "@/lib/chat-types";
 import { downloadDocx } from "@/lib/memo-export";
 import { citeLabelMap, rewriteCites, type CitePage, type CiteReport } from "@/lib/pile/cite-trust";
 import { PILE_JOBS, type PileJobId } from "@/lib/pile/jobs";
+import { sourceCoverage } from "@/lib/pile/source-coverage";
 import type { PileFileHits, PileHit, PileStructure } from "@/lib/pile/types";
 import type { AskTurn } from "@/lib/use-pile";
 
@@ -28,8 +29,10 @@ function PassageRow({
     <button
       type="button"
       onClick={onOpen}
-      className={`block w-full rounded-md px-2.5 py-2 text-left transition-colors ${
-        active ? "bg-brand-orange-soft/40" : "hover:bg-muted/50"
+      className={`block w-full border-l-2 px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        active
+          ? "border-l-brand-orange bg-brand-orange-soft/30"
+          : "border-l-transparent hover:bg-muted/40"
       }`}
     >
       <span className="block font-mono text-[10.5px] tabular-nums text-muted-foreground">
@@ -60,7 +63,7 @@ function GroupCard({
   const rest = group.hits.length - shown.length;
 
   return (
-    <section className="border-b border-border/70 px-4 py-3.5 last:border-b-0">
+    <section className="border-b border-border/70 px-4 py-4 last:border-b-0 sm:px-6">
       <div className="flex min-w-0 items-center gap-2">
         <h3 className="min-w-0 truncate text-[13px] font-semibold text-foreground">
           {group.fileName}
@@ -76,7 +79,7 @@ function GroupCard({
       </div>
 
       {group.hits.length ? (
-        <div className="mt-1.5 space-y-0.5">
+        <div className="mt-2 space-y-1">
           {shown.map((h) => (
             <PassageRow
               key={`${h.fileId}:${h.page}:${h.snippet.slice(0, 16)}`}
@@ -90,7 +93,7 @@ function GroupCard({
             <button
               type="button"
               onClick={() => setExpanded(true)}
-              className="px-2.5 pt-1 text-[11.5px] font-medium text-brand-orange hover:underline"
+              className="rounded-sm px-3 pt-1 text-[11.5px] font-medium text-brand-orange hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               Show {rest} more passage{rest === 1 ? "" : "s"}
             </button>
@@ -286,19 +289,20 @@ export function ResultsPane({
   const passages = groups.reduce((n, g) => n + g.hits.length, 0);
   const idle = !searching && !answer && !groups.length;
   const labels = citeLabelMap(citePages);
+  const coverage = sourceCoverage(groups);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const collapseSources = Boolean(answer) && groups.length > 0;
 
   return (
     <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto">
       {mode === "ask" && onJob && !streaming ? (
-        <div className="flex flex-wrap gap-1.5 border-b border-border/70 px-4 py-2.5">
+        <div className="flex flex-wrap divide-x divide-border border-b border-border/70 px-4 py-2.5 sm:px-6">
           {PILE_JOBS.map((job) => (
             <button
               key={job.id}
               type="button"
               onClick={() => onJob(job.id)}
-              className="rounded-full border border-border bg-muted/30 px-3 py-1 text-[11.5px] font-medium text-foreground transition hover:border-brand-navy/30 hover:bg-card"
+              className="px-3 py-1 text-[11px] font-medium text-foreground transition first:pl-0 hover:text-brand-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {job.label}
             </button>
@@ -318,46 +322,84 @@ export function ResultsPane({
       ) : null}
 
       {answer ? (
-        <section className="border-b border-border/70 px-4 py-4">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              Answer
-            </span>
-            <span className="rounded bg-emerald-500/12 px-1.5 py-0.5 text-[10.5px] font-medium text-emerald-700">
-              {citeReport
-                ? `${citeReport.pagesRead} page${citeReport.pagesRead === 1 ? "" : "s"}`
-                : `${hits.length} grounded passage${hits.length === 1 ? "" : "s"}`}
-            </span>
-            <span className="font-mono text-[10.5px] text-muted-foreground">
-              across {citeReport?.filesRead ?? matched.length} document
-              {(citeReport?.filesRead ?? matched.length) === 1 ? "" : "s"}
-            </span>
-            {!streaming ? (
-              <AnswerActions text={answer} title={query} citePages={citePages} />
-            ) : null}
+        <section className="border-b border-border/70 px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
+          <div className="mx-auto w-full max-w-[78ch]">
+            <div className="mb-3 flex min-h-7 flex-wrap items-center gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                Answer
+              </span>
+              {streaming ? (
+                <span
+                  className="inline-flex items-center gap-1.5 text-[10.5px] font-medium text-brand-navy"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Loader2 className="h-3 w-3 motion-safe:animate-spin" />
+                  Writing answer
+                </span>
+              ) : (
+                <span className="border-l-2 border-emerald-600 pl-2 text-[10.5px] font-medium text-emerald-700">
+                  {citeReport
+                    ? `${citeReport.pagesRead} page${citeReport.pagesRead === 1 ? "" : "s"}`
+                    : `${hits.length} grounded passage${hits.length === 1 ? "" : "s"}`}
+                </span>
+              )}
+              <span className="font-mono text-[10.5px] text-muted-foreground">
+                across {citeReport?.filesRead ?? matched.length} document
+                {(citeReport?.filesRead ?? matched.length) === 1 ? "" : "s"}
+              </span>
+              {!streaming ? (
+                <AnswerActions text={answer} title={query} citePages={citePages} />
+              ) : null}
+            </div>
+            <AnswerMarkdown
+              text={answer}
+              streaming={streaming}
+              selectedRef={selectedRef}
+              onCite={onCite}
+              citeLabels={labels}
+            />
+            {!streaming && citeReport ? <CiteStrip report={citeReport} /> : null}
           </div>
-          <AnswerMarkdown
-            text={answer}
-            streaming={streaming}
-            selectedRef={selectedRef}
-            onCite={onCite}
-            citeLabels={labels}
-          />
-          {!streaming && citeReport ? <CiteStrip report={citeReport} /> : null}
         </section>
       ) : null}
 
       {searching ? (
-        <p className="px-4 py-4 text-[12.5px] text-muted-foreground">Searching the index…</p>
+        <div
+          className="flex min-h-20 items-center gap-2 px-4 py-5 text-[12.5px] text-muted-foreground sm:px-6"
+          role="status"
+        >
+          <Loader2 className="h-4 w-4 motion-safe:animate-spin" />
+          Searching the index…
+        </div>
       ) : null}
 
       {groups.length ? (
         <>
+          <div className="border-b border-border bg-surface px-4 py-2 sm:px-6">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10.5px] tabular-nums text-muted-foreground">
+              <span>
+                Coverage {coverage.matchedFiles}/{coverage.totalFiles} documents
+              </span>
+              <span>{coverage.passages} passages</span>
+              {coverage.unmatchedFiles.length ? (
+                <details>
+                  <summary className="cursor-pointer list-none text-amber-700 hover:underline">
+                    {coverage.unmatchedFiles.length} unmatched
+                  </summary>
+                  <p className="mt-1 max-w-2xl whitespace-normal font-sans text-[11px] leading-relaxed text-muted-foreground">
+                    {coverage.unmatchedFiles.join(" · ")}
+                  </p>
+                </details>
+              ) : null}
+            </div>
+          </div>
           {collapseSources ? (
             <button
               type="button"
               onClick={() => setSourcesOpen((v) => !v)}
-              className="sticky top-0 z-[1] flex w-full items-center gap-2 border-b border-border/70 bg-card/95 px-4 py-2 text-left backdrop-blur"
+              aria-expanded={sourcesOpen}
+              className="sticky top-0 z-[1] flex w-full items-center gap-2 border-b border-border bg-surface/95 px-4 py-2.5 text-left backdrop-blur focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:px-6"
             >
               <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
                 Sources ({passages})
@@ -367,7 +409,7 @@ export function ResultsPane({
               />
             </button>
           ) : (
-            <div className="sticky top-0 z-[1] flex items-center gap-2 border-b border-border/70 bg-card/95 px-4 py-2 backdrop-blur">
+            <div className="sticky top-0 z-[1] flex items-center gap-2 border-b border-border bg-surface/95 px-4 py-2.5 backdrop-blur sm:px-6">
               <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
                 {passages} passage{passages === 1 ? "" : "s"} across {matched.length} of{" "}
                 {groups.length} documents
@@ -388,20 +430,20 @@ export function ResultsPane({
             : null}
         </>
       ) : idle ? (
-        <div className="px-4 py-5">
-          <p className="text-[13px] font-medium text-foreground">
+        <div className="mx-auto flex min-h-[14rem] w-full max-w-2xl flex-col justify-center px-5 py-8 sm:px-8">
+          <p className="text-[14px] font-medium leading-relaxed text-foreground">
             {mode === "ask"
               ? "Ask a question — answers stay on the page and cite the source."
               : "Find a phrase, docket number, or name across every document."}
           </p>
           {suggestions.length ? (
-            <div className="mt-3 flex flex-wrap gap-1.5">
+            <div className="mt-4 flex flex-wrap gap-2">
               {suggestions.map((q) => (
                 <button
                   key={q}
                   type="button"
                   onClick={() => onSuggest(q)}
-                  className="rounded-full border border-border bg-muted/30 px-3 py-1.5 text-left text-[12px] text-foreground transition hover:border-brand-navy/30 hover:bg-card"
+                  className="border-l-2 border-border px-3 py-1 text-left text-[11.5px] leading-relaxed text-foreground transition hover:border-brand-navy hover:text-brand-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {q}
                 </button>

@@ -138,8 +138,8 @@ export function DepositionView() {
       )}
 
       {workbench ? (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-sm border border-border/80 bg-white">
-          <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border/80 px-3 py-2 sm:px-4">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-sm border border-border bg-card">
+          <header className="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border bg-surface px-3 py-2 sm:px-4">
             <div className="flex min-w-[14rem] flex-1 items-center gap-2">
               {desktopLayout ? (
                 <button
@@ -252,7 +252,7 @@ export function DepositionView() {
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
               <div
-                className="grid h-11 shrink-0 grid-cols-2 border-b border-border/80 bg-white p-1"
+                className="grid h-11 shrink-0 grid-cols-2 border-b border-border bg-surface p-1"
                 role="tablist"
                 aria-label="Deposition workspace panes"
               >
@@ -297,7 +297,7 @@ export function DepositionView() {
           )}
 
           <form
-            className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border/80 bg-white px-3 py-1.5 sm:flex-nowrap sm:gap-3"
+            className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border bg-surface px-3 py-1.5 sm:flex-nowrap sm:gap-3"
             onSubmit={(event) => {
               event.preventDefault();
               setMobilePane("analysis");
@@ -318,7 +318,7 @@ export function DepositionView() {
                 value={state.query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Ask across testimony, issues, conflicts, or exhibits"
-                className="h-8 w-full rounded-sm border border-slate-200 bg-white pl-8 pr-3 text-[12.5px] text-slate-900 outline-none placeholder:text-slate-400 focus:border-brand-navy/35 focus:ring-1 focus:ring-brand-navy/10"
+                className="h-8 w-full rounded-sm border border-border bg-card pl-8 pr-3 text-[12.5px] text-foreground outline-none placeholder:text-muted-foreground focus:border-brand-navy/35 focus:ring-1 focus:ring-brand-navy/10"
               />
             </div>
             <Button

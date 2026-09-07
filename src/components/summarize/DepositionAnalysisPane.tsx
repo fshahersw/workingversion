@@ -447,9 +447,9 @@ export function DepositionAnalysisPane({
         : TABS.find((t) => t.id === tab)?.label;
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 overflow-hidden bg-white">
-      <nav className="wr-app-scroll flex w-[172px] shrink-0 flex-col overflow-y-auto border-r border-border/80 pt-0">
-        <div className="flex h-11 items-center border-b border-border/80 px-3">
+    <section className="flex h-full min-h-0 min-w-0 overflow-hidden bg-card">
+      <nav className="wr-app-scroll flex w-[172px] shrink-0 flex-col overflow-y-auto border-r border-border bg-surface pt-0">
+        <div className="flex h-11 items-center border-b border-border px-3">
           <p className="text-[13px] font-semibold text-slate-900">Analysis</p>
         </div>
         {GROUPS.map((group) => {
@@ -475,7 +475,7 @@ export function DepositionAnalysisPane({
                       className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-[13px] ${
                         on
                           ? "bg-brand-navy text-white"
-                          : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                          : "text-slate-600 hover:bg-surface-strong hover:text-slate-900"
                       }`}
                     >
                       <span className="font-medium">{t.label}</span>
@@ -502,7 +502,7 @@ export function DepositionAnalysisPane({
       </nav>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border/80 px-4">
+        <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border bg-surface px-4">
           <p className="text-[13px] font-semibold text-slate-900">{heading}</p>
           {role && tab === "summary" ? (
             <p className="truncate text-[12px] text-slate-500">{role}</p>

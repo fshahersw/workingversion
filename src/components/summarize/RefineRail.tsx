@@ -1,4 +1,11 @@
-import { AlertTriangle, FileText, Loader2, Plus, SlidersHorizontal } from "lucide-react";
+import {
+  AlertTriangle,
+  FileText,
+  Loader2,
+  PanelLeftClose,
+  Plus,
+  SlidersHorizontal,
+} from "lucide-react";
 import { useRef } from "react";
 
 import type { PileFile, PileStructure } from "@/lib/pile/types";
@@ -80,6 +87,7 @@ export function RefineRail({
   onClear,
   onOpen,
   onAddFiles,
+  onClose,
   children,
 }: {
   files: PileFile[];
@@ -95,6 +103,7 @@ export function RefineRail({
   onClear: () => void;
   onOpen: (fileId: string, page: number) => void;
   onAddFiles?: (files: File[]) => void;
+  onClose?: () => void;
   children?: React.ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -109,8 +118,8 @@ export function RefineRail({
   const showFormats = formatFacets.length >= 2;
 
   return (
-    <div className="flex min-h-0 flex-col">
-      <div className="flex items-center gap-2 border-b border-border/70 px-4 py-2.5">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-12 items-center gap-2 border-b border-border/70 px-4 py-2.5">
         <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
           Working set
         </span>
@@ -132,18 +141,28 @@ export function RefineRail({
               type="button"
               onClick={() => inputRef.current?.click()}
               disabled={adding}
-              className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium text-foreground hover:underline disabled:opacity-50"
+              className="ml-auto inline-flex items-center gap-1 rounded-sm text-[11px] font-medium text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
             >
               {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" strokeWidth={2} />}
               Add
             </button>
           </>
         ) : null}
+        {onClose ? (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Collapse working set files"
+            className="grid h-7 w-7 place-items-center text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <PanelLeftClose className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
 
       <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto">
-        <section className="border-b border-border/70 px-3 py-2">
-          <ul className="space-y-0.5">
+        <section className="border-b border-border/70 px-3 py-3">
+          <ul className="space-y-1">
             {files.map((f) => {
               const unreadable = f.emptyPages > 0 && f.emptyPages === f.pageCount;
               const active = selectedFileId === f.id;
@@ -163,7 +182,7 @@ export function RefineRail({
                   <button
                     type="button"
                     onClick={() => onOpen(f.id, 1)}
-                    className={`flex min-w-0 flex-1 items-start gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors ${
+                    className={`flex min-w-0 flex-1 items-start gap-2 px-2 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                       active ? "bg-brand-orange-soft/40" : "hover:bg-muted/50"
                     }`}
                   >

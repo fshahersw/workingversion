@@ -510,7 +510,7 @@ export function KnowledgeGraph({
 
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/80 bg-muted/25 px-1 py-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-1 py-2">
         {wideToolbar ? filters : (
           <Popover>
             <PopoverTrigger asChild>
@@ -559,7 +559,7 @@ export function KnowledgeGraph({
         <div
           ref={viewportRef}
           tabIndex={0}
-          className="relative min-h-[28rem] min-w-0 flex-1 overflow-hidden border border-border bg-muted/20 outline-none"
+          className="relative min-h-[28rem] min-w-0 flex-1 overflow-hidden border border-border bg-surface outline-none"
           onWheel={onWheel}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}

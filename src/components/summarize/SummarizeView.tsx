@@ -1,5 +1,13 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertCircle, ChevronDown, FileStack, Search, SlidersHorizontal, X } from "lucide-react";
+import {
+  AlertCircle,
+  ChevronDown,
+  FileStack,
+  PanelLeftOpen,
+  Search,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { DocumentReader } from "./DocumentReader";
@@ -10,6 +18,13 @@ import { docTypeOf, fileFormat, RefineRail } from "./RefineRail";
 import { ResultsPane } from "./ResultsPane";
 import { StructureRail } from "./StructureRail";
 import { Button } from "@/components/ui/button";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
+import { useMediaQuery } from "@/hooks/use-media-query";
+import {
+  readLayoutPreference,
+  WORKING_SET_FILES_KEY,
+  writeLayoutPreference,
+} from "@/lib/pile/discovery-layout";
 import { suggestQuestions } from "@/lib/pile/suggest-questions";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
 import type { PileFile, PileFileHits } from "@/lib/pile/types";
@@ -68,11 +83,21 @@ export function SummarizeView() {
   const [followUp, setFollowUp] = useState(false);
   const [refineOpen, setRefineOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(() =>
+    readLayoutPreference(WORKING_SET_FILES_KEY, false),
+  );
+  const desktopLayout = useMediaQuery("(min-width: 1024px)");
+  const wideLayout = useMediaQuery("(min-width: 1280px)");
 
   const started = state.phase !== "idle";
   const ingesting = state.phase === "reading" || state.phase === "indexing";
   const busy = ingesting || state.phase === "asking" || state.adding;
   const files = state.session?.files ?? [];
+
+  useEffect(() => {
+    writeLayoutPreference(WORKING_SET_FILES_KEY, filesOpen);
+  }, [filesOpen]);
 
   useEffect(() => {
     if (state.phase !== "reading" && state.phase !== "indexing" && !state.adding) return;
@@ -123,8 +148,23 @@ export function SummarizeView() {
   const dockFile = selectedFile ?? files[0];
   const readerPage = selectedFile ? Number(readerPageRaw) || 1 : 1;
   const readerGroup = dockFile ? fileAsGroup(dockFile, state.hits) : undefined;
-  const overlayOpen = !!selectedFile;
+  const overlayOpen = !!selectedFile && readerOpen && !wideLayout;
   const dockFileId = dockFile?.id;
+
+  useEffect(() => {
+    if (!overlayOpen && !refineOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (overlayOpen) {
+        selectHit(null);
+        setReaderOpen(false);
+      } else {
+        setRefineOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [overlayOpen, refineOpen, selectHit]);
 
   useEffect(() => {
     if (!dockFileId) return;
@@ -132,6 +172,7 @@ export function SummarizeView() {
   }, [dockFileId, readerPage, loadPage]);
 
   const openPage = (fileId: string, page: number) => {
+    setReaderOpen(true);
     selectHit(`${fileId}:${page}`);
     void loadPage(fileId, page);
   };
@@ -168,6 +209,7 @@ export function SummarizeView() {
     reset();
     setRestrictIds(new Set());
     setFollowUp(false);
+    setReaderOpen(false);
   };
 
   const refine = (
@@ -196,6 +238,10 @@ export function SummarizeView() {
       }}
       onOpen={openPage}
       onAddFiles={(incoming) => void addFiles(incoming)}
+      onClose={() => {
+        if (desktopLayout) setFilesOpen(false);
+        else setRefineOpen(false);
+      }}
     >
       <button
         type="button"
@@ -286,7 +332,7 @@ export function SummarizeView() {
               Clear session
             </button>
             {saveOpen ? (
-              <div className="absolute right-0 top-7 z-20 w-64 rounded-lg border border-border bg-card p-3 shadow-lg">
+              <div className="absolute right-0 top-7 z-20 w-72 max-w-[calc(100vw-2rem)] rounded-sm border border-border bg-card p-4 shadow-lg">
                 <p className="mb-2 text-[11px] font-semibold text-brand-navy">Save as workspace</p>
                 <input
                   value={wsName}
@@ -329,7 +375,7 @@ export function SummarizeView() {
       ) : null}
 
       {state.error && (
-        <div className="mb-3 flex items-start gap-2.5 rounded-xl border border-destructive/25 bg-destructive/5 px-3.5 py-3">
+        <div className="mb-3 flex items-start gap-2.5 rounded-sm border border-destructive/25 bg-destructive/5 px-3.5 py-3">
           <AlertCircle className="mt-[1px] h-4 w-4 shrink-0 text-destructive" />
           <div className="min-w-0 flex-1">
             <p className="text-[12.5px] text-foreground">{state.error}</p>
@@ -355,7 +401,7 @@ export function SummarizeView() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.32, ease: EASE }}
-              className="w-full max-w-[760px]"
+              className="w-full max-w-[880px]"
             >
               <DropPanel onStart={(f, i) => void start(f, i)} busy={false} />
               <p className="mt-3 text-center text-[12px] leading-relaxed text-muted-foreground">
@@ -366,27 +412,63 @@ export function SummarizeView() {
           </AnimatePresence>
         </div>
       ) : ingesting ? (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <IngestProgress files={state.files} indexing={state.phase === "indexing"} />
+        <div className="min-h-0 flex-1 overflow-y-auto px-0.5 py-1 sm:py-4">
+          <div className="mx-auto w-full max-w-[880px]">
+            <IngestProgress files={state.files} indexing={state.phase === "indexing"} />
+          </div>
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden rounded-xl border border-border bg-card lg:grid-cols-[236px_minmax(0,1fr)] xl:grid-cols-[236px_minmax(0,1fr)_minmax(360px,38%)]">
-          <aside className="hidden min-h-0 border-r border-border/70 bg-card lg:flex lg:flex-col">
-            {refine}
-          </aside>
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-sm border border-border bg-card">
+          {desktopLayout ? (
+            filesOpen ? (
+              <aside className="hidden h-full w-[260px] shrink-0 border-r border-border bg-surface lg:flex lg:flex-col">
+                {refine}
+              </aside>
+            ) : (
+              <aside className="hidden h-full w-11 shrink-0 flex-col items-center border-r border-border bg-surface-strong py-2 lg:flex">
+                <button
+                  type="button"
+                  onClick={() => setFilesOpen(true)}
+                  aria-label="Open working set files"
+                  className="grid h-8 w-8 place-items-center text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <PanelLeftOpen className="h-3.5 w-3.5" />
+                </button>
+                <span className="mt-2 font-mono text-[10px] tabular-nums text-muted-foreground">
+                  {files.length}
+                </span>
+              </aside>
+            )
+          ) : null}
 
-          <div className="flex min-h-0 min-w-0 flex-col bg-card">
-            <div className="shrink-0 border-b border-border/70 px-4 py-3">
+          <ResizablePanelGroup
+            key={wideLayout && readerOpen ? "results-reader" : "results"}
+            id={wideLayout && readerOpen ? "working-set-results-reader" : "working-set-results"}
+            orientation="horizontal"
+            className="min-h-0 min-w-0 flex-1"
+          >
+            <ResizablePanel
+              id="working-set-results"
+              defaultSize="68%"
+              minSize={desktopLayout ? "360px" : "0px"}
+            >
+              <div className="flex h-full min-h-0 min-w-0 flex-col bg-card">
+            <div className="shrink-0 border-b border-border bg-surface px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
-                <div className="inline-flex rounded-lg bg-muted p-0.5">
+                <div
+                  className="inline-flex border border-border bg-surface-strong p-px"
+                  role="group"
+                  aria-label="Working set mode"
+                >
                   {(["ask", "search"] as Mode[]).map((m) => (
                     <button
                       key={m}
                       type="button"
                       onClick={() => setMode(m)}
-                      className={`rounded-[7px] px-3 py-1 text-[12px] font-medium transition-colors ${
+                      aria-pressed={mode === m}
+                      className={`px-3 py-1 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                         mode === m
-                          ? "bg-card text-foreground shadow-sm"
+                          ? "bg-card text-foreground"
                           : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
@@ -412,10 +494,19 @@ export function SummarizeView() {
                 ) : null}
                 <button
                   type="button"
-                  onClick={() => setRefineOpen(true)}
-                  className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11.5px] font-medium text-foreground lg:hidden"
+                  onClick={() => {
+                    if (desktopLayout) setFilesOpen(true);
+                    else setRefineOpen(true);
+                  }}
+                  className={`ml-auto items-center gap-1.5 border border-border bg-card px-2.5 py-1.5 text-[11.5px] font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                    desktopLayout && filesOpen ? "hidden" : "inline-flex"
+                  }`}
                 >
-                  <SlidersHorizontal className="h-3 w-3" strokeWidth={1.75} />
+                  {desktopLayout ? (
+                    <PanelLeftOpen className="h-3 w-3" strokeWidth={1.75} />
+                  ) : (
+                    <SlidersHorizontal className="h-3 w-3" strokeWidth={1.75} />
+                  )}
                   Working set
                 </button>
               </div>
@@ -427,7 +518,7 @@ export function SummarizeView() {
                   submit();
                 }}
               >
-                <div className="flex h-11 items-center gap-1 rounded-xl border border-border/80 bg-card pl-3.5 pr-1 shadow-sm transition-all focus-within:border-brand-navy/30 focus-within:ring-4 focus-within:ring-brand-navy/[0.06]">
+                <div className="flex min-h-11 items-center gap-1 rounded-sm border border-border/80 bg-card py-1 pl-3.5 pr-1 transition-[border-color,box-shadow] focus-within:border-brand-navy/40 focus-within:ring-2 focus-within:ring-brand-navy/[0.06]">
                   <Search
                     className="h-4 w-4 shrink-0 text-muted-foreground/70"
                     strokeWidth={1.75}
@@ -445,7 +536,7 @@ export function SummarizeView() {
                   <Button
                     type="submit"
                     disabled={!state.query.trim() || busy}
-                    className="h-8 shrink-0 rounded-lg bg-brand-navy px-4 text-[12.5px] font-semibold text-primary-foreground transition-all hover:bg-brand-navy/90 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50"
+                    className="h-8 shrink-0 rounded-sm bg-brand-navy px-4 text-[12.5px] font-semibold text-primary-foreground transition-colors hover:bg-brand-navy/90 disabled:pointer-events-none disabled:opacity-50"
                   >
                     {state.phase === "asking"
                       ? "Reading…"
@@ -488,29 +579,24 @@ export function SummarizeView() {
               onSuggest={runSuggestion}
               onJob={runJob}
             />
-          </div>
-
-          {readerGroup ? (
-            <>
-              <aside className="hidden min-h-0 border-l border-border/70 xl:block">
-                <DocumentReader
-                  group={readerGroup}
-                  page={readerPage}
-                  query={state.query}
-                  docType={docTypeOf(readerGroup.fileName, state.structure)}
-                  pageTexts={state.pageTexts}
-                  onPage={(p) => openPage(readerGroup.fileId, p)}
+              </div>
+            </ResizablePanel>
+            {wideLayout && readerOpen && readerGroup ? (
+              <>
+                <ResizableHandle
+                  withHandle
+                  aria-label="Resize document reader"
+                  className="z-10 w-1 bg-border/70 transition-colors hover:bg-brand-navy/20 data-[resize-handle-active]:bg-brand-navy/25"
                 />
-              </aside>
-              {overlayOpen ? (
-                <div className="fixed inset-0 z-40 flex xl:hidden">
-                  <button
-                    type="button"
-                    aria-label="Close reader"
-                    onClick={() => selectHit(null)}
-                    className="flex-1 bg-foreground/20 backdrop-blur-[1px]"
-                  />
-                  <div className="w-full max-w-[640px] border-l border-border bg-card shadow-2xl">
+                <ResizablePanel
+                  id="working-set-reader"
+                  defaultSize="32%"
+                  minSize="320px"
+                  maxSize="52%"
+                  collapsible
+                  collapsedSize="0%"
+                >
+                  <aside className="h-full min-h-0 border-l border-border bg-card">
                     <DocumentReader
                       group={readerGroup}
                       page={readerPage}
@@ -518,12 +604,48 @@ export function SummarizeView() {
                       docType={docTypeOf(readerGroup.fileName, state.structure)}
                       pageTexts={state.pageTexts}
                       onPage={(p) => openPage(readerGroup.fileId, p)}
-                      onClose={() => selectHit(null)}
+                      onClose={() => {
+                        selectHit(null);
+                        setReaderOpen(false);
+                      }}
                     />
-                  </div>
-                </div>
-              ) : null}
-            </>
+                  </aside>
+                </ResizablePanel>
+              </>
+            ) : null}
+          </ResizablePanelGroup>
+
+          {overlayOpen && readerGroup ? (
+            <div
+              className="fixed inset-0 z-50 flex"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Document reader"
+            >
+              <button
+                type="button"
+                aria-label="Close reader"
+                onClick={() => {
+                  selectHit(null);
+                  setReaderOpen(false);
+                }}
+                className="flex-1 bg-foreground/20 backdrop-blur-[1px]"
+              />
+              <div className="h-full w-[min(92vw,720px)] border-l border-border bg-card shadow-2xl">
+                <DocumentReader
+                  group={readerGroup}
+                  page={readerPage}
+                  query={state.query}
+                  docType={docTypeOf(readerGroup.fileName, state.structure)}
+                  pageTexts={state.pageTexts}
+                  onPage={(p) => openPage(readerGroup.fileId, p)}
+                  onClose={() => {
+                    selectHit(null);
+                    setReaderOpen(false);
+                  }}
+                />
+              </div>
+            </div>
           ) : null}
 
           {refineOpen ? (
