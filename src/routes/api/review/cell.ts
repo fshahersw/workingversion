@@ -24,8 +24,13 @@ export const Route = createFileRoute("/api/review/cell")({
     handlers: {
       POST: async ({ request }) => {
         if (!REVIEW_TABLES_ENABLED) {
-          return Response.json({ error: "Review tables are disabled" }, { status: 404 });
+          return Response.json({ error: "Tabular Review is disabled" }, { status: 404 });
         }
+        // apiAuthMiddleware already gates /api/*; verifying here as well keeps
+        // this route safe if the middleware list is ever edited.
+        const { getUserFromRequest } = await import("@/lib/auth/cognito.server");
+        const user = await getUserFromRequest(request);
+        if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
         let body: {
           columnName?: string;
           question?: string;

@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertCircle,
+  Check,
+  CloudUpload,
   Download,
   FileSpreadsheet,
   Layers,
@@ -28,22 +31,80 @@ import {
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/lib/use-auth";
+import { takeWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { exportCsv, exportXlsx } from "@/lib/review/export";
 import { REVIEW_COLUMN_WARN, REVIEW_MAX_COLUMNS, type ReviewColumn } from "@/lib/review/types";
-import { useReviewTable } from "@/lib/review/use-review-table";
+import { useReviewTable, type DocSaveState } from "@/lib/review/use-review-table";
 import { MAX_FILES } from "@/lib/pile/limits";
 import { useSharedPile } from "@/lib/pile-context";
+
+/** Where this table's documents stand in the owner's account. */
+function DocSaveBadge({ state, hydrating }: { state: DocSaveState; hydrating: boolean }) {
+  if (hydrating) {
+    return (
+      <Badge variant="outline" className="gap-1 text-[11px] text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Loading saved documents…
+      </Badge>
+    );
+  }
+  if (state.status === "idle") return null;
+  if (state.status === "saving" || state.status === "indexing") {
+    return (
+      <Badge variant="outline" className="gap-1 text-[11px] text-muted-foreground" title={state.message ?? undefined}>
+        <CloudUpload className="h-3 w-3" />
+        {state.status === "saving" ? "Saving documents…" : "Indexing documents…"}
+      </Badge>
+    );
+  }
+  if (state.status === "error") {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-1 border-amber-500/40 text-[11px] text-amber-700"
+        title={state.message ?? undefined}
+      >
+        <AlertCircle className="h-3 w-3" />
+        Not all documents saved
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="gap-1 text-[11px] text-muted-foreground">
+      <Check className="h-3 w-3 text-emerald-600" strokeWidth={2.5} />
+      Documents saved
+    </Badge>
+  );
+}
 
 export function ReviewTablesTab() {
   const { user } = useAuth();
   const pile = useSharedPile();
+  const sessionFiles = pile.state.session?.files;
   const shared = useMemo(
-    () => ({ getClient: pile.client, ingestPages: pile.ingestPages }),
-    [pile.client, pile.ingestPages],
+    () => ({
+      getClient: pile.client,
+      ingestPages: pile.ingestPages,
+      liveFileIds: () => new Set((sessionFiles ?? []).map((f) => f.id)),
+    }),
+    [pile.client, pile.ingestPages, sessionFiles],
   );
   const review = useReviewTable(user?.sub ?? null, user?.email ?? null, shared);
   const inputRef = useRef<HTMLInputElement>(null);
-  const workingFiles = pile.state.session?.files ?? [];
+  const workingFiles = sessionFiles ?? [];
+  const workingSaved = pile.state.session?.savedWorkspace ?? null;
+
+  // Library "Open" on a saved document batch lands on the table that owns it.
+  const { tables: knownTables, loadTable } = review;
+  const handoffRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (handoffRef.current === null) handoffRef.current = takeWorkspaceHandoff("review") ?? "";
+    const wanted = handoffRef.current;
+    if (!wanted || !knownTables.length) return;
+    const owner = knownTables.find((t) => t.sources.some((s) => s.workspaceItemId === wanted));
+    handoffRef.current = "";
+    if (owner) void loadTable(owner);
+  }, [knownTables, loadTable]);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ReviewColumn | null>(null);
@@ -76,6 +137,8 @@ export function ReviewTablesTab() {
     error,
     stats,
     linkedRowIds,
+    docSave,
+    hydrating,
     cellAt,
     pageText,
     pending,
@@ -113,12 +176,12 @@ export function ReviewTablesTab() {
     return (
       <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto">
         <div className="rounded-lg border bg-muted/25 p-4">
-          <p className="text-[13px] font-medium">Review Tables</p>
+          <p className="text-[13px] font-medium">Tabular Review</p>
           <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-muted-foreground">
             Build a spreadsheet over a document set: rows are documents, columns are the questions
             you ask of each one. Every answer is extracted from that document alone and cites the
-            page it came from. Tables are saved to your account; documents stay in the working set
-            on this device.
+            page it came from. Tables and their documents are saved to your account, so a table
+            reopens with its documents ready to run.
           </p>
           <div className="mt-3 flex max-w-md items-center gap-2">
             <Input
@@ -246,6 +309,7 @@ export function ReviewTablesTab() {
             {ocrPages} page{ocrPages === 1 ? "" : "s"} recovered by vision OCR
           </Badge>
         ) : null}
+        <DocSaveBadge state={docSave} hydrating={hydrating} />
 
         <div className="ml-auto flex items-center gap-1.5">
           <input
@@ -275,7 +339,12 @@ export function ReviewTablesTab() {
             variant="outline"
             className="gap-1.5 text-[12.5px]"
             disabled={busy || !workingFiles.length}
-            onClick={() => void review.useWorkingSet(workingFiles)}
+            title={
+              workingSaved
+                ? "Add the saved Working Set's documents as rows"
+                : "Add the open Working Set's documents as rows (save it to keep them with this table)"
+            }
+            onClick={() => void review.useWorkingSet(workingFiles, workingSaved)}
           >
             <Table2 className="h-3.5 w-3.5" strokeWidth={1.75} />
             Use working set
@@ -366,6 +435,11 @@ export function ReviewTablesTab() {
           {error}
         </p>
       ) : null}
+      {docSave.status === "error" && docSave.message ? (
+        <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[12.5px] text-amber-800">
+          {docSave.message}
+        </p>
+      ) : null}
 
       {rows.length === 0 ? (
         <div
@@ -389,7 +463,7 @@ export function ReviewTablesTab() {
                 variant="outline"
                 className="text-[12.5px]"
                 disabled={busy}
-                onClick={() => void review.useWorkingSet(workingFiles)}
+                onClick={() => void review.useWorkingSet(workingFiles, workingSaved)}
               >
                 Use working set ({workingFiles.length})
               </Button>

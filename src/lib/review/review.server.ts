@@ -18,6 +18,9 @@
 import { ulid } from "ulid";
 
 import { putItem, getItem, queryPrefix, deleteItem, batchDelete } from "@/lib/data/dynamo.server";
+import { deleteWorkspace, getWorkspace } from "@/lib/kb/workspace.server";
+import type { WorkspaceSurface } from "@/lib/kb/workspace.server";
+import { upsertSource } from "./review-sources";
 import {
   displayValue,
   type CellCitation,
@@ -27,6 +30,7 @@ import {
   type ReviewCell,
   type ReviewColumn,
   type ReviewRow,
+  type ReviewSource,
   type ReviewTable,
 } from "./types";
 
@@ -47,6 +51,30 @@ const list = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
 
 // --- mappers -----------------------------------------------------------------
 
+const SOURCE_SURFACES = new Set<WorkspaceSurface>(["workingset", "deposition", "review"]);
+
+function mapSources(raw: unknown): ReviewSource[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ReviewSource[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const o = entry as Record<string, unknown>;
+    const workspaceItemId = s(o.workspaceItemId);
+    const kbWorkspaceId = s(o.kbWorkspaceId);
+    const surface = s(o.surface) as WorkspaceSurface;
+    if (!workspaceItemId || !kbWorkspaceId || !SOURCE_SURFACES.has(surface)) continue;
+    out.push({
+      workspaceItemId,
+      kbWorkspaceId,
+      surface,
+      name: s(o.name, "Saved documents"),
+      owned: o.owned === true,
+      attachedAt: s(o.attachedAt),
+    });
+  }
+  return out;
+}
+
 function mapTable(i: Item): ReviewTable {
   return {
     id: s(i.id),
@@ -56,6 +84,7 @@ function mapTable(i: Item): ReviewTable {
     instructions: (i.instructions as string | null) ?? null,
     createdAt: s(i.createdAt),
     updatedAt: s(i.updatedAt),
+    sources: mapSources(i.sources),
   };
 }
 
@@ -81,6 +110,8 @@ function mapRow(i: Item): ReviewRow {
     fingerprint: (i.fingerprint as string | null) ?? null,
     pageCount: n(i.pageCount),
     position: n(i.position),
+    docId: s(i.docId) || null,
+    workspaceItemId: s(i.workspaceItemId) || null,
   };
 }
 
@@ -159,10 +190,76 @@ export async function createReviewTable(
     matterId: input.matterId ?? null,
     matterLabel: input.matterLabel ?? null,
     instructions: input.instructions ?? null,
+    sources: [],
     createdAt: now,
     updatedAt: now,
   });
-  return { id, name: input.name.trim() || "Untitled review", matterId: input.matterId ?? null, matterLabel: input.matterLabel ?? null, instructions: input.instructions ?? null, createdAt: now, updatedAt: now };
+  return {
+    id,
+    name: input.name.trim() || "Untitled review",
+    matterId: input.matterId ?? null,
+    matterLabel: input.matterLabel ?? null,
+    instructions: input.instructions ?? null,
+    createdAt: now,
+    updatedAt: now,
+    sources: [],
+  };
+}
+
+/**
+ * Attach a saved workspace as a document source. The workspace must exist
+ * and belong to the caller; its identity is read from the record, never from
+ * the browser, so a table can only ever reference the owner's own documents.
+ */
+export async function attachReviewSource(
+  principal: string,
+  input: { tableId: string; workspaceItemId: string; owned: boolean },
+): Promise<ReviewSource[]> {
+  const tableItem = await getItem(pk(principal), tblSK(input.tableId), { consistent: true });
+  if (!tableItem) throw new Error("Table not found");
+  const workspace = await getWorkspace(principal, input.workspaceItemId);
+  if (!workspace) throw new Error("Saved documents were not found");
+  const source: ReviewSource = {
+    workspaceItemId: workspace.itemId,
+    kbWorkspaceId: workspace.kbWorkspaceId,
+    surface: workspace.surface,
+    name: workspace.name,
+    owned: input.owned,
+    attachedAt: new Date().toISOString(),
+  };
+  const sources = upsertSource(mapSources(tableItem.sources), source);
+  await putItem({ ...tableItem, sources, updatedAt: new Date().toISOString() });
+  return sources;
+}
+
+/**
+ * Bind rows to KB documents once their source workspace has indexed them.
+ * Every docId is checked against the workspace's own document list; a row
+ * that is already bound keeps its binding.
+ */
+export async function bindRowDocuments(
+  principal: string,
+  input: { tableId: string; workspaceItemId: string; bindings: { rowId: string; docId: string }[] },
+): Promise<ReviewRow[]> {
+  if (!input.bindings.length) return [];
+  const workspace = await getWorkspace(principal, input.workspaceItemId);
+  if (!workspace) throw new Error("Saved documents were not found");
+  const known = new Set(workspace.docs.map((doc) => doc.docId));
+  const out: ReviewRow[] = [];
+  for (const binding of input.bindings) {
+    if (!known.has(binding.docId)) continue;
+    if (tableIdFromChildId(binding.rowId) !== input.tableId) continue;
+    const item = await getItem(pk(principal), rowSK(binding.rowId));
+    if (!item || s(item.tableId) !== input.tableId) continue;
+    if (s(item.docId)) {
+      out.push(mapRow(item));
+      continue;
+    }
+    const next = { ...item, docId: binding.docId, workspaceItemId: workspace.itemId };
+    await putItem(next);
+    out.push(mapRow(next));
+  }
+  return out;
 }
 
 async function touchTable(principal: string, tableId: string): Promise<void> {
@@ -179,6 +276,18 @@ export async function renameReviewTable(principal: string, id: string, name: str
 
 export async function deleteReviewTable(principal: string, id: string): Promise<void> {
   const p = pk(principal);
+  // Saved document workspaces this table created go first. A failure leaves
+  // the table in place so the user can retry rather than orphan storage.
+  const tableItem = await getItem(p, tblSK(id), { consistent: true });
+  if (tableItem) {
+    const owned = mapSources(tableItem.sources).filter((source) => source.owned);
+    for (const source of owned) {
+      const result = await deleteWorkspace(principal, source.workspaceItemId);
+      if (!result.ok) {
+        throw new Error("Saved documents for this table could not be deleted. Try again.");
+      }
+    }
+  }
   // Cascade: every child SK is prefixed with the table id.
   for (const prefix of ["RCOL#", "RROW#", "RCELL#", "RRUN#", "RHIST#"]) {
     const kids = await queryPrefix(p, `${prefix}${id}#`);
@@ -260,17 +369,40 @@ export async function listRows(principal: string, tableId: string): Promise<Revi
   return rows.map(mapRow).sort((a, b) => a.position - b.position);
 }
 
+export type RowInsert = {
+  label: string;
+  fileIds: string[];
+  fingerprint: string;
+  pageCount: number;
+  /** Present when the document is already indexed in a saved workspace. */
+  docId?: string | null;
+  workspaceItemId?: string | null;
+};
+
 export async function upsertRows(
   principal: string,
   tableId: string,
-  rows: { label: string; fileIds: string[]; fingerprint: string; pageCount: number }[],
+  rows: RowInsert[],
   startPosition: number,
 ): Promise<ReviewRow[]> {
   const out: ReviewRow[] = [];
   const now = new Date().toISOString();
+  // Bindings supplied at insert time are verified against the workspace's own
+  // document list, exactly like a later bind.
+  const knownByWorkspace = new Map<string, Set<string>>();
+  for (const r of rows) {
+    if (!r.docId || !r.workspaceItemId || knownByWorkspace.has(r.workspaceItemId)) continue;
+    const workspace = await getWorkspace(principal, r.workspaceItemId);
+    knownByWorkspace.set(
+      r.workspaceItemId,
+      new Set(workspace ? workspace.docs.map((doc) => doc.docId) : []),
+    );
+  }
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]!;
     const id = `${tableId}#${ulid()}`;
+    const bound =
+      !!r.docId && !!r.workspaceItemId && knownByWorkspace.get(r.workspaceItemId)?.has(r.docId);
     const row: ReviewRow = {
       id,
       tableId,
@@ -279,6 +411,8 @@ export async function upsertRows(
       fingerprint: r.fingerprint,
       pageCount: r.pageCount,
       position: startPosition + i,
+      docId: bound ? r.docId! : null,
+      workspaceItemId: bound ? r.workspaceItemId! : null,
     };
     await putItem({ PK: pk(principal), SK: rowSK(id), entity: "rrow", owner: principal, ...row, createdAt: now });
     out.push(row);

@@ -1,22 +1,41 @@
 // ============================================================================
-// Review Tables orchestration.
+// Tabular Review orchestration.
 //
-// Documents live in the browser working set (the same PileIndex the Summarize
-// tab uses); the table — columns, rows, cells, citations, overrides — lives in
-// the app database. One index call per column fans the question out to every
-// document, then each document's own pages are sent for its own cell answer.
-// No cross-document lumping: a cell is answered from one document only.
+// Documents are read in the browser into the shared PileIndex for retrieval,
+// and saved to the owner's KB (S3 bytes + pages, Aurora chunks + embeddings)
+// as `review` workspaces the table references. Rows bind to their KB document
+// once ingest lands, so reopening a table rehydrates its pages from storage
+// instead of asking for the files again. The table — columns, rows, cells,
+// citations, overrides — lives in DynamoDB. One index call per column fans the
+// question out to every document, then each document's own pages are sent for
+// its own cell answer. No cross-document lumping.
 // ============================================================================
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { extractFile, fileKind } from "@/lib/extract-text";
-import { mapPool, sleep } from "@/lib/pile/async";
+import { abortableDelay, rawFileSha256, uploadOriginalBytes } from "@/lib/kb/client-upload";
+import { SYNC_INGEST_MAX_CHARS, SYNC_INGEST_MAX_PAGES } from "@/lib/kb/ingest-state";
+import {
+  deleteWorkspaceFn,
+  getWorkspaceFn,
+  getWorkspacePagesFn,
+  getWorkspaceStatusFn,
+  saveWorkspaceFn,
+} from "@/lib/kb/workspace.functions";
+import { mapPool, sleep, withRetry } from "@/lib/pile/async";
 import { MAX_FILES, MAX_PAGES } from "@/lib/pile/limits";
 import { PileClient } from "@/lib/pile/pile-client";
-import type { PileFile, PilePage } from "@/lib/pile/types";
+import type { PileFile, PilePage, SavedWorkspaceBinding } from "@/lib/pile/types";
 
 import { recoverScannedPages } from "./ocr-pages";
 import * as db from "./review-db";
+import {
+  bindingsFromSave,
+  hydrationPlan,
+  reviewBatchName,
+  upsertSource,
+  type RowBinding,
+} from "./review-sources";
 import {
   REVIEW_CELL_CONCURRENCY,
   REVIEW_CELL_PAGES,
@@ -34,6 +53,16 @@ import {
   type ReviewRow,
   type ReviewTable,
 } from "./types";
+
+/** How the table's documents stand in the owner's account. */
+export type DocSaveState = {
+  status: "idle" | "saving" | "indexing" | "saved" | "error";
+  message: string | null;
+};
+
+const SAVE_POLL_MS = 2_000;
+/** ~3 minutes of polling before the tab stops waiting on a slow async ingest. */
+const SAVE_POLL_MAX = 90;
 
 export type ReviewFileState = {
   /** Matches ReviewRow.fileIds[0] once the row is persisted. */
@@ -136,6 +165,8 @@ async function requestCell(input: {
 export type SharedPileBridge = {
   getClient: () => PileClient;
   ingestPages: (files: PileFile[], pages: PilePage[]) => Promise<void>;
+  /** File ids currently indexed in the shared pile. */
+  liveFileIds: () => Set<string>;
 };
 
 export function useReviewTable(
@@ -160,6 +191,16 @@ export function useReviewTable(
   const [pending, setPending] = useState<Set<CellKey>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [docSave, setDocSave] = useState<DocSaveState>({ status: "idle", message: null });
+  const [hydrating, setHydrating] = useState(false);
+
+  // Background save/bind tasks read the latest table and rows, not a snapshot.
+  const tableRef = useRef<ReviewTable | null>(null);
+  tableRef.current = table;
+  const rowsRef = useRef<ReviewRow[]>([]);
+  rowsRef.current = rows;
+  /** In-flight document saves, keyed by table id; aborted when the table closes. */
+  const saveTasks = useRef(new Map<string, AbortController>());
 
   const pile = useCallback((): PileClient => {
     if (sharedRef.current) return sharedRef.current.getClient();
@@ -167,9 +208,16 @@ export function useReviewTable(
     return pileRef.current;
   }, []);
 
+  const liveFileIds = useCallback((): Set<string> => {
+    if (sharedRef.current) return sharedRef.current.liveFileIds();
+    return new Set(files.filter((f) => f.status === "ready").map((f) => f.fileId));
+  }, [files]);
+
   useEffect(
     () => () => {
       abortRef.current?.abort();
+      for (const controller of saveTasks.current.values()) controller.abort();
+      saveTasks.current.clear();
       if (sharedRef.current) return;
       pileRef.current?.dispose();
       pileRef.current = null;
@@ -190,25 +238,176 @@ export function useReviewTable(
     void refreshTables();
   }, [refreshTables]);
 
-  const loadTable = useCallback(async (next: ReviewTable) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const [cols, rws, cls] = await Promise.all([
-        db.listColumns(next.id),
-        db.listRows(next.id),
-        db.listCells(next.id),
-      ]);
-      setTable(next);
-      setColumns(cols);
-      setRows(rws);
-      setCells(Object.fromEntries(cls.map((c) => [key(c.rowId, c.columnId), c])));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not open that table");
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  /**
+   * Pull pages for rows bound to saved documents that are not in the pile yet,
+   * index them under the KB doc id, and point the rows at that id. Rows whose
+   * save landed after the tab closed are bound first through the workspace's
+   * own `sourceFileId` manifest, so nothing depends on the browser having
+   * stayed open.
+   */
+  const hydrateRows = useCallback(
+    async (tableId: string, current: ReviewRow[], sources: ReviewTable["sources"]) => {
+      let working = current;
+      const live = liveFileIds();
+
+      // Late binding: rows still carrying only a browser file id whose batch
+      // finished indexing after the session ended.
+      const unbound = working.filter((row) => !row.docId);
+      if (unbound.length && sources.length) {
+        for (const source of sources) {
+          if (!source.owned) continue;
+          const ws = await getWorkspaceFn({ data: { itemId: source.workspaceItemId } }).catch(
+            () => null,
+          );
+          if (!ws || ws.status !== "ready") continue;
+          const docIdByFileId: Record<string, string> = {};
+          for (const doc of ws.docs) if (doc.sourceFileId) docIdByFileId[doc.sourceFileId] = doc.docId;
+          const bindings = bindingsFromSave(working, source.workspaceItemId, docIdByFileId);
+          if (!bindings.length) continue;
+          const bound = await db.bindRowDocuments(tableId, source.workspaceItemId, bindings);
+          const byId = new Map(bound.map((row) => [row.id, row]));
+          working = working.map((row) => byId.get(row.id) ?? row);
+        }
+      }
+
+      const plan = hydrationPlan(working, live);
+      if (!plan.size) {
+        return working;
+      }
+      setHydrating(true);
+      const hydratedFiles: ReviewFileState[] = [];
+      const missing: string[] = [];
+      try {
+        for (const [workspaceItemId, bindings] of plan) {
+          const ws = await getWorkspaceFn({ data: { itemId: workspaceItemId } }).catch(() => null);
+          if (!ws || ws.status !== "ready") {
+            missing.push(...bindings.map((b) => b.rowId));
+            continue;
+          }
+          const docsById = new Map(ws.docs.map((doc) => [doc.docId, doc]));
+          const loaded = await mapPool(bindings, 4, async (binding: RowBinding) => {
+            const doc = docsById.get(binding.docId);
+            if (!doc) return null;
+            const pg = await getWorkspacePagesFn({
+              data: { itemId: workspaceItemId, docId: binding.docId },
+            }).catch(() => null);
+            if (!pg?.length) return null;
+            const pages: PilePage[] = pg.map((page) => ({
+              fileId: binding.docId,
+              fileName: doc.fileName,
+              page: page.page,
+              text: page.text,
+              ocr: false,
+            }));
+            return { binding, doc, pages };
+          });
+          const ok = loaded.filter((entry): entry is NonNullable<typeof entry> => !!entry);
+          missing.push(
+            ...bindings
+              .filter((b) => !ok.some((entry) => entry.binding.rowId === b.rowId))
+              .map((b) => b.rowId),
+          );
+          if (!ok.length) continue;
+          const allPages = ok.flatMap((entry) => entry.pages);
+          const pileFiles: PileFile[] = ok.map((entry) => ({
+            id: entry.binding.docId,
+            name: entry.doc.fileName,
+            pageCount: entry.pages.length,
+            emptyPages: entry.pages.filter((p) => !p.text.trim()).length,
+            ocrPages: 0,
+          }));
+          if (sharedRef.current) await sharedRef.current.ingestPages(pileFiles, allPages);
+          else await pile().addPages(allPages);
+          setPageTexts((prev) => {
+            const next = { ...prev };
+            for (const p of allPages) next[`${p.fileId}:${p.page}`] = p.text;
+            return next;
+          });
+          const byRow = new Map(ok.map((entry) => [entry.binding.rowId, entry]));
+          working = working.map((row) => {
+            const entry = byRow.get(row.id);
+            return entry ? { ...row, fileIds: [entry.binding.docId] } : row;
+          });
+          hydratedFiles.push(
+            ...ok.map((entry) => ({
+              fileId: entry.binding.docId,
+              name: entry.doc.fileName,
+              pages: entry.pages.length,
+              status: "ready" as const,
+            })),
+          );
+          if (tableRef.current?.id === tableId) setRows(working);
+        }
+        if (hydratedFiles.length && tableRef.current?.id === tableId) {
+          setFiles((prev) => {
+            const seen = new Set(prev.map((f) => f.fileId));
+            return [...prev, ...hydratedFiles.filter((f) => !seen.has(f.fileId))];
+          });
+        }
+        if (missing.length && tableRef.current?.id === tableId) {
+          setDocSave({
+            status: "error",
+            message: `${missing.length} saved document${missing.length === 1 ? "" : "s"} could not be loaded. Re-add ${missing.length === 1 ? "it" : "them"} to run those rows.`,
+          });
+        }
+      } finally {
+        setHydrating(false);
+      }
+      return working;
+    },
+    [liveFileIds, pile],
+  );
+
+  const loadTable = useCallback(
+    async (next: ReviewTable) => {
+      setBusy(true);
+      setError(null);
+      setDocSave({ status: "idle", message: null });
+      try {
+        const [cols, rws, cls] = await Promise.all([
+          db.listColumns(next.id),
+          db.listRows(next.id),
+          db.listCells(next.id),
+        ]);
+        setTable(next);
+        tableRef.current = next;
+        setColumns(cols);
+        setRows(rws);
+        rowsRef.current = rws;
+        setCells(Object.fromEntries(cls.map((c) => [key(c.rowId, c.columnId), c])));
+        // Documents already in the pile from this session stay linked; the rest
+        // come back from storage.
+        const live = liveFileIds();
+        setFiles(
+          rws
+            .filter((row) => row.fileIds.some((id) => live.has(id)))
+            .map((row) => ({
+              fileId: row.fileIds.find((id) => live.has(id))!,
+              name: row.label,
+              pages: row.pageCount,
+              status: "ready" as const,
+            })),
+        );
+        setBusy(false);
+        const hydrated = await hydrateRows(next.id, rws, next.sources);
+        if (tableRef.current?.id === next.id) {
+          setRows(hydrated);
+          if (hydrated.some((row) => row.docId)) {
+            setDocSave((prev) =>
+              prev.status === "error"
+                ? prev
+                : { status: "saved", message: null },
+            );
+          }
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not open that table");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [hydrateRows, liveFileIds],
+  );
 
   const newTable = useCallback(
     async (name: string, instructions?: string | null) => {
@@ -221,6 +420,7 @@ export function useReviewTable(
         setRows([]);
         setCells({});
         setFiles([]);
+        setDocSave({ status: "idle", message: null });
         if (!sharedRef.current) await pile().clear();
         void refreshTables();
         return created;
@@ -236,13 +436,25 @@ export function useReviewTable(
 
   const removeTable = useCallback(
     async (id: string) => {
-      await db.deleteReviewTable(id).catch(() => undefined);
+      for (const [taskKey, controller] of saveTasks.current) {
+        if (taskKey.startsWith(`${id}:`)) {
+          controller.abort();
+          saveTasks.current.delete(taskKey);
+        }
+      }
+      try {
+        await db.deleteReviewTable(id);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not delete the table");
+        return;
+      }
       if (table?.id === id) {
         setTable(null);
         setColumns([]);
         setRows([]);
         setCells({});
         setFiles([]);
+        setDocSave({ status: "idle", message: null });
         if (!sharedRef.current) await pile().clear();
       }
       void refreshTables();
@@ -252,12 +464,15 @@ export function useReviewTable(
 
   const closeTable = useCallback(async () => {
     abortRef.current?.abort();
+    // Document saves keep running: the server binds rows when ingest lands and
+    // the next open picks them up through the workspace manifest.
     setTable(null);
     setColumns([]);
     setRows([]);
     setCells({});
     setFiles([]);
     setRun(IDLE_RUN);
+    setDocSave({ status: "idle", message: null });
     if (!sharedRef.current) await pile().clear();
     void refreshTables();
   }, [pile, refreshTables]);
@@ -274,11 +489,168 @@ export function useReviewTable(
 
   // --- documents -------------------------------------------------------------
 
+  type SaveStatus = {
+    status: "saving" | "ready" | "error";
+    pendingCount: number;
+    documents: { clientFileId: string; status: string; docId?: string }[];
+    errorSummary?: string;
+  };
+
+  /**
+   * Save one drop batch to the owner's account as a `review` workspace
+   * (original bytes best-effort, pages, chunk index) and bind its rows to the
+   * KB documents that come back. Runs in the background: the grid is usable
+   * as soon as extraction finishes, and a table closed mid-save is bound on
+   * its next open through the workspace manifest.
+   */
+  const saveBatch = useCallback(
+    async (
+      target: { id: string; name: string },
+      docs: { fileId: string; name: string; file: File; pages: PilePage[] }[],
+      batchRows: ReviewRow[],
+    ) => {
+      if (!docs.length) return;
+      const controller = new AbortController();
+      const signal = controller.signal;
+      const requestId = crypto.randomUUID();
+      const taskKey = `${target.id}:${requestId}`;
+      saveTasks.current.set(taskKey, controller);
+      const forThisTable = () => tableRef.current?.id === target.id;
+      const plural = docs.length === 1 ? "" : "s";
+      if (forThisTable()) {
+        setDocSave({ status: "saving", message: `Saving ${docs.length} document${plural} to your account…` });
+      }
+      let itemId: string | null = null;
+      let attached = false;
+      try {
+        const files = await mapPool(docs, 3, async (doc) => {
+          const sha256 = await rawFileSha256(doc.file).catch(() => undefined);
+          const bytesKey = await uploadOriginalBytes(
+            { name: doc.name, blob: doc.file, ...(sha256 ? { sha256 } : {}) },
+            signal,
+          );
+          const pages = doc.pages
+            .filter((p) => p.text.trim())
+            .map((p) => ({ page: p.page, text: p.text }));
+          const totalChars = pages.reduce((n, p) => n + p.text.length, 0);
+          // Oversize documents take the asynchronous lane over the original
+          // bytes; everything else is indexed from the text the grid reads.
+          const oversize = pages.length > SYNC_INGEST_MAX_PAGES || totalChars > SYNC_INGEST_MAX_CHARS;
+          return {
+            clientFileId: doc.fileId,
+            fileName: doc.name,
+            ...(doc.file.type ? { mime: doc.file.type } : {}),
+            ...(sha256 ? { sha256 } : {}),
+            byteSize: doc.file.size,
+            ...(bytesKey ? { bytesKey } : {}),
+            pages: oversize ? [] : pages,
+          };
+        });
+        if (signal.aborted) return;
+        const res = await saveWorkspaceFn({
+          data: {
+            requestId,
+            name: reviewBatchName(target.name, docs.map((d) => d.name)),
+            surface: "review",
+            files,
+          },
+        });
+        itemId = res.itemId;
+        let status: SaveStatus = res;
+        for (let poll = 0; status.status === "saving" && poll < SAVE_POLL_MAX; poll++) {
+          if (forThisTable()) {
+            setDocSave({
+              status: "indexing",
+              message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} still indexing…`,
+            });
+          }
+          await abortableDelay(SAVE_POLL_MS, signal);
+          const polled = await withRetry(() => getWorkspaceStatusFn({ data: { itemId: res.itemId } }), {
+            tries: 3,
+            baseMs: 500,
+            signal,
+          });
+          if (!polled) throw new Error("Saved document status is unavailable.");
+          status = polled;
+        }
+        if (signal.aborted) {
+          // The table was deleted while its documents were saving.
+          await deleteWorkspaceFn({ data: { itemId: res.itemId } }).catch(() => undefined);
+          return;
+        }
+
+        let sources: ReviewTable["sources"];
+        try {
+          sources = await db.attachSource(target.id, res.itemId, true);
+          attached = true;
+        } catch {
+          // Table gone: do not leave storage the user cannot see.
+          await deleteWorkspaceFn({ data: { itemId: res.itemId } }).catch(() => undefined);
+          return;
+        }
+        if (forThisTable()) {
+          setTable((t) => (t && t.id === target.id ? { ...t, sources } : t));
+        }
+
+        const docIdByFileId = Object.fromEntries(
+          status.documents.flatMap((doc) =>
+            doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
+          ),
+        );
+        const known = new Map(batchRows.map((row) => [row.id, row]));
+        for (const row of rowsRef.current) if (row.tableId === target.id) known.set(row.id, row);
+        const bindings = bindingsFromSave([...known.values()], res.itemId, docIdByFileId);
+        if (bindings.length) {
+          const bound = await db.bindRowDocuments(target.id, res.itemId, bindings);
+          if (forThisTable()) {
+            setRows((prev) => {
+              const byId = new Map(bound.map((row) => [row.id, row]));
+              return prev.map((row) => byId.get(row.id) ?? row);
+            });
+          }
+        }
+        if (forThisTable()) {
+          if (status.status === "error") {
+            setDocSave({
+              status: "error",
+              message: status.errorSummary ?? "Some documents could not be saved to your account.",
+            });
+          } else if (status.status === "saving") {
+            setDocSave({
+              status: "indexing",
+              message: "Large documents are still indexing; they finish binding when you reopen this table.",
+            });
+          } else {
+            setDocSave({ status: "saved", message: null });
+          }
+        }
+      } catch (err) {
+        if (signal.aborted) return;
+        if (itemId && !attached) {
+          // Reserved but never attached; a retry on the next drop starts clean.
+          await deleteWorkspaceFn({ data: { itemId } }).catch(() => undefined);
+        }
+        if (forThisTable()) {
+          setDocSave({
+            status: "error",
+            message: `${docs.length} document${plural} stayed in this tab only: ${
+              err instanceof Error ? err.message : "save failed"
+            }`,
+          });
+        }
+      } finally {
+        saveTasks.current.delete(taskKey);
+      }
+    },
+    [],
+  );
+
   /**
    * Extract dropped files in the browser, add their pages to the index, and
    * persist one row per document. A document already in the table (same name
    * and page count) is re-linked instead of duplicated, so reopening a saved
    * table and re-dropping the files restores the reader without new rows.
+   * The batch is then saved to the owner's account in the background.
    */
   const addFiles = useCallback(
     async (incoming: File[]) => {
@@ -311,6 +683,7 @@ export function useReviewTable(
       const fresh: {
         fileId: string;
         name: string;
+        file: File;
         pages: PilePage[];
         fingerprint: string;
       }[] = [];
@@ -342,6 +715,7 @@ export function useReviewTable(
             fresh.push({
               fileId,
               name: res.name,
+              file,
               pages,
               fingerprint: documentRowFingerprint(res.name, pages.length),
             });
@@ -367,6 +741,7 @@ export function useReviewTable(
           fresh.push({
             fileId,
             name: res.name,
+            file,
             pages,
             fingerprint: documentRowFingerprint(res.name, pages.length),
           });
@@ -413,15 +788,20 @@ export function useReviewTable(
 
         // Re-link rows that already exist for this document; insert the rest.
         const toInsert: typeof fresh = [];
+        const batchRows: ReviewRow[] = [];
+        /** Documents whose row is already bound to a saved copy need no new save. */
+        const toSave: typeof fresh = [];
         for (const f of fresh) {
           const match = findDocumentRow(rows, f.name, f.pages.length);
           if (match) {
             await db.relinkRow(match.id, [f.fileId]);
-            setRows((prev) =>
-              prev.map((r) => (r.id === match.id ? { ...r, fileIds: [f.fileId] } : r)),
-            );
+            const relinked = { ...match, fileIds: [f.fileId] };
+            batchRows.push(relinked);
+            setRows((prev) => prev.map((r) => (r.id === match.id ? relinked : r)));
+            if (!match.docId) toSave.push(f);
           } else {
             toInsert.push(f);
+            toSave.push(f);
           }
         }
         if (toInsert.length) {
@@ -436,7 +816,15 @@ export function useReviewTable(
             })),
             rows.length,
           );
+          batchRows.push(...inserted);
           setRows((prev) => [...prev, ...inserted]);
+        }
+        if (toSave.length) {
+          void saveBatch(
+            { id: table.id, name: table.name },
+            toSave.map((f) => ({ fileId: f.fileId, name: f.name, file: f.file, pages: f.pages })),
+            batchRows,
+          );
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not save these documents");
@@ -444,11 +832,17 @@ export function useReviewTable(
         setBusy(false);
       }
     },
-    [owner, pile, rows, table],
+    [owner, pile, rows, saveBatch, table],
   );
 
+  /**
+   * Add the open Working Set's documents as rows. When that Working Set is
+   * saved, rows bind straight to its KB documents and the workspace becomes a
+   * referenced (not owned) source; otherwise the rows are session-only until
+   * the Working Set is saved.
+   */
   const useWorkingSet = useCallback(
-    async (files: PileFile[]) => {
+    async (files: PileFile[], saved?: SavedWorkspaceBinding | null) => {
       if (!owner || !table) return;
       if (!files.length) {
         setError("Open a working set first, then use it here.");
@@ -456,29 +850,53 @@ export function useReviewTable(
       }
       setError(null);
       setBusy(true);
+      const binding = saved && saved.surface === "workingset" ? saved : null;
       try {
-        const toInsert: { label: string; fileIds: string[]; fingerprint: string; pageCount: number }[] =
-          [];
+        const toInsert: db.RowInsert[] = [];
+        const toBind: { rowId: string; docId: string }[] = [];
         for (const f of files) {
           const fingerprint = documentRowFingerprint(f.name, f.pageCount);
+          const docId = binding?.docIdByFileId[f.id] ?? null;
           const match = findDocumentRow(rows, f.name, f.pageCount);
           if (match) {
             await db.relinkRow(match.id, [f.id]);
             setRows((prev) =>
               prev.map((r) => (r.id === match.id ? { ...r, fileIds: [f.id] } : r)),
             );
+            if (docId && !match.docId) toBind.push({ rowId: match.id, docId });
           } else {
             toInsert.push({
               label: f.name,
               fileIds: [f.id],
               fingerprint,
               pageCount: f.pageCount,
+              ...(docId && binding
+                ? { docId, workspaceItemId: binding.itemId }
+                : {}),
             });
           }
         }
         if (toInsert.length) {
           const inserted = await db.upsertRows(owner, table.id, toInsert, rows.length);
           setRows((prev) => [...prev, ...inserted]);
+        }
+        if (binding) {
+          const sources = await db.attachSource(table.id, binding.itemId, false);
+          setTable((t) => (t && t.id === table.id ? { ...t, sources } : t));
+          if (toBind.length) {
+            const bound = await db.bindRowDocuments(table.id, binding.itemId, toBind);
+            setRows((prev) => {
+              const byId = new Map(bound.map((row) => [row.id, row]));
+              return prev.map((row) => byId.get(row.id) ?? row);
+            });
+          }
+          setDocSave({ status: "saved", message: null });
+        } else {
+          setDocSave({
+            status: "error",
+            message:
+              "This Working Set is not saved, so these rows live in this tab only. Save the Working Set to keep them with the table.",
+          });
         }
         setFiles(
           files.map((f) => ({
@@ -927,6 +1345,8 @@ export function useReviewTable(
     error,
     stats,
     linkedRowIds,
+    docSave,
+    hydrating,
     setError,
     refreshTables,
     loadTable,

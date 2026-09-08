@@ -43,7 +43,7 @@ export function DocsWorkspace({ tab, onTabChange }: { tab: DocsTab; onTabChange:
               className="h-10 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] shadow-none data-[state=active]:border-brand-navy data-[state=active]:bg-transparent data-[state=active]:text-brand-navy data-[state=active]:shadow-none"
             >
               <Table2 className="h-3.5 w-3.5" strokeWidth={1.75} />
-              Review Tables
+              Tabular Review
             </TabsTrigger>
           ) : null}
         </TabsList>
@@ -63,6 +63,7 @@ export function DocsWorkspace({ tab, onTabChange }: { tab: DocsTab; onTabChange:
         {reviewOn ? (
           <TabsContent
             value="review"
+            forceMount
             className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden data-[state=inactive]:hidden"
           >
             <ReviewTablesTab />

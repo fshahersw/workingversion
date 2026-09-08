@@ -5,11 +5,13 @@
 // browser. Was Lovable Supabase (`public.review_*`); same exported surface, so
 // use-review-table / CellDrawer / ReviewTablesTab are unchanged.
 //
-// The grid survives a reload; the working set does not (documents stay in the
-// browser), which is why every citation stores its verbatim quote, not just a
-// page pointer.
+// Documents are saved as KB workspaces the table references (`sources`), and
+// rows bind to their KB document, so a reopened table rehydrates from storage.
+// Citations still store their verbatim quote so a cell reads on its own.
 // ============================================================================
 import {
+  attachReviewSourceFn,
+  bindRowDocumentsFn,
   createColumnFn,
   createReviewTableFn,
   deleteColumnFn,
@@ -39,8 +41,18 @@ import type {
   ReviewCell,
   ReviewColumn,
   ReviewRow,
+  ReviewSource,
   ReviewTable,
 } from "./types";
+
+export type RowInsert = {
+  label: string;
+  fileIds: string[];
+  fingerprint: string;
+  pageCount: number;
+  docId?: string | null;
+  workspaceItemId?: string | null;
+};
 
 export type CellHistoryEntry = {
   id: string;
@@ -159,11 +171,30 @@ export async function listRows(tableId: string): Promise<ReviewRow[]> {
 export async function upsertRows(
   _owner: string,
   tableId: string,
-  rows: { label: string; fileIds: string[]; fingerprint: string; pageCount: number }[],
+  rows: RowInsert[],
   startPosition: number,
 ): Promise<ReviewRow[]> {
   if (!rows.length) return [];
   return upsertRowsFn({ data: { tableId, rows, startPosition } });
+}
+
+// --- saved document sources --------------------------------------------------
+
+export async function attachSource(
+  tableId: string,
+  workspaceItemId: string,
+  owned: boolean,
+): Promise<ReviewSource[]> {
+  return attachReviewSourceFn({ data: { tableId, workspaceItemId, owned } });
+}
+
+export async function bindRowDocuments(
+  tableId: string,
+  workspaceItemId: string,
+  bindings: { rowId: string; docId: string }[],
+): Promise<ReviewRow[]> {
+  if (!bindings.length) return [];
+  return bindRowDocumentsFn({ data: { tableId, workspaceItemId, bindings } });
 }
 
 export async function deleteRow(id: string): Promise<void> {

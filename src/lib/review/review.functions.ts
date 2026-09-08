@@ -5,11 +5,50 @@ import { createServerFn } from "@tanstack/react-start";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import type { SwUser } from "@/lib/auth/cognito.server";
-import type { CellWrite } from "@/lib/review/review.server";
+import { isUuid } from "@/lib/kb/workspace-lifecycle";
+import type { CellWrite, RowInsert } from "@/lib/review/review.server";
 import type { CellStatus, ColumnKind, ReviewCell } from "@/lib/review/types";
 
 function principalOf(context: unknown): string {
   return (context as { user: SwUser }).user.sub;
+}
+
+const MAX_ROWS_PER_CALL = 200;
+const ID = /^[A-Za-z0-9#~_.:-]{1,200}$/;
+
+function requireId(value: unknown, label: string): string {
+  const id = String(value ?? "").trim();
+  if (!ID.test(id)) throw new Error(`${label} required`);
+  return id;
+}
+
+function requireWorkspaceItemId(value: unknown): string {
+  const id = String(value ?? "").trim();
+  if (!isUuid(id)) throw new Error("valid workspaceItemId required");
+  return id;
+}
+
+function cleanRowInsert(raw: unknown): RowInsert {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const label = String(r.label ?? "").trim();
+  if (!label) throw new Error("row label required");
+  const fileIds = Array.isArray(r.fileIds) ? r.fileIds.map(String).filter(Boolean).slice(0, 8) : [];
+  const pageCount = Number(r.pageCount);
+  const docId = r.docId ? String(r.docId).trim() : null;
+  const workspaceItemId = r.workspaceItemId ? String(r.workspaceItemId).trim() : null;
+  if ((docId && !workspaceItemId) || (!docId && workspaceItemId)) {
+    throw new Error("docId and workspaceItemId must be supplied together");
+  }
+  if (workspaceItemId && !isUuid(workspaceItemId)) throw new Error("valid workspaceItemId required");
+  if (docId && !ID.test(docId)) throw new Error("valid docId required");
+  return {
+    label,
+    fileIds,
+    fingerprint: String(r.fingerprint ?? ""),
+    pageCount: Number.isFinite(pageCount) && pageCount >= 0 ? Math.floor(pageCount) : 0,
+    docId,
+    workspaceItemId,
+  };
 }
 
 export const listReviewTablesFn = createServerFn({ method: "POST" })
@@ -121,13 +160,50 @@ export const listRowsFn = createServerFn({ method: "POST" })
 
 export const upsertRowsFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { tableId: string; rows: { label: string; fileIds: string[]; fingerprint: string; pageCount: number }[]; startPosition: number }) => {
-    if (!d?.tableId) throw new Error("tableId required");
-    return { tableId: d.tableId, rows: Array.isArray(d.rows) ? d.rows : [], startPosition: Number(d.startPosition) || 0 };
+  .inputValidator((d: { tableId: string; rows: RowInsert[]; startPosition: number }) => {
+    const tableId = requireId(d?.tableId, "tableId");
+    const rows = Array.isArray(d?.rows) ? d.rows : [];
+    if (rows.length > MAX_ROWS_PER_CALL) throw new Error("too many rows in one call");
+    return { tableId, rows: rows.map(cleanRowInsert), startPosition: Number(d.startPosition) || 0 };
   })
   .handler(async ({ context, data }) => {
     const m = await import("@/lib/review/review.server");
     return m.upsertRows(principalOf(context), data.tableId, data.rows, data.startPosition);
+  });
+
+/** Reference a saved workspace's documents from a table (ownership verified server-side). */
+export const attachReviewSourceFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { tableId: string; workspaceItemId: string; owned: boolean }) => ({
+    tableId: requireId(d?.tableId, "tableId"),
+    workspaceItemId: requireWorkspaceItemId(d?.workspaceItemId),
+    owned: d?.owned === true,
+  }))
+  .handler(async ({ context, data }) => {
+    const m = await import("@/lib/review/review.server");
+    return m.attachReviewSource(principalOf(context), data);
+  });
+
+/** Bind rows to the KB documents a finished save produced. */
+export const bindRowDocumentsFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator(
+    (d: { tableId: string; workspaceItemId: string; bindings: { rowId: string; docId: string }[] }) => {
+      const bindings = Array.isArray(d?.bindings) ? d.bindings : [];
+      if (bindings.length > MAX_ROWS_PER_CALL) throw new Error("too many bindings in one call");
+      return {
+        tableId: requireId(d?.tableId, "tableId"),
+        workspaceItemId: requireWorkspaceItemId(d?.workspaceItemId),
+        bindings: bindings.map((b) => ({
+          rowId: requireId(b?.rowId, "rowId"),
+          docId: requireId(b?.docId, "docId"),
+        })),
+      };
+    },
+  )
+  .handler(async ({ context, data }) => {
+    const m = await import("@/lib/review/review.server");
+    return m.bindRowDocuments(principalOf(context), data);
   });
 
 export const deleteRowFn = createServerFn({ method: "POST" })

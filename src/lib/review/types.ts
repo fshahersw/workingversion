@@ -1,11 +1,12 @@
 // ============================================================================
-// Review Tables — client-safe types.
+// Tabular Review — client-safe types.
 //
-// A review table is a spreadsheet over a working set: rows are documents,
+// A review table is a spreadsheet over a document set: rows are documents,
 // columns are questions. Every cell carries a cited answer, a status and an
-// audit trail. Table state is durable (public.review_* in the app database);
-// the documents themselves stay in the browser working set, exactly like the
-// Summarize tab, so nothing about the existing pile pipeline changes.
+// audit trail. Table state lives in DynamoDB under the owner's Cognito
+// principal. Documents are saved as KB workspaces (S3 bytes + pages, Aurora
+// chunks + embeddings) that the table references through `sources`; each row
+// binds to its KB document so a reopened table rehydrates without re-upload.
 // ============================================================================
 
 /** Single kill switch. Set to false and the tab disappears; nothing else changes. */
@@ -103,10 +104,31 @@ export type ReviewRow = {
   id: string;
   tableId: string;
   label: string;
+  /** Live browser pile ids for this session (docId once hydrated from a saved source). */
   fileIds: string[];
   fingerprint: string | null;
   pageCount: number;
   position: number;
+  /** KB document this row is bound to, once its source workspace finished ingest. */
+  docId: string | null;
+  /** Saved workspace (DynamoDB item id) that holds `docId`. */
+  workspaceItemId: string | null;
+};
+
+export type ReviewSourceSurface = "workingset" | "deposition" | "review";
+
+/**
+ * A saved KB workspace a table reads documents from. `owned` sources were
+ * created by this table from dropped files and are deleted with it; imported
+ * Working Sets are referenced only.
+ */
+export type ReviewSource = {
+  workspaceItemId: string;
+  kbWorkspaceId: string;
+  surface: ReviewSourceSurface;
+  name: string;
+  owned: boolean;
+  attachedAt: string;
 };
 
 /**
@@ -144,6 +166,7 @@ export type ReviewTable = {
   instructions: string | null;
   createdAt: string;
   updatedAt: string;
+  sources: ReviewSource[];
 };
 
 /** What the model is asked to return for one cell. */
