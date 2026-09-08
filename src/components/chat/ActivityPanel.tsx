@@ -1,0 +1,272 @@
+import {
+  Brain,
+  Check,
+  ChevronDown,
+  FileOutput,
+  FileText,
+  Globe,
+  Loader2,
+  Search,
+  Terminal,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import { summarizeResearchActivity } from "@/lib/agents/research-activity";
+import { toolLabel, type Message, type ToolCall } from "@/lib/chat-types";
+
+/**
+ * One quiet panel for everything the agent does before the answer: the live
+ * status line, the tool calls as they start and fill in, and the model's own
+ * reasoning. Open while the agent works, folds to a single summary line the
+ * moment the answer starts, and stays available as a trace afterwards. No
+ * rounds, no agent names, no truncated text.
+ */
+export function ActivityPanel({ msg }: { msg: Message }) {
+  const running = msg.status === "thinking";
+  const writing = msg.status === "writing";
+  const settled = writing || msg.status === "done";
+  const [open, setOpen] = useState(true);
+  const [pinned, setPinned] = useState(false);
+
+  // Fold automatically when the answer starts unless the reader opened it by hand.
+  useEffect(() => {
+    if (settled && !pinned) setOpen(false);
+  }, [settled, pinned]);
+
+  const steps = useMemo<ToolCall[]>(
+    () =>
+      msg.rounds.flatMap((round) => Object.values(round.agents).flatMap((agent) => agent.tools)),
+    [msg.rounds],
+  );
+  const narration = useMemo(
+    () =>
+      (msg.thinking ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+    [msg.thinking],
+  );
+  const reasoning = (msg.reasoning ?? "").trim();
+  const summary = useMemo(
+    () => summarizeResearchActivity(msg.rounds, settled),
+    [msg.rounds, settled],
+  );
+  const sourceCount = msg.sources?.length ?? 0;
+  const pending = steps.filter((step) => typeof step.hits !== "number").length;
+
+  if (!steps.length && !narration.length && !reasoning && !running) return null;
+  if (msg.mode === "conversational") return null;
+
+  const title = running
+    ? (narration[narration.length - 1] ??
+      (steps.length ? "Working the record" : "Reading the question"))
+    : writing
+      ? msg.deliverable
+        ? `Preparing your ${msg.deliverable.toUpperCase()}`
+        : "Writing the answer"
+      : `Researched ${sourceCount} source${sourceCount === 1 ? "" : "s"}`;
+
+  const meta = [
+    steps.length ? `${steps.length} ${steps.length === 1 ? "step" : "steps"}` : null,
+    running && pending ? `${pending} running` : null,
+    settled && elapsed(summary.elapsedMs) ? elapsed(summary.elapsedMs) : null,
+    msg.mode && msg.mode !== "conversational" && settled ? modeLabel(msg.mode) : null,
+  ].filter(Boolean);
+
+  const showBody = open && (steps.length > 0 || reasoning.length > 0 || narration.length > 1);
+
+  return (
+    <section className="mb-3 overflow-hidden rounded-md border border-border/80 bg-surface">
+      <button
+        type="button"
+        onClick={() => {
+          setOpen((value) => !value);
+          setPinned(true);
+        }}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <StatusMark running={running} writing={writing} />
+        <span
+          className={`min-w-0 flex-1 text-[12.5px] leading-snug ${
+            running ? "wr-shimmer font-medium" : "font-medium text-foreground/80"
+          }`}
+        >
+          {title}
+        </span>
+        {meta.length > 0 && (
+          <span className="shrink-0 text-[10.5px] tabular-nums text-muted-foreground">
+            {meta.join(" · ")}
+          </span>
+        )}
+        <ChevronDown
+          className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+
+      {showBody ? (
+        <div className="border-t border-border/60">
+          {steps.length > 0 && <StepList steps={steps} />}
+          {reasoning && <ReasoningBlock text={reasoning} live={running} defaultOpen={running} />}
+          {settled && narration.length > 1 && <NarrationList lines={narration} />}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function StatusMark({ running, writing }: { running: boolean; writing: boolean }) {
+  if (running) {
+    return <Loader2 className="h-3.5 w-3.5 shrink-0 text-brand-orange motion-safe:animate-spin" />;
+  }
+  if (writing) {
+    return <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-brand-orange" />;
+  }
+  return <Check className="h-3.5 w-3.5 shrink-0 text-emerald-700" strokeWidth={2.5} />;
+}
+
+function StepList({ steps }: { steps: ToolCall[] }) {
+  const listRef = useRef<HTMLOListElement>(null);
+  // Keep the newest step in view while calls are still arriving.
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [steps.length]);
+
+  return (
+    <ol ref={listRef} className="wr-app-scroll max-h-56 overflow-y-auto px-2.5 py-1.5">
+      {steps.map((step, index) => {
+        const Icon = iconFor(step.tool);
+        const done = typeof step.hits === "number";
+        return (
+          <li
+            key={step.id ?? `${step.tool}-${index}`}
+            className="flex items-center gap-2 py-[3px] text-[12px] leading-snug"
+          >
+            <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" strokeWidth={1.9} />
+            <span className="shrink-0 font-medium text-foreground/80">
+              {toolLabel(step.tool, step.scope)}
+            </span>
+            {step.query ? (
+              <span className="min-w-0 flex-1 truncate text-muted-foreground" title={step.query}>
+                {step.query}
+              </span>
+            ) : (
+              <span className="flex-1" />
+            )}
+            {done ? (
+              <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground">
+                {resultLabel(step.tool, step.hits ?? 0)}
+              </span>
+            ) : (
+              <Loader2 className="h-3 w-3 shrink-0 text-brand-orange motion-safe:animate-spin" />
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function ReasoningBlock({
+  text,
+  live,
+  defaultOpen,
+}: {
+  text: string;
+  live: boolean;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // Follow the stream while it is being written; leave the reader alone after.
+  useEffect(() => {
+    if (!live || !open) return;
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [text, live, open]);
+
+  return (
+    <div className="border-t border-border/60">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] font-medium text-muted-foreground hover:text-foreground"
+      >
+        <Brain className="h-3.5 w-3.5 shrink-0" strokeWidth={1.9} />
+        Reasoning
+        {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-orange" />}
+        <span className="ml-auto text-[10.5px] tabular-nums">{words(text)} words</span>
+        <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div
+          ref={bodyRef}
+          className="wr-app-scroll max-h-52 overflow-y-auto whitespace-pre-wrap px-3 pb-2.5 text-[12px] leading-relaxed text-foreground/65"
+        >
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NarrationList({ lines }: { lines: string[] }) {
+  return (
+    <details className="group border-t border-border/60">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground">
+        <FileText className="h-3.5 w-3.5 shrink-0" strokeWidth={1.9} />
+        Status log
+        <span className="ml-auto text-[10.5px] tabular-nums">{lines.length}</span>
+        <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
+      </summary>
+      <ol className="wr-app-scroll max-h-40 overflow-y-auto px-3 pb-2.5 text-[12px] leading-relaxed text-foreground/65">
+        {lines.map((line, index) => (
+          <li key={`${index}-${line.slice(0, 24)}`} className="py-[1px]">
+            {line}
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
+function iconFor(tool: string) {
+  if (tool === "fetch_page") return Globe;
+  if (tool === "run_python") return Terminal;
+  if (tool === "create_document") return FileOutput;
+  if (tool === "read_document" || tool === "db_read_filing" || tool === "recap_read")
+    return FileText;
+  return Search;
+}
+
+function resultLabel(tool: string, hits: number): string {
+  if (tool === "run_python") return hits ? "ran" : "no output";
+  if (tool === "create_document") return hits ? "file ready" : "failed";
+  if (tool === "fetch_page" || tool === "recap_read" || tool === "db_read_filing") {
+    return hits ? "read" : "no text";
+  }
+  if (tool === "verify_citations") return hits ? `${hits} checked` : "none found";
+  return hits ? `${hits} result${hits === 1 ? "" : "s"}` : "no results";
+}
+
+function modeLabel(mode: string): string {
+  if (mode === "fast") return "Fast";
+  if (mode === "think") return "Think";
+  return mode;
+}
+
+function elapsed(ms: number | null): string | null {
+  if (ms == null || ms <= 0) return null;
+  if (ms < 1_000) return "<1s";
+  const seconds = Math.round(ms / 1_000);
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function words(text: string): number {
+  return text.split(/\s+/).filter(Boolean).length;
+}

@@ -217,7 +217,7 @@ export type Message = {
   deliverable?: string;
   /** Live, streamed research narration ("thinking steps") shown before the answer. */
   thinking?: string;
-  /** Internal model reasoning. Retained for compatibility but never rendered to users. */
+  /** The model's live adaptive-thinking text, shown in the activity panel's Reasoning fold. */
   reasoning?: string;
   status: "thinking" | "writing" | "done" | "error";
   error?: string;

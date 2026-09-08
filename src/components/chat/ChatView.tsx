@@ -28,12 +28,11 @@ import {
   type ComposerMode,
 } from "./composer-kit";
 import { ConversationHistory } from "./ConversationHistory";
+import { ActivityPanel } from "./ActivityPanel";
 import { AnswerMarkdown } from "./AnswerMarkdown";
 import { ArtifactPanel } from "./ArtifactPanel";
-import { ThinkingStream } from "./ThinkingStream";
 import { AnswerActions } from "./AnswerActions";
 import { WorkspaceRail } from "./WorkspaceRail";
-import { ResearchActivity } from "./ResearchActivity";
 import { StructuredChoicePanel } from "./StructuredChoicePanel";
 import { choiceResponseText } from "@/lib/agents/research-activity";
 
@@ -666,29 +665,6 @@ function ChatComposer({
   );
 }
 
-function ModeBadge({ mode, reason, sources }: { mode: string; reason?: string; sources: number }) {
-  const META: Record<string, { label: string; cls: string }> = {
-    fast: { label: "Fast", cls: "border-amber-200 bg-amber-50 text-amber-700" },
-    think: { label: "Think", cls: "border-[oklch(0.55_0.22_262/0.25)] bg-brand-blue-soft/50 text-brand-navy" },
-  };
-  const m = META[mode] ?? { label: mode, cls: "border-slate-200 bg-slate-100 text-slate-600" };
-  return (
-    <div className="mb-1.5 flex items-center gap-1.5 text-[11px]">
-      <span
-        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${m.cls}`}
-        title={reason ? `Effort: ${reason}` : undefined}
-      >
-        {m.label} mode
-      </span>
-      {sources > 0 && (
-        <span className="text-muted-foreground/70">
-          {sources} source{sources === 1 ? "" : "s"}
-        </span>
-      )}
-    </div>
-  );
-}
-
 /** Citation-faithfulness trust chip: how many [S#]-cited claims a reasoning
  *  judge found the cited sources actually support. Green when all supported;
  *  amber when some are unsupported (tooltip lists them). A signal, not a gate. */
@@ -745,43 +721,20 @@ function AssistantMessage({
   onChoice: (request: NonNullable<Message["choice"]>, optionId: string) => void;
 }) {
 
-  const rounds = msg.rounds ?? [];
+  const quietStart =
+    msg.status === "thinking" &&
+    msg.rounds.length === 0 &&
+    !(msg.thinking ?? "").trim() &&
+    !(msg.reasoning ?? "").trim();
 
   return (
     <div className="mb-3">
-      {msg.status === "thinking" && rounds.length === 0 && (
+      {quietStart && (
         <div className="mb-2 flex h-[11px] items-center">
           <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-brand-orange" />
         </div>
       )}
-      {rounds.length > 0 && (
-        <ResearchActivity
-          rounds={rounds}
-          settled={msg.status === "writing" || msg.status === "done"}
-          sourceCount={(msg.sources ?? []).length}
-        />
-      )}
-      <ThinkingStream
-        text={msg.thinking ?? ""}
-        active={msg.status === "thinking"}
-      />
-      {msg.status === "writing" && !msg.answer.trim() && (
-        <div className="mb-2.5 flex items-center gap-2 rounded-lg border border-brand-orange/25 bg-gradient-to-b from-brand-orange-soft/25 to-transparent px-2.5 py-1.5">
-          <span className="h-[7px] w-[7px] shrink-0 animate-pulse rounded-full bg-brand-orange" />
-          <span className="text-[12.5px] font-medium text-foreground/75">
-            {msg.deliverable
-              ? `Research complete · preparing your ${msg.deliverable.toUpperCase()} report`
-              : "Research complete · writing your answer"}
-            {(msg.sources?.length ?? 0) > 0
-              ? ` from ${msg.sources.length} source${msg.sources.length === 1 ? "" : "s"}`
-              : ""}
-            &hellip;
-          </span>
-        </div>
-      )}
-      {msg.mode && msg.mode !== "conversational" && msg.answer.trim().length > 0 && (
-        <ModeBadge mode={msg.mode} reason={msg.modeReason} sources={(msg.sources ?? []).length} />
-      )}
+      <ActivityPanel msg={msg} />
       <div className="prose prose-neutral max-w-none text-foreground [&_code]:break-all [&_pre]:whitespace-pre-wrap">
         <AnswerMarkdown
           text={msg.answer}
