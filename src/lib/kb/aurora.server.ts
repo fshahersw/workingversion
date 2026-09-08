@@ -89,6 +89,30 @@ export function vectorLiteral(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
+/**
+ * The RDS Data API for Aurora PostgreSQL rejects array-typed parameters
+ * ("Array parameters are not supported"). Arrays travel as one delimited text
+ * parameter and are split server-side with string_to_array(...) so they stay
+ * bound parameters, never interpolated SQL. Values must not contain the
+ * delimiter; every caller passes uuids, integers or enum tokens.
+ */
+export const LIST_DELIMITER = ",";
+
+export function listParam(name: string, values: readonly (string | number)[]): SqlParameter {
+  for (const value of values) {
+    const text = String(value);
+    if (!text || text.includes(LIST_DELIMITER) || /\s/.test(text)) {
+      throw new Error(`invalid list value for ${name}`);
+    }
+  }
+  return param(name, values.map(String).join(LIST_DELIMITER));
+}
+
+/** SQL fragment turning a listParam back into a typed array. */
+export function listCast(name: string, type: "uuid" | "bigint" | "text"): string {
+  return `CAST(string_to_array(:${name}, '${LIST_DELIMITER}') AS ${type}[])`;
+}
+
 // --- low-level execution -----------------------------------------------------
 
 /** Run one statement. Returns the raw command output. */
@@ -240,13 +264,8 @@ export async function hybridSearch(args: HybridSearchArgs): Promise<KbHit[]> {
     param("rrf_k", rrfK),
     param("snippet", snippetChars),
   ];
-  if (restrict) {
-    parameters.push({
-      name: "doc_ids",
-      value: { arrayValue: { stringValues: args.docIds as string[] } },
-    });
-  }
-  const docIdsSql = restrict ? "CAST(:doc_ids AS uuid[])" : "NULL::uuid[]";
+  if (restrict) parameters.push(listParam("doc_ids", args.docIds as string[]));
+  const docIdsSql = restrict ? listCast("doc_ids", "uuid") : "NULL::uuid[]";
 
   const sql = `
     SELECT chunk_id, doc_id, page_start, page_end, kind, content, conf, score
@@ -293,14 +312,11 @@ export async function fetchChunks(
     param("owner", sub),
     param("workspace", workspaceId),
     param("surface", surface),
-    {
-      name: "ids",
-      value: { arrayValue: { longValues: chunkIds } },
-    },
+    listParam("ids", chunkIds),
   ];
   const sql = `
     SELECT chunk_id, doc_id, page_start, page_end, kind, content, conf
-    FROM kb.fetch_chunks(:owner, CAST(:workspace AS uuid), :surface, CAST(:ids AS bigint[]))
+    FROM kb.fetch_chunks(:owner, CAST(:workspace AS uuid), :surface, ${listCast("ids", "bigint")})
   `;
   return withPrincipal(sub, (tx) => queryJson<KbChunk>(sql, parameters, tx));
 }
@@ -592,11 +608,8 @@ export async function updateDocumentIngest(
   if (patch.status && !guardedStatuses?.length) return false;
   let expectedSql = "";
   if (guardedStatuses?.length) {
-    parameters.push({
-      name: "expected_statuses",
-      value: { arrayValue: { stringValues: [...guardedStatuses] } },
-    });
-    expectedSql = "AND status = ANY(CAST(:expected_statuses AS text[]))";
+    parameters.push(listParam("expected_statuses", [...guardedStatuses]));
+    expectedSql = `AND status = ANY(${listCast("expected_statuses", "text")})`;
   }
   const result = await withPrincipal(sub, (tx) =>
     execute(

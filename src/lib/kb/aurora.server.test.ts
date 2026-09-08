@@ -13,9 +13,25 @@ import {
   fetchChunks,
   insertDocument,
   insertChunks,
+  listCast,
+  listParam,
   withPrincipal,
   deleteWorkspaceDocuments,
 } from "./aurora.server.ts";
+
+test("arrays travel as one delimited text parameter, never as a Data API array", () => {
+  // The Data API for Aurora PostgreSQL rejects arrayValue parameters; this
+  // shape is what broke every save once guarded status updates were added.
+  const p = listParam("ids", [12, 7, 300]);
+  assert.deepEqual(p, { name: "ids", value: { stringValue: "12,7,300" } });
+  assert.equal(listCast("ids", "bigint"), "CAST(string_to_array(:ids, ',') AS bigint[])");
+  assert.deepEqual(listParam("s", ["embedding", "ready"]).value, { stringValue: "embedding,ready" });
+  assert.throws(() => listParam("bad", ["a,b"]), /invalid list value/);
+  assert.throws(() => listParam("bad", ["with space"]), /invalid list value/);
+  assert.throws(() => listParam("bad", [""]), /invalid list value/);
+  const source = readFileSync(new URL("./aurora.server.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /arrayValue/, "no Data API array parameters may remain");
+});
 
 test("param infers the Data API field type", () => {
   assert.deepEqual(param("s", "hi"), { name: "s", value: { stringValue: "hi" } });
