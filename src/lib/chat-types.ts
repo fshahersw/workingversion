@@ -212,6 +212,8 @@ export type Message = {
   artifacts?: Artifact[];
   /** A structured choice emitted by the orchestrator. Absent unless a real event supplied it. */
   choice?: ChoiceRequest;
+  /** Document material proposed by the Drafts assistant (write/edit/research). */
+  proposal?: DraftProposal;
   /** Effort mode this turn actually ran at (fast | think | conversational) and why. */
   mode?: string;
   modeReason?: string;
@@ -250,6 +252,18 @@ export type Message = {
 export type MatterScope = {
   matterId: string;
   label: string;
+};
+
+/** Material the Drafts assistant proposes for the document. */
+export type DraftProposal = {
+  /** Markdown to place in the document, with [S#] markers where facts rely on sources. */
+  material: string;
+  /** Where it goes: over the selection the request was made with, or at the cursor. */
+  target: "selection" | "cursor";
+  /** The short chat note that accompanied it. */
+  note?: string;
+  /** Set once the attorney inserted or replaced with it. */
+  appliedAt?: number;
 };
 
 /** A file the attorney uploaded into the code-interpreter sandbox. Text is

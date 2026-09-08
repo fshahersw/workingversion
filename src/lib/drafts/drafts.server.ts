@@ -196,17 +196,25 @@ export async function updateDraftMeta(
 ): Promise<DraftSummary> {
   const row = await loadRow(principal, input.draftId);
   const set: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+  const remove: string[] = [];
   if (input.title !== undefined) set.name = cleanDraftTitle(input.title);
   if (input.style !== undefined) {
     if (!isDraftStyle(input.style)) throw new Error("invalid style");
     set.style = input.style;
   }
   if (input.convId !== undefined) {
-    if (!ULID.test(input.convId)) throw new Error("invalid conversation id");
-    set.convId = input.convId;
+    // Empty string unlinks the conversation (a fresh thread for the draft).
+    if (input.convId === "") remove.push("convId");
+    else if (!ULID.test(input.convId)) throw new Error("invalid conversation id");
+    else set.convId = input.convId;
   }
-  await updateItem(userPK(principal), itemSK(input.draftId), { set });
-  return mapDraft({ ...row, ...set });
+  await updateItem(userPK(principal), itemSK(input.draftId), {
+    set,
+    ...(remove.length ? { remove } : {}),
+  });
+  const next = { ...row, ...set } as Item;
+  for (const key of remove) delete next[key];
+  return mapDraft(next);
 }
 
 /** Record an imported original for the draft (bytes already written by the caller). */

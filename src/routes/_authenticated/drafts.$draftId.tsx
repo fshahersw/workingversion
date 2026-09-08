@@ -8,10 +8,13 @@ import {
   Download,
   Loader2,
   RefreshCw,
+  Sparkles,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { DraftAssistant } from "@/components/drafts/DraftAssistant";
 import { DraftEditor } from "@/components/drafts/DraftEditor";
 import {
   DropdownMenu,
@@ -19,9 +22,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import type { DraftMode } from "@/lib/agents/draft-prompts";
+import type { Message } from "@/lib/chat-types";
 import { takeDraftImport } from "@/lib/drafts/import";
+import { materialForDocument, nextReferenceNumber } from "@/lib/drafts/material";
 import { DRAFT_STYLES, type DraftStyle } from "@/lib/drafts/types";
 import { useDraft, type SaveState } from "@/lib/drafts/use-draft";
+import { useDraftChat, type DraftDocumentSnapshot } from "@/lib/drafts/use-draft-chat";
 
 export const Route = createFileRoute("/_authenticated/drafts/$draftId")({
   ssr: false,
@@ -34,6 +41,8 @@ const STYLE_LABEL: Record<DraftStyle, string> = {
   modern: "Modern",
   minimal: "Minimal",
 };
+const ASSISTANT_STORAGE_KEY = "sw.draft.assistant";
+const CONTEXT_CHARS = 1_200;
 
 function DraftPage() {
   const { draftId } = Route.useParams();
@@ -52,6 +61,24 @@ function DraftPage() {
   } = useDraft(draftId);
   const editorRef = useRef<Editor | null>(null);
   const [titleDraft, setTitleDraft] = useState<string | null>(null);
+  const [selectionText, setSelectionText] = useState("");
+  const [assistantOpen, setAssistantOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return window.localStorage.getItem(ASSISTANT_STORAGE_KEY) !== "closed";
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(ASSISTANT_STORAGE_KEY, assistantOpen ? "open" : "closed");
+    } catch {
+      /* ignore */
+    }
+  }, [assistantOpen]);
+
+  const chat = useDraftChat({
+    draftId,
+    draftTitle: draft?.title ?? "",
+    ...(draft?.convId ? { convId: draft.convId } : {}),
+  });
 
   // An import hand-off (Drafts page converted a DOCX) lands here once the
   // editor exists: set the HTML as content and let autosave persist it.
@@ -84,6 +111,79 @@ function DraftPage() {
     await saveNow();
     await exportAs(format, editor.getMarkdown());
   };
+
+  /** What the assistant sees: the document, the selection, the cursor context. */
+  const snapshot = useCallback((): DraftDocumentSnapshot | null => {
+    const editor = editorRef.current;
+    if (!editor || !draft) return null;
+    const { from, to, empty } = editor.state.selection;
+    const doc = editor.state.doc;
+    const text = editor.getText({ blockSeparator: "\n" });
+    const selection = empty ? "" : doc.textBetween(from, to, "\n");
+    const before = doc
+      .textBetween(Math.max(1, from - CONTEXT_CHARS * 2), from, "\n")
+      .slice(-CONTEXT_CHARS);
+    const after = doc
+      .textBetween(to, Math.min(doc.content.size, to + CONTEXT_CHARS * 2), "\n")
+      .slice(0, CONTEXT_CHARS);
+    return {
+      title: draft.title,
+      text,
+      ...(selection ? { selection } : {}),
+      before,
+      after,
+      style: draft.style,
+    };
+  }, [draft]);
+
+  // The assistant's requests carry the selection they were made with, so the
+  // reply can be applied even after the cursor moved.
+  const requestSelection = useRef<{ from: number; to: number } | null>(null);
+
+  const onSend = useCallback(
+    (instruction: string, mode: DraftMode) => {
+      const snap = snapshot();
+      if (!snap) return;
+      const editor = editorRef.current!;
+      const { from, to, empty } = editor.state.selection;
+      requestSelection.current = empty ? null : { from, to };
+      void chat.send(instruction, mode, snap);
+    },
+    [chat, snapshot],
+  );
+
+  const onApply = useCallback(
+    (message: Message, how: "insert" | "replace"): boolean => {
+      const editor = editorRef.current;
+      const material = message.proposal?.material;
+      if (!editor || !material) return false;
+      const startAt = nextReferenceNumber(editor.getText({ blockSeparator: "\n" }));
+      const { markdown } = materialForDocument(material, message.sources ?? [], startAt);
+      const chain = editor.chain().focus();
+      if (how === "replace") {
+        const sel = editor.state.selection;
+        const range = !sel.empty
+          ? { from: sel.from, to: sel.to }
+          : requestSelection.current && requestSelection.current.to <= editor.state.doc.content.size
+            ? requestSelection.current
+            : null;
+        if (!range) {
+          toast.error("Select the passage to replace first.");
+          return false;
+        }
+        chain
+          .deleteRange(range)
+          .insertContentAt(range.from, markdown, { contentType: "markdown" })
+          .run();
+      } else {
+        chain.insertContent(markdown, { contentType: "markdown" }).run();
+      }
+      chat.markApplied(message.id);
+      onChange(editor.getJSON() as never, editor.getText({ blockSeparator: "\n" }));
+      return true;
+    },
+    [chat, onChange],
+  );
 
   if (loadError) {
     return (
@@ -153,7 +253,7 @@ function DraftPage() {
               <button
                 type="button"
                 disabled={!draft || exporting !== null}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand-navy px-2.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-[12px] font-medium text-foreground transition-colors hover:bg-muted/60 disabled:opacity-50"
               >
                 {exporting ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -171,23 +271,53 @@ function DraftPage() {
               <DropdownMenuItem onSelect={() => void doExport("pdf")}>PDF</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {!assistantOpen ? (
+            <button
+              type="button"
+              onClick={() => setAssistantOpen(true)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand-navy px-2.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
+            >
+              <Sparkles className="h-3.5 w-3.5" strokeWidth={2} />
+              Assistant
+            </button>
+          ) : null}
         </header>
 
-        <div className="min-h-0 flex-1">
-          {draft ? (
-            <DraftEditor
-              key={draft.draftId}
-              initialDoc={draft.content?.doc ?? null}
-              style={draft.style}
-              readOnly={saveState === "conflict"}
-              onChange={onChange}
-              onReady={onReady}
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center text-[12.5px] text-muted-foreground">
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Opening…
-            </div>
-          )}
+        <div className="flex min-h-0 flex-1">
+          <div className="min-h-0 min-w-0 flex-1">
+            {draft ? (
+              <DraftEditor
+                key={draft.draftId}
+                initialDoc={draft.content?.doc ?? null}
+                style={draft.style}
+                readOnly={saveState === "conflict"}
+                onChange={onChange}
+                onReady={onReady}
+                onSelection={setSelectionText}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-[12.5px] text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Opening…
+              </div>
+            )}
+          </div>
+          {assistantOpen && draft ? (
+            <aside className="hidden h-full w-[400px] shrink-0 border-l border-border/70 lg:block xl:w-[440px]">
+              <DraftAssistant
+                messages={chat.messages}
+                busy={chat.busy}
+                ready={chat.ready}
+                selectionText={selectionText}
+                documentWords={wordCount}
+                documentEmpty={wordCount === 0}
+                onSend={onSend}
+                onStop={chat.stop}
+                onNewThread={() => void chat.reset()}
+                onApply={onApply}
+                onCollapse={() => setAssistantOpen(false)}
+              />
+            </aside>
+          ) : null}
         </div>
       </div>
     </AppShell>

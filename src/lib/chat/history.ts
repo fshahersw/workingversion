@@ -34,6 +34,7 @@ type StoredAssistant = {
   mode?: string;
   modeReason?: string;
   thinking?: string;
+  proposal?: Message["proposal"];
 };
 
 export type ConversationSummary = {
@@ -111,6 +112,7 @@ export async function loadConversation(id: string): Promise<LoadedConversation |
           ...(parsed?.mode ? { mode: parsed.mode } : {}),
           ...(parsed?.modeReason ? { modeReason: parsed.modeReason } : {}),
           ...(parsed?.thinking ? { thinking: parsed.thinking } : {}),
+          ...(parsed?.proposal ? { proposal: parsed.proposal } : {}),
           status: "done" as const,
         };
       }
@@ -181,6 +183,7 @@ export async function saveTurn(args: {
       ...(args.answer.mode ? { mode: args.answer.mode } : {}),
       ...(args.answer.modeReason ? { modeReason: args.answer.modeReason } : {}),
       ...(args.answer.thinking ? { thinking: args.answer.thinking.slice(0, 20_000) } : {}),
+      ...(args.answer.proposal ? { proposal: args.answer.proposal } : {}),
     };
     await appendMessageFn({
       data: { convId: conversationId, role: "assistant", content: JSON.stringify(stored) },

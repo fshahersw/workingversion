@@ -21,6 +21,7 @@ import { Route as ApiSummarizeRouteImport } from './routes/api/summarize'
 import { Route as ApiQuickAskRouteImport } from './routes/api/quick-ask'
 import { Route as ApiOrchestrateRouteImport } from './routes/api/orchestrate'
 import { Route as ApiFollowupsRouteImport } from './routes/api/followups'
+import { Route as ApiDraftRouteImport } from './routes/api/draft'
 import { Route as AuthenticatedSummarizeRouteImport } from './routes/_authenticated/summarize'
 import { Route as AuthenticatedResearchRouteImport } from './routes/_authenticated/research'
 import { Route as AuthenticatedLibraryRouteImport } from './routes/_authenticated/library'
@@ -111,6 +112,11 @@ const ApiOrchestrateRoute = ApiOrchestrateRouteImport.update({
 const ApiFollowupsRoute = ApiFollowupsRouteImport.update({
   id: '/api/followups',
   path: '/api/followups',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiDraftRoute = ApiDraftRouteImport.update({
+  id: '/api/draft',
+  path: '/api/draft',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedSummarizeRoute = AuthenticatedSummarizeRouteImport.update({
@@ -296,6 +302,7 @@ export interface FileRoutesByFullPath {
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
+  '/api/draft': typeof ApiDraftRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
@@ -340,6 +347,7 @@ export interface FileRoutesByTo {
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
+  '/api/draft': typeof ApiDraftRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
@@ -387,6 +395,7 @@ export interface FileRoutesById {
   '/_authenticated/library': typeof AuthenticatedLibraryRoute
   '/_authenticated/research': typeof AuthenticatedResearchRoute
   '/_authenticated/summarize': typeof AuthenticatedSummarizeRoute
+  '/api/draft': typeof ApiDraftRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
@@ -435,6 +444,7 @@ export interface FileRouteTypes {
     | '/library'
     | '/research'
     | '/summarize'
+    | '/api/draft'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
@@ -479,6 +489,7 @@ export interface FileRouteTypes {
     | '/library'
     | '/research'
     | '/summarize'
+    | '/api/draft'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
@@ -525,6 +536,7 @@ export interface FileRouteTypes {
     | '/_authenticated/library'
     | '/_authenticated/research'
     | '/_authenticated/summarize'
+    | '/api/draft'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
@@ -563,6 +575,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRouteWithChildren
+  ApiDraftRoute: typeof ApiDraftRoute
   ApiFollowupsRoute: typeof ApiFollowupsRoute
   ApiOrchestrateRoute: typeof ApiOrchestrateRoute
   ApiQuickAskRoute: typeof ApiQuickAskRoute
@@ -671,6 +684,13 @@ declare module '@tanstack/react-router' {
       path: '/api/followups'
       fullPath: '/api/followups'
       preLoaderRoute: typeof ApiFollowupsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/draft': {
+      id: '/api/draft'
+      path: '/api/draft'
+      fullPath: '/api/draft'
+      preLoaderRoute: typeof ApiDraftRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/summarize': {
@@ -985,6 +1005,7 @@ const ApiPublicIngestBatchesRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRouteWithChildren,
+  ApiDraftRoute: ApiDraftRoute,
   ApiFollowupsRoute: ApiFollowupsRoute,
   ApiOrchestrateRoute: ApiOrchestrateRoute,
   ApiQuickAskRoute: ApiQuickAskRoute,

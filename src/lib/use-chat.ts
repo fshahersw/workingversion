@@ -13,7 +13,7 @@ import {
   keepConversation,
 } from "@/lib/chat/history";
 
-type Action =
+export type ChatAction =
   | { type: "user"; id: string; text: string }
   | { type: "assistant_start"; id: string }
   | { type: "sse"; id: string; evt: SSEEvent }
@@ -21,10 +21,13 @@ type Action =
   | { type: "thinking"; id: string; text: string }
   | { type: "reasoning"; id: string; text: string }
   | { type: "followups"; id: string; followups: string[] }
+  | { type: "proposal_applied"; id: string }
   | { type: "hydrate"; messages: Message[] }
   | { type: "reset" };
 
-function emptyAssistant(id: string): Message {
+type Action = ChatAction;
+
+export function emptyAssistant(id: string): Message {
   return {
     id,
     role: "assistant",
@@ -34,6 +37,11 @@ function emptyAssistant(id: string): Message {
     answer: "",
     status: "thinking",
   };
+}
+
+/** The chat message reducer; shared with the Drafts assistant hook. */
+export function reduceChatMessages(state: Message[], a: Action): Message[] {
+  return reduce(state, a);
 }
 
 function reduce(state: Message[], a: Action): Message[] {
@@ -88,6 +96,12 @@ function reduce(state: Message[], a: Action): Message[] {
       );
     case "hydrate":
       return a.messages;
+    case "proposal_applied":
+      return state.map((m) =>
+        m.id === a.id && m.role === "assistant" && m.proposal
+          ? { ...m, proposal: { ...m.proposal, appliedAt: Date.now() } }
+          : m,
+      );
     case "followups":
       return state.map((m) =>
         m.id === a.id && m.role === "assistant"
@@ -253,6 +267,19 @@ function applyEvent(m: Message, e: SSEEvent): Message {
       const choice = normalizeChoiceRequest(d.choice ?? d);
       return choice ? { ...m, choice } : m;
     }
+    case "proposal": {
+      const material = typeof d.material === "string" ? d.material : "";
+      if (!material.trim()) return m;
+      return {
+        ...m,
+        proposal: {
+          material,
+          target: d.target === "selection" ? "selection" : "cursor",
+          ...(typeof d.note === "string" && d.note ? { note: d.note } : {}),
+          ...(m.proposal?.appliedAt ? { appliedAt: m.proposal.appliedAt } : {}),
+        },
+      };
+    }
     case "done":
       return { ...m, status: "done", collapseTimeline: true, rounds: completeRounds(m.rounds) };
     case "error":
@@ -270,6 +297,33 @@ function applyEvent(m: Message, e: SSEEvent): Message {
 function completeRounds(rounds: Round[]): Round[] {
   const now = Date.now();
   return rounds.map((r) => (r.done && r.completedAt ? r : { ...r, done: true, completedAt: r.completedAt ?? now }));
+}
+
+/**
+ * RAF-batched channel for a streamed text field: coalesces deltas into one
+ * dispatch per frame. Shared by the research and Drafts chat hooks.
+ */
+export function makeStreamChannel(flushTo: (text: string) => void): {
+  push: (text: string) => void;
+  flush: () => void;
+} {
+  let buf = "";
+  let scheduled = false;
+  const flush = () => {
+    scheduled = false;
+    if (!buf) return;
+    const t = buf;
+    buf = "";
+    flushTo(t);
+  };
+  const push = (text: string) => {
+    buf += text;
+    if (scheduled) return;
+    scheduled = true;
+    if (typeof requestAnimationFrame !== "undefined") requestAnimationFrame(flush);
+    else setTimeout(flush, 40);
+  };
+  return { push, flush };
 }
 
 function mapRound(m: Message, n: number, fn: (r: Round) => Round): Message {
