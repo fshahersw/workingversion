@@ -38,14 +38,17 @@ export function ActivityPanel({ msg }: { msg: Message }) {
       msg.rounds.flatMap((round) => Object.values(round.agents).flatMap((agent) => agent.tools)),
     [msg.rounds],
   );
-  const narration = useMemo(
-    () =>
-      (msg.thinking ?? "")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
-    [msg.thinking],
-  );
+  // Narration lines with arrival times; a reopened message only has the joined
+  // text, so those lines sort ahead of the tool rows.
+  const narration = useMemo<{ text: string; at: number }[]>(() => {
+    if (msg.narration?.length) return msg.narration;
+    return (msg.thinking ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((text) => ({ text, at: 0 }));
+  }, [msg.narration, msg.thinking]);
+  const timeline = useMemo(() => buildTimeline(narration, steps), [narration, steps]);
   const reasoning = (msg.reasoning ?? "").trim();
   const summary = useMemo(
     () => summarizeResearchActivity(msg.rounds, settled),
@@ -58,7 +61,7 @@ export function ActivityPanel({ msg }: { msg: Message }) {
   if (msg.mode === "conversational") return null;
 
   const title = running
-    ? (narration[narration.length - 1] ??
+    ? (narration[narration.length - 1]?.text ??
       (steps.length ? "Working the record" : "Reading the question"))
     : writing
       ? msg.deliverable
@@ -73,7 +76,7 @@ export function ActivityPanel({ msg }: { msg: Message }) {
     msg.mode && msg.mode !== "conversational" && settled ? modeLabel(msg.mode) : null,
   ].filter(Boolean);
 
-  const showBody = open && (steps.length > 0 || reasoning.length > 0 || narration.length > 1);
+  const showBody = open && (timeline.length > 0 || reasoning.length > 0);
 
   return (
     <section className="mb-3 overflow-hidden rounded-md border border-border/80 bg-surface">
@@ -108,13 +111,40 @@ export function ActivityPanel({ msg }: { msg: Message }) {
 
       {showBody ? (
         <div className="border-t border-border/60">
-          {steps.length > 0 && <StepList steps={steps} />}
+          {timeline.length > 0 && <Timeline items={timeline} live={running} />}
           {reasoning && <ReasoningBlock text={reasoning} live={running} defaultOpen={running} />}
-          {settled && narration.length > 1 && <NarrationList lines={narration} />}
         </div>
       ) : null}
     </section>
   );
+}
+
+type TimelineItem =
+  | { kind: "note"; text: string; at: number }
+  | { kind: "tool"; call: ToolCall; at: number };
+
+/** Merge narration and tool calls by arrival, notes first on a tie, so each
+ *  "why" line sits above the calls it explains. */
+function buildTimeline(
+  narration: { text: string; at: number }[],
+  steps: ToolCall[],
+): TimelineItem[] {
+  const items: TimelineItem[] = [
+    ...narration.map((n) => ({ kind: "note" as const, text: n.text, at: n.at })),
+    ...steps.map((call, index) => ({
+      kind: "tool" as const,
+      call,
+      at: call.at ?? Number.MAX_SAFE_INTEGER - steps.length + index,
+    })),
+  ];
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      if (a.item.at !== b.item.at) return a.item.at - b.item.at;
+      if (a.item.kind !== b.item.kind) return a.item.kind === "note" ? -1 : 1;
+      return a.index - b.index;
+    })
+    .map(({ item }) => item);
 }
 
 function StatusMark({ running, writing }: { running: boolean; writing: boolean }) {
@@ -127,39 +157,50 @@ function StatusMark({ running, writing }: { running: boolean; writing: boolean }
   return <Check className="h-3.5 w-3.5 shrink-0 text-emerald-700" strokeWidth={2.5} />;
 }
 
-function StepList({ steps }: { steps: ToolCall[] }) {
+function Timeline({ items, live }: { items: TimelineItem[]; live: boolean }) {
   const listRef = useRef<HTMLOListElement>(null);
-  // Keep the newest step in view while calls are still arriving.
+  // Keep the newest entry in view while the agent is still working.
   useEffect(() => {
     const el = listRef.current;
-    if (!el) return;
+    if (!el || !live) return;
     el.scrollTop = el.scrollHeight;
-  }, [steps.length]);
+  }, [items.length, live]);
 
   return (
-    <ol ref={listRef} className="wr-app-scroll max-h-56 overflow-y-auto px-2.5 py-1.5">
-      {steps.map((step, index) => {
-        const Icon = iconFor(step.tool);
-        const done = typeof step.hits === "number";
+    <ol ref={listRef} className="wr-app-scroll max-h-64 overflow-y-auto px-2.5 py-1.5">
+      {items.map((item, index) => {
+        if (item.kind === "note") {
+          return (
+            <li
+              key={`note-${index}`}
+              className={`py-[3px] text-[12px] leading-snug text-foreground/70 ${index > 0 ? "mt-1" : ""}`}
+            >
+              {item.text}
+            </li>
+          );
+        }
+        const { call } = item;
+        const Icon = iconFor(call.tool);
+        const done = typeof call.hits === "number";
         return (
           <li
-            key={step.id ?? `${step.tool}-${index}`}
-            className="flex items-center gap-2 py-[3px] text-[12px] leading-snug"
+            key={call.id ?? `tool-${index}`}
+            className="flex items-center gap-2 py-[3px] pl-3 text-[12px] leading-snug"
           >
             <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" strokeWidth={1.9} />
             <span className="shrink-0 font-medium text-foreground/80">
-              {toolLabel(step.tool, step.scope)}
+              {toolLabel(call.tool, call.scope)}
             </span>
-            {step.query ? (
-              <span className="min-w-0 flex-1 truncate text-muted-foreground" title={step.query}>
-                {step.query}
+            {call.query ? (
+              <span className="min-w-0 flex-1 truncate text-muted-foreground" title={call.query}>
+                {call.query}
               </span>
             ) : (
               <span className="flex-1" />
             )}
             {done ? (
               <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground">
-                {resultLabel(step.tool, step.hits ?? 0)}
+                {resultLabel(call.tool, call.hits ?? 0)}
               </span>
             ) : (
               <Loader2 className="h-3 w-3 shrink-0 text-brand-orange motion-safe:animate-spin" />
@@ -212,26 +253,6 @@ function ReasoningBlock({
         </div>
       )}
     </div>
-  );
-}
-
-function NarrationList({ lines }: { lines: string[] }) {
-  return (
-    <details className="group border-t border-border/60">
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground">
-        <FileText className="h-3.5 w-3.5 shrink-0" strokeWidth={1.9} />
-        Status log
-        <span className="ml-auto text-[10.5px] tabular-nums">{lines.length}</span>
-        <ChevronDown className="h-3 w-3 transition-transform group-open:rotate-180" />
-      </summary>
-      <ol className="wr-app-scroll max-h-40 overflow-y-auto px-3 pb-2.5 text-[12px] leading-relaxed text-foreground/65">
-        {lines.map((line, index) => (
-          <li key={`${index}-${line.slice(0, 24)}`} className="py-[1px]">
-            {line}
-          </li>
-        ))}
-      </ol>
-    </details>
   );
 }
 

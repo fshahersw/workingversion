@@ -109,6 +109,32 @@ function attachmentsBlock(input: OrchestrateInput): string {
   return `UPLOADED FILES\nThe attorney uploaded ${files.length} file(s) this session: ${names}. Their content is below — use it directly when the question concerns these files. Data files (CSV/Excel/JSON) are also loaded in your code sandbox, so you can run_python over them by filename to compute exact figures. For any file that shows a read_document pointer, call read_document(name, keywords) to pull additional passages from the full document.\n\n${parts.join("\n\n")}\n\n`;
 }
 
+/** The one input worth showing next to a tool row: the query for searches, else
+ *  whatever identifies the target (URL, docket or document id, file name, title). */
+const TOOL_LABEL_KEYS = [
+  "query",
+  "search",
+  "url",
+  "case_name",
+  "docket_number",
+  "docket_id",
+  "document_id",
+  "doc_id",
+  "filing_id",
+  "name",
+  "title",
+  "endpoint",
+] as const;
+
+function toolCallLabel(input: Record<string, unknown>): string | undefined {
+  for (const key of TOOL_LABEL_KEYS) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim()) return trunc(value.trim(), 160);
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return undefined;
+}
+
 /** Short friendly confirmation shown in chat when a file deliverable is ready. */
 function friendlyDone(format: string, name: string): string {
   const F = format.toUpperCase();
@@ -391,7 +417,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                 agent: "research",
                 id: call.id,
                 tool: call.name,
-                query: typeof call.input["query"] === "string" ? call.input["query"] : undefined,
+                query: toolCallLabel(call.input),
               }),
             execute: async (call) => {
               toolCalls++;
@@ -404,7 +430,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                 agent: "research",
                 id: call.id,
                 tool: call.name,
-                query: typeof call.input["query"] === "string" ? call.input["query"] : undefined,
+                query: toolCallLabel(call.input),
                 hits: out.hits,
               });
               emit("sources", { sources: book.all() });

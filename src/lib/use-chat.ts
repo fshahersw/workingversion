@@ -60,11 +60,22 @@ function reduce(state: Message[], a: Action): Message[] {
           : m,
       );
     case "thinking":
-      return state.map((m) =>
-        m.id === a.id && m.role === "assistant"
-          ? { ...m, thinking: (m.thinking ?? "") + a.text }
-          : m,
-      );
+      return state.map((m) => {
+        if (m.id !== a.id || m.role !== "assistant") return m;
+        // Each server narration is one line ("\n"-prefixed after the first);
+        // RAF batching may deliver several at once, so split and stamp each.
+        const now = Date.now();
+        const lines = a.text
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((text) => ({ text, at: now }));
+        return {
+          ...m,
+          thinking: (m.thinking ?? "") + a.text,
+          narration: lines.length ? [...(m.narration ?? []), ...lines] : m.narration,
+        };
+      });
     case "reasoning":
       return state.map((m) =>
         m.id === a.id && m.role === "assistant"
@@ -171,7 +182,7 @@ function applyEvent(m: Message, e: SSEEvent): Message {
         const tools =
           i >= 0
             ? ex.tools.map((t, j) => (j === i ? { ...t, ...tc } : t))
-            : [...ex.tools, tc];
+            : [...ex.tools, { ...tc, at: Date.now() }];
         return {
           ...r,
           agents: { ...r.agents, [agent]: { ...ex, tools } },
@@ -204,10 +215,13 @@ function applyEvent(m: Message, e: SSEEvent): Message {
       return { ...m, sources };
     }
     case "writer_start":
+      // Research is over when the writer starts: stamp the rounds so the
+      // elapsed time is fixed (and survives a reopen) instead of ticking.
       return {
         ...m,
         status: "writing",
         collapseTimeline: true,
+        rounds: completeRounds(m.rounds),
         deliverable: d.deliverable ? String(d.deliverable) : m.deliverable,
       };
     case "delta":
@@ -240,7 +254,7 @@ function applyEvent(m: Message, e: SSEEvent): Message {
       return choice ? { ...m, choice } : m;
     }
     case "done":
-      return { ...m, status: "done", collapseTimeline: true };
+      return { ...m, status: "done", collapseTimeline: true, rounds: completeRounds(m.rounds) };
     case "error":
       return {
         ...m,
@@ -250,6 +264,12 @@ function applyEvent(m: Message, e: SSEEvent): Message {
     default:
       return m;
   }
+}
+
+/** Mark every round finished (once); keeps an existing completion time. */
+function completeRounds(rounds: Round[]): Round[] {
+  const now = Date.now();
+  return rounds.map((r) => (r.done && r.completedAt ? r : { ...r, done: true, completedAt: r.completedAt ?? now }));
 }
 
 function mapRound(m: Message, n: number, fn: (r: Round) => Round): Message {

@@ -17,7 +17,7 @@ import {
 
 import { factCheck, kindLabel, unverified } from "@/lib/fact-check";
 import { sentencesForRef } from "@/lib/highlight";
-import type { Attachment, MatterScope, Message } from "@/lib/chat-types";
+import type { Attachment, MatterScope, Message, Source } from "@/lib/chat-types";
 import {
   ModeDropdown,
   useUploads,
@@ -85,10 +85,13 @@ export function ChatView({
     () => [...messages].reverse().find((m) => m.role === "user")?.id,
     [messages],
   );
-  const allSources = useMemo(
-    () => messages.flatMap((m) => m.sources ?? []),
-    [messages],
-  );
+  // Sources carried into a follow-up keep their refs, so the same source appears
+  // on several turns; the rail shows each ref once (latest copy wins).
+  const allSources = useMemo(() => {
+    const byRef = new Map<string, Source>();
+    for (const m of messages) for (const s of m.sources ?? []) byRef.set(s.ref, s);
+    return [...byRef.values()];
+  }, [messages]);
   const lastAssistant = useMemo(
     () => [...messages].reverse().find((m) => m.role === "assistant"),
     [messages],

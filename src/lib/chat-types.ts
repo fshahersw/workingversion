@@ -135,6 +135,8 @@ export type ToolCall = {
   query?: string;
   scope?: string;
   hits?: number;
+  /** Client arrival time of the call's start, to interleave with narration. */
+  at?: number;
 };
 
 export type AgentRun = {
@@ -217,6 +219,9 @@ export type Message = {
   deliverable?: string;
   /** Live, streamed research narration ("thinking steps") shown before the answer. */
   thinking?: string;
+  /** The narration split into lines with arrival times, so the activity panel
+   *  can interleave each "why" with the tool calls that followed it. */
+  narration?: { text: string; at: number }[];
   /** The model's live adaptive-thinking text, shown in the activity panel's Reasoning fold. */
   reasoning?: string;
   status: "thinking" | "writing" | "done" | "error";

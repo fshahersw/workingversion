@@ -29,13 +29,16 @@ export function summarizeResearchActivity(
     .map((round) => round.completedAt)
     .filter((value): value is number => typeof value === "number");
   const start = starts.length ? Math.min(...starts) : null;
-  const end = settled && ends.length ? Math.max(...ends) : now;
+  // Live: measure to now. Settled: only a recorded completion counts; a settled
+  // round without one (older saved turns) reports no elapsed time rather than
+  // the time since it was reopened.
+  const end = settled ? (ends.length ? Math.max(...ends) : null) : now;
   return {
     phase: latest?.phase?.trim() || (settled ? "Research complete" : "Reviewing the question"),
     rounds: rounds.length,
     agents,
     tools,
-    elapsedMs: start == null ? null : Math.max(0, end - start),
+    elapsedMs: start == null || end == null ? null : Math.max(0, end - start),
     done: settled,
   };
 }
