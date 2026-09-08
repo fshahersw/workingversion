@@ -372,8 +372,18 @@ export const deleteWorkspaceFn = createServerFn({ method: "POST" })
     return { itemId: d.itemId };
   })
   .handler(async ({ context, data }) => {
+    const sub = principalOf(context);
     const { deleteWorkspace } = await import("@/lib/kb/workspace.server");
-    const result = await deleteWorkspace(principalOf(context), data.itemId);
-    if (!result.ok) throw new Error("Workspace deletion did not complete.");
+    const result = await deleteWorkspace(sub, data.itemId);
+    if (!result.ok) {
+      const why = result.failures[0]?.summary;
+      throw new Error(
+        why ? `Workspace deletion did not complete: ${why}` : "Workspace deletion did not complete.",
+      );
+    }
+    // Tabular Review tables that read from this workspace keep their grid but
+    // lose the binding; their rows now ask for the document again.
+    const { detachWorkspaceFromTables } = await import("@/lib/review/review.server");
+    await detachWorkspaceFromTables(sub, data.itemId).catch(() => undefined);
     return result;
   });

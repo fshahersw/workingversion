@@ -133,8 +133,9 @@ export function ConversationHistory({
                   type="button"
                   aria-label="Delete conversation"
                   onClick={async () => {
-                    await deleteConversation(c.id);
-                    setItems((prev) => prev.filter((x) => x.id !== c.id));
+                    if (await deleteConversation(c.id)) {
+                      setItems((prev) => prev.filter((x) => x.id !== c.id));
+                    }
                   }}
                   className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted-foreground/0 transition-colors group-hover:text-muted-foreground hover:bg-background hover:text-destructive"
                 >

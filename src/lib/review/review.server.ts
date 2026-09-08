@@ -233,6 +233,39 @@ export async function attachReviewSource(
 }
 
 /**
+ * A saved workspace was deleted from the Library: drop it from every table
+ * that referenced it and unbind the rows that pointed into it, so those rows
+ * read "re-upload" instead of failing to hydrate against missing storage.
+ */
+export async function detachWorkspaceFromTables(
+  principal: string,
+  workspaceItemId: string,
+): Promise<{ tables: number; rows: number }> {
+  const p = pk(principal);
+  const tables = await queryPrefix(p, "RTBL#");
+  let touchedTables = 0;
+  let touchedRows = 0;
+  for (const tableItem of tables) {
+    const sources = mapSources(tableItem.sources);
+    if (!sources.some((source) => source.workspaceItemId === workspaceItemId)) continue;
+    touchedTables += 1;
+    await putItem({
+      ...tableItem,
+      sources: sources.filter((source) => source.workspaceItemId !== workspaceItemId),
+      updatedAt: new Date().toISOString(),
+    });
+    const tableId = s(tableItem.id);
+    const rows = await queryPrefix(p, `RROW#${tableId}#`);
+    for (const row of rows) {
+      if (s(row.workspaceItemId) !== workspaceItemId) continue;
+      await putItem({ ...row, docId: null, workspaceItemId: null });
+      touchedRows += 1;
+    }
+  }
+  return { tables: touchedTables, rows: touchedRows };
+}
+
+/**
  * Bind rows to KB documents once their source workspace has indexed them.
  * Every docId is checked against the workspace's own document list; a row
  * that is already bound keeps its binding.

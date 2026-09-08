@@ -102,11 +102,13 @@ export async function loadConversation(id: string): Promise<LoadedConversation |
   }
 }
 
-export async function deleteConversation(id: string): Promise<void> {
+/** Delete a conversation and its messages. Returns false when the server refused. */
+export async function deleteConversation(id: string): Promise<boolean> {
   try {
     await deleteConversationFn({ data: { convId: id } });
+    return true;
   } catch {
-    /* best-effort */
+    return false;
   }
 }
 

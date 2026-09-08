@@ -152,11 +152,17 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
   const remove = async (id: string) => {
     setBusyId(id);
     try {
-      await deleteWorkspaceFn({ data: { itemId: id } });
+      const result = await deleteWorkspaceFn({ data: { itemId: id } });
       await load();
-      toast.success("Workspace deleted");
-    } catch {
-      toast.error("Could not delete workspace");
+      toast.success(
+        result.alreadyDeleted
+          ? "Already deleted"
+          : surface === "review"
+            ? "Saved documents deleted; the table that used them now shows those rows as needing re-upload."
+            : "Workspace deleted",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not delete workspace");
     } finally {
       setBusyId(null);
     }
@@ -235,6 +241,7 @@ function Loading() {
 function ChatsList() {
   const navigate = useNavigate();
   const [items, setItems] = useState<ConversationSummary[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setItems(await listConversations(100));
@@ -293,13 +300,21 @@ function ChatsList() {
           <button
             type="button"
             title="Delete"
+            disabled={busyId === c.id}
             onClick={async () => {
-              await deleteConversation(c.id);
-              setItems((prev) => prev?.filter((x) => x.id !== c.id) ?? prev);
+              setBusyId(c.id);
+              const ok = await deleteConversation(c.id);
+              setBusyId(null);
+              if (ok) {
+                setItems((prev) => prev?.filter((x) => x.id !== c.id) ?? prev);
+                toast.success("Conversation deleted");
+              } else {
+                toast.error("Could not delete this conversation");
+              }
             }}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/40 transition-colors hover:bg-background hover:text-destructive"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/40 transition-colors hover:bg-background hover:text-destructive disabled:opacity-50"
           >
-            <Trash2 className="h-4 w-4" />
+            {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
           </button>
         </div>
       ))}
@@ -467,11 +482,21 @@ function ItemsList({ kind }: { kind: ItemKind }) {
                 <button
                   type="button"
                   title="Delete"
+                  disabled={busyId === it.itemId}
                   onClick={async () => {
-                    await deleteLibraryItemFn({ data: { itemId: it.itemId } });
-                    setItems((prev) => prev?.filter((x) => x.itemId !== it.itemId) ?? prev);
+                    setBusyId(it.itemId);
+                    try {
+                      await deleteLibraryItemFn({ data: { itemId: it.itemId } });
+                      setItems((prev) => prev?.filter((x) => x.itemId !== it.itemId) ?? prev);
+                      if (openId === it.itemId) setOpenId(null);
+                      toast.success(isFile ? "File deleted" : "Deleted");
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : "Could not delete this item");
+                    } finally {
+                      setBusyId(null);
+                    }
                   }}
-                  className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/40 transition-colors hover:bg-background hover:text-destructive"
+                  className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/40 transition-colors hover:bg-background hover:text-destructive disabled:opacity-50"
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>
