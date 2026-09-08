@@ -4,6 +4,7 @@ import {
   BookmarkCheck,
   Download,
   FileText,
+  FolderInput,
   FolderOpen,
   Layers,
   Loader2,
@@ -17,12 +18,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/app-shell";
+import { FolderBar, MoveToMenu } from "@/components/library/FolderBar";
 import {
   deleteConversation,
   keepConversation,
   listConversations,
   type ConversationSummary,
 } from "@/lib/chat/history";
+import { ROOT_FOLDER, type FolderCategory, type LibraryFolder } from "@/lib/library/folder-tree";
+import {
+  createFolderFn,
+  deleteFolderFn,
+  listFoldersFn,
+  moveContentFn,
+  renameFolderFn,
+} from "@/lib/library/folders.functions";
 import {
   createUploadFn,
   deleteLibraryItemFn,
@@ -45,11 +55,82 @@ type LibItem = {
   itemId: string;
   kind: string;
   name: string;
+  folderId?: string;
   createdAt: string;
   preview?: string;
   contentType?: string;
   size?: number;
 };
+
+const folderOf = (value: string | undefined | null): string => value || ROOT_FOLDER;
+
+/**
+ * Folder state for one Library section: the tree, the folder being viewed,
+ * and the create / rename / delete / move actions. Every action re-reads the
+ * server's tree so two tabs never disagree.
+ */
+function useFolders(category: FolderCategory) {
+  const [folders, setFolders] = useState<LibraryFolder[]>([]);
+  const [current, setCurrent] = useState<string>(ROOT_FOLDER);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setFolders(await listFoldersFn({ data: { category } }));
+    } catch {
+      setFolders([]);
+    }
+  }, [category]);
+  useEffect(() => {
+    setCurrent(ROOT_FOLDER);
+    void refresh();
+  }, [refresh]);
+
+  const run = useCallback(
+    async (work: () => Promise<unknown>, ok?: string) => {
+      setBusy(true);
+      try {
+        await work();
+        await refresh();
+        if (ok) toast.success(ok);
+        return true;
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Folder action failed");
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh],
+  );
+
+  return {
+    folders,
+    current,
+    busy,
+    navigate: setCurrent,
+    /** Items at this level: in the current folder, or unfiled when viewing All. */
+    inView: (folderId: string | undefined | null) => folderOf(folderId) === current,
+    create: (name: string) =>
+      run(() => createFolderFn({ data: { category, name, parentId: current } }), "Folder created").then(
+        () => undefined,
+      ),
+    rename: (folderId: string, name: string) =>
+      run(() => renameFolderFn({ data: { category, folderId, name } })).then(() => undefined),
+    remove: async (folderId: string) => {
+      const ok = await run(
+        () => deleteFolderFn({ data: { category, folderId } }),
+        "Folder deleted; its contents moved up one level",
+      );
+      if (ok && current === folderId) {
+        const parent = folders.find((f) => f.folderId === folderId)?.parentId ?? ROOT_FOLDER;
+        setCurrent(parent);
+      }
+    },
+    move: (targetId: string, folderId: string) =>
+      run(() => moveContentFn({ data: { category, targetId, folderId } }), "Moved"),
+  };
+}
 
 const TABS = [
   { key: "workingset", label: "Working Sets", icon: Layers },
@@ -133,6 +214,7 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
   const navigate = useNavigate();
   const [items, setItems] = useState<WorkspaceSummary[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const folders = useFolders(surface);
 
   const load = useCallback(async () => {
     try {
@@ -169,14 +251,34 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
   };
 
   if (!items) return <Loading />;
-  if (!items.length) {
-    return (
-      <EmptyState label="No saved workspaces yet. Save a working set from Discovery to see it here." />
-    );
-  }
+  const counts = new Map<string, number>();
+  for (const w of items) counts.set(folderOf(w.folderId), (counts.get(folderOf(w.folderId)) ?? 0) + 1);
+  const shown = items.filter((w) => folders.inView(w.folderId));
+  const emptyLabel =
+    surface === "deposition"
+      ? "No saved depositions yet. Drop transcripts in Discovery › Depositions; they save automatically."
+      : surface === "review"
+        ? "No saved review documents yet. Add documents to a Tabular Review table; they save automatically."
+        : "No saved working sets yet. Save a working set from Discovery to see it here.";
   return (
-    <ul className="space-y-1.5">
-      {items.map((w) => (
+    <div className="space-y-3">
+      <FolderBar
+        folders={folders.folders}
+        current={folders.current}
+        counts={counts}
+        busy={folders.busy}
+        onNavigate={folders.navigate}
+        onCreate={folders.create}
+        onRename={folders.rename}
+        onDelete={folders.remove}
+      />
+      {!items.length ? (
+        <EmptyState label={emptyLabel} />
+      ) : !shown.length ? (
+        <EmptyState label="Nothing in this folder yet. Use Move on an item to file it here." />
+      ) : null}
+      <ul className="space-y-1.5">
+      {shown.map((w) => (
         <li
           key={w.itemId}
           className="flex items-center gap-3 rounded-lg border border-border/70 bg-card px-3 py-2.5"
@@ -185,8 +287,7 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
           <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-medium text-foreground">{w.name}</p>
             <p className="text-[11px] text-muted-foreground">
-              {w.docCount} doc{w.docCount === 1 ? "" : "s"} · {w.pageCount} pages
-              {w.folderId && w.folderId !== "ROOT" ? ` · ${w.folderId}` : ""} · {relative(w.createdAt)}
+              {w.docCount} doc{w.docCount === 1 ? "" : "s"} · {w.pageCount} pages · {relative(w.createdAt)}
               {w.status === "saving"
                 ? " · saving"
                 : w.status === "error"
@@ -199,6 +300,20 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
               </p>
             ) : null}
           </div>
+          <MoveToMenu
+            folders={folders.folders}
+            current={folderOf(w.folderId)}
+            onMove={(folderId) => void folders.move(w.itemId, folderId).then(load)}
+          >
+            <button
+              type="button"
+              aria-label="Move to folder"
+              title="Move to folder"
+              className="shrink-0 text-muted-foreground/60 transition hover:text-foreground"
+            >
+              <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+            </button>
+          </MoveToMenu>
           <button
             type="button"
             onClick={() => openWorkspace(w.itemId)}
@@ -222,7 +337,8 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
           </button>
         </li>
       ))}
-    </ul>
+      </ul>
+    </div>
   );
 }
 
@@ -242,6 +358,7 @@ function ChatsList() {
   const navigate = useNavigate();
   const [items, setItems] = useState<ConversationSummary[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const folders = useFolders("chats");
 
   const refresh = useCallback(async () => {
     setItems(await listConversations(100));
@@ -263,11 +380,29 @@ function ChatsList() {
   );
 
   if (items === null) return <Loading />;
-  if (items.length === 0) return <EmptyState label="No conversations yet." />;
+  const counts = new Map<string, number>();
+  for (const c of items) counts.set(folderOf(c.folderId), (counts.get(folderOf(c.folderId)) ?? 0) + 1);
+  const shown = items.filter((c) => folders.inView(c.folderId));
 
   return (
-    <div className="space-y-1">
-      {items.map((c) => (
+    <div className="space-y-3">
+      <FolderBar
+        folders={folders.folders}
+        current={folders.current}
+        counts={counts}
+        busy={folders.busy}
+        onNavigate={folders.navigate}
+        onCreate={folders.create}
+        onRename={folders.rename}
+        onDelete={folders.remove}
+      />
+      {items.length === 0 ? (
+        <EmptyState label="No conversations yet." />
+      ) : shown.length === 0 ? (
+        <EmptyState label="Nothing in this folder yet. Use Move on a conversation to file it here." />
+      ) : null}
+      <div className="space-y-1">
+      {shown.map((c) => (
         <div
           key={c.id}
           className="group flex items-center gap-1 rounded-lg px-1 hover:bg-muted/60"
@@ -283,6 +418,20 @@ function ChatsList() {
               {relative(c.updatedAt)}
             </div>
           </button>
+          <MoveToMenu
+            folders={folders.folders}
+            current={folderOf(c.folderId)}
+            onMove={(folderId) => void folders.move(c.id, folderId).then(refresh)}
+          >
+            <button
+              type="button"
+              aria-label="Move to folder"
+              title="Move to folder"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/50 transition-colors hover:bg-background hover:text-foreground"
+            >
+              <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+            </button>
+          </MoveToMenu>
           <button
             type="button"
             title={c.saved ? "Kept — won't expire" : "Keep (save past the 3-day default)"}
@@ -318,6 +467,7 @@ function ChatsList() {
           </button>
         </div>
       ))}
+      </div>
     </div>
   );
 }
@@ -331,6 +481,7 @@ function ItemsList({ kind }: { kind: ItemKind }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folders = useFolders(kind);
 
   const refresh = useCallback(async () => {
     setItems((await listItemsFn({ data: { kind } })) as LibItem[]);
@@ -411,9 +562,24 @@ function ItemsList({ kind }: { kind: ItemKind }) {
     : kind === "prompt"
       ? "No saved prompts yet."
       : "No saved outputs yet. Use Save on an answer to add one.";
+  const counts = new Map<string, number>();
+  for (const it of items ?? []) {
+    counts.set(folderOf(it.folderId), (counts.get(folderOf(it.folderId)) ?? 0) + 1);
+  }
+  const shown = (items ?? []).filter((it) => folders.inView(it.folderId));
 
   return (
     <div className="space-y-2">
+      <FolderBar
+        folders={folders.folders}
+        current={folders.current}
+        counts={counts}
+        busy={folders.busy}
+        onNavigate={folders.navigate}
+        onCreate={folders.create}
+        onRename={folders.rename}
+        onDelete={folders.remove}
+      />
       {isFile && (
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-muted-foreground">Files up to 50 MB.</span>
@@ -444,9 +610,11 @@ function ItemsList({ kind }: { kind: ItemKind }) {
         <Loading />
       ) : items.length === 0 ? (
         <EmptyState label={emptyLabel} />
+      ) : shown.length === 0 ? (
+        <EmptyState label="Nothing in this folder yet. Use Move on an item to file it here." />
       ) : (
         <div className="space-y-1">
-          {items.map((it) => (
+          {shown.map((it) => (
             <div key={it.itemId} className="rounded-lg border border-border/50">
               <div className="group flex items-center gap-1 px-1 hover:bg-muted/40">
                 <button
@@ -479,6 +647,20 @@ function ItemsList({ kind }: { kind: ItemKind }) {
                     </span>
                   </span>
                 </button>
+                <MoveToMenu
+                  folders={folders.folders}
+                  current={folderOf(it.folderId)}
+                  onMove={(folderId) => void folders.move(it.itemId, folderId).then(refresh)}
+                >
+                  <button
+                    type="button"
+                    aria-label="Move to folder"
+                    title="Move to folder"
+                    className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/50 transition-colors hover:bg-background hover:text-foreground"
+                  >
+                    <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+                  </button>
+                </MoveToMenu>
                 <button
                   type="button"
                   title="Delete"

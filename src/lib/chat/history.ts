@@ -26,6 +26,8 @@ export type ConversationSummary = {
   matterLabel: string | null;
   updatedAt: string;
   saved: boolean;
+  /** Library folder (ROOT when unfiled). */
+  folderId?: string;
 };
 
 export type LoadedConversation = {
@@ -50,6 +52,7 @@ export async function listConversations(limit = 30): Promise<ConversationSummary
       matterLabel: null,
       updatedAt: c.updatedAt,
       saved: !!c.saved,
+      ...(c.folderId ? { folderId: c.folderId } : {}),
     }));
   } catch {
     return [];

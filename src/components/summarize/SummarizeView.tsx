@@ -26,6 +26,8 @@ import {
   writeLayoutPreference,
 } from "@/lib/pile/discovery-layout";
 import { takeWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
+import { flattenFolders, ROOT_FOLDER, type LibraryFolder } from "@/lib/library/folder-tree";
+import { listFoldersFn } from "@/lib/library/folders.functions";
 import { suggestQuestions } from "@/lib/pile/suggest-questions";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
 import type { PileFile, PileFileHits } from "@/lib/pile/types";
@@ -64,7 +66,16 @@ export function SummarizeView() {
   } = useSharedPile();
   const [saveOpen, setSaveOpen] = useState(false);
   const [wsName, setWsName] = useState("");
-  const [wsFolder, setWsFolder] = useState("");
+  const [wsFolder, setWsFolder] = useState<string>(ROOT_FOLDER);
+  const [wsFolders, setWsFolders] = useState<LibraryFolder[]>([]);
+  // Real Library folders for the Working Sets section, loaded when the save
+  // panel opens so the picker matches what the Library shows.
+  useEffect(() => {
+    if (!saveOpen) return;
+    listFoldersFn({ data: { category: "workingset" } })
+      .then(setWsFolders)
+      .catch(() => setWsFolders([]));
+  }, [saveOpen]);
 
   // One-click reload: the Library "Open" hands off a workspace id via sessionStorage.
   useEffect(() => {
@@ -335,12 +346,19 @@ export function SummarizeView() {
                   placeholder="Workspace name"
                   className="mb-2 h-[29px] w-full rounded border border-border bg-muted/40 px-2 text-[12px] outline-none focus:border-brand-blue/50 focus:bg-card"
                 />
-                <input
+                <select
                   value={wsFolder}
                   onChange={(e) => setWsFolder(e.target.value)}
-                  placeholder="Folder (optional)"
+                  aria-label="Library folder"
                   className="mb-2.5 h-[29px] w-full rounded border border-border bg-muted/40 px-2 text-[12px] outline-none focus:border-brand-blue/50 focus:bg-card"
-                />
+                >
+                  <option value={ROOT_FOLDER}>Library › Working Sets (top level)</option>
+                  {flattenFolders(wsFolders).map(({ folder, depth }) => (
+                    <option key={folder.folderId} value={folder.folderId}>
+                      {`${"\u00a0\u00a0".repeat(depth)}${folder.name}`}
+                    </option>
+                  ))}
+                </select>
                 <div className="flex justify-end gap-2">
                   <button
                     type="button"
@@ -354,7 +372,7 @@ export function SummarizeView() {
                     onClick={() => {
                       void saveWorkspace({
                         name: wsName.trim() || files[0]?.name || "Working set",
-                        ...(wsFolder.trim() ? { folderId: wsFolder.trim() } : {}),
+                        ...(wsFolder && wsFolder !== ROOT_FOLDER ? { folderId: wsFolder } : {}),
                       });
                       setSaveOpen(false);
                     }}
