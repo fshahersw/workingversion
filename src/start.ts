@@ -30,12 +30,24 @@ const apiAuthMiddleware = createMiddleware().server(async ({ next }) => {
   if (request) {
     const { pathname } = new URL(request.url);
     if (pathname.startsWith("/api/") && !pathname.startsWith("/api/public/")) {
-      const { getUserFromRequest } = await import("@/lib/auth/cognito.server");
-      const user = await getUserFromRequest(request);
-      if (!user) {
+      const { resolveSession } = await import("@/lib/auth/cognito.server");
+      const session = await resolveSession(request);
+      if (!session) {
         return new Response(JSON.stringify({ error: "unauthorized" }), {
           status: 401,
           headers: { "content-type": "application/json" },
+        });
+      }
+      if (session.setCookies.length) {
+        // The id token was silently refreshed: hand the new cookie back with
+        // whatever the route returns (including streamed responses).
+        const result = await next();
+        const headers = new Headers(result.response.headers);
+        for (const cookie of session.setCookies) headers.append("Set-Cookie", cookie);
+        return new Response(result.response.body, {
+          status: result.response.status,
+          statusText: result.response.statusText,
+          headers,
         });
       }
     }

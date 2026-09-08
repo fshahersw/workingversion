@@ -175,21 +175,86 @@ export function clearCookie(name: string): string {
   return parts.join("; ");
 }
 
+export type ResolvedSession = {
+  user: SwUser;
+  /** Set when the id token was minted from the refresh cookie on this request. */
+  setCookies: string[];
+};
+
 /**
- * Read + verify the session from a request. Returns the user or null.
- * Phase 1: verifies the id_token only; if expired/invalid, returns null (the
- * user re-auths at /auth, which is silent if the Cognito/Entra session is alive).
- * Silent refresh via the refresh_token cookie is a later enhancement.
+ * Silent refresh memo. A page load fires many server calls at once; when the
+ * id-token cookie has expired they would each redeem the same refresh token.
+ * One redemption per refresh token is shared for a short window instead.
+ * Cognito refresh tokens are not rotated on use, so sharing is safe.
+ */
+const REFRESH_MEMO_MS = 20_000;
+const refreshMemo = new Map<string, { at: number; promise: Promise<ResolvedSession | null> }>();
+
+async function refreshSession(refreshToken: string): Promise<ResolvedSession | null> {
+  const key = refreshToken.slice(-48);
+  const now = Date.now();
+  const cached = refreshMemo.get(key);
+  if (cached && now - cached.at < REFRESH_MEMO_MS) return cached.promise;
+  const promise = (async () => {
+    try {
+      const tokens = await refreshTokens(refreshToken);
+      const user = await verifyIdToken(tokens.id_token);
+      const setCookies = [serializeCookie(C_ID, tokens.id_token, tokens.expires_in)];
+      if (tokens.refresh_token) {
+        setCookies.push(serializeCookie(C_REFRESH, tokens.refresh_token, 30 * 24 * 3600));
+      }
+      return { user, setCookies };
+    } catch {
+      return null;
+    }
+  })();
+  refreshMemo.set(key, { at: now, promise });
+  if (refreshMemo.size > 500) {
+    for (const [k, v] of refreshMemo) if (now - v.at > REFRESH_MEMO_MS) refreshMemo.delete(k);
+  }
+  return promise;
+}
+
+/**
+ * Read + verify the session from a request. A valid id token wins; when it is
+ * missing or expired but the refresh cookie is present, a fresh id token is
+ * minted and returned in `setCookies` for the caller to attach to its response.
+ * Null means the user must sign in again.
+ */
+export async function resolveSession(request: Request): Promise<ResolvedSession | null> {
+  loadCognitoConfig();
+  const cookies = parseCookies(request.headers.get("cookie"));
+  const idToken = cookies[C_ID];
+  if (idToken) {
+    try {
+      return { user: await verifyIdToken(idToken), setCookies: [] };
+    } catch {
+      /* expired or invalid: fall through to the refresh cookie */
+    }
+  }
+  const refreshToken = cookies[C_REFRESH];
+  if (!refreshToken) return null;
+  return refreshSession(refreshToken);
+}
+
+/**
+ * The user for a request, or null. When the session had to be refreshed the
+ * new id-token cookie is attached to the in-flight response when a server
+ * event is active (server functions and request middleware); route handlers
+ * that build their own Response should use resolveSession directly.
  */
 export async function getUserFromRequest(request: Request): Promise<SwUser | null> {
-  loadCognitoConfig();
-  const idToken = parseCookies(request.headers.get("cookie"))[C_ID];
-  if (!idToken) return null;
-  try {
-    return await verifyIdToken(idToken);
-  } catch {
-    return null;
+  const session = await resolveSession(request);
+  if (!session) return null;
+  if (session.setCookies.length) {
+    try {
+      const { setResponseHeader } = await import("@tanstack/react-start/server");
+      setResponseHeader("Set-Cookie", session.setCookies);
+    } catch {
+      /* no active server event (tests, background jobs): the cookie is simply not refreshed */
+    }
   }
+  return session.user;
 }
 
 export const getCognitoConfig = loadCognitoConfig;
