@@ -174,36 +174,48 @@ export async function listReviewTables(principal: string): Promise<ReviewTable[]
     .slice(0, 50);
 }
 
+const MAX_TABLE_NAME = 120;
+const MAX_INSTRUCTIONS = 5_000;
+const MAX_QUESTION = 2_000;
+const MAX_OPTIONS = 40;
+
+function cleanText(value: unknown, max: number): string {
+  return String(value ?? "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function cleanOptions(options: unknown): string[] {
+  if (!Array.isArray(options)) return [];
+  return [...new Set(options.map((o) => cleanText(o, 120)).filter(Boolean))].slice(0, MAX_OPTIONS);
+}
+
 export async function createReviewTable(
   principal: string,
   input: { name: string; matterId?: string | null; matterLabel?: string | null; instructions?: string | null },
 ): Promise<ReviewTable> {
   const id = ulid();
   const now = new Date().toISOString();
+  const table: ReviewTable = {
+    id,
+    name: cleanText(input.name, MAX_TABLE_NAME) || "Untitled review",
+    matterId: input.matterId ? cleanText(input.matterId, 120) : null,
+    matterLabel: input.matterLabel ? cleanText(input.matterLabel, 200) : null,
+    instructions: input.instructions ? cleanText(input.instructions, MAX_INSTRUCTIONS) : null,
+    createdAt: now,
+    updatedAt: now,
+    sources: [],
+  };
   await putItem({
     PK: pk(principal),
     SK: tblSK(id),
     entity: "rtable",
     owner: principal,
-    id,
-    name: input.name.trim() || "Untitled review",
-    matterId: input.matterId ?? null,
-    matterLabel: input.matterLabel ?? null,
-    instructions: input.instructions ?? null,
-    sources: [],
-    createdAt: now,
-    updatedAt: now,
+    ...table,
   });
-  return {
-    id,
-    name: input.name.trim() || "Untitled review",
-    matterId: input.matterId ?? null,
-    matterLabel: input.matterLabel ?? null,
-    instructions: input.instructions ?? null,
-    createdAt: now,
-    updatedAt: now,
-    sources: [],
-  };
+  return table;
 }
 
 /**
@@ -304,7 +316,11 @@ async function touchTable(principal: string, tableId: string): Promise<void> {
 export async function renameReviewTable(principal: string, id: string, name: string): Promise<void> {
   const t = await getItem(pk(principal), tblSK(id));
   if (!t) return;
-  await putItem({ ...t, name: name.trim() || "Untitled review", updatedAt: new Date().toISOString() });
+  await putItem({
+    ...t,
+    name: cleanText(name, MAX_TABLE_NAME) || "Untitled review",
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 export async function deleteReviewTable(principal: string, id: string): Promise<void> {
@@ -346,10 +362,10 @@ export async function createColumn(
   const col: ReviewColumn = {
     id,
     tableId: input.tableId,
-    name: input.name.trim() || "Untitled column",
+    name: cleanText(input.name, 120) || "Untitled column",
     kind: input.kind,
-    question: input.question.trim(),
-    options: input.options,
+    question: cleanText(input.question, MAX_QUESTION),
+    options: cleanOptions(input.options),
     version: 1,
     position: input.position,
   };
@@ -367,17 +383,18 @@ export async function updateColumn(
   const current = mapColumn(item);
   // A prompt / type / options change bumps the version, invalidating this
   // column's cell cache keys so only this column recomputes on the next run.
+  const nextQuestion = patch.question !== undefined ? cleanText(patch.question, MAX_QUESTION) : undefined;
+  const nextOptions = patch.options !== undefined ? cleanOptions(patch.options) : undefined;
   const semantic =
-    (patch.question !== undefined && patch.question.trim() !== current.question) ||
+    (nextQuestion !== undefined && nextQuestion !== current.question) ||
     (patch.kind !== undefined && patch.kind !== current.kind) ||
-    (patch.options !== undefined &&
-      patch.options.join("\u0000") !== current.options.join("\u0000"));
+    (nextOptions !== undefined && nextOptions.join("\u0000") !== current.options.join("\u0000"));
   const next: ReviewColumn = {
     ...current,
-    ...(patch.name !== undefined ? { name: patch.name.trim() || current.name } : {}),
+    ...(patch.name !== undefined ? { name: cleanText(patch.name, 120) || current.name } : {}),
     ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
-    ...(patch.question !== undefined ? { question: patch.question.trim() } : {}),
-    ...(patch.options !== undefined ? { options: patch.options } : {}),
+    ...(nextQuestion !== undefined ? { question: nextQuestion } : {}),
+    ...(nextOptions !== undefined ? { options: nextOptions } : {}),
     version: semantic ? current.version + 1 : current.version,
   };
   await putItem({ ...item, ...next });
@@ -549,24 +566,65 @@ async function logCell(
   });
 }
 
+/**
+ * The cell the caller is acting on, read from the owner's own partition. The
+ * client's copy is used only to name the cell; nothing else it sends is stored.
+ */
+async function ownedCell(principal: string, cell: ReviewCell): Promise<ReviewCell> {
+  const id = s(cell.id);
+  if (!id) throw new Error("Cell not found");
+  const stored = await getItem(pk(principal), cellSK(id));
+  if (stored) return mapCell(stored);
+  // A cell that was never run yet: accept only its identity fields.
+  const rowId = s(cell.rowId);
+  const columnId = s(cell.columnId);
+  if (!rowId || !columnId || id !== cellId(rowId, columnId)) throw new Error("Cell not found");
+  return {
+    id,
+    tableId: s(cell.tableId),
+    rowId,
+    columnId,
+    display: "",
+    value: null,
+    status: "pending",
+    confidence: null,
+    citations: [],
+    rationale: null,
+    pagesSearched: [],
+    error: null,
+    overridden: false,
+    verifiedAt: null,
+    cacheKey: null,
+  };
+}
+
 export async function overrideCell(
   principal: string,
   cell: ReviewCell,
   value: string,
   actorEmail: string | null,
 ): Promise<ReviewCell> {
-  const display = displayValue(value);
+  const current = await ownedCell(principal, cell);
+  const nextValue = value.slice(0, 20_000);
+  const display = displayValue(nextValue);
   const updated: ReviewCell = {
-    ...cell,
-    value,
+    ...current,
+    value: nextValue,
     display,
-    status: value.trim() ? "answered" : "not_found",
+    status: nextValue.trim() ? "answered" : "not_found",
     overridden: true,
     verifiedAt: new Date().toISOString(),
     error: null,
   };
-  await putItem({ PK: pk(principal), SK: cellSK(cell.id), entity: "rcell", owner: principal, ...updated, updatedAt: new Date().toISOString() });
-  await logCell(principal, cell, "override", cell.display, display, actorEmail);
+  await putItem({
+    PK: pk(principal),
+    SK: cellSK(current.id),
+    entity: "rcell",
+    owner: principal,
+    ...updated,
+    updatedAt: new Date().toISOString(),
+  });
+  await logCell(principal, current, "override", current.display, display, actorEmail);
   return updated;
 }
 
@@ -576,9 +634,24 @@ export async function setCellVerified(
   verified: boolean,
   actorEmail: string | null,
 ): Promise<ReviewCell> {
-  const updated: ReviewCell = { ...cell, verifiedAt: verified ? new Date().toISOString() : null };
-  await putItem({ PK: pk(principal), SK: cellSK(cell.id), entity: "rcell", owner: principal, ...updated, updatedAt: new Date().toISOString() });
-  await logCell(principal, cell, verified ? "verify" : "unverify", cell.display, cell.display, actorEmail);
+  const current = await ownedCell(principal, cell);
+  const updated: ReviewCell = { ...current, verifiedAt: verified ? new Date().toISOString() : null };
+  await putItem({
+    PK: pk(principal),
+    SK: cellSK(current.id),
+    entity: "rcell",
+    owner: principal,
+    ...updated,
+    updatedAt: new Date().toISOString(),
+  });
+  await logCell(
+    principal,
+    current,
+    verified ? "verify" : "unverify",
+    current.display,
+    current.display,
+    actorEmail,
+  );
   return updated;
 }
 
