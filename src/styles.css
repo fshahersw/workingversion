@@ -216,6 +216,169 @@
   background: transparent;
 }
 
+/* Drafts: the Word surface. `.sw-doc` is the editable page body; the style
+   variants mirror docgen's legal / modern / minimal export styles so what the
+   attorney sees is what the DOCX/PDF will look like. */
+.sw-doc {
+  min-height: 60vh;
+  color: oklch(0.2 0.02 255);
+  font-size: 12pt;
+  line-height: 1.6;
+  --sw-doc-accent: var(--brand-navy);
+  --sw-doc-heading: var(--font-display);
+  --sw-doc-body: var(--font-display);
+}
+.sw-doc-modern {
+  --sw-doc-accent: oklch(0.45 0.09 200);
+  --sw-doc-heading: var(--font-sans);
+  --sw-doc-body: var(--font-sans);
+}
+.sw-doc-minimal {
+  --sw-doc-accent: oklch(0.3 0.01 255);
+  --sw-doc-heading: var(--font-sans);
+  --sw-doc-body: var(--font-sans);
+}
+.sw-doc,
+.sw-doc p,
+.sw-doc li,
+.sw-doc td,
+.sw-doc th {
+  font-family: var(--sw-doc-body);
+}
+.sw-doc p {
+  margin: 0 0 0.75em;
+}
+.sw-doc p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: color-mix(in oklab, currentColor 40%, transparent);
+  pointer-events: none;
+}
+.sw-doc h1,
+.sw-doc h2,
+.sw-doc h3 {
+  font-family: var(--sw-doc-heading);
+  color: var(--sw-doc-accent);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+}
+.sw-doc h1 {
+  font-size: 1.9em;
+  letter-spacing: -0.01em;
+}
+.sw-doc-legal h1 {
+  text-align: center;
+  text-transform: uppercase;
+  font-size: 1.35em;
+  letter-spacing: 0.04em;
+}
+.sw-doc h2 {
+  font-size: 1.3em;
+}
+.sw-doc-legal h2 {
+  border-bottom: 1px solid color-mix(in oklab, var(--sw-doc-accent) 35%, transparent);
+  padding-bottom: 0.2em;
+}
+.sw-doc h3 {
+  font-size: 1.08em;
+}
+.sw-doc > :first-child {
+  margin-top: 0;
+}
+.sw-doc ul,
+.sw-doc ol {
+  padding-left: 1.6em;
+  margin: 0 0 0.75em;
+}
+.sw-doc ul {
+  list-style: disc;
+}
+.sw-doc ol {
+  list-style: decimal;
+}
+.sw-doc li > p {
+  margin: 0 0 0.25em;
+}
+.sw-doc blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 0 0.2em 1em;
+  border-left: 3px solid color-mix(in oklab, var(--sw-doc-accent) 45%, transparent);
+  color: color-mix(in oklab, currentColor 80%, transparent);
+}
+.sw-doc hr {
+  border: 0;
+  border-top: 1px solid color-mix(in oklab, var(--sw-doc-accent) 30%, transparent);
+  margin: 1.4em 0;
+}
+.sw-doc a {
+  color: var(--sw-doc-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sw-doc mark {
+  background: oklch(0.93 0.12 95);
+  padding: 0 0.1em;
+}
+.sw-doc code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.9em;
+  background: color-mix(in oklab, var(--sw-doc-accent) 8%, transparent);
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+}
+.sw-doc pre {
+  background: color-mix(in oklab, var(--sw-doc-accent) 6%, transparent);
+  padding: 0.8em 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0 0 0.9em;
+}
+.sw-doc table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.9em 0 1.1em;
+  table-layout: fixed;
+  font-size: 0.95em;
+}
+.sw-doc th,
+.sw-doc td {
+  border: 1px solid color-mix(in oklab, var(--sw-doc-accent) 30%, transparent);
+  padding: 0.35em 0.6em;
+  vertical-align: top;
+  text-align: left;
+  position: relative;
+}
+.sw-doc th {
+  background: color-mix(in oklab, var(--sw-doc-accent) 10%, transparent);
+  font-weight: 600;
+}
+.sw-doc-legal th {
+  background: var(--sw-doc-accent);
+  color: white;
+}
+.sw-doc .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklab, var(--sw-doc-accent) 12%, transparent);
+  pointer-events: none;
+}
+.sw-doc td p,
+.sw-doc th p {
+  margin: 0;
+}
+.sw-doc .ProseMirror-gapcursor:after {
+  border-top-color: var(--sw-doc-accent);
+}
+/* Text the assistant just inserted: a soft wash that fades once accepted. */
+.sw-doc .sw-ai-insert {
+  background: color-mix(in oklab, var(--brand-orange) 14%, transparent);
+  border-radius: 2px;
+  transition: background 1.2s ease;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
