@@ -348,13 +348,14 @@ function AssistantTurn({
               <>
                 <MaterialButton
                   icon={TextCursorInput}
-                  label="Insert at cursor"
+                  label="Insert"
+                  title="Insert at the cursor"
                   onClick={() => onApply(msg, "insert")}
                   primary={target === "cursor" && !applied}
                 />
                 <MaterialButton
                   icon={Replace}
-                  label="Replace selection"
+                  label="Replace"
                   disabled={!hasSelection}
                   title={
                     hasSelection

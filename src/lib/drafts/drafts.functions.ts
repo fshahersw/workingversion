@@ -76,7 +76,13 @@ export const getDraftFn = createServerFn({ method: "POST" })
 export const saveDraftContentFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator(
-    (d: { draftId: string; expectedVersion: number; content: DraftContent; title?: string }) => {
+    (d: {
+      draftId: string;
+      expectedVersion: number;
+      content: DraftContent;
+      title?: string;
+      force?: boolean;
+    }) => {
       const expectedVersion = Number(d?.expectedVersion);
       if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
         throw new Error("expectedVersion required");
@@ -86,6 +92,7 @@ export const saveDraftContentFn = createServerFn({ method: "POST" })
         expectedVersion,
         content: cleanContent(d?.content),
         ...(typeof d.title === "string" ? { title: d.title } : {}),
+        ...(d.force === true ? { force: true } : {}),
       };
     },
   )

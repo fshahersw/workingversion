@@ -72,11 +72,46 @@ export function materialForDocument(
   if (!used.length) return { markdown: body.trim(), used };
   const lines = used.map(({ n, source, ref }) => {
     if (!source) return `${n}. Source ${ref} (not in the retrieved record)`;
-    const date = source.effective_date ? ` (${source.effective_date})` : "";
-    const link = source.source_url ? ` — ${source.source_url}` : "";
-    return `${n}. ${source.citation}${date}${link}`;
+    return `${n}. ${referenceLine(source)}`;
   });
   return { markdown: `${body.trim()}\n\n**Sources**\n\n${lines.join("\n")}`, used };
+}
+
+/** One reference line: a readable label, a real date if there is one, the URL once. */
+export function referenceLine(source: Source): string {
+  const url = source.source_url?.trim() ?? "";
+  const rawCitation = (source.citation ?? "").trim();
+  const citationIsUrl = /^https?:\/\//i.test(rawCitation);
+  const label = citationIsUrl
+    ? labelFromUrl(rawCitation)
+    : rawCitation || (url ? labelFromUrl(url) : "Source");
+  const date = cleanDate(source.effective_date);
+  const parts = [label];
+  if (date) parts.push(`(${date})`);
+  if (url && url !== label) parts.push(`— ${url}`);
+  return parts.join(" ");
+}
+
+function labelFromUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const file = decodeURIComponent(u.pathname.split("/").filter(Boolean).pop() ?? "");
+    const host = u.hostname.replace(/^www\./, "");
+    return file && file !== host ? `${host} — ${file}` : host;
+  } catch {
+    return url;
+  }
+}
+
+/** Keep a date only when it looks like one; drop "unknown" and clock noise. */
+function cleanDate(value: string | undefined): string {
+  const v = (value ?? "").trim();
+  if (!v || /^(unknown|n\/a|none|null)$/i.test(v)) return "";
+  const iso = v.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+  if (iso) return iso[1]!;
+  const long = v.match(/\b([A-Z][a-z]+ \d{1,2},? \d{4})\b/);
+  if (long) return long[1]!;
+  return /\d{4}/.test(v) ? v.slice(0, 40) : "";
 }
 
 /** Highest "[n]" reference already in the document, so new inserts continue it. */

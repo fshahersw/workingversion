@@ -156,11 +156,18 @@ export async function getDraft(principal: string, draftId: string): Promise<Draf
  */
 export async function saveDraftContent(
   principal: string,
-  input: { draftId: string; expectedVersion: number; content: DraftContent; title?: string },
+  input: {
+    draftId: string;
+    expectedVersion: number;
+    content: DraftContent;
+    title?: string;
+    /** Overwrite whatever another tab saved (the user chose to keep this copy). */
+    force?: boolean;
+  },
 ): Promise<{ version: number; wordCount: number; updatedAt: string }> {
   const row = await loadRow(principal, input.draftId);
   const current = n(row.version, 0);
-  if (input.expectedVersion !== current) {
+  if (!input.force && input.expectedVersion !== current) {
     const err = new Error("This document was saved elsewhere; reload to continue.");
     err.name = "DraftVersionConflict";
     throw err;

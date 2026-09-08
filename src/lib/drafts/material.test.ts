@@ -7,6 +7,7 @@ import {
   hasPartialMarker,
   materialForDocument,
   nextReferenceNumber,
+  referenceLine,
   splitMaterial,
 } from "./material.ts";
 import { draftStarters } from "./starters.ts";
@@ -80,6 +81,24 @@ test("material without refs gets no sources list", () => {
   const { markdown, used } = materialForDocument("Plain paragraph.", [src("S1")]);
   assert.equal(markdown, "Plain paragraph.");
   assert.equal(used.length, 0);
+});
+
+test("reference lines read well for URL-only citations and drop non-dates", () => {
+  const urlOnly = referenceLine({
+    ...src("S1", "https://www.flsd.uscourts.gov/files/20md2924/PTO%2041.pdf"),
+    citation: "https://www.flsd.uscourts.gov/files/20md2924/PTO%2041.pdf",
+    effective_date: "unknown",
+  } as Source);
+  assert.equal(
+    urlOnly,
+    "flsd.uscourts.gov — PTO 41.pdf — https://www.flsd.uscourts.gov/files/20md2924/PTO%2041.pdf",
+  );
+  const dated = referenceLine({
+    ...src("S2", "https://x.example/post"),
+    citation: "Zantac Lawsuit Update",
+    effective_date: "05:00PM, Monday, May 11 2026, PDT",
+  } as Source);
+  assert.equal(dated, "Zantac Lawsuit Update (May 11 2026) — https://x.example/post");
 });
 
 test("nextReferenceNumber continues the document's own numbering", () => {

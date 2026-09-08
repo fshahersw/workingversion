@@ -52,7 +52,9 @@ function DraftPage() {
     saveState,
     wordCount,
     exporting,
+    loadCount,
     reload,
+    keepMine,
     onChange,
     setTitle,
     setStyle,
@@ -232,7 +234,12 @@ function DraftPage() {
           ) : (
             <div className="h-8 flex-1" />
           )}
-          <SaveIndicator state={saveState} words={wordCount} onReload={reload} />
+          <SaveIndicator
+            state={saveState}
+            words={wordCount}
+            onReload={reload}
+            onKeepMine={keepMine}
+          />
           {draft ? (
             <select
               value={draft.style}
@@ -287,7 +294,7 @@ function DraftPage() {
           <div className="min-h-0 min-w-0 flex-1">
             {draft ? (
               <DraftEditor
-                key={draft.draftId}
+                key={`${draft.draftId}:${loadCount}`}
                 initialDoc={draft.content?.doc ?? null}
                 style={draft.style}
                 readOnly={saveState === "conflict"}
@@ -328,10 +335,12 @@ function SaveIndicator({
   state,
   words,
   onReload,
+  onKeepMine,
 }: {
   state: SaveState;
   words: number;
   onReload: () => void;
+  onKeepMine: () => void;
 }) {
   const label =
     state === "saving"
@@ -360,13 +369,24 @@ function SaveIndicator({
           ) : null}
           <span className={state === "conflict" ? "text-amber-700" : ""}>{label}</span>
           {state === "conflict" ? (
-            <button
-              type="button"
-              onClick={onReload}
-              className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10.5px] font-medium text-foreground hover:bg-muted"
-            >
-              <RefreshCw className="h-3 w-3" /> Reload
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={onReload}
+                title="Discard this tab's changes and load the version saved elsewhere"
+                className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10.5px] font-medium text-foreground hover:bg-muted"
+              >
+                <RefreshCw className="h-3 w-3" /> Take theirs
+              </button>
+              <button
+                type="button"
+                onClick={onKeepMine}
+                title="Overwrite the version saved elsewhere with this tab's content"
+                className="inline-flex items-center gap-1 rounded bg-brand-navy px-1.5 py-0.5 text-[10.5px] font-medium text-white hover:opacity-90"
+              >
+                Keep mine
+              </button>
+            </>
           ) : null}
         </span>
       ) : null}

@@ -23,11 +23,15 @@ export function useDraft(draftId: string) {
 
   const versionRef = useRef(0);
   const pendingRef = useRef<{ doc: JsonValue; text: string } | null>(null);
+  // The content a refused save carried, kept so "Keep mine" can force it through.
+  const conflictRef = useRef<{ doc: JsonValue; text: string } | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savingRef = useRef(false);
   const titleRef = useRef("");
   // flush and schedule refer to each other; the ref breaks the cycle.
   const scheduleRef = useRef<() => void>(() => {});
+  // Bumped by every load so the editor remounts with the fresh document.
+  const [loadCount, setLoadCount] = useState(0);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -35,9 +39,12 @@ export function useDraft(draftId: string) {
       const loaded = await getDraftFn({ data: { draftId } });
       versionRef.current = loaded.version;
       titleRef.current = loaded.title;
+      pendingRef.current = null;
+      conflictRef.current = null;
       setDraft(loaded);
       setWordCount(loaded.content ? countWords(loaded.content.text) : loaded.wordCount);
       setSaveState("idle");
+      setLoadCount((n) => n + 1);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Could not open this draft");
     }
@@ -80,7 +87,10 @@ export function useDraft(draftId: string) {
       if (/saved elsewhere|DraftVersionConflict/i.test(message)) {
         setSaveState("conflict");
         pendingRef.current = null;
-        toast.error("This document was saved in another tab. Reload to continue editing.");
+        conflictRef.current = pending;
+        toast.error(
+          "This document was saved in another tab. Reload to take that version, or keep yours.",
+        );
       } else {
         // Keep the edit queued so the next change retries.
         pendingRef.current = pendingRef.current ?? pending;
@@ -126,6 +136,41 @@ export function useDraft(draftId: string) {
       if (pendingRef.current) void flush();
     };
   }, [flush]);
+
+  /** Conflict recovery: overwrite the other tab's save with this tab's content. */
+  const keepMine = useCallback(async () => {
+    const mine = conflictRef.current;
+    if (!mine) return;
+    setSaveState("saving");
+    try {
+      const result = await saveDraftContentFn({
+        data: {
+          draftId,
+          expectedVersion: versionRef.current,
+          content: { format: "tiptap", doc: mine.doc, text: mine.text },
+          title: titleRef.current,
+          force: true,
+        },
+      });
+      versionRef.current = result.version;
+      conflictRef.current = null;
+      setDraft((d) =>
+        d
+          ? {
+              ...d,
+              version: result.version,
+              wordCount: result.wordCount,
+              updatedAt: result.updatedAt,
+            }
+          : d,
+      );
+      setSaveState("saved");
+      toast.success("Kept this version");
+    } catch (err) {
+      setSaveState("conflict");
+      toast.error(err instanceof Error ? err.message : "Could not save");
+    }
+  }, [draftId]);
 
   const setTitle = useCallback(
     async (title: string) => {
@@ -184,7 +229,10 @@ export function useDraft(draftId: string) {
     saveState,
     wordCount,
     exporting,
+    /** Changes on every (re)load; key the editor on it so it remounts with fresh content. */
+    loadCount,
     reload: load,
+    keepMine,
     onChange,
     setTitle,
     setStyle,
