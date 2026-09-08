@@ -28,23 +28,78 @@ import { isLowQualityText } from "./text-quality.ts";
 import type { PileFileHits, PileFilePack, PileHit, PilePage, PileStructure } from "./types.ts";
 
 
-function snippet(text: string, query: string): string {
+/** Characters of page text shown per hit before the reader is opened. */
+export const SNIPPET_CHARS = 380;
+
+/**
+ * The passage a hit shows: the window of the page that covers the most
+ * distinct query terms (then the most occurrences), snapped outward to
+ * sentence boundaries so it reads as prose rather than a cut mid-clause.
+ * Falls back to the page opening when no term matches.
+ */
+export function snippet(text: string, query: string, max = SNIPPET_CHARS): string {
   const raw = text.replace(/\s+/g, " ").trim();
   if (!raw) return "";
+  if (raw.length <= max) return raw;
   const hay = raw.toLowerCase();
   // Anchor on the selective terms the ranker actually used, so a snippet never
   // centres on "the".
-  const terms = query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 2);
-  let idx = -1;
-  for (const t of terms) {
-    idx = hay.indexOf(t);
-    if (idx >= 0) break;
+  const terms = [
+    ...new Set(
+      query
+        .toLowerCase()
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((w) => w.length > 2),
+    ),
+  ];
+  const positions: { at: number; term: number }[] = [];
+  terms.forEach((term, index) => {
+    let from = 0;
+    for (let guard = 0; guard < 64; guard += 1) {
+      const at = hay.indexOf(term, from);
+      if (at < 0) break;
+      positions.push({ at, term: index });
+      from = at + term.length;
+    }
+  });
+  positions.sort((a, b) => a.at - b.at);
+  if (!positions.length) return `${raw.slice(0, max).replace(/\s+\S*$/, "")}`;
+
+  // Best window: most distinct terms, then most hits, earliest on ties.
+  let best = { start: Math.max(0, positions[0]!.at - 80), distinct: 0, count: 0 };
+  for (let i = 0; i < positions.length; i += 1) {
+    const start = Math.max(0, positions[i]!.at - 60);
+    const end = start + max;
+    const seen = new Set<number>();
+    let count = 0;
+    for (let j = i; j < positions.length && positions[j]!.at < end; j += 1) {
+      seen.add(positions[j]!.term);
+      count += 1;
+    }
+    if (seen.size > best.distinct || (seen.size === best.distinct && count > best.count)) {
+      best = { start, distinct: seen.size, count };
+    }
   }
-  const start = Math.max(0, (idx < 0 ? 0 : idx) - 80);
-  return raw.slice(start, start + 220);
+
+  // Snap outward to sentence boundaries when one is close; otherwise to a word.
+  let start = best.start;
+  if (start > 0) {
+    const boundary = raw.lastIndexOf(". ", start);
+    start = boundary >= 0 && start - boundary <= 90 ? boundary + 2 : raw.indexOf(" ", start) + 1;
+    if (start < 0 || start > best.start + 40) start = best.start;
+  }
+  let end = Math.min(raw.length, start + max);
+  if (end < raw.length) {
+    const boundary = raw.indexOf(". ", end - 90);
+    end =
+      boundary >= 0 && boundary + 1 <= end + 40 && boundary + 1 > start + max / 2
+        ? boundary + 1
+        : (() => {
+            const space = raw.lastIndexOf(" ", end);
+            return space > start + max / 2 ? space : end;
+          })();
+  }
+  return raw.slice(start, end).trim();
 }
 
 export function pageToHit(page: PilePage, query: string, score: number): PileHit {
