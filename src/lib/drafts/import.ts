@@ -1,32 +1,22 @@
-// Hand-off of an imported document's HTML from the Drafts landing page to the
-// editor page, via sessionStorage (same pattern as the Library -> Discovery
-// workspace hand-off). Bounded so a very large conversion degrades to text
-// instead of overflowing storage.
+// Word import, in the browser: DOCX -> HTML (mammoth) -> editor JSON
+// (TipTap's headless generateJSON with the same extensions the editor uses).
+// The result is saved as the draft's content before the editor page opens, so
+// the import never depends on editor mount timing. Falls back to the file's
+// raw text as paragraphs when the HTML conversion yields no readable text.
+import { generateJSON } from "@tiptap/core";
 
-const KEY_PREFIX = "sw:draft-import:";
-const MAX_HTML_CHARS = 2_000_000;
+import { docToText, paragraphsDoc } from "./doc-text";
+import { draftExtensions } from "./editor-extensions";
+import type { DraftContent, JsonValue } from "./types";
 
-export function stashDraftImport(draftId: string, html: string): void {
-  try {
-    const clean = sanitizeImportHtml(html);
-    const payload =
-      clean.length <= MAX_HTML_CHARS ? clean : htmlToText(clean).slice(0, MAX_HTML_CHARS);
-    sessionStorage.setItem(KEY_PREFIX + draftId, payload);
-  } catch {
-    /* storage full or unavailable: the draft opens empty */
-  }
-}
-
-export function takeDraftImport(draftId: string): string | null {
-  try {
-    const key = KEY_PREFIX + draftId;
-    const value = sessionStorage.getItem(key);
-    if (value !== null) sessionStorage.removeItem(key);
-    return value;
-  } catch {
-    return null;
-  }
-}
+export type ImportResult = {
+  /** Null when no text could be read from the file. */
+  content: DraftContent | null;
+  /** mammoth conversion warnings (unsupported styles and the like), for logging. */
+  warnings: string[];
+  /** "html" when the formatted conversion was used, "text" for the raw-text fallback. */
+  via: "html" | "text" | "none";
+};
 
 /** Drop what the editor cannot keep faithfully (embedded images, scripts). */
 export function sanitizeImportHtml(html: string): string {
@@ -36,15 +26,37 @@ export function sanitizeImportHtml(html: string): string {
     .replace(/\son\w+="[^"]*"/gi, "");
 }
 
-function htmlToText(html: string): string {
-  return html
-    .replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
+export async function convertDocxToContent(buf: ArrayBuffer): Promise<ImportResult> {
+  const mammoth = await import("mammoth/mammoth.browser");
+  const warnings: string[] = [];
+  let doc: JsonValue | null = null;
+  try {
+    const result = await mammoth.convertToHtml({ arrayBuffer: buf });
+    for (const m of result.messages ?? []) if (m?.message) warnings.push(String(m.message));
+    const html = sanitizeImportHtml(result.value ?? "");
+    if (html.trim()) {
+      const json = generateJSON(html, draftExtensions("")) as JsonValue;
+      if (docToText(json).trim()) doc = json;
+    }
+  } catch (err) {
+    warnings.push(err instanceof Error ? err.message : "HTML conversion failed");
+  }
+  if (doc) {
+    return { content: { format: "tiptap", doc, text: docToText(doc) }, warnings, via: "html" };
+  }
+  try {
+    const raw = await mammoth.extractRawText({ arrayBuffer: buf });
+    const text = (raw.value ?? "").trim();
+    if (text) {
+      const fallback = paragraphsDoc(text);
+      return {
+        content: { format: "tiptap", doc: fallback, text: docToText(fallback) },
+        warnings,
+        via: "text",
+      };
+    }
+  } catch (err) {
+    warnings.push(err instanceof Error ? err.message : "text extraction failed");
+  }
+  return { content: null, warnings, via: "none" };
 }

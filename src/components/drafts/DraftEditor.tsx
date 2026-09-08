@@ -19,7 +19,7 @@ import {
   Underline,
   Undo2,
 } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 
 import { draftExtensions } from "@/lib/drafts/editor-extensions";
 import type { DraftStyle, JsonValue } from "@/lib/drafts/types";
@@ -50,8 +50,11 @@ export function DraftEditor({
   onSelection,
   toolbarEnd,
 }: DraftEditorProps) {
+  // Stable extension instances: useEditor compares options by identity on
+  // every render and re-applies them when they differ.
+  const extensions = useMemo(() => draftExtensions(placeholder), [placeholder]);
   const editor = useEditor({
-    extensions: draftExtensions(placeholder),
+    extensions,
     // A stored document is always a JSON object; anything else starts empty.
     content:
       initialDoc && typeof initialDoc === "object" && !Array.isArray(initialDoc)
@@ -88,8 +91,10 @@ export function DraftEditor({
     });
   }, [editor, style]);
 
+  // emitUpdate=false: toggling editability is not a document change and must
+  // not trigger onChange (it queued empty autosaves on every mount).
   useEffect(() => {
-    editor?.setEditable(!readOnly);
+    editor?.setEditable(!readOnly, false);
   }, [editor, readOnly]);
 
   return (

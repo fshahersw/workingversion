@@ -9,8 +9,9 @@ import {
   createDraftFn,
   deleteDraftFn,
   listDraftsFn,
+  saveDraftContentFn,
 } from "@/lib/drafts/drafts.functions";
-import { stashDraftImport } from "@/lib/drafts/import";
+import { convertDocxToContent } from "@/lib/drafts/import";
 import type { DraftSummary } from "@/lib/drafts/types";
 
 export const Route = createFileRoute("/_authenticated/drafts/")({
@@ -72,21 +73,33 @@ function DraftsPage() {
     setBusy("import");
     try {
       const buf = await file.arrayBuffer();
-      const mammoth = await import("mammoth/mammoth.browser");
-      const { value: html } = await mammoth.convertToHtml({ arrayBuffer: buf });
+      // Convert here and save the body before the editor ever opens, so the
+      // import does not depend on editor mount timing.
+      const converted = await convertDocxToContent(buf);
+      if (converted.warnings.length) {
+        console.info("[drafts] import notes:", converted.warnings.slice(0, 8).join(" | "));
+      }
       const title =
         file.name
           .replace(/\.docx$/i, "")
           .replace(/[_-]+/g, " ")
           .trim() || "Imported document";
       const d = await createDraftFn({ data: { kind: "word", title } });
-      // Keep the original with the draft (download later); the editor page
-      // picks the converted HTML up from the stash and saves it as content.
+      if (converted.content) {
+        await saveDraftContentFn({
+          data: { draftId: d.draftId, expectedVersion: 0, content: converted.content, title },
+        });
+        if (converted.via === "text") {
+          toast.message("Imported as plain text; the file's formatting could not be read.");
+        }
+      } else {
+        toast.warning("No readable text was found in that file. The document opens empty.");
+      }
+      // Keep the original with the draft (best effort; the body is already saved).
       const base64 = bytesToBase64(new Uint8Array(buf));
       await attachDraftSourceFn({
         data: { draftId: d.draftId, name: file.name, ext: "docx", base64 },
       }).catch(() => undefined);
-      stashDraftImport(d.draftId, html);
       open(d.draftId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not import that file");

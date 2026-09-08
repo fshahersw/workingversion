@@ -24,7 +24,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { DraftMode } from "@/lib/agents/draft-prompts";
 import type { Message } from "@/lib/chat-types";
-import { takeDraftImport } from "@/lib/drafts/import";
 import { materialForDocument, nextReferenceNumber } from "@/lib/drafts/material";
 import { DRAFT_STYLES, type DraftStyle } from "@/lib/drafts/types";
 import { useDraft, type SaveState } from "@/lib/drafts/use-draft";
@@ -82,19 +81,9 @@ function DraftPage() {
     ...(draft?.convId ? { convId: draft.convId } : {}),
   });
 
-  // An import hand-off (Drafts page converted a DOCX) lands here once the
-  // editor exists: set the HTML as content and let autosave persist it.
-  const onReady = useCallback(
-    (editor: Editor) => {
-      editorRef.current = editor;
-      const html = takeDraftImport(draftId);
-      if (html) {
-        editor.commands.setContent(html, { contentType: "html" });
-        onChange(editor.getJSON() as never, editor.getText({ blockSeparator: "\n" }));
-      }
-    },
-    [draftId, onChange],
-  );
+  const onReady = useCallback((editor: Editor) => {
+    editorRef.current = editor;
+  }, []);
 
   useEffect(() => {
     if (draft) document.title = `${draft.title} — Seeger Weiss`;

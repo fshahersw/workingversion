@@ -30,29 +30,37 @@ export function useDraft(draftId: string) {
   const titleRef = useRef("");
   // flush and schedule refer to each other; the ref breaks the cycle.
   const scheduleRef = useRef<() => void>(() => {});
-  // Bumped by every load so the editor remounts with the fresh document.
+  // Bumped only by an explicit reload so the editor remounts with the fresh
+  // document. The initial load must not bump it: in development React runs the
+  // mount effect twice, and a key that changed on every load remounted the
+  // editor mid-flight (the cause of imports opening blank).
   const [loadCount, setLoadCount] = useState(0);
 
-  const load = useCallback(async () => {
-    setLoadError(null);
-    try {
-      const loaded = await getDraftFn({ data: { draftId } });
-      versionRef.current = loaded.version;
-      titleRef.current = loaded.title;
-      pendingRef.current = null;
-      conflictRef.current = null;
-      setDraft(loaded);
-      setWordCount(loaded.content ? countWords(loaded.content.text) : loaded.wordCount);
-      setSaveState("idle");
-      setLoadCount((n) => n + 1);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Could not open this draft");
-    }
-  }, [draftId]);
+  const load = useCallback(
+    async (opts?: { remount?: boolean }) => {
+      setLoadError(null);
+      try {
+        const loaded = await getDraftFn({ data: { draftId } });
+        versionRef.current = loaded.version;
+        titleRef.current = loaded.title;
+        pendingRef.current = null;
+        conflictRef.current = null;
+        setDraft(loaded);
+        setWordCount(loaded.content ? countWords(loaded.content.text) : loaded.wordCount);
+        setSaveState("idle");
+        if (opts?.remount) setLoadCount((n) => n + 1);
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : "Could not open this draft");
+      }
+    },
+    [draftId],
+  );
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  const reload = useCallback(() => load({ remount: true }), [load]);
 
   const flush = useCallback(async () => {
     if (savingRef.current) return;
@@ -229,9 +237,9 @@ export function useDraft(draftId: string) {
     saveState,
     wordCount,
     exporting,
-    /** Changes on every (re)load; key the editor on it so it remounts with fresh content. */
+    /** Changes on explicit reload; key the editor on it so it remounts with fresh content. */
     loadCount,
-    reload: load,
+    reload,
     keepMine,
     onChange,
     setTitle,
