@@ -278,7 +278,14 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
           pageCount: res.pageCount,
           chunkCount: res.chunkCount,
         });
-      } catch {
+      } catch (error) {
+        // The user sees a bounded summary; the server log keeps the cause so a
+        // schema drift or a Bedrock/Aurora outage is diagnosable. No document
+        // text or principal is written here.
+        const cause = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        console.error(
+          `[kb] workspace ingest failed lane=${file.lane.lane} item=${reservation.itemId} file=${file.clientFileId}: ${cause.slice(0, 400)}`,
+        );
         await checkpointWorkspaceDocument(sub, {
           itemId: reservation.itemId,
           clientFileId: file.clientFileId,
