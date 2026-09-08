@@ -62,6 +62,11 @@ done by hand in dev that is not on this list is a defect in the runbook.
 5. Leave the tab idle for over an hour, then act: no "Unauthorized"; the session
    refreshes silently. Check `/api/auth/me` returns the user.
 6. Server logs contain no `[kb] workspace ingest failed` lines during the run.
+7. Drafts: New document, type a line, header reaches "Saved". Assistant Write with a
+   matter question streams tool rows, then a proposal card; Insert places numbered,
+   linked references and a Sources list. Reopen from Library › Drafts: content and the
+   assistant thread return. Export › Word downloads a .docx (uses the code interpreter).
+   Import Word file opens a converted copy with the original kept on the draft.
 
 ## Verified on dev (2026-09-08)
 
@@ -71,3 +76,7 @@ done by hand in dev that is not on this list is a defect in the runbook.
 - Not yet verified live: Deposition auto-save and analysis persistence (needs a
   transcript drop, which the browser automation cannot do) and the knowledge graph
   lenses on a real analysis.
+- Drafts (2026-09-08): create, Write with research (8 sources, 20s), Insert with
+  numbered references, autosave, two-tab conflict detection, Library listing and reopen
+  with the assistant thread: verified in the browser. Not yet clicked live: Export and
+  DOCX import (same docgen/mammoth paths the research agent and Working Set already use).
