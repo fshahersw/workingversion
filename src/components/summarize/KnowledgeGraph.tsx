@@ -7,8 +7,9 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { LocateFixed, Minus, Plus, Search } from "lucide-react";
+import { Loader2, LocateFixed, Minus, Plus, Search } from "lucide-react";
 
+import { AnswerMarkdown } from "@/components/chat/AnswerMarkdown";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -16,6 +17,8 @@ import { nodeFileMap, witnessColumns } from "@/lib/pile/dep-intel";
 import { displayCite, type DepAnalysis, type DepGraphNode } from "@/lib/pile/deposition-analysis";
 import { CLUSTER_PALETTE, clusterGraph } from "@/lib/pile/graph-cluster";
 import { enumeratePaths, rankPaths, serialisePath } from "@/lib/pile/graph-paths";
+import { graphQuestion, type GraphAskKind } from "@/lib/pile/graph-questions";
+import type { PileHit } from "@/lib/pile/types";
 import {
   conflictEdgesFromAnalysis,
   corroborationEdgesFromAnalysis,
@@ -34,7 +37,28 @@ import {
 import { fitGraphView, wrapGraphLabel } from "@/lib/pile/knowledge-graph-view";
 
 export type GraphFocus = { id: string; n: number };
-export type GraphJumpTab = "ask" | "contradictions" | "exhibits" | "chronology" | "witnesses";
+
+/**
+ * One-click analyses over the selected node. Each lens changes what the
+ * canvas emphasises and which question "Ask" sends; nothing leaves the graph.
+ */
+type Lens = "connections" | "paths" | "conflicts" | "relationships" | "witnesses";
+
+const LENSES: { id: Lens; label: string; hint: string; multiOnly?: boolean }[] = [
+  { id: "connections", label: "Connections", hint: "Everything one step away" },
+  { id: "paths", label: "Paths", hint: "Two steps out, with the routes to shared entities" },
+  { id: "relationships", label: "Relationships", hint: "Every link labelled with what the witness said" },
+  { id: "conflicts", label: "Conflicts", hint: "Only contradictions and corroboration around this node" },
+  { id: "witnesses", label: "Across witnesses", hint: "Who else mentions this, coloured by witness", multiOnly: true },
+];
+
+const LENS_ASK: Record<Lens, GraphAskKind> = {
+  connections: "testimony",
+  paths: "relationships",
+  relationships: "relationships",
+  conflicts: "conflicts",
+  witnesses: "witnesses",
+};
 
 /** Below this many CSS px of component width the dossier docks under the canvas. */
 const DOSSIER_SIDE_MIN_WIDTH = 960;
@@ -91,15 +115,22 @@ export function KnowledgeGraph({
   multi,
   transcripts,
   onAsk,
-  onOpenTab,
+  answer,
+  asking,
+  hits,
   focus: focusReq,
 }: {
   analysis: DepAnalysis;
   onCite: (cite: string, fileName?: string) => void;
   multi?: boolean;
   transcripts?: { fileId: string; fileName: string; witness?: string | null }[];
-  onAsk?: (q: string, opts?: { fileIds?: string[] }) => void;
-  onOpenTab?: (tab: GraphJumpTab) => void;
+  /** Runs an Ask; the answer is shown inside the graph's dossier. */
+  onAsk?: (q: string) => void;
+  /** Current Ask answer and state, rendered inline when the graph asked. */
+  answer?: string;
+  asking?: boolean;
+  /** Retrieved passages behind `answer`; [S#] refs resolve to their page:line. */
+  hits?: PileHit[];
   focus?: GraphFocus | null;
 }) {
   const wideToolbar = useMediaQuery("(min-width: 900px)");
@@ -113,6 +144,9 @@ export function KnowledgeGraph({
   const [camera, setCamera] = useState<GraphView>({ x: 0, y: 0, k: 1 });
   const [view, setView] = useState<GraphViewSettings>(() => loadGraphView());
   const [dragging, setDragging] = useState<{ x: number; y: number; cam: GraphView } | null>(null);
+  const [lens, setLens] = useState<Lens>("connections");
+  /** The question this graph last sent to Ask; the inline answer belongs to it. */
+  const [askedHere, setAskedHere] = useState<{ nodeId: string; question: string } | null>(null);
   const fittedKey = useRef("");
 
   useEffect(() => {
@@ -124,6 +158,16 @@ export function KnowledgeGraph({
     setActive(focusReq.id);
     setView((current) => ({ ...current, minDegree: 0, sharedOnly: false }));
   }, [focusReq]);
+
+  // Lenses drive hop depth and colouring; the reader never has to find the
+  // matching dropdowns.
+  useEffect(() => {
+    setView((current) => ({
+      ...current,
+      hops: lens === "paths" ? 2 : 1,
+      colorBy: lens === "witnesses" ? "witness" : current.colorBy === "witness" ? "cluster" : current.colorBy,
+    }));
+  }, [lens]);
 
   const synthetic = useMemo(
     () => [...conflictEdgesFromAnalysis(analysis), ...corroborationEdgesFromAnalysis(analysis)],
@@ -234,14 +278,16 @@ export function KnowledgeGraph({
     fit();
   }, [fit, layout.height, layout.width, visible.nodes.length]);
 
+  // Wheel and trackpad scroll pan the canvas; zoom is reserved for the +/−
+  // buttons and keys so an accidental scroll never changes the scale.
   const onWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     event.preventDefault();
-    const box = viewportRef.current?.getBoundingClientRect();
-    if (!box) return;
-    const factor = event.deltaY < 0 ? 1.25 : 1 / 1.25;
-    setCamera((current) =>
-      zoomAt(current, event.clientX - box.left, event.clientY - box.top, factor),
-    );
+    const scale = event.deltaMode === 1 ? 16 : 1;
+    setCamera((current) => ({
+      ...current,
+      x: current.x - event.deltaX * scale,
+      y: current.y - event.deltaY * scale,
+    }));
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -425,6 +471,34 @@ export function KnowledgeGraph({
       </div>
     ) : null;
 
+  /** Witness display names for the files a node is attributed to. */
+  const witnessNames = (files: string[]): string[] =>
+    files.map((file) => {
+      const transcript = transcripts?.find((t) => t.fileName === file);
+      return transcript?.witness?.trim() || file.replace(/\.[^.]+$/, "");
+    });
+  const askContext = (node: DepGraphNode) => ({
+    label: node.label,
+    kind: node.kind,
+    witnesses: witnessNames(visible.files.get(node.id) ?? []),
+    neighbors: focusEdges.map((edge) => {
+      const otherId = edge.from === node.id ? edge.to : edge.from;
+      return {
+        relation: edge.class === "contradicts" ? "contradicts" : edge.label || "related to",
+        other: nodeById.get(otherId)?.label ?? otherId,
+        conflict: edge.class === "contradicts",
+      };
+    }),
+    cites: focusEdges.map((edge) => edge.cite).filter(Boolean),
+  });
+  const askFromGraph = (node: DepGraphNode, kind: GraphAskKind) => {
+    if (!onAsk) return;
+    const question = graphQuestion(kind, askContext(node));
+    setAskedHere({ nodeId: node.id, question });
+    onAsk(question);
+  };
+  const inlineAnswer = askedHere && focusNode && askedHere.nodeId === focusNode.id;
+
   const dossier =
     focusNode && focusLaid ? (
       <div className="space-y-3 p-3">
@@ -440,63 +514,97 @@ export function KnowledgeGraph({
             {agreeIds.has(focusNode.id) ? " · agreement" : ""}
           </p>
         </div>
-        <div className="flex flex-wrap gap-1">
-          {onAsk ? (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Lens
+          </p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {LENSES.filter((item) => !item.multiOnly || multi).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                aria-pressed={lens === item.id}
+                title={item.hint}
+                onClick={() => setLens(item.id)}
+                className={`border px-2 py-1 text-[11px] ${
+                  lens === item.id
+                    ? "border-brand-navy bg-brand-navy text-white"
+                    : "border-border bg-card text-foreground hover:bg-muted"
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1 text-[10.5px] text-muted-foreground">
+            {LENSES.find((item) => item.id === lens)?.hint}
+          </p>
+        </div>
+        {onAsk ? (
+          <div className="flex flex-wrap gap-1">
             <Button
               type="button"
               size="sm"
               className="h-7 rounded-sm"
-              onClick={() => {
-                onOpenTab?.("ask");
-                onAsk(`What does the testimony say about ${focusNode.label}?`);
-              }}
+              disabled={asking}
+              onClick={() => askFromGraph(focusNode, LENS_ASK[lens])}
             >
+              {asking && inlineAnswer ? (
+                <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" />
+              ) : null}
               Ask about this
             </Button>
-          ) : null}
-          {onOpenTab ? (
-            <>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 rounded-sm"
+              disabled={asking}
+              onClick={() => askFromGraph(focusNode, "timeline")}
+            >
+              Timeline
+            </Button>
+            {multi ? (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="h-7 rounded-sm"
-                onClick={() => onOpenTab("contradictions")}
+                disabled={asking}
+                onClick={() => askFromGraph(focusNode, "witnesses")}
               >
-                Conflicts
+                Compare witnesses
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-7 rounded-sm"
-                onClick={() => onOpenTab("exhibits")}
-              >
-                Exhibits
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-7 rounded-sm"
-                onClick={() => onOpenTab("chronology")}
-              >
-                Timeline
-              </Button>
-              {multi ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 rounded-sm"
-                  onClick={() => onOpenTab("witnesses")}
-                >
-                  Witnesses
-                </Button>
-              ) : null}
-            </>
-          ) : null}
-        </div>
+            ) : null}
+          </div>
+        ) : null}
+        {inlineAnswer ? (
+          <div className="border border-border bg-surface p-2.5">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              Answer
+            </p>
+            <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{askedHere.question}</p>
+            <div className="mt-2 text-[12.5px]">
+              {asking && !answer ? (
+                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" /> Reading the transcript…
+                </span>
+              ) : answer ? (
+                <AnswerMarkdown
+                  text={answer}
+                  streaming={!!asking}
+                  onCite={(ref) => {
+                    const n = Number(String(ref).replace(/^S/i, ""));
+                    const hit = (hits ?? [])[n - 1];
+                    if (hit) onCite(hit.cite || `${hit.page}:1`, hit.fileName);
+                  }}
+                />
+              ) : (
+                <span className="text-muted-foreground">No answer yet.</span>
+              )}
+            </div>
+          </div>
+        ) : null}
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
             Links
@@ -563,10 +671,18 @@ export function KnowledgeGraph({
         ) : null}
       </div>
     ) : (
-      <p className="p-3 text-[12px] leading-relaxed text-muted-foreground">
-        Click a person, exhibit, or event to open its dossier. Red edges are contradictions; dashed
-        green edges are corroboration. Click a page:line to open the transcript.
-      </p>
+      <div className="space-y-2 p-3 text-[12px] leading-relaxed text-muted-foreground">
+        <p>
+          Click a person, exhibit, or event to open its dossier, then pick a lens: connections,
+          paths to shared entities, labelled relationships, or conflicts only. Ask about this
+          answers inside this panel.
+        </p>
+        <p>
+          Red edges are contradictions; dashed green edges are corroboration. Scroll pans, +/−
+          zoom, double-click a node to frame its neighbourhood, and click a page:line to open the
+          transcript.
+        </p>
+      </div>
     );
 
   if (!layout.items.length) {
@@ -678,8 +794,13 @@ export function KnowledgeGraph({
                 const a = byId.get(edge.from);
                 const b = byId.get(edge.to);
                 if (!a || !b) return null;
-                const dim = focusId ? !linked.has(edge.from) || !linked.has(edge.to) : false;
-                const on = focusId ? linked.has(edge.from) && linked.has(edge.to) : false;
+                const inFocus = focusId ? linked.has(edge.from) && linked.has(edge.to) : false;
+                // The conflicts lens keeps only contradiction and corroboration
+                // edges legible around the selected node.
+                const lensHidden =
+                  lens === "conflicts" && !!focusId && edge.class === "factual";
+                const dim = (focusId ? !inFocus : false) || lensHidden;
+                const on = inFocus && !lensHidden;
                 return (
                   <path
                     key={`${edge.from}-${edge.to}-${index}`}
@@ -692,25 +813,35 @@ export function KnowledgeGraph({
                           : EDGE_HEX.factual
                         : EDGE_HEX[edge.class]
                     }
-                    strokeWidth={on ? 2.4 : 1.5}
+                    strokeWidth={on ? 2.4 : edge.class === "contradicts" ? 1.9 : 1.5}
                     strokeDasharray={edge.class === "corroborates" ? "6 4" : undefined}
                     opacity={dim ? 0.08 : 1}
-                    markerEnd="url(#kg-arrow)"
+                    markerEnd={`url(#kg-arrow-${edge.class === "factual" ? (on ? "on" : "factual") : edge.class})`}
                   />
                 );
               })}
               <defs>
-                <marker
-                  id="kg-arrow"
-                  viewBox="0 0 10 10"
-                  refX="8"
-                  refY="5"
-                  markerWidth="6"
-                  markerHeight="6"
-                  orient="auto-start-reverse"
-                >
-                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
-                </marker>
+                {(
+                  [
+                    ["factual", EDGE_HEX.factual],
+                    ["on", EDGE_HEX.on],
+                    ["contradicts", EDGE_HEX.contradicts],
+                    ["corroborates", EDGE_HEX.corroborates],
+                  ] as const
+                ).map(([id, color]) => (
+                  <marker
+                    key={id}
+                    id={`kg-arrow-${id}`}
+                    viewBox="0 0 10 10"
+                    refX="8"
+                    refY="5"
+                    markerWidth="6"
+                    markerHeight="6"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill={color} />
+                  </marker>
+                ))}
               </defs>
             </svg>
             {visible.edges.map((edge, index) => {
@@ -746,7 +877,11 @@ export function KnowledgeGraph({
               const files = visible.files.get(item.id) ?? [];
               const selected = active === item.id;
               const dim = focusId
-                ? !linked.has(item.id)
+                ? !linked.has(item.id) ||
+                  (lens === "conflicts" &&
+                    !selected &&
+                    !conflictIds.has(item.id) &&
+                    !agreeIds.has(item.id))
                 : !matches.has(item.id) && search.trim().length > 0;
               const showLabel = shouldShowNodeLabel(
                 camera.k,

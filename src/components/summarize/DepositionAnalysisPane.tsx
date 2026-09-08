@@ -430,16 +430,28 @@ export function DepositionAnalysisPane({
   };
   // Jump to Ask only on the transition into a new ask — not on every render,
   // otherwise manual tab clicks get snapped back while an answer is present.
+  // Asks issued from the knowledge graph render inline there and never jump.
   const tabChangeRef = useRef(onTabChange);
   tabChangeRef.current = onTabChange;
   const prevAsking = useRef(false);
+  const askFromGraph = useRef(false);
   useEffect(() => {
     if (asking && !prevAsking.current) {
-      setTab("ask");
-      tabChangeRef.current?.("ask");
+      if (askFromGraph.current) {
+        askFromGraph.current = false;
+      } else {
+        setTab("ask");
+        tabChangeRef.current?.("ask");
+      }
     }
     prevAsking.current = !!asking;
   }, [asking]);
+  const onGraphAsk = onAsk
+    ? (question: string) => {
+        askFromGraph.current = true;
+        onAsk(question);
+      }
+    : undefined;
   const visibleTabs = TABS.filter(
     (t) => t.id !== "objections" || (analysis?.objections.length ?? 0) > 0,
   );
@@ -697,8 +709,10 @@ export function DepositionAnalysisPane({
                 onCite={onCite}
                 multi={(transcripts?.length ?? 0) > 1}
                 transcripts={transcripts}
-                onAsk={onAsk}
-                onOpenTab={selectTab}
+                onAsk={onGraphAsk}
+                answer={answer}
+                asking={asking}
+                hits={hits}
                 focus={graphFocus}
               />
             ) : (

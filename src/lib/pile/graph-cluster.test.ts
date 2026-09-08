@@ -18,6 +18,37 @@ const edges: ClassifiedGraphEdge[] = [
   { from: "p1", to: "p2", label: "contradicts", cite: "2:11", class: "contradicts" },
 ];
 
+test("modularity refinement pulls a tie-broken node back to its dense community", () => {
+  // Two tight triangles joined by one bridge; the bridge node "x" also touches
+  // triangle B once, so propagation can leave it wherever the tie broke.
+  const tri = (p: string): DepGraphNode[] =>
+    ["1", "2", "3"].map((n) => ({ id: `${p}${n}`, label: `${p}${n}`, kind: "theme" as const }));
+  const link = (from: string, to: string): ClassifiedGraphEdge => ({
+    from,
+    to,
+    label: "with",
+    cite: "1:1",
+    class: "factual",
+  });
+  const graphNodes = [...tri("a"), ...tri("b"), { id: "x", label: "x", kind: "theme" as const }];
+  const graphEdges = [
+    link("a1", "a2"),
+    link("a2", "a3"),
+    link("a1", "a3"),
+    link("b1", "b2"),
+    link("b2", "b3"),
+    link("b1", "b3"),
+    link("x", "a1"),
+    link("x", "a2"),
+    link("x", "b1"),
+  ];
+  const clusters = clusterGraph({ nodes: graphNodes, edges: graphEdges });
+  const ofX = clusters.find((c) => c.nodeIds.includes("x"))!;
+  assert.ok(ofX.nodeIds.includes("a1") && ofX.nodeIds.includes("a2"), "x belongs with triangle A");
+  assert.ok(!ofX.nodeIds.includes("b1"), "x is not merged into triangle B");
+  assert.equal(clusters.length, 2);
+});
+
 test("clusterGraph is deterministic and splits unlinked hubs", () => {
   const first = clusterGraph({ nodes, edges });
   const second = clusterGraph({ nodes, edges });

@@ -38,7 +38,8 @@ export const KIND_HEX: Record<DepGraphNode["kind"], string> = {
   event: "#b45309",
 };
 
-export const GRAPH_VIEW_STORAGE_KEY = "dep-graph-view:v1";
+/** v2: cluster layout and colouring by default; earlier saved views are discarded. */
+export const GRAPH_VIEW_STORAGE_KEY = "dep-graph-view:v2";
 
 export const DEFAULT_GRAPH_VIEW: GraphViewSettings = {
   kinds: { person: true, org: true, doc: true, theme: true, event: true },
@@ -49,8 +50,8 @@ export const DEFAULT_GRAPH_VIEW: GraphViewSettings = {
   minDegree: 0,
   minConfidence: 0,
   labels: "auto",
-  layout: "kind",
-  colorBy: "kind",
+  layout: "cluster",
+  colorBy: "cluster",
   hops: 1,
 };
 
@@ -187,10 +188,16 @@ export function parseGraphView(raw: unknown): GraphViewSettings {
     minConfidence: Math.max(0, Math.min(100, Number(value.minConfidence) || 0)),
     labels: value.labels === "always" || value.labels === "never" ? value.labels : "auto",
     layout:
-      value.layout === "force" || value.layout === "witness" || value.layout === "cluster"
+      value.layout === "force" ||
+      value.layout === "witness" ||
+      value.layout === "cluster" ||
+      value.layout === "kind"
         ? value.layout
-        : "kind",
-    colorBy: value.colorBy === "witness" || value.colorBy === "cluster" ? value.colorBy : "kind",
+        : DEFAULT_GRAPH_VIEW.layout,
+    colorBy:
+      value.colorBy === "witness" || value.colorBy === "cluster" || value.colorBy === "kind"
+        ? value.colorBy
+        : DEFAULT_GRAPH_VIEW.colorBy,
     hops: value.hops === 2 ? 2 : 1,
   };
 }
