@@ -5,6 +5,7 @@ import { createServerFn } from "@tanstack/react-start";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import type { SwUser } from "@/lib/auth/cognito.server";
+import type { JsonValue } from "@/lib/chat/chat.server";
 
 function principalOf(context: unknown): string {
   return (context as { user: SwUser }).user.sub;
@@ -49,6 +50,27 @@ export const getConversationFn = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { getConversation } = await import("@/lib/chat/chat.server");
     return getConversation(principalOf(context), data.convId);
+  });
+
+export const updateConversationStateFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator(
+    (d: {
+      convId: string;
+      memory?: JsonValue | null;
+      matter?: { matterId: string; label: string } | null;
+    }) => {
+      if (!d?.convId) throw new Error("convId required");
+      return {
+        convId: d.convId,
+        ...(d.memory !== undefined ? { memory: d.memory } : {}),
+        ...(d.matter !== undefined ? { matter: d.matter } : {}),
+      };
+    },
+  )
+  .handler(async ({ context, data }) => {
+    const { updateConversationState } = await import("@/lib/chat/chat.server");
+    return updateConversationState(principalOf(context), data.convId, data);
   });
 
 export const saveConversationFn = createServerFn({ method: "POST" })

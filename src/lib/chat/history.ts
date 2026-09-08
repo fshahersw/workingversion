@@ -6,11 +6,12 @@
 // Default behavior: conversations + messages auto-expire 3 days after creation
 // (DynamoDB TTL). `keepConversation` clears the TTL to persist ("save as ongoing").
 //
-// v1 notes: conversation "memory" and matter are not persisted across reloads
-// (carried in-session); follow-ups are not persisted. The rich assistant message
-// (answer/rounds/sources/followups) is stored as JSON so a reopened conversation
-// renders faithfully.
-import type { MatterScope, Message, Round, Source } from "@/lib/chat-types";
+// The rich assistant message (answer/rounds/sources/followups/verification/
+// artifacts/mode) is stored as JSON so a reopened conversation renders
+// faithfully, and the conversation's rolling research memory and matter scope
+// are stored on the conversation item after every turn so reopening continues
+// with the same context rather than a bare tail of recent messages.
+import type { Artifact, MatterScope, Message, Round, Source } from "@/lib/chat-types";
 import {
   createConversationFn,
   appendMessageFn,
@@ -18,7 +19,22 @@ import {
   getConversationFn,
   saveConversationFn,
   deleteConversationFn,
+  updateConversationStateFn,
 } from "@/lib/chat/chat.functions";
+import type { JsonValue } from "@/lib/chat/chat.server";
+
+/** What one assistant turn stores; everything the reopened view needs. */
+type StoredAssistant = {
+  answer?: string;
+  rounds?: Round[];
+  sources?: Source[];
+  followups?: string[];
+  verification?: Message["verification"];
+  artifacts?: Artifact[];
+  mode?: string;
+  modeReason?: string;
+  thinking?: string;
+};
 
 export type ConversationSummary = {
   id: string;
@@ -37,6 +53,17 @@ export type LoadedConversation = {
   memory: unknown;
   messages: Message[];
 };
+
+/** Round-trip through JSON so only serializable memory reaches the server. */
+function toJson(value: unknown): JsonValue | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  try {
+    return JSON.parse(JSON.stringify(value)) as JsonValue;
+  } catch {
+    return undefined;
+  }
+}
 
 function titleFrom(question: string): string {
   const t = question.replace(/\s+/g, " ").trim();
@@ -65,9 +92,9 @@ export async function loadConversation(id: string): Promise<LoadedConversation |
     if (!loaded?.conversation) return null;
     const messages: Message[] = loaded.messages.map((m) => {
       if (m.role === "assistant") {
-        let parsed: { answer?: string; rounds?: Round[]; sources?: Source[]; followups?: string[] } | null = null;
+        let parsed: StoredAssistant | null = null;
         try {
-          parsed = JSON.parse(m.content);
+          parsed = JSON.parse(m.content) as StoredAssistant;
         } catch {
           parsed = null;
         }
@@ -79,6 +106,11 @@ export async function loadConversation(id: string): Promise<LoadedConversation |
           rounds: parsed?.rounds ?? [],
           sources: parsed?.sources ?? [],
           followups: parsed?.followups ?? [],
+          ...(parsed?.verification ? { verification: parsed.verification } : {}),
+          ...(parsed?.artifacts?.length ? { artifacts: parsed.artifacts } : {}),
+          ...(parsed?.mode ? { mode: parsed.mode } : {}),
+          ...(parsed?.modeReason ? { modeReason: parsed.modeReason } : {}),
+          ...(parsed?.thinking ? { thinking: parsed.thinking } : {}),
           status: "done" as const,
         };
       }
@@ -93,11 +125,12 @@ export async function loadConversation(id: string): Promise<LoadedConversation |
         status: "done" as const,
       };
     });
+    const state = (loaded as { state?: { memory?: unknown; matter?: MatterScope | null } }).state;
     return {
       id: loaded.conversation.convId,
       title: loaded.conversation.title || "New research",
-      matter: null,
-      memory: null,
+      matter: state?.matter ?? null,
+      memory: state?.memory ?? null,
       messages,
     };
   } catch {
@@ -138,15 +171,31 @@ export async function saveTurn(args: {
     await appendMessageFn({
       data: { convId: conversationId, role: "user", content: args.question.text },
     });
-    const assistantPayload = JSON.stringify({
+    const stored: StoredAssistant = {
       answer: args.answer.answer ?? "",
       rounds: args.answer.rounds ?? [],
       sources: args.answer.sources ?? [],
       followups: args.answer.followups ?? [],
-    });
+      ...(args.answer.verification ? { verification: args.answer.verification } : {}),
+      ...(args.answer.artifacts?.length ? { artifacts: args.answer.artifacts } : {}),
+      ...(args.answer.mode ? { mode: args.answer.mode } : {}),
+      ...(args.answer.modeReason ? { modeReason: args.answer.modeReason } : {}),
+      ...(args.answer.thinking ? { thinking: args.answer.thinking.slice(0, 20_000) } : {}),
+    };
     await appendMessageFn({
-      data: { convId: conversationId, role: "assistant", content: assistantPayload },
+      data: { convId: conversationId, role: "assistant", content: JSON.stringify(stored) },
     });
+    // Memory arrives on the `memory` SSE event after the answer; the caller
+    // passes the latest it has. Best-effort: a miss here only costs context on
+    // a later reopen, never the turn itself.
+    const memory = toJson(args.memory);
+    await updateConversationStateFn({
+      data: {
+        convId: conversationId,
+        ...(memory !== undefined ? { memory } : {}),
+        matter: args.matter,
+      },
+    }).catch(() => undefined);
     return conversationId;
   } catch {
     return args.conversationId;

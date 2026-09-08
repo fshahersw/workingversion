@@ -98,6 +98,36 @@ export async function listConversations(principal: string, limit = 50): Promise<
   }));
 }
 
+/** Rolling research memory is a bounded JSON blob; larger than this is discarded. */
+const MAX_MEMORY_CHARS = 200_000;
+
+/** JSON-serializable value; the server-function serializer rejects `unknown`. */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+export type ConversationState = {
+  /** Server-built rolling memory (summary, entity ledger, tail, carried sources). */
+  memory: JsonValue | null;
+  /** Matter the attorney scoped the conversation to, if any. */
+  matter: { matterId: string; label: string } | null;
+};
+
+function parseState(conv: Record<string, unknown>): ConversationState {
+  let memory: JsonValue | null = null;
+  if (typeof conv.memory === "string" && conv.memory) {
+    try {
+      memory = JSON.parse(conv.memory) as JsonValue;
+    } catch {
+      memory = null;
+    }
+  }
+  const rawMatter = conv.matter as { matterId?: unknown; label?: unknown } | undefined;
+  const matter =
+    rawMatter && typeof rawMatter.matterId === "string" && rawMatter.matterId
+      ? { matterId: rawMatter.matterId, label: String(rawMatter.label ?? rawMatter.matterId) }
+      : null;
+  return { memory, matter };
+}
+
 export async function getConversation(principal: string, convId: string) {
   const conv = await loadConv(principal, convId);
   const msgs = await queryPrefix(convPK(convId), "MSG#", { scanForward: true });
@@ -110,6 +140,7 @@ export async function getConversation(principal: string, convId: string) {
       createdAt: conv.createdAt as string,
       updatedAt: conv.updatedAt as string,
     } as Conversation,
+    state: parseState(conv),
     messages: msgs.map((m) => ({
       msgId: (m.SK as string).slice("MSG#".length),
       role: m.role as Role,
@@ -117,6 +148,41 @@ export async function getConversation(principal: string, convId: string) {
       ts: m.ts as string,
     })) as Message[],
   };
+}
+
+/**
+ * Store the conversation's research memory and matter scope after a turn, so
+ * reopening it later continues with the same context instead of a bare tail.
+ */
+export async function updateConversationState(
+  principal: string,
+  convId: string,
+  state: { memory?: JsonValue | null; matter?: { matterId: string; label: string } | null },
+): Promise<{ ok: true }> {
+  await loadConv(principal, convId);
+  const set: Record<string, unknown> = {};
+  const remove: string[] = [];
+  if (state.memory !== undefined) {
+    const json = state.memory === null ? "" : JSON.stringify(state.memory);
+    if (json && json.length <= MAX_MEMORY_CHARS) set.memory = json;
+    else remove.push("memory");
+  }
+  if (state.matter !== undefined) {
+    if (state.matter && state.matter.matterId) {
+      set.matter = {
+        matterId: String(state.matter.matterId).slice(0, 120),
+        label: String(state.matter.label ?? state.matter.matterId).slice(0, 200),
+      };
+    } else {
+      remove.push("matter");
+    }
+  }
+  if (!Object.keys(set).length && !remove.length) return { ok: true };
+  await updateItem(userPK(principal), convSK(convId), {
+    ...(Object.keys(set).length ? { set } : {}),
+    ...(remove.length ? { remove } : {}),
+  });
+  return { ok: true };
 }
 
 /** Persist a conversation (clear the 3-day TTL) and optionally file it in a folder. */
