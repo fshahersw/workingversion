@@ -93,3 +93,66 @@ export async function searchKb(sub: string, args: KbSearchArgs): Promise<KbHit[]
     return hits.slice(0, topK);
   }
 }
+
+export type KbDocumentPages = {
+  docId: string;
+  /** Pages ranked by their best fused chunk score, strongest first. */
+  pages: { page: number; score: number }[];
+};
+
+/**
+ * Per-document page ranking for one question: the same pgvector + BM25 fusion,
+ * run independently inside each document so no document is crowded out by a
+ * more verbose neighbour. Used by Tabular Review, where a cell is answered
+ * from one document only. The query is embedded once; documents are searched
+ * in a small pool. Degrades to lexical-only if the embedder fails.
+ */
+export async function searchKbByDocuments(
+  sub: string,
+  args: {
+    workspaceId: string;
+    surface: KbSurface;
+    query: string;
+    docIds: string[];
+    perDocPages?: number;
+    signal?: AbortSignal;
+  },
+): Promise<KbDocumentPages[]> {
+  const perDocPages = Math.max(1, Math.min(args.perDocPages ?? 12, 32));
+  if (!args.docIds.length) return [];
+  const { embedText } = await import("@/lib/pile/titan.server");
+  const { mapPool } = await import("@/lib/pile/async");
+  const embedding = await embedText(args.query, args.signal).catch(() => null);
+  return mapPool(args.docIds, 6, async (docId) => {
+    if (args.signal?.aborted) return { docId, pages: [] };
+    let hits: KbHit[] = [];
+    try {
+      hits = await hybridSearch({
+        sub,
+        workspaceId: args.workspaceId,
+        surface: args.surface,
+        query: args.query,
+        embedding,
+        match: Math.max(24, perDocPages * 3),
+        snippetChars: 120,
+        docIds: [docId],
+      });
+    } catch {
+      return { docId, pages: [] };
+    }
+    const byPage = new Map<number, number>();
+    for (const hit of hits) {
+      const start = hit.page_start ?? 0;
+      const end = hit.page_end ?? start;
+      for (let page = start; page <= Math.min(end, start + 2); page++) {
+        if (page <= 0) continue;
+        byPage.set(page, Math.max(byPage.get(page) ?? 0, hit.score));
+      }
+    }
+    const pages = [...byPage.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+      .slice(0, perDocPages)
+      .map(([page, score]) => ({ page, score }));
+    return { docId, pages };
+  });
+}

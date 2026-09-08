@@ -14,7 +14,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { extractFile, fileKind } from "@/lib/extract-text";
 import { abortableDelay, rawFileSha256, uploadOriginalBytes } from "@/lib/kb/client-upload";
-import { SYNC_INGEST_MAX_CHARS, SYNC_INGEST_MAX_PAGES } from "@/lib/kb/ingest-state";
+import { planSaveLane } from "@/lib/kb/ingest-state";
+import { searchWorkspaceDocumentsFn } from "@/lib/kb/search.functions";
 import {
   deleteWorkspaceFn,
   getWorkspaceFn,
@@ -26,8 +27,11 @@ import { mapPool, sleep, withRetry } from "@/lib/pile/async";
 import { MAX_FILES, MAX_PAGES } from "@/lib/pile/limits";
 import { PileClient } from "@/lib/pile/pile-client";
 import type { PileFile, PilePage, SavedWorkspaceBinding } from "@/lib/pile/types";
+import { forEachRenderedPdfPage } from "@/lib/pile-render";
 
+import { harmonizeValues } from "./canonical";
 import { recoverScannedPages } from "./ocr-pages";
+import { fusePageRanks, withNeighbours } from "./retrieval-fusion";
 import * as db from "./review-db";
 import {
   bindingsFromSave,
@@ -43,16 +47,32 @@ import {
   REVIEW_PIPELINE_ENABLED,
   REVIEW_PIPELINE_VERSION,
   REVIEW_SAMPLE_ROWS,
+  REVIEW_VISION_MAX_PAGES,
   cellCacheKey,
   displayValue,
   documentRowFingerprint,
   type CellAnswer,
+  type CellPageImage,
   type ColumnKind,
   type ReviewCell,
   type ReviewColumn,
   type ReviewRow,
   type ReviewTable,
 } from "./types";
+
+/** Cells are written to the table as they land, in batches this size. */
+const CELL_FLUSH_EVERY = 6;
+/** Free-text kinds whose spellings are harmonized within a column after a run. */
+const HARMONIZED_KINDS = new Set<ColumnKind>(["text", "list"]);
+/** Pause before the automatic retry of a column's transient failures. */
+const RETRY_COOLDOWN_MS = 4_000;
+
+/** Failures worth one more attempt after a pause: throttling, timeouts, transport. */
+export function isTransientCellError(message: string): boolean {
+  return /HTTP 429|HTTP 5\d\d|timed out|timeout|Failed to fetch|network|ECONNRESET|socket|Cell failed \(HTTP 5|returned no text|did not return a JSON object|All models in the chain failed/i.test(
+    message,
+  );
+}
 
 /** How the table's documents stand in the owner's account. */
 export type DocSaveState = {
@@ -118,11 +138,14 @@ function findDocumentRow(
   );
 }
 
+type CellPages = { page: number; text: string; ocr?: boolean }[];
+
 async function requestCell(input: {
   column: { name: string; question: string; kind: ColumnKind; options: string[] };
   instructions: string | null;
   fileName: string;
-  pages: { page: number; text: string; ocr?: boolean }[];
+  pages: CellPages;
+  images?: CellPageImage[];
   signal?: AbortSignal;
 }): Promise<CellAnswer> {
   const payload = {
@@ -133,6 +156,7 @@ async function requestCell(input: {
     instructions: input.instructions,
     fileName: input.fileName,
     pages: input.pages,
+    ...(input.images?.length ? { images: input.images } : {}),
   };
 
   let last: Error | null = null;
@@ -178,6 +202,8 @@ export function useReviewTable(
   const abortRef = useRef<AbortController | null>(null);
   const sharedRef = useRef(shared);
   sharedRef.current = shared;
+  /** Original PDFs dropped this session, by pile file id, for page-image re-reads. */
+  const fileBlobs = useRef(new Map<string, File>());
 
   const [tables, setTables] = useState<ReviewTable[]>([]);
   const [table, setTable] = useState<ReviewTable | null>(null);
@@ -464,6 +490,7 @@ export function useReviewTable(
 
   const closeTable = useCallback(async () => {
     abortRef.current?.abort();
+    fileBlobs.current.clear();
     // Document saves keep running: the server binds rows when ingest lands and
     // the next open picks them up through the workspace manifest.
     setTable(null);
@@ -533,9 +560,16 @@ export function useReviewTable(
             .filter((p) => p.text.trim())
             .map((p) => ({ page: p.page, text: p.text }));
           const totalChars = pages.reduce((n, p) => n + p.text.length, 0);
-          // Oversize documents take the asynchronous lane over the original
-          // bytes; everything else is indexed from the text the grid reads.
-          const oversize = pages.length > SYNC_INGEST_MAX_PAGES || totalChars > SYNC_INGEST_MAX_CHARS;
+          // Oversize or textless documents take the asynchronous lane over the
+          // original bytes; everything else is indexed from the text the grid
+          // reads. A textless document whose upload failed is left out.
+          const plan = planSaveLane({
+            readablePages: pages.length,
+            totalChars,
+            lowQuality: false,
+            hasBytes: Boolean(bytesKey && sha256),
+          });
+          if (plan === "skip") return null;
           return {
             clientFileId: doc.fileId,
             fileName: doc.name,
@@ -543,16 +577,21 @@ export function useReviewTable(
             ...(sha256 ? { sha256 } : {}),
             byteSize: doc.file.size,
             ...(bytesKey ? { bytesKey } : {}),
-            pages: oversize ? [] : pages,
+            pages: plan === "async" ? [] : pages,
           };
         });
         if (signal.aborted) return;
+        const submitted = files.filter((file): file is NonNullable<typeof file> => file !== null);
+        const skipped = docs.length - submitted.length;
+        if (!submitted.length) {
+          throw new Error("no readable text was extracted and the original files could not be uploaded");
+        }
         const res = await saveWorkspaceFn({
           data: {
             requestId,
             name: reviewBatchName(target.name, docs.map((d) => d.name)),
             surface: "review",
-            files,
+            files: submitted,
           },
         });
         itemId = res.itemId;
@@ -619,6 +658,11 @@ export function useReviewTable(
             setDocSave({
               status: "indexing",
               message: "Large documents are still indexing; they finish binding when you reopen this table.",
+            });
+          } else if (skipped) {
+            setDocSave({
+              status: "error",
+              message: `${skipped} document${skipped === 1 ? "" : "s"} stayed in this tab only: no readable text and the original file could not be uploaded.`,
             });
           } else {
             setDocSave({ status: "saved", message: null });
@@ -703,6 +747,7 @@ export function useReviewTable(
           }));
 
           if (fileKind(file) === "pdf") {
+            fileBlobs.current.set(fileId, file);
             setFiles((prev) =>
               prev.map((f) =>
                 f.fileId === `pending:${file.name}`
@@ -1002,12 +1047,98 @@ export function useReviewTable(
 
   // --- retrieval -------------------------------------------------------------
 
-  /** Per-document evidence packs for one question, keyed by file id. */
+  type EvidencePack = { pages: CellPages; semantic: boolean };
+
+  /**
+   * Per-document evidence packs for one question, keyed by file id. The
+   * in-tab BM25 pack is fused with the saved index's semantic ranking for every
+   * row bound to a saved document, so a page either ranker trusts is read. If
+   * the saved index is unreachable the lexical pack stands on its own.
+   */
   const packsFor = useCallback(
-    async (question: string) => {
+    async (question: string, targetRows: readonly ReviewRow[]) => {
       const { groups, texts } = await pile().packAskByFile(question, null, REVIEW_CELL_PAGES);
-      setPageTexts((prev) => ({ ...prev, ...texts }));
-      return new Map(groups.map((g) => [g.fileId, g]));
+      const lexical = new Map(groups.map((g) => [g.fileId, g]));
+      const ocrByKey = new Map<string, boolean>();
+      for (const g of groups) for (const p of g.pages) ocrByKey.set(`${g.fileId}:${p.page}`, p.ocr);
+
+      // Semantic candidates, one call per source workspace.
+      const byWorkspace = new Map<string, { docId: string; fileId: string; pageCount: number }[]>();
+      for (const row of targetRows) {
+        const fileId = row.fileIds[0];
+        if (!row.docId || !row.workspaceItemId || !fileId) continue;
+        const list = byWorkspace.get(row.workspaceItemId) ?? [];
+        list.push({ docId: row.docId, fileId, pageCount: row.pageCount });
+        byWorkspace.set(row.workspaceItemId, list);
+      }
+      const semantic = new Map<string, number[]>();
+      let semanticUnavailable = false;
+      await Promise.all(
+        [...byWorkspace].map(async ([itemId, entries]) => {
+          try {
+            const ranked = await searchWorkspaceDocumentsFn({
+              data: {
+                itemId,
+                query: question,
+                docIds: entries.map((e) => e.docId),
+                perDocPages: REVIEW_CELL_PAGES,
+              },
+            });
+            const fileByDoc = new Map(entries.map((e) => [e.docId, e.fileId]));
+            for (const r of ranked) {
+              const fileId = fileByDoc.get(r.docId);
+              if (fileId) semantic.set(fileId, r.pages.map((p) => p.page));
+            }
+          } catch {
+            semanticUnavailable = true;
+          }
+        }),
+      );
+
+      // Fuse per file and fetch text for pages the lexical pack did not carry.
+      const fusedPages = new Map<string, number[]>();
+      const pageCountByFile = new Map(
+        [...byWorkspace.values()].flat().map((e) => [e.fileId, e.pageCount]),
+      );
+      for (const [fileId, sem] of semantic) {
+        const lex = (lexical.get(fileId)?.pages ?? []).map((p) => p.page);
+        const fused = fusePageRanks(lex, sem, REVIEW_CELL_PAGES);
+        fusedPages.set(
+          fileId,
+          withNeighbours(fused, pageCountByFile.get(fileId) ?? Number.MAX_SAFE_INTEGER, REVIEW_CELL_PAGES),
+        );
+      }
+      const need = [...fusedPages].flatMap(([fileId, pages]) =>
+        pages.filter((page) => texts[`${fileId}:${page}`] === undefined).map((page) => ({ fileId, page })),
+      );
+      const extra = need.length ? (await pile().textsFor(need)).texts : {};
+      const allTexts = { ...texts, ...extra };
+      setPageTexts((prev) => ({ ...prev, ...allTexts }));
+
+      const packs = new Map<string, EvidencePack>();
+      for (const [fileId, g] of lexical) {
+        const fused = fusedPages.get(fileId);
+        if (fused) {
+          packs.set(fileId, {
+            semantic: true,
+            pages: fused
+              .filter((page) => allTexts[`${fileId}:${page}`] !== undefined)
+              .map((page) => ({
+                page,
+                text: allTexts[`${fileId}:${page}`]!,
+                ocr: ocrByKey.get(`${fileId}:${page}`) ?? false,
+              })),
+          });
+        } else {
+          packs.set(fileId, {
+            semantic: false,
+            pages: [...g.pages]
+              .sort((a, b) => a.page - b.page)
+              .map((p) => ({ page: p.page, text: p.text, ocr: p.ocr })),
+          });
+        }
+      }
+      return { packs, semanticUnavailable };
     },
     [pile],
   );
@@ -1019,6 +1150,56 @@ export function useReviewTable(
     abortRef.current = null;
     setRun((r) => ({ ...r, running: false, label: "Cancelled" }));
   }, []);
+
+  /**
+   * Second look for a cell that came back flagged on scanned pages: render the
+   * pages the model leaned on and ask the vision judge to read the images.
+   * Only possible while the original PDF is in this session (drop time).
+   */
+  const visionReread = useCallback(
+    async (input: {
+      fileId: string;
+      column: ReviewColumn | { name: string; question: string; kind: ColumnKind; options: string[] };
+      instructions: string | null;
+      fileName: string;
+      pages: CellPages;
+      answer: CellAnswer;
+      signal: AbortSignal;
+    }): Promise<CellAnswer | null> => {
+      const file = fileBlobs.current.get(input.fileId);
+      if (!file || fileKind(file) !== "pdf") return null;
+      const ocrPages = input.pages.filter((p) => p.ocr).map((p) => p.page);
+      if (!ocrPages.length) return null;
+      const flagged =
+        input.answer.status === "needs_review" ||
+        input.answer.confidence === "low" ||
+        input.answer.status === "not_found";
+      if (!flagged) return null;
+      const cited = input.answer.citations.map((c) => c.page).filter((p) => ocrPages.includes(p));
+      const targets = [...new Set([...cited, ...ocrPages])].slice(0, REVIEW_VISION_MAX_PAGES);
+      const images: CellPageImage[] = [];
+      await forEachRenderedPdfPage(
+        file,
+        targets,
+        async (page, data) => {
+          images.push({ page, mediaType: "image/jpeg", data });
+        },
+        input.signal,
+        2,
+      );
+      if (!images.length) return null;
+      images.sort((a, b) => a.page - b.page);
+      return requestCell({
+        column: input.column,
+        instructions: input.instructions,
+        fileName: input.fileName,
+        pages: input.pages,
+        images,
+        signal: input.signal,
+      });
+    },
+    [],
+  );
 
   /**
    * Fill cells. Verified and overridden cells are never touched; cells whose
@@ -1112,6 +1293,26 @@ export function useReviewTable(
 
       let done = 0;
       let failed = 0;
+      let semanticGap = false;
+
+      /** Persist finished cells in small batches so a closed tab loses at most a few. */
+      const flushQueue: db.CellWrite[] = [];
+      const flush = async (force = false) => {
+        if (!flushQueue.length || (!force && flushQueue.length < CELL_FLUSH_EVERY)) return;
+        const batch = flushQueue.splice(0, flushQueue.length);
+        const saved = await db.saveCells(batch);
+        setCells((prev) => {
+          const next = { ...prev };
+          for (const c of saved) next[key(c.rowId, c.columnId)] = c;
+          return next;
+        });
+      };
+      let flushing: Promise<void> = Promise.resolve();
+      const enqueue = (write: db.CellWrite, force = false) => {
+        flushQueue.push(write);
+        flushing = flushing.then(() => flush(force)).catch(() => undefined);
+        return flushing;
+      };
 
       try {
         for (const column of targetColumns) {
@@ -1120,9 +1321,70 @@ export function useReviewTable(
           if (!columnJobs.length) continue;
 
           setRun((r) => ({ ...r, label: `Reading for “${column.name}”` }));
-          const packs = await packsFor(column.question);
+          const { packs, semanticUnavailable } = await packsFor(
+            column.question,
+            columnJobs.map((j) => j.row),
+          );
+          semanticGap = semanticGap || semanticUnavailable;
 
-          const writes: db.CellWrite[] = [];
+          const columnWrites: db.CellWrite[] = [];
+          /** Cells that failed for a transient reason and get one cooled-down retry. */
+          const retryable: { job: Job; pages: CellPages; fileId: string }[] = [];
+
+          const attemptCell = async (job: Job, fileId: string, pages: CellPages): Promise<db.CellWrite> => {
+            let answer = await requestCell({
+              column,
+              instructions: table.instructions,
+              fileName: job.row.label,
+              pages,
+              signal: controller.signal,
+            });
+            const second = await visionReread({
+              fileId,
+              column,
+              instructions: table.instructions,
+              fileName: job.row.label,
+              pages,
+              answer,
+              signal: controller.signal,
+            }).catch(() => null);
+            if (second && (second.status === "answered" || answer.status !== "answered")) {
+              answer = second;
+            }
+            return {
+              owner,
+              tableId: table.id,
+              rowId: job.row.id,
+              columnId: column.id,
+              cacheKey: job.cacheKey,
+              runId,
+              value: answer.value ?? null,
+              display: answer.display || displayValue(answer.value),
+              status: answer.status,
+              confidence: answer.confidence,
+              citations: answer.citations ?? [],
+              rationale: answer.rationale ?? null,
+              pagesSearched: pages.map((p) => p.page),
+              error: null,
+            };
+          };
+          const errorWrite = (job: Job, pages: CellPages, message: string): db.CellWrite => ({
+            owner,
+            tableId: table.id,
+            rowId: job.row.id,
+            columnId: column.id,
+            cacheKey: job.cacheKey,
+            runId,
+            value: null,
+            display: "",
+            status: "error",
+            confidence: null,
+            citations: [],
+            rationale: null,
+            pagesSearched: pages.map((p) => p.page),
+            error: message,
+          });
+
           await mapPool(columnJobs, REVIEW_CELL_CONCURRENCY, async (job) => {
             const settle = () =>
               setPending((prev) => {
@@ -1133,90 +1395,123 @@ export function useReviewTable(
             if (controller.signal.aborted) return settle();
             const fileId = job.row.fileIds[0] ?? "";
             const pack = packs.get(fileId);
-            const pages = (pack?.pages ?? []).map((p) => ({
-              page: p.page,
-              text: p.text,
-              ocr: p.ocr,
-            }));
-            const base = {
-              owner,
-              tableId: table.id,
-              rowId: job.row.id,
-              columnId: column.id,
-              cacheKey: job.cacheKey,
-              runId,
-            };
-            if (!fileId) {
-              writes.push({
-                ...base,
-                value: null,
-                display: "",
-                status: "error",
-                confidence: null,
-                citations: [],
-                rationale: null,
-                pagesSearched: [],
-                error: "Re-upload this document to run it",
-              });
+            const pages: CellPages = pack?.pages ?? [];
+            if (!fileId || !pack) {
+              const write = errorWrite(
+                job,
+                [],
+                job.row.docId
+                  ? "This document is still loading from your account; run again shortly"
+                  : "Re-upload this document to run it",
+              );
+              columnWrites.push(write);
+              void enqueue(write);
               failed++;
               setRun((r) => ({ ...r, failed }));
               settle();
               return;
             }
-
             try {
-              const answer = await requestCell({
-                column,
-                instructions: table.instructions,
-                fileName: job.row.label,
-                pages,
-                signal: controller.signal,
-              });
-              writes.push({
-                ...base,
-                value: answer.value ?? null,
-                display: answer.display || displayValue(answer.value),
-                status: answer.status,
-                confidence: answer.confidence,
-                citations: answer.citations ?? [],
-                rationale: answer.rationale ?? null,
-                pagesSearched: pages.map((p) => p.page),
-                error: null,
-              });
+              const write = await attemptCell(job, fileId, pages);
+              columnWrites.push(write);
+              void enqueue(write);
               done++;
               setRun((r) => ({ ...r, done }));
-              settle();
             } catch (err) {
-              settle();
-              if (controller.signal.aborted) return;
-              writes.push({
-                ...base,
-                value: null,
-                display: "",
-                status: "error",
-                confidence: null,
-                citations: [],
-                rationale: null,
-                pagesSearched: pages.map((p) => p.page),
-                error: err instanceof Error ? err.message : "Cell failed",
-              });
-              failed++;
-              setRun((r) => ({ ...r, failed }));
+              if (controller.signal.aborted) return settle();
+              const message = err instanceof Error ? err.message : "Cell failed";
+              if (isTransientCellError(message)) {
+                retryable.push({ job, pages, fileId });
+              } else {
+                const write = errorWrite(job, pages, message);
+                columnWrites.push(write);
+                void enqueue(write);
+                failed++;
+                setRun((r) => ({ ...r, failed }));
+              }
             }
+            settle();
           });
 
-          if (writes.length) {
-            const saved = await db.saveCells(writes);
-            setCells((prev) => {
-              const next = { ...prev };
-              for (const c of saved) next[key(c.rowId, c.columnId)] = c;
+          // One cooled-down retry for transient failures (throttling, timeouts,
+          // dropped connections) so a burst of 429s does not leave holes.
+          if (retryable.length && !controller.signal.aborted) {
+            setRun((r) => ({
+              ...r,
+              label: `Retrying ${retryable.length} cell${retryable.length === 1 ? "" : "s"} for “${column.name}”`,
+            }));
+            setPending((prev) => {
+              const next = new Set(prev);
+              for (const r of retryable) next.add(key(r.job.row.id, column.id));
               return next;
             });
+            await sleep(RETRY_COOLDOWN_MS, controller.signal).catch(() => undefined);
+            await mapPool(retryable, Math.max(2, Math.floor(REVIEW_CELL_CONCURRENCY / 3)), async (r) => {
+              const settle = () =>
+                setPending((prev) => {
+                  const next = new Set(prev);
+                  next.delete(key(r.job.row.id, column.id));
+                  return next;
+                });
+              if (controller.signal.aborted) return settle();
+              try {
+                const write = await attemptCell(r.job, r.fileId, r.pages);
+                columnWrites.push(write);
+                void enqueue(write);
+                done++;
+                setRun((s) => ({ ...s, done }));
+              } catch (err) {
+                if (controller.signal.aborted) return settle();
+                const write = errorWrite(
+                  r.job,
+                  r.pages,
+                  `${err instanceof Error ? err.message : "Cell failed"} (retried once)`,
+                );
+                columnWrites.push(write);
+                void enqueue(write);
+                failed++;
+                setRun((s) => ({ ...s, failed }));
+              }
+              settle();
+            });
+          }
+          await flushing;
+          await flush(true);
+
+          // Within-column harmonization: spellings that differ only by case,
+          // punctuation or whitespace collapse to the dominant form, so the
+          // grid, filters and exports treat them as one value.
+          if (HARMONIZED_KINDS.has(column.kind) && !controller.signal.aborted) {
+            const eligible = columnWrites.filter(
+              (w) => w.status === "answered" && typeof w.value === "string" && w.value.trim(),
+            );
+            const { changes } = harmonizeValues(eligible.map((w) => w.value as string));
+            if (changes.size) {
+              const rewrites = eligible
+                .filter((w) => changes.has(w.value as string))
+                .map((w) => {
+                  const canonical = changes.get(w.value as string)!;
+                  return {
+                    ...w,
+                    value: canonical,
+                    display: canonical,
+                    rationale: `${w.rationale ?? ""} [spelling harmonized from "${w.value as string}"]`.trim(),
+                  };
+                });
+              const saved = await db.saveCells(rewrites);
+              setCells((prev) => {
+                const next = { ...prev };
+                for (const c of saved) next[key(c.rowId, c.columnId)] = c;
+                return next;
+              });
+            }
           }
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "The run stopped early");
       }
+      await flushing.catch(() => undefined);
+      await flush(true).catch(() => undefined);
 
       const cancelled = controller.signal.aborted;
       await db.finishRun(runId, {
@@ -1232,10 +1527,15 @@ export function useReviewTable(
         done,
         failed,
         skipped,
-        label: cancelled ? "Cancelled" : failed ? `${failed} cell(s) failed` : "Run complete",
+        label: [
+          cancelled ? "Cancelled" : failed ? `${failed} cell(s) failed` : "Run complete",
+          semanticGap ? "saved index unreachable, lexical retrieval only" : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
       });
     },
-    [cells, columns, owner, packsFor, rows, table],
+    [cells, columns, owner, packsFor, rows, table, visionReread],
   );
 
   /**
@@ -1252,7 +1552,7 @@ export function useReviewTable(
       if (!draft.question.trim()) throw new Error("Write the question first");
       const sample = rows.filter((r) => r.fileIds[0]).slice(0, REVIEW_SAMPLE_ROWS);
       if (!sample.length) throw new Error("Add documents to this table first");
-      const packs = await packsFor(draft.question);
+      const { packs } = await packsFor(draft.question, sample);
 
       const results: SampleResult[] = [];
       await mapPool(sample, REVIEW_CELL_CONCURRENCY, async (row) => {
@@ -1262,7 +1562,7 @@ export function useReviewTable(
             column: draft,
             instructions: table?.instructions ?? null,
             fileName: row.label,
-            pages: (pack?.pages ?? []).map((p) => ({ page: p.page, text: p.text, ocr: p.ocr })),
+            pages: pack?.pages ?? [],
           });
           results.push({ rowId: row.id, label: row.label, answer, error: null });
         } catch (err) {

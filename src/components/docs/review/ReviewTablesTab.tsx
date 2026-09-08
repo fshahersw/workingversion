@@ -279,6 +279,17 @@ export function ReviewTablesTab() {
         >
           Tables
         </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="gap-1 text-[12.5px] text-muted-foreground"
+          disabled={busy || run.running}
+          title="Start a blank table (this one stays saved)"
+          onClick={() => void review.newTable("Untitled review")}
+        >
+          <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
+          New
+        </Button>
         <Input
           defaultValue={table.name}
           onBlur={(e) => {

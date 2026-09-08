@@ -24,7 +24,11 @@ export const REVIEW_PIPELINE_ENABLED = true;
  * Goes into every cell's cache key so flipping the pipeline on (or changing
  * its prompts/chains) invalidates cells produced by the previous model.
  */
-export const REVIEW_PIPELINE_VERSION = "nemotron-v2";
+export const REVIEW_PIPELINE_VERSION = "nemotron-v3";
+
+/** Page images sent for a vision re-read of a flagged cell (scanned pages). */
+export const REVIEW_VISION_MAX_PAGES = 3;
+export const REVIEW_VISION_MAX_IMAGE_CHARS = 2_500_000;
 
 /** Skip the verify pass. Cheaper and faster; fewer cells get flagged. */
 export const REVIEW_SKIP_VERIFY = false;
@@ -87,6 +91,18 @@ export type CellCitation = {
   /** Verbatim span the answer rests on. Kept so a cite is readable later. */
   quote: string;
   fileName?: string;
+  /**
+   * The quote was read from the page image, not located in the text layer
+   * (scanned page whose OCR disagreed with the image). Verify against the page.
+   */
+  fromImage?: boolean;
+};
+
+export type CellPageImage = {
+  page: number;
+  mediaType: "image/jpeg" | "image/png" | "image/webp";
+  /** Base64 image bytes. */
+  data: string;
 };
 
 export type ReviewColumn = {
@@ -187,6 +203,8 @@ export type CellRequest = {
   instructions?: string | null;
   fileName: string;
   pages: { page: number; text: string; ocr?: boolean }[];
+  /** When present the cell is re-read from these page images by the vision judge. */
+  images?: CellPageImage[];
 };
 
 export function columnKindLabel(kind: ColumnKind): string {

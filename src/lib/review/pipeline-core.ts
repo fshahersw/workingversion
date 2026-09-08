@@ -7,6 +7,7 @@
 // ============================================================================
 import type { CellCitation, ColumnKind, JsonValue } from "./types.ts";
 
+import { matchOption } from "./canonical.ts";
 import { displayValue } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -25,6 +26,10 @@ export const MODELS = {
   gemma: "google.gemma-3-27b-it",
   /** Heavy synthesis (table insights, prompt improvement). On-demand Converse. */
   kimi: "moonshotai.kimi-k2.5",
+  /** Cheap vision reader (same model the OCR path uses). On-demand Converse. */
+  nemotronVl: "nvidia.nemotron-nano-12b-v2",
+  /** Stronger vision fallback, still far cheaper than the Anthropic judge. */
+  qwenVl: "qwen.qwen3-vl-235b-a22b",
 } as const;
 
 export type ModelId = (typeof MODELS)[keyof typeof MODELS];
@@ -54,6 +59,12 @@ export const EXTRACT_CHAIN: readonly string[] = [MODELS.nemotronNano, MODELS.gem
 export const VERIFY_CHAIN: readonly string[] = [MODELS.gemma, MODELS.nemotronNano];
 
 export const HEAVY_CHAIN: readonly string[] = [MODELS.kimi, MODELS.nemotronNano];
+
+/**
+ * Vision re-read of scanned pages: cheap VL models in parallel-friendly order.
+ * The Anthropic judge is only reached when the whole chain is unavailable.
+ */
+export const VISION_CHAIN: readonly string[] = [MODELS.nemotronVl, MODELS.qwenVl];
 
 /** Same model, same call — worth retrying before walking the chain. */
 export function isRetryableStatus(status: number): boolean {
@@ -277,41 +288,75 @@ export function checkCitations(
 // Value normalization by column kind
 // ---------------------------------------------------------------------------
 
-export function normalizeValue(
+export type ConstrainedValue = {
+  value: JsonValue;
+  /**
+   * Answers a select / multi_select column returned that map to none of its
+   * options (or to more than one). Non-empty means the cell must be flagged:
+   * a constrained column never silently stores free text.
+   */
+  unmatched: string[];
+};
+
+/**
+ * Coerce the model's `value` to the column kind. Constrained kinds resolve
+ * each answer to an allowed option through exact → normalized → conservative
+ * fuzzy matching (see canonical.ts); anything unresolved is reported back so
+ * the caller can flag the cell instead of storing a near-miss spelling.
+ */
+export function constrainValue(
   parsed: Record<string, unknown>,
   kind: ColumnKind,
   options: string[],
-): JsonValue {
+): ConstrainedValue {
   const value = parsed["value"];
-  if (value === null || value === undefined) return null;
+  if (value === null || value === undefined) return { value: null, unmatched: [] };
   if (kind === "yes_no") {
     const s = String(value).trim().toLowerCase();
-    if (s.startsWith("y")) return "Yes";
-    if (s.startsWith("n")) return "No";
-    return "Unclear";
+    if (s.startsWith("y")) return { value: "Yes", unmatched: [] };
+    if (s.startsWith("n")) return { value: "No", unmatched: [] };
+    return { value: "Unclear", unmatched: [] };
   }
   if (kind === "number") {
     const n =
       typeof value === "number" ? value : Number(String(value).replace(/[^0-9.-]/g, ""));
-    if (!Number.isFinite(n)) return null;
+    if (!Number.isFinite(n)) return { value: null, unmatched: [] };
     const unit = String(parsed["unit"] ?? "").trim();
-    return unit ? `${n} ${unit}` : n;
+    return { value: unit ? `${n} ${unit}` : n, unmatched: [] };
   }
   if (kind === "select") {
     const s = String(value).trim();
-    return options.find((o) => o.toLowerCase() === s.toLowerCase()) ?? s;
+    if (!s) return { value: null, unmatched: [] };
+    const match = matchOption(s, options);
+    return match.option === null ? { value: s, unmatched: [s] } : { value: match.option, unmatched: [] };
   }
   if (kind === "multi_select" || kind === "list") {
     const arr = Array.isArray(value) ? value : String(value).split(/[;,]/);
     const cleaned = arr.map((v) => String(v).trim()).filter(Boolean);
     if (kind === "multi_select") {
-      return cleaned
-        .map((v) => options.find((o) => o.toLowerCase() === v.toLowerCase()) ?? v)
-        .filter((v, i, a) => a.indexOf(v) === i);
+      const unmatched: string[] = [];
+      const mapped = cleaned.map((v) => {
+        const match = matchOption(v, options);
+        if (match.option === null) unmatched.push(v);
+        return match.option ?? v;
+      });
+      return { value: mapped.filter((v, i, a) => a.indexOf(v) === i), unmatched };
     }
-    return cleaned.slice(0, 24);
+    return { value: cleaned.slice(0, 24), unmatched: [] };
   }
-  return typeof value === "object" ? displayValue(value) : (value as JsonValue);
+  return {
+    value: typeof value === "object" ? displayValue(value) : (value as JsonValue),
+    unmatched: [],
+  };
+}
+
+/** Value-only view of constrainValue, kept for callers that flag separately. */
+export function normalizeValue(
+  parsed: Record<string, unknown>,
+  kind: ColumnKind,
+  options: string[],
+): JsonValue {
+  return constrainValue(parsed, kind, options).value;
 }
 
 export type Confidence = "high" | "medium" | "low";

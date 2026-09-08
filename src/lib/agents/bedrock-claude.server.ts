@@ -66,7 +66,20 @@ export function isAnthropicWriter(model: string = BEDROCK_WRITER_MODEL): boolean
   return /anthropic|claude/i.test(model);
 }
 
-export type BedrockClaudeMsg = { role: "user" | "assistant"; content: string };
+export type BedrockImageMediaType = "image/jpeg" | "image/png" | "image/webp";
+
+export type BedrockImage = { mediaType: BedrockImageMediaType; data: string };
+
+export type BedrockClaudeMsg = {
+  role: "user" | "assistant";
+  content: string;
+  /** Base64 page images placed before the text (vision re-read of scanned pages). */
+  images?: BedrockImage[];
+};
+
+function converseImageFormat(mediaType: BedrockImageMediaType): "jpeg" | "png" | "webp" {
+  return mediaType === "image/png" ? "png" : mediaType === "image/webp" ? "webp" : "jpeg";
+}
 
 export type BedrockClaudeRequest = {
   model?: string;
@@ -167,7 +180,13 @@ export async function streamBedrockClaude(
     system: req.system,
     messages: req.messages.map((m) => ({
       role: m.role,
-      content: [{ type: "text", text: m.content }],
+      content: [
+        ...(m.images ?? []).map((image) => ({
+          type: "image",
+          source: { type: "base64", media_type: image.mediaType, data: image.data },
+        })),
+        { type: "text", text: m.content },
+      ],
     })),
     thinking: { type: "adaptive" },
     output_config: { effort: req.effort ?? "medium" },
@@ -280,7 +299,12 @@ export async function streamBedrockConverse(
     system: [{ text: req.system }],
     messages: req.messages.map((m) => ({
       role: m.role,
-      content: [{ text: m.content }],
+      content: [
+        ...(m.images ?? []).map((image) => ({
+          image: { format: converseImageFormat(image.mediaType), source: { bytes: image.data } },
+        })),
+        { text: m.content },
+      ],
     })),
     inferenceConfig: { maxTokens: Math.max(req.maxTokens, 1536) },
   };

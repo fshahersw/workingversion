@@ -35,14 +35,15 @@ import {
   EXTRACT_CHAIN,
   HEAVY_CHAIN,
   VERIFY_CHAIN,
+  VISION_CHAIN,
   backoffMs,
   checkCitations,
+  constrainValue,
   createModelCircuit,
   firstJsonObject,
   isFallbackStatus,
   isRetryableStatus,
   needsNoThink,
-  normalizeValue,
   parseConfidence,
   type Confidence,
 } from "./pipeline-core";
@@ -52,6 +53,7 @@ import {
   REVIEW_PIPELINE_VERSION,
   displayValue,
   type CellAnswer,
+  type CellPageImage,
   type CellRequest,
 } from "./types";
 
@@ -75,6 +77,7 @@ const CALL_TRIES = 3;
 const EXTRACT_TIMEOUT_MS = 25_000;
 const VERIFY_TIMEOUT_MS = 15_000;
 const HEAVY_TIMEOUT_MS = 45_000;
+const VISION_TIMEOUT_MS = 40_000;
 
 export function pipelineEnabled(): boolean {
   return bedrockCredsReady();
@@ -97,7 +100,13 @@ type ModelCall = {
   temperature?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Page images placed before the text (Converse image blocks). */
+  images?: CellPageImage[];
 };
+
+function converseImageFormat(mediaType: CellPageImage["mediaType"]): "jpeg" | "png" | "webp" {
+  return mediaType === "image/png" ? "png" : mediaType === "image/webp" ? "webp" : "jpeg";
+}
 
 function childSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
   const ctrl = new AbortController();
@@ -125,7 +134,20 @@ async function converseOnce(req: ModelCall): Promise<string> {
     {
       body: JSON.stringify({
         system: [{ text: system }],
-        messages: [{ role: "user", content: [{ text: req.user }] }],
+        messages: [
+          {
+            role: "user",
+            content: [
+              ...(req.images ?? []).map((image) => ({
+                image: {
+                  format: converseImageFormat(image.mediaType),
+                  source: { bytes: image.data },
+                },
+              })),
+              { text: req.user },
+            ],
+          },
+        ],
         inferenceConfig: { maxTokens: req.maxTokens, temperature: req.temperature ?? 0 },
       }),
       ...(req.signal ? { signal: req.signal } : {}),
@@ -245,13 +267,30 @@ type Extracted = CellAnswer & {
   rejectedCitations: { page: number; quote: string; reason: string }[];
 };
 
-function parseExtracted(text: string, model: string, req: CellRequest): Extracted {
+function parseExtracted(
+  text: string,
+  model: string,
+  req: CellRequest,
+  opts: { imagePages?: Set<number> } = {},
+): Extracted {
   const parsed = firstJsonObject(text);
   if (!parsed) throw new PipelineError(502, model, `${model} did not return a JSON object`);
 
   const rawStatus = String(parsed["status"] ?? "").toLowerCase();
-  const { verified, rejected } = checkCitations(parsed["citations"], req.pages, req.fileName);
-  const value = normalizeValue(parsed, req.kind, req.options);
+  const checked = checkCitations(parsed["citations"], req.pages, req.fileName);
+  // A quote read from a page image cannot be expected to appear in a text
+  // layer the OCR got wrong. Keep it, on a page we actually sent, and mark it
+  // so the reviewer knows to check the image rather than search the text.
+  const verified = [...checked.verified];
+  const rejected: typeof checked.rejected = [];
+  for (const r of checked.rejected) {
+    if (opts.imagePages?.has(r.page) && r.reason === "quote not found on that page") {
+      verified.push({ page: r.page, quote: r.quote, fileName: req.fileName, fromImage: true });
+    } else {
+      rejected.push(r);
+    }
+  }
+  const { value, unmatched } = constrainValue(parsed, req.kind, req.options);
   const rationale = String(parsed["rationale"] ?? "")
     .trim()
     .slice(0, 600);
@@ -271,23 +310,29 @@ function parseExtracted(text: string, model: string, req: CellRequest): Extracte
     };
   }
 
+  // A constrained column never stores a spelling that is not one of its
+  // options; the near-miss is kept visible and the cell flagged for a human.
   const status =
-    rawStatus === "needs_review" || verified.length === 0 || confidence === "low"
+    rawStatus === "needs_review" || verified.length === 0 || confidence === "low" || unmatched.length
       ? "needs_review"
       : "answered";
 
-  const note =
+  const notes = [
     rejected.length && verified.length === 0
-      ? ` (${rejected.length} citation${rejected.length > 1 ? "s" : ""} could not be located on the cited page${rejected.length > 1 ? "s" : ""})`
-      : "";
+      ? `${rejected.length} citation${rejected.length > 1 ? "s" : ""} could not be located on the cited page${rejected.length > 1 ? "s" : ""}`
+      : "",
+    unmatched.length
+      ? `not one of the allowed options: ${unmatched.map((u) => `"${u}"`).join(", ")}`
+      : "",
+  ].filter(Boolean);
 
   return {
     value,
     display: displayValue(value),
     status,
-    confidence,
+    confidence: unmatched.length && confidence === "high" ? "medium" : confidence,
     citations: verified,
-    rationale: `${rationale}${note}`.trim(),
+    rationale: `${rationale}${notes.length ? ` (${notes.join("; ")})` : ""}`.trim(),
     model,
     rejectedCitations: rejected,
   };
@@ -321,6 +366,56 @@ async function extractWithSonnet(req: CellRequest, signal?: AbortSignal): Promis
     },
   );
   return parseExtracted(res.text, BEDROCK_PILE_WRITER_MODEL, req);
+}
+
+const VISION_PREAMBLE = `Page images are attached for the pages listed below. Their text layer came
+from OCR and may be wrong or incomplete: read the images directly and treat them as the
+source of truth wherever the text disagrees. Quote what the page image says, character for
+character as printed.`;
+
+/**
+ * Vision re-read: the same question, answered from page images. Cheap VL
+ * models first (Nemotron Nano 2 VL, then Qwen3-VL) through Converse; the
+ * Anthropic judge is the last resort when the whole chain is unavailable.
+ * Used for cells that came back flagged on scanned pages.
+ */
+async function extractFromImages(req: CellRequest, signal?: AbortSignal): Promise<Extracted> {
+  const images = (req.images ?? []).slice(0, 4);
+  const pageList = images.map((image) => image.page).join(", ");
+  const user = `${VISION_PREAMBLE}\nAttached page images: ${pageList}\n\n${buildCellUser(req)}`;
+  const imagePages = new Set(images.map((image) => image.page));
+  try {
+    const { text, model } = await callChain(VISION_CHAIN, {
+      system: CELL_SYSTEM,
+      user,
+      images,
+      maxTokens: 1600,
+      temperature: 0,
+      signal,
+      timeoutMs: VISION_TIMEOUT_MS,
+    });
+    return parseExtracted(text, model, req, { imagePages });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    if (!bedrockClaudeEnabled()) throw err;
+  }
+  const res = await streamWriter(
+    {
+      model: BEDROCK_PILE_WRITER_MODEL,
+      system: CELL_SYSTEM,
+      messages: [
+        {
+          role: "user",
+          content: user,
+          images: images.map((image) => ({ mediaType: image.mediaType, data: image.data })),
+        },
+      ],
+      maxTokens: 4000,
+      effort: "medium",
+      ...(signal ? { signal } : {}),
+    },
+  );
+  return parseExtracted(res.text, BEDROCK_PILE_WRITER_MODEL, req, { imagePages });
 }
 
 function shouldEscalate(answer: PipelineAnswer): boolean {
@@ -459,7 +554,7 @@ export async function runCellPipeline(
   req: CellRequest,
   opts: PipelineOptions = {},
 ): Promise<PipelineAnswer> {
-  if (!req.pages.length) {
+  if (!req.pages.length && !req.images?.length) {
     return {
       value: null,
       display: "",
@@ -468,6 +563,28 @@ export async function runCellPipeline(
       citations: [],
       rationale: "No page in this document matched the question.",
       extractModel: "none",
+      verifyModel: null,
+      verified: null,
+    };
+  }
+
+  // Vision re-read: page images from a scanned document whose text layer let
+  // the first pass down. A VL model reads the images; the text verifier cannot,
+  // so the answer is capped at medium confidence and labelled for the reviewer.
+  if (req.images?.length) {
+    const seen = await extractFromImages(req, opts.signal);
+    const fromImage = seen.citations.some((c) => c.fromImage);
+    return {
+      value: seen.value,
+      display: seen.display,
+      status: seen.status,
+      confidence:
+        seen.status === "answered" && seen.confidence === "high" ? "medium" : seen.confidence,
+      citations: seen.citations,
+      rationale: `${seen.rationale} [read from page image${
+        req.images.length === 1 ? "" : "s"
+      }${fromImage ? "; quotes taken from the image, not the text layer" : ""}]`.trim(),
+      extractModel: `${seen.model}+vision`,
       verifyModel: null,
       verified: null,
     };

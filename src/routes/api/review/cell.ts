@@ -5,8 +5,30 @@ import {
   REVIEW_PIPELINE_ENABLED,
   REVIEW_SKIP_VERIFY,
   REVIEW_TABLES_ENABLED,
+  REVIEW_VISION_MAX_IMAGE_CHARS,
+  REVIEW_VISION_MAX_PAGES,
+  type CellPageImage,
   type ColumnKind,
 } from "@/lib/review/types";
+
+const IMAGE_TYPES = new Set<CellPageImage["mediaType"]>(["image/jpeg", "image/png", "image/webp"]);
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function cleanImages(raw: unknown): CellPageImage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CellPageImage[] = [];
+  for (const item of raw.slice(0, REVIEW_VISION_MAX_PAGES)) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const page = Number(o.page);
+    const mediaType = String(o.mediaType ?? "") as CellPageImage["mediaType"];
+    const data = typeof o.data === "string" ? o.data : "";
+    if (!Number.isFinite(page) || page <= 0 || !IMAGE_TYPES.has(mediaType)) continue;
+    if (!data || data.length > REVIEW_VISION_MAX_IMAGE_CHARS || !BASE64.test(data)) continue;
+    out.push({ page, mediaType, data });
+  }
+  return out;
+}
 
 const KINDS: ColumnKind[] = [
   "text",
@@ -39,6 +61,7 @@ export const Route = createFileRoute("/api/review/cell")({
           instructions?: string | null;
           fileName?: string;
           pages?: { page?: number; text?: string; ocr?: boolean }[];
+          images?: unknown;
         } = {};
         try {
           body = (await request.json()) as typeof body;
@@ -71,6 +94,7 @@ export const Route = createFileRoute("/api/review/cell")({
           instructions: body.instructions ?? null,
           fileName: (body.fileName ?? "document").slice(0, 300),
           pages,
+          images: cleanImages(body.images),
         };
 
         try {
