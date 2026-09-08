@@ -14,6 +14,7 @@ export type FolderCategory =
   | "deposition"
   | "review"
   | "chats"
+  | "draft"
   | "output"
   | "prompt"
   | "file";
@@ -23,6 +24,7 @@ export const FOLDER_CATEGORIES: readonly FolderCategory[] = [
   "deposition",
   "review",
   "chats",
+  "draft",
   "output",
   "prompt",
   "file",

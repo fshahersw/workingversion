@@ -10,6 +10,7 @@ import {
   Loader2,
   MessageSquare,
   Mic,
+  PenLine,
   Table2,
   Trash2,
   Upload,
@@ -44,6 +45,8 @@ import {
 import { discoveryTabFor, stashWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { deleteWorkspaceFn, listWorkspacesFn } from "@/lib/kb/workspace.functions";
 import type { WorkspaceSummary, WorkspaceSurface } from "@/lib/kb/workspace.server";
+import { deleteDraftFn, listDraftsFn } from "@/lib/drafts/drafts.functions";
+import type { DraftSummary } from "@/lib/drafts/types";
 
 export const Route = createFileRoute("/_authenticated/library")({
   ssr: false,
@@ -136,6 +139,7 @@ const TABS = [
   { key: "workingset", label: "Working Sets", icon: Layers },
   { key: "deposition", label: "Depositions", icon: Mic },
   { key: "review", label: "Tabular Review", icon: Table2 },
+  { key: "draft", label: "Drafts", icon: PenLine },
   { key: "chats", label: "Chat history", icon: MessageSquare },
   { key: "output", label: "Saved outputs", icon: Bookmark },
   { key: "prompt", label: "Prompts", icon: FileText },
@@ -199,6 +203,8 @@ function LibraryPage() {
         <div className="wr-app-scroll mt-4 min-h-0 flex-1 overflow-y-auto">
           {tab === "chats" ? (
             <ChatsList />
+          ) : tab === "draft" ? (
+            <DraftsList />
           ) : SURFACE_TABS.has(tab) ? (
             <WorkspacesList surface={tab as WorkspaceSurface} />
           ) : (
@@ -337,6 +343,113 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
           </button>
         </li>
       ))}
+      </ul>
+    </div>
+  );
+}
+
+function DraftsList() {
+  const navigate = useNavigate();
+  const [items, setItems] = useState<DraftSummary[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const folders = useFolders("draft");
+
+  const load = useCallback(async () => {
+    try {
+      setItems(await listDraftsFn({ data: {} }));
+    } catch {
+      setItems([]);
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const remove = async (id: string) => {
+    setBusyId(id);
+    try {
+      const result = await deleteDraftFn({ data: { draftId: id } });
+      await load();
+      toast.success(result.alreadyDeleted ? "Already deleted" : "Draft deleted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not delete draft");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (!items) return <Loading />;
+  const counts = new Map<string, number>();
+  for (const d of items) counts.set(folderOf(d.folderId), (counts.get(folderOf(d.folderId)) ?? 0) + 1);
+  const shown = items.filter((d) => folders.inView(d.folderId));
+  return (
+    <div className="space-y-3">
+      <FolderBar
+        folders={folders.folders}
+        current={folders.current}
+        counts={counts}
+        busy={folders.busy}
+        onNavigate={folders.navigate}
+        onCreate={folders.create}
+        onRename={folders.rename}
+        onDelete={folders.remove}
+      />
+      {!items.length ? (
+        <EmptyState label="No drafts yet. Start one from Drafts; it saves as you write." />
+      ) : !shown.length ? (
+        <EmptyState label="Nothing in this folder yet. Use Move on a draft to file it here." />
+      ) : null}
+      <ul className="space-y-1.5">
+        {shown.map((d) => (
+          <li
+            key={d.draftId}
+            className="flex items-center gap-3 rounded-lg border border-border/70 bg-card px-3 py-2.5"
+          >
+            <PenLine className="h-4 w-4 shrink-0 text-brand-navy/50" strokeWidth={1.8} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13px] font-medium text-foreground">{d.title}</p>
+              <p className="text-[11px] text-muted-foreground">
+                {d.kind === "pdf" ? "PDF" : "Document"} · {d.wordCount.toLocaleString()} words ·
+                edited {relative(d.updatedAt)}
+                {d.sourceName ? ` · from ${d.sourceName}` : ""}
+              </p>
+            </div>
+            <MoveToMenu
+              folders={folders.folders}
+              current={folderOf(d.folderId)}
+              onMove={(folderId) => void folders.move(d.draftId, folderId).then(load)}
+            >
+              <button
+                type="button"
+                aria-label="Move to folder"
+                title="Move to folder"
+                className="shrink-0 text-muted-foreground/60 transition hover:text-foreground"
+              >
+                <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+              </button>
+            </MoveToMenu>
+            <button
+              type="button"
+              onClick={() => void navigate({ to: "/drafts/$draftId", params: { draftId: d.draftId } })}
+              className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
+            >
+              Open
+            </button>
+            <button
+              type="button"
+              onClick={() => void remove(d.draftId)}
+              disabled={busyId === d.draftId}
+              aria-label="Delete draft"
+              className="shrink-0 text-muted-foreground transition hover:text-destructive disabled:opacity-50"
+            >
+              {busyId === d.draftId ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+            </button>
+          </li>
+        ))}
       </ul>
     </div>
   );

@@ -10,6 +10,7 @@ import {
   Library,
   LogOut,
   Menu,
+  PenLine,
   Search,
   X,
 } from "lucide-react";
@@ -33,6 +34,7 @@ const primaryNav: readonly NavItem[] = [
   { icon: Search, label: "Research", to: "/research" },
   { icon: CalendarDays, label: "Calendar", to: "/calendar" },
   { icon: FileSearch, label: "Discovery", to: "/docs" },
+  { icon: PenLine, label: "Drafts", to: "/drafts" },
   { icon: Library, label: "Library", to: "/library" },
 ] as const;
 
@@ -218,9 +220,17 @@ function SidebarInner({
           onClick={onNavigate}
         />
 
-        {/* Library */}
+        {/* Drafts */}
         <NavRow
           item={primaryNav[4]}
+          active={pathname.startsWith("/drafts")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+
+        {/* Library */}
+        <NavRow
+          item={primaryNav[5]}
           active={pathname.startsWith("/library")}
           expanded={expanded}
           onClick={onNavigate}
