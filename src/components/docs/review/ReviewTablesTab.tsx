@@ -38,6 +38,19 @@ import { useReviewTable, type DocSaveState } from "@/lib/review/use-review-table
 import { MAX_FILES } from "@/lib/pile/limits";
 import { useSharedPile } from "@/lib/pile-context";
 
+function relativeTime(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return "";
+  const mins = Math.max(0, Math.round(ms / 60_000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 /** Where this table's documents stand in the owner's account. */
 function DocSaveBadge({ state, hydrating }: { state: DocSaveState; hydrating: boolean }) {
   if (hydrating) {
@@ -173,83 +186,137 @@ export function ReviewTablesTab() {
 
   // ---- table picker -----------------------------------------------------------
   if (!table) {
+    const steps = [
+      { n: "1", title: "Add documents", body: "Drop files or bring in a saved Working Set. Each becomes a row." },
+      { n: "2", title: "Ask columns", body: "Each column is one question, typed: text, date, yes/no, options." },
+      { n: "3", title: "Fill and verify", body: "Every cell is answered from its own document and cites the page." },
+    ];
+    const createTable = () => {
+      if (!newName.trim() || busy) return;
+      void review.newTable(newName);
+    };
     return (
-      <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto">
-        <div className="rounded-lg border bg-muted/25 p-4">
-          <p className="text-[13px] font-medium">Tabular Review</p>
-          <p className="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-muted-foreground">
-            Build a spreadsheet over a document set: rows are documents, columns are the questions
-            you ask of each one. Every answer is extracted from that document alone and cites the
-            page it came from. Tables and their documents are saved to your account, so a table
-            reopens with its documents ready to run.
-          </p>
-          <div className="mt-3 flex max-w-md items-center gap-2">
+      <div className="flex h-full min-h-0 flex-col overflow-y-auto">
+        <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-4">
+          <div className="min-w-0">
+            <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-foreground">Tabular Review</h2>
+            <p className="mt-1 max-w-xl text-[12.5px] leading-relaxed text-muted-foreground">
+              A spreadsheet over a document set. Tables and their documents are saved to your
+              account and reopen ready to run.
+            </p>
+          </div>
+          <form
+            className="flex w-full max-w-md items-center gap-2 sm:w-auto"
+            onSubmit={(e) => {
+              e.preventDefault();
+              createTable();
+            }}
+          >
             <Input
               value={newName}
-              placeholder="e.g. Custodian production — privilege pass"
+              placeholder="Name a new table"
+              aria-label="New table name"
               onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && newName.trim()) void review.newTable(newName);
-              }}
-              className="h-9 text-[13px]"
+              className="h-9 rounded-sm text-[13px]"
             />
             <Button
+              type="submit"
               size="sm"
               disabled={!newName.trim() || busy}
-              onClick={() => void review.newTable(newName)}
-              className="gap-1.5 text-[12.5px]"
+              className="h-9 shrink-0 gap-1.5 rounded-sm text-[12.5px]"
             >
               <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
-              New table
+              Create
             </Button>
-          </div>
+          </form>
         </div>
 
         {error ? (
-          <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[12.5px] text-destructive">
+          <p className="mt-3 rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-[12.5px] text-destructive">
             {error}
           </p>
         ) : null}
 
-        <div className="space-y-1.5">
-          <p className="text-[11.5px] font-medium uppercase tracking-wide text-muted-foreground">
-            Saved tables
-          </p>
+        <section className="mt-5">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+              Saved tables
+            </h3>
+            {tables.length ? (
+              <span className="font-mono text-[10.5px] tabular-nums text-muted-foreground">
+                {tables.length}
+              </span>
+            ) : null}
+          </div>
           {tables.length === 0 ? (
-            <p className="rounded-lg border border-dashed px-4 py-8 text-center text-[12.5px] text-muted-foreground">
-              No tables yet. Name one above to get started.
-            </p>
+            <div className="mt-2 rounded-sm border border-dashed border-border bg-surface px-5 py-6">
+              <p className="text-[12.5px] text-muted-foreground">
+                No tables yet. Name one above to begin.
+              </p>
+            </div>
           ) : (
-            tables.map((t) => (
-              <div
-                key={t.id}
-                className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 transition-colors hover:bg-accent/40"
-              >
-                <button
-                  type="button"
-                  onClick={() => void review.loadTable(t)}
-                  className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
-                >
-                  <Table2 className="h-4 w-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
-                  <span className="min-w-0">
-                    <span className="block truncate text-[13px] font-medium">{t.name}</span>
-                    <span className="block text-[11.5px] text-muted-foreground">
-                      Updated {new Date(t.updatedAt).toLocaleString()}
-                    </span>
-                  </span>
-                </button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                  onClick={() => void review.removeTable(t.id)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))
+            <ul className="mt-2 grid gap-2 sm:grid-cols-2">
+              {tables.map((t) => {
+                const owned = t.sources.filter((s) => s.owned).length;
+                const linked = t.sources.length - owned;
+                const meta = [
+                  `Updated ${relativeTime(t.updatedAt)}`,
+                  owned ? `${owned} document set${owned === 1 ? "" : "s"}` : "",
+                  linked ? `${linked} linked working set${linked === 1 ? "" : "s"}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ");
+                return (
+                  <li
+                    key={t.id}
+                    className="group flex items-stretch rounded-sm border border-border bg-card transition-colors hover:border-brand-navy/30"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => void review.loadTable(t)}
+                      className="flex min-w-0 flex-1 items-center gap-3 px-3 py-3 text-left"
+                    >
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-surface text-brand-navy">
+                        <Table2 className="h-4 w-4" strokeWidth={1.75} />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block truncate text-[13px] font-semibold text-foreground">
+                          {t.name}
+                        </span>
+                        <span className="mt-0.5 block truncate text-[11.5px] text-muted-foreground">
+                          {meta}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Delete ${t.name}`}
+                      title="Delete table and its saved document sets"
+                      onClick={() => {
+                        if (window.confirm(`Delete “${t.name}”? Its saved document sets are removed too.`)) {
+                          void review.removeTable(t.id);
+                        }
+                      }}
+                      className="grid w-9 shrink-0 place-items-center rounded-r-sm text-muted-foreground/40 opacity-0 transition hover:bg-destructive/5 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           )}
-        </div>
+        </section>
+
+        <section className="mt-6 grid gap-2 sm:grid-cols-3">
+          {steps.map((step) => (
+            <div key={step.n} className="rounded-sm border border-border bg-surface px-3.5 py-3">
+              <p className="font-mono text-[10px] text-brand-orange">{step.n}</p>
+              <p className="mt-1 text-[12.5px] font-semibold text-foreground">{step.title}</p>
+              <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">{step.body}</p>
+            </div>
+          ))}
+        </section>
       </div>
     );
   }
