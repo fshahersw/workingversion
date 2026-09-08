@@ -172,13 +172,6 @@ export function SourcePanel({
   }, [sources]);
 
 
-  const related = useMemo(() => {
-    if (!citedRefs || citedRefs.size === 0) return [];
-    return sortByAuthority(sources)
-      .filter((s) => !citedRefs.has(s.ref.toUpperCase()))
-      .slice(0, 6);
-  }, [sources, citedRefs]);
-
   if (sources.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center px-6 text-center">
@@ -232,27 +225,15 @@ export function SourcePanel({
                   source={s}
                   selected={selectedRef === s.ref}
                   dim={b === "press"}
+                  cited={citedRefs?.has(s.ref.toUpperCase())}
                   onRead={onRead}
                   onPin={onPin}
                 />
-
               ))}
             </div>
           </section>
         ))}
 
-        {related.length > 0 && (
-          <section className="mb-2 border-t border-border/50 pt-3">
-            <div className="pb-1.5 text-[10px] font-medium uppercase tracking-[0.09em] text-muted-foreground/50">
-              Related
-            </div>
-            <div className="space-y-1.5">
-              {related.map((s) => (
-                <RelatedCard key={`rel-${s.ref}`} source={s} />
-              ))}
-            </div>
-          </section>
-        )}
       </div>
     </div>
   );
@@ -262,49 +243,19 @@ function isInternalSource(source: Source): boolean {
   return source.authority === "registry" || !hostOf(source.source_url);
 }
 
-function RelatedCard({ source }: { source: Source }) {
-  const host = hostOf(source.source_url);
-  const external = !isInternalSource(source) && source.source_url;
-  const Wrapper = external ? "a" : "div";
-
-  return (
-    <Wrapper
-      {...(external
-        ? {
-            href: source.source_url,
-            target: "_blank",
-            rel: "noopener noreferrer",
-          }
-        : {})}
-      className={`block rounded-lg border border-border/60 bg-card px-2.5 py-2 transition-all duration-200 ${
-        external
-          ? "hover:-translate-y-[1px] hover:border-brand-navy/25 hover:shadow-[0_6px_18px_-12px_rgba(31,42,94,0.45)]"
-          : ""
-      }`}
-    >
-      <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/70">
-        <Favicon host={host} size={13} src={source.favicon} />
-        <span className="truncate">
-          {host || source.authority || source.source_type}
-        </span>
-      </div>
-      <div className="mt-1 line-clamp-2 text-[11.5px] font-medium leading-snug text-brand-navy">
-        {source.citation}
-      </div>
-    </Wrapper>
-  );
-}
-
 function SourceRow({
   source,
   selected,
   dim,
+  cited,
   onRead,
   onPin,
 }: {
   source: Source;
   selected: boolean;
   dim?: boolean;
+  /** Whether the answer cites this source (undefined before any answer). */
+  cited?: boolean;
   onRead?: (source: Source) => void;
   onPin?: (source: Source) => void;
 }) {
@@ -330,7 +281,7 @@ function SourceRow({
       transition={{ duration: 0.26, ease: [0.22, 0.61, 0.36, 1] }}
       className={`group relative px-2 py-2 transition-colors ${
         selected ? "bg-brand-blue-soft/30" : "hover:bg-muted/30"
-      }`}
+      } ${cited === false ? "opacity-70 hover:opacity-100" : ""}`}
     >
       {selected && (
         <span className="absolute inset-y-2 left-0 w-[2px] rounded-full bg-brand-navy/60" />
@@ -338,7 +289,12 @@ function SourceRow({
       <div className="flex items-start gap-2">
         <div className="mt-[2px] flex shrink-0 flex-col items-center gap-1">
           <Favicon host={host} src={source.favicon} />
-          <span className="text-[9.5px] font-medium tabular-nums text-muted-foreground/45">
+          <span
+            className={`text-[9.5px] font-medium tabular-nums ${
+              cited ? "text-brand-navy/80" : "text-muted-foreground/45"
+            }`}
+            title={cited ? "Cited in the answer" : undefined}
+          >
             {source.ref.slice(1)}
           </span>
         </div>
