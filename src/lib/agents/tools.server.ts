@@ -37,13 +37,7 @@ export class SourceBook {
   private order: Source[] = [];
 
   add(src: Omit<Source, "ref">): Source {
-    // Registry excerpts dedupe on citation+pinpoint (presigned PDF URLs are
-    // unique per call, so they cannot be the dedupe key).
-    const key = (
-      src.authority === "registry" && src.section_path
-        ? `${src.citation}|${src.section_path}`
-        : src.source_url || src.citation
-    ).toLowerCase();
+    const key = sourceKey(src);
     const existing = this.byKey.get(key);
     if (existing) return existing;
     const ref = `S${this.nextRef()}`;
@@ -60,11 +54,7 @@ export class SourceBook {
    */
   seed(sources: Source[]): void {
     for (const src of sources) {
-      const key = (
-        src.authority === "registry" && src.section_path
-          ? `${src.citation}|${src.section_path}`
-          : src.source_url || src.citation
-      ).toLowerCase();
+      const key = sourceKey(src);
       if (this.byKey.has(key)) continue;
       this.byKey.set(key, src);
       this.order.push(src);
@@ -83,6 +73,18 @@ export class SourceBook {
     while (used.has(n)) n++;
     return n;
   }
+}
+
+/** Dedupe key. Registry excerpts key on citation + pinpoint (empty pinpoint
+ *  included): their presigned PDF URLs are unique per call, so the same filing
+ *  re-read on a later turn must not become a second source. Everything else
+ *  keys on its URL, else its citation. */
+function sourceKey(src: Omit<Source, "ref">): string {
+  const key =
+    src.authority === "registry"
+      ? `${src.citation}|${src.section_path ?? ""}`
+      : src.source_url || src.citation;
+  return key.toLowerCase();
 }
 
 function refNum(ref: string): number {
