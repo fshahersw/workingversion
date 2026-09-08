@@ -10,7 +10,7 @@ import {
   type DepositionRecordPass,
   type DepositionRecordPassStatus,
 } from "@/lib/kb/deposition-record";
-import { SYNC_INGEST_MAX_CHARS, SYNC_INGEST_MAX_PAGES } from "@/lib/kb/ingest-state";
+import { planSaveLane } from "@/lib/kb/ingest-state";
 import { streamSavedWorkspaceAsk, type KbAskSource } from "@/lib/kb/kb-client";
 import {
   deleteWorkspaceFn,
@@ -479,9 +479,16 @@ export function useDeposition() {
         }
         const totalChars = fp.reduce((total, page) => total + page.text.length, 0);
         // Transcripts are indexed from the text the reader shows (including OCR
-        // repairs) so chunk cites line up with the transcript. Only oversize
-        // files fall back to the asynchronous lane over the original bytes.
-        const oversize = fp.length > SYNC_INGEST_MAX_PAGES || totalChars > SYNC_INGEST_MAX_CHARS;
+        // repairs) so chunk cites line up with the transcript. Only oversize or
+        // textless files fall back to the asynchronous lane over the original
+        // bytes; without bytes such a file is left out rather than failing the set.
+        const plan = planSaveLane({
+          readablePages: fp.length,
+          totalChars,
+          lowQuality: false,
+          hasBytes: Boolean(bytesKey && sha256),
+        });
+        if (plan === "skip") return null;
         return {
           clientFileId: t.fileId,
           fileName: t.fileName,
@@ -489,12 +496,19 @@ export function useDeposition() {
           ...(sha256 ? { sha256 } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
           ...(bytesKey ? { bytesKey } : {}),
-          pages: oversize ? [] : fp,
+          pages: plan === "async" ? [] : fp,
         };
       });
       if (controller.signal.aborted) return;
+      const submitted = files.filter((file): file is NonNullable<typeof file> => file !== null);
+      const skipped = transcripts.length - submitted.length;
+      if (!submitted.length) {
+        throw new Error(
+          "No transcript could be saved: no readable text and the original files are not in this session.",
+        );
+      }
       const res = await saveWorkspaceFn({
-        data: { requestId: attempt.requestId, name, surface: "deposition", files },
+        data: { requestId: attempt.requestId, name, surface: "deposition", files: submitted },
       });
       if (controller.signal.aborted) return;
       let status: Omit<typeof res, "kbWorkspaceId"> = res;
@@ -556,13 +570,15 @@ export function useDeposition() {
         hybridAsk: bound,
         message: bound
           ? null
-          : "Saved, but not every transcript is indexed. Ask uses in-tab retrieval.",
+          : skipped
+            ? `Saved ${submitted.length} of ${transcripts.length} transcripts. ${skipped} had no readable text and no original file to convert. Ask uses in-tab retrieval.`
+            : "Saved, but not every transcript is indexed. Ask uses in-tab retrieval.",
       });
       step({
         id: "save",
         label: "Saved to your library",
         status: "done",
-        detail: `${status.docCount} transcript${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages`,
+        detail: `${status.docCount} transcript${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages${skipped ? ` · ${skipped} left out` : ""}`,
       });
       const dirty = persistDirty.current;
       if (dirty || savedRef.current.analysis === "pending") {

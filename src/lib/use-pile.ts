@@ -45,7 +45,7 @@ import {
   getWorkspaceStatusFn,
 } from "@/lib/kb/workspace.functions";
 import { abortableDelay, rawFileSha256 } from "@/lib/kb/client-upload";
-import { SYNC_INGEST_MAX_CHARS, SYNC_INGEST_MAX_PAGES } from "@/lib/kb/ingest-state";
+import { planSaveLane } from "@/lib/kb/ingest-state";
 import { streamSavedWorkspaceAsk, type KbAskSource } from "@/lib/kb/kb-client";
 import { createUploadFn } from "@/lib/library/library.functions";
 import {
@@ -1489,6 +1489,10 @@ export function usePile() {
         bytesKey?: string;
         pages: { page: number; text: string }[];
       }[] = [];
+      /** Documents left out: no readable text and no original bytes to convert. */
+      const skipped: string[] = [];
+      /** Documents indexed from imperfect browser text because bytes were unavailable. */
+      const degraded: string[] = [];
       for (const file of session.files) {
         const fp = byFile.get(file.id) ?? [];
         let bytesKey: string | undefined = attempt.bytesKeyByFileId[file.id];
@@ -1538,11 +1542,19 @@ export function usePile() {
         const totalChars = fp.reduce((total, page) => total + page.text.length, 0);
         const hasLowQualityExtraction =
           file.emptyPages > 0 || fp.some((page) => isLowQualityText(page.text));
-        const asyncCandidate =
-          hasLowQualityExtraction ||
-          fp.length === 0 ||
-          fp.length > SYNC_INGEST_MAX_PAGES ||
-          totalChars > SYNC_INGEST_MAX_CHARS;
+        // The server rejects a document that needs conversion without its
+        // bytes; decide here so one such file cannot sink the whole save.
+        const plan = planSaveLane({
+          readablePages: fp.length,
+          totalChars,
+          lowQuality: hasLowQualityExtraction,
+          hasBytes: Boolean(bytesKey && sha256),
+        });
+        if (plan === "skip") {
+          skipped.push(file.name);
+          continue;
+        }
+        if (plan === "sync-degraded") degraded.push(file.name);
         files.push({
           clientFileId: file.id,
           fileName: file.name,
@@ -1550,10 +1562,15 @@ export function usePile() {
           ...(sha256 ? { sha256 } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
           ...(bytesKey ? { bytesKey } : {}),
-          pages: asyncCandidate ? [] : fp,
+          pages: plan === "async" ? [] : fp,
         });
       }
       if (controller.signal.aborted) return;
+      if (!files.length) {
+        throw new Error(
+          "None of these documents can be saved: no readable text was extracted and the original files are no longer in this session. Re-add them and save again.",
+        );
+      }
       attempt.submitted = true;
       const res = await saveWorkspaceFn({
         data: {
@@ -1663,16 +1680,27 @@ export function usePile() {
         setState((state) => ({ ...state, session: savedSession }));
       }
       pendingWorkspaceSaveRef.current = null;
+      const caveats = [
+        skipped.length
+          ? `${skipped.length} left out (no readable text and the original file is not in this session): ${skipped.slice(0, 3).join(", ")}${skipped.length > 3 ? "…" : ""}`
+          : "",
+        degraded.length
+          ? `${degraded.length} indexed from browser text only (original file unavailable for conversion)`
+          : "",
+      ].filter(Boolean);
+      const headline = `Saved “${opts.name}” · ${status.docCount} doc${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages`;
       setState((s) => ({
         ...s,
         kbSave: {
           status: "saved",
           message:
             bindingComplete && snapshotStillCurrent
-              ? `Saved “${opts.name}” · ${status.docCount} doc${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages`
-              : bindingComplete
-                ? `Saved “${opts.name}”, but this Working Set changed during save. Save it again to use hybrid Ask.`
-                : `Saved “${opts.name}”, but the current pile could not be bound. Reload it from the Library to use hybrid Ask.`,
+              ? [headline, ...caveats].join(" · ")
+              : skipped.length
+                ? [headline, ...caveats, "Hybrid Ask covers the saved documents only."].join(" · ")
+                : bindingComplete
+                  ? `Saved “${opts.name}”, but this Working Set changed during save. Save it again to use hybrid Ask.`
+                  : `Saved “${opts.name}”, but the current pile could not be bound. Reload it from the Library to use hybrid Ask.`,
         },
       }));
     } catch (e) {

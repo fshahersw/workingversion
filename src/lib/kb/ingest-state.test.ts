@@ -6,10 +6,47 @@ import {
   isIngestStatus,
   isTerminalErrorKind,
   isTerminalIngestStatus,
+  planSaveLane,
   selectIngestLane,
+  SYNC_INGEST_MAX_PAGES,
   terminalErrorSummary,
   type IngestStatus,
 } from "./ingest-state.ts";
+
+test("save lane plan never produces a request the server would reject", () => {
+  // A blank cover page must not force a bytes-only lane when bytes are missing.
+  assert.equal(
+    planSaveLane({ readablePages: 40, totalChars: 90_000, lowQuality: true, hasBytes: false }),
+    "sync-degraded",
+  );
+  assert.equal(
+    planSaveLane({ readablePages: 40, totalChars: 90_000, lowQuality: true, hasBytes: true }),
+    "async",
+  );
+  assert.equal(
+    planSaveLane({ readablePages: 40, totalChars: 90_000, lowQuality: false, hasBytes: false }),
+    "sync",
+  );
+  // No text and no bytes: nothing can be indexed, so the document is left out.
+  assert.equal(planSaveLane({ readablePages: 0, totalChars: 0, lowQuality: true, hasBytes: false }), "skip");
+  assert.equal(planSaveLane({ readablePages: 0, totalChars: 0, lowQuality: true, hasBytes: true }), "async");
+  // Over the synchronous limit behaves like "no text": async or skip.
+  assert.equal(
+    planSaveLane({
+      readablePages: SYNC_INGEST_MAX_PAGES + 1,
+      totalChars: 10,
+      lowQuality: false,
+      hasBytes: false,
+    }),
+    "skip",
+  );
+  // Every non-skip plan is accepted by the server-side lane check.
+  assert.equal(selectIngestLane({ readablePages: 40, totalChars: 90_000 }).lane, "sync");
+  assert.equal(
+    selectIngestLane({ readablePages: 0, totalChars: 0, bytesKey: "k", sha256: "a".repeat(64) }).lane,
+    "async",
+  );
+});
 
 const statuses: IngestStatus[] = ["queued", "converting", "embedding", "ready", "error"];
 

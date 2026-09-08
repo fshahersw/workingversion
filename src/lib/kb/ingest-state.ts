@@ -58,6 +58,33 @@ export function selectIngestLane(args: {
   return { lane: "reject", reason: "async-input-required" };
 }
 
+/**
+ * Browser-side plan for one document before a save request is built, so the
+ * server's lane check never rejects the whole workspace over one file.
+ *
+ *  - "async": original bytes are stored; let BDA convert (required when the
+ *    text is missing or over the synchronous limits, preferred when the
+ *    extraction looks poor).
+ *  - "sync": index the readable text we have.
+ *  - "sync-degraded": extraction looked poor but the bytes are unavailable;
+ *    index what we have rather than lose the document.
+ *  - "skip": nothing to index and no bytes to convert. Leave it out and say so.
+ */
+export type SaveLanePlan = "async" | "sync" | "sync-degraded" | "skip";
+
+export function planSaveLane(args: {
+  readablePages: number;
+  totalChars: number;
+  lowQuality: boolean;
+  hasBytes: boolean;
+}): SaveLanePlan {
+  const overSync =
+    args.readablePages > SYNC_INGEST_MAX_PAGES || args.totalChars > SYNC_INGEST_MAX_CHARS;
+  if (args.readablePages === 0 || overSync) return args.hasBytes ? "async" : "skip";
+  if (args.lowQuality) return args.hasBytes ? "async" : "sync-degraded";
+  return "sync";
+}
+
 export const TERMINAL_ERROR_KINDS = [
   "conversion",
   "processing",
