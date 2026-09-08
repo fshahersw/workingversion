@@ -47,6 +47,10 @@ const SYNTHESIS_EFFORT = process.env["BEDROCK_SYNTHESIS_EFFORT"] ?? "medium";
 // default for THINK + report modes (never fast/conversational); set
 // BEDROCK_COVERAGE_GATE=0 to disable so eval can A/B from one codebase.
 const COVERAGE_GATE_ON = !/^(0|off|false)$/i.test(process.env["BEDROCK_COVERAGE_GATE"] ?? "");
+/** Injected once when a fresh question (no conversation context) gets a
+ *  tool-less first reply: the answer must rest on sources, not recall. */
+const NO_TOOL_NUDGE =
+  "You answered without consulting any source. A litigation answer must rest on retrieved authority, not recall: call the relevant tools now (in parallel where independent), then write the answer with [S#] citations. Only if this question is genuinely about the conversation itself or needs no factual support, restate your reply.";
 
 type ModeCfg = {
   maxSteps: number;
@@ -259,6 +263,8 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     let cacheWrite = 0;
 
     let answerText = "";
+    let directAnswer = false;
+    const hasFollowupContext = history.length > 0 || book.all().length > 0;
     const historyPreamble =
       history.length > 0
         ? "This is a follow-up in an ongoing chat; the earlier turns are your context.\n\n"
@@ -295,12 +301,15 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             ...(history.length ? { history } : {}),
             ...(cfg.researchEffort ? { researchEffort: cfg.researchEffort } : {}),
             ...(cfg.synthesisEffort ? { synthesisEffort: cfg.synthesisEffort } : {}),
-            // Comprehensiveness gate (plan A): THINK + report modes only — a
-            // scoped FAST lookup should stay tight, not trigger extra rounds.
-            ...(COVERAGE_GATE_ON && (mode === "think" || docReq.wants)
+            // Comprehensiveness gate (plan A): every voluntary stop in THINK +
+            // report modes. FAST stays tight: it is consulted only when the model
+            // stopped without a single tool call, the one case where a scoped
+            // lookup is about to be answered from recall instead of a source.
+            ...(COVERAGE_GATE_ON
               ? {
                   gate: {
-                    check: async () => {
+                    check: async (ctx: { totalCalls: number }) => {
+                      if (mode === "fast" && !docReq.wants && ctx.totalCalls > 0) return null;
                       const gaps = await coverageGaps({
                         query: resolved.query,
                         sources: book.all(),
@@ -336,6 +345,13 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                   },
                 }
               : {}),
+            // A follow-up the model can answer from the conversation and the
+            // carried sources streams its first tool-less reply as the answer
+            // (one turn instead of draft + synthesis). A fresh question with no
+            // context gets one nudge to research before answering from memory.
+            ...(hasFollowupContext
+              ? { directAnswer: { minChars: 160 } }
+              : { noToolNudge: NO_TOOL_NUDGE }),
             ...(input.signal ? { signal: input.signal } : {}),
           },
           {
@@ -399,6 +415,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
           },
         );
         if (!answerText.trim() && res.answer.trim()) answerText = res.answer;
+        directAnswer = Boolean(res.direct);
         agentLog("research_loop", {
           run: runId,
           ms: since(loopStart),
@@ -409,6 +426,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
           sources: book.all().length,
           answer_chars: answerText.length,
           gate_requeried: res.gateRequeried,
+          direct: directAnswer,
           tokens_in: tokIn,
           tokens_out: tokOut,
           tokens_total: tokIn + tokOut,

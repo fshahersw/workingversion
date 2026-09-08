@@ -297,6 +297,9 @@ export type StreamToolLoopResult = {
   /** True when the comprehensiveness gate injected a targeted re-query round
    *  before synthesis (quality plan A) — for eval attribution. */
   gateRequeried: boolean;
+  /** True when the first turn's tool-less reply was streamed as the answer
+   *  (no separate synthesis turn). */
+  direct?: boolean;
 };
 
 /** Streaming research loop + merged synthesis. During research the model's
@@ -350,6 +353,17 @@ export async function streamConverseToolLoop(
         researchMsLeft: number;
       }) => Promise<string | null>;
     };
+    /** Direct answer: when the model's FIRST turn calls no tools and writes a
+     *  complete reply (a follow-up it can answer from the conversation and the
+     *  carried sources), stream that reply as the answer instead of dropping it
+     *  and paying for a second synthesis turn. Only after the gate (if any) has
+     *  passed, only on a clean end_turn stop, and only above minChars so a bare
+     *  status line never becomes the answer. */
+    directAnswer?: { minChars?: number };
+    /** No-tool nudge: when the FIRST turn calls no tools and there is no
+     *  conversation context to answer from, push this instruction once and give
+     *  the model one more turn to research before it answers from memory. */
+    noToolNudge?: string;
   },
   handlers: {
     onText?: (delta: string) => void;
@@ -401,6 +415,7 @@ export async function streamConverseToolLoop(
   // targeted re-query round (returned to the caller for eval attribution).
   let gateFired = false;
   let gateRequeried = false;
+  let nudged = false;
 
   for (; steps < opts.maxSteps; steps++) {
     // Below the research threshold, hold to the full deadline (don't starve
@@ -486,6 +501,33 @@ export async function streamConverseToolLoop(
           continue;
         }
       }
+      const draft = turnText.trim();
+      // First turn, no tools, complete reply, gate satisfied: this IS the answer.
+      if (
+        opts.directAnswer &&
+        steps === 0 &&
+        totalCalls === 0 &&
+        turn.stopReason === "end_turn" &&
+        draft.length >= (opts.directAnswer.minChars ?? 160)
+      ) {
+        handlers.onSynthesisStart?.();
+        handlers.onAnswer?.(draft);
+        return { narration: "", answer: draft, steps: steps + 1, gateRequeried, direct: true };
+      }
+      // First turn, no tools, nothing to answer from: one chance to research.
+      if (
+        opts.noToolNudge &&
+        !nudged &&
+        steps === 0 &&
+        totalCalls === 0 &&
+        steps < opts.maxSteps - 1 &&
+        turn.assistantContent.length > 0
+      ) {
+        nudged = true;
+        messages.push({ role: "assistant", content: turn.assistantContent } as unknown as BedrockMsg);
+        messages.push({ role: "user", content: [{ text: opts.noToolNudge }] } as BedrockMsg);
+        continue;
+      }
       break; // model is answering — drop the draft; synthesis writes the answer.
     }
 
@@ -567,5 +609,5 @@ export async function streamConverseToolLoop(
   );
   handlers.onStep?.({ step: steps + 1, ms: Date.now() - synthStart, stopReason: `synthesis:${synth.stopReason}`, toolCalls: [], inputTokens: synth.usage.input, outputTokens: synth.usage.output, cacheReadTokens: synth.usage.cacheRead, cacheWriteTokens: synth.usage.cacheWrite });
 
-  return { narration: lastText, answer: synth.text, steps, gateRequeried };
+  return { narration: lastText, answer: synth.text, steps, gateRequeried, direct: false };
 }

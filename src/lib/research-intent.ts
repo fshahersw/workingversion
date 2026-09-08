@@ -155,7 +155,7 @@ const CONVERSATIONAL_RE =
 
 /** Meta / reformat of the assistant's own prior answer (no new research). */
 const REFORMAT_RE =
-  /\b(shorten (that|it|this)|make (that|it|this) shorter|too long|tl;?dr|rephrase (that|it)|reword (that|it)|rewrite (that|it)|say (that|it) again|in plain (english|terms)|simplify (that|it)|bullet(ize| points| that)|who are you|what can you do|what are you|how do you work)\b/i;
+  /\b(shorten (that|it|this)|make (that|it|this) (shorter|longer|a table|into a table|more concise|more formal)|too long|tl;?dr|rephrase (that|it)|reword (that|it)|rewrite (that|it)|say (that|it) again|in plain (english|terms)|simplify (that|it)|bullet(ize| points| that)|summari[sz]e (that|this|the above|your (last )?answer)|(as|in) (a table|bullets?|\d+ bullets?|one (paragraph|sentence)|two sentences|plain english)|key (points|takeaways) (of|from) (that|this|the above)|translate (that|this|it)|who are you|what can you do|what are you|how do you work)\b/i;
 
 /** Any hint that this is a real legal-research question — blocks a down-route. */
 const LEGAL_SIGNAL_RE =
