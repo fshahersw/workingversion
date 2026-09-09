@@ -1,0 +1,54 @@
+[
+  {
+    "ParameterKey": "NamePrefix",
+    "ParameterValue": "litai"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "testing"
+  },
+  {
+    "ParameterKey": "DynamoTableName",
+    "ParameterValue": "sw-dev-app"
+  },
+  {
+    "ParameterKey": "AppDataBucketName",
+    "ParameterValue": "sw-dev-seegerweissai-475976462949"
+  },
+  {
+    "ParameterKey": "AppDataKmsKeyArn",
+    "ParameterValue": "arn:aws:kms:us-east-1:475976462949:key/a7b92505-5e20-4288-8356-eff7b250e315"
+  },
+  {
+    "ParameterKey": "KbClusterArn",
+    "ParameterValue": "arn:aws:rds:us-east-1:475976462949:cluster:sw-kb-kb"
+  },
+  {
+    "ParameterKey": "KbSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:475976462949:secret:sw-kb/kb/kb_app-voZDNh"
+  },
+  {
+    "ParameterKey": "BdaProjectArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:475976462949:data-automation-project/7df322dd90ae"
+  },
+  {
+    "ParameterKey": "BdaProfileArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:475976462949:data-automation-profile/us.data-automation-v1"
+  },
+  {
+    "ParameterKey": "AgentCoreGatewayArn",
+    "ParameterValue": "arn:aws:bedrock-agentcore:us-east-1:475976462949:gateway/claudeaddinwebsearchiamgateway-x9d5bnlhd4"
+  },
+  {
+    "ParameterKey": "AgentCoreCodeInterpreterResourceArn",
+    "ParameterValue": "arn:aws:bedrock-agentcore:us-east-1:aws:code-interpreter/aws.codeinterpreter.v1"
+  },
+  {
+    "ParameterKey": "BedrockModelResourceArns",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:475976462949:inference-profile/us.anthropic.claude-sonnet-5,arn:aws:bedrock:us-east-1:475976462949:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0,arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5,arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1,arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0,arn:aws:bedrock:us-east-1::foundation-model/nvidia.nemotron-nano-3-30b,arn:aws:bedrock:us-east-1::foundation-model/nvidia.nemotron-nano-12b-v2,arn:aws:bedrock:us-east-1::foundation-model/nvidia.nemotron-super-3-120b,arn:aws:bedrock:us-east-1::foundation-model/google.gemma-3-27b-it,arn:aws:bedrock:us-east-1::foundation-model/moonshotai.kimi-k2.5,arn:aws:bedrock:us-east-1::foundation-model/qwen.qwen3-vl-235b-a22b,arn:aws:bedrock:us-east-1::foundation-model/zai.glm-5"
+  },
+  {
+    "ParameterKey": "BedrockRerankResourceArns",
+    "ParameterValue": "arn:aws:bedrock:us-east-1::foundation-model/cohere.rerank-v3-5:0"
+  }
+]

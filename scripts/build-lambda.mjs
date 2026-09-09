@@ -3,9 +3,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const environment = process.env.LITAI_BUILD_ENVIRONMENT;
-if (environment !== "staging" && environment !== "prod") {
+if (environment !== "testing" && environment !== "staging" && environment !== "prod") {
   throw new Error(
-    "LITAI_BUILD_ENVIRONMENT must be staging or prod for a Lambda artifact",
+    "LITAI_BUILD_ENVIRONMENT must be testing, staging, or prod for a Lambda artifact",
   );
 }
 

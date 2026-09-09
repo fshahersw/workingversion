@@ -1,0 +1,166 @@
+[
+  {
+    "ParameterKey": "NamePrefix",
+    "ParameterValue": "litai"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "testing"
+  },
+  {
+    "ParameterKey": "DeploymentIntent",
+    "ParameterValue": "new-environment"
+  },
+  {
+    "ParameterKey": "ApiGatewayAccountLoggingMode",
+    "ParameterValue": "preconfigured-outside-this-stack"
+  },
+  {
+    "ParameterKey": "ArtifactBucketName",
+    "ParameterValue": "litai-testing-475976462949-artifacts"
+  },
+  {
+    "ParameterKey": "ArtifactObjectKey",
+    "ParameterValue": "releases/0b8cf55aa5826b2dcf0308ac1977a84629c0a1c1658be75164fa2559e2ca1f7d/app-runtime.zip"
+  },
+  {
+    "ParameterKey": "ArtifactObjectVersion",
+    "ParameterValue": "oYaq8bhpIR5o6nRhQ1ynIZEC50mXd6t8"
+  },
+  {
+    "ParameterKey": "Architecture",
+    "ParameterValue": "arm64"
+  },
+  {
+    "ParameterKey": "AppKmsKeyArn",
+    "ParameterValue": "arn:aws:kms:us-east-1:475976462949:key/dd5477e7-ea74-42e7-9dff-03467f3aa59e"
+  },
+  {
+    "ParameterKey": "AppAccessPolicyArn",
+    "ParameterValue": "arn:aws:iam::475976462949:policy/lit-ai/testing/litai-testing-app-access"
+  },
+  {
+    "ParameterKey": "DynamoTableName",
+    "ParameterValue": "sw-dev-app"
+  },
+  {
+    "ParameterKey": "AppDataBucketName",
+    "ParameterValue": "sw-dev-seegerweissai-475976462949"
+  },
+  {
+    "ParameterKey": "OriginAccessSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:475976462949:secret:litai/testing/cloudfront-origin-WmXx6E"
+  },
+  {
+    "ParameterKey": "CognitoRegion",
+    "ParameterValue": "us-east-1"
+  },
+  {
+    "ParameterKey": "CognitoUserPoolId",
+    "ParameterValue": "us-east-1_D7NX6OyAR"
+  },
+  {
+    "ParameterKey": "CognitoClientId",
+    "ParameterValue": "3ab10qboajkm0vc36lcv59k78m"
+  },
+  {
+    "ParameterKey": "CognitoDomain",
+    "ParameterValue": "seegerweissai-auth.auth.us-east-1.amazoncognito.com"
+  },
+  {
+    "ParameterKey": "CognitoRedirectUri",
+    "ParameterValue": "https://testing.seegerweiss.com/auth/callback"
+  },
+  {
+    "ParameterKey": "CognitoLogoutUri",
+    "ParameterValue": "https://testing.seegerweiss.com/"
+  },
+  {
+    "ParameterKey": "KbAccessPolicyArn",
+    "ParameterValue": "arn:aws:iam::475976462949:policy/sw-kb-kb-app-access"
+  },
+  {
+    "ParameterKey": "KbClusterArn",
+    "ParameterValue": "arn:aws:rds:us-east-1:475976462949:cluster:sw-kb-kb"
+  },
+  {
+    "ParameterKey": "KbSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:475976462949:secret:sw-kb/kb/kb_app-voZDNh"
+  },
+  {
+    "ParameterKey": "KbDatabase",
+    "ParameterValue": "kb"
+  },
+  {
+    "ParameterKey": "KbIngestAccessPolicyArn",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "KbIngestJobsTableName",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "KbIngestQueueUrl",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "BedrockRegion",
+    "ParameterValue": "us-east-1"
+  },
+  {
+    "ParameterKey": "BdaProjectArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:475976462949:data-automation-project/7df322dd90ae"
+  },
+  {
+    "ParameterKey": "BdaProfileArn",
+    "ParameterValue": "arn:aws:bedrock:us-east-1:475976462949:data-automation-profile/us.data-automation-v1"
+  },
+  {
+    "ParameterKey": "AgentCoreGatewayUrl",
+    "ParameterValue": "https://claudeaddinwebsearchiamgateway-x9d5bnlhd4.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+  },
+  {
+    "ParameterKey": "AgentCoreSearchTool",
+    "ParameterValue": "general___WebSearch"
+  },
+  {
+    "ParameterKey": "AgentCoreCodeInterpreterId",
+    "ParameterValue": "aws.codeinterpreter.v1"
+  },
+  {
+    "ParameterKey": "CorpusUrl",
+    "ParameterValue": "https://odwhzepghulspdzmzhhz.supabase.co"
+  },
+  {
+    "ParameterKey": "CorpusPublishableKey",
+    "ParameterValue": "sb_publishable_3dqNzUbWYPa27v_5oONvCw_iBx4yPiw"
+  },
+  {
+    "ParameterKey": "CorpusServiceSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:475976462949:secret:litai/testing/runtime-ll7hn3"
+  },
+  {
+    "ParameterKey": "AppAliasDomain",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "AcmCertificateArn",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "ApiDeploymentSlot",
+    "ParameterValue": "blue"
+  },
+  {
+    "ParameterKey": "ApiIntegrationTimeoutMilliseconds",
+    "ParameterValue": "300000"
+  },
+  {
+    "ParameterKey": "CloudFrontPriceClass",
+    "ParameterValue": "PriceClass_100"
+  },
+  {
+    "ParameterKey": "WafRateLimit",
+    "ParameterValue": "2000"
+  }
+]

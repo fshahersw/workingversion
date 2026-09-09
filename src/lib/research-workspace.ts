@@ -1,12 +1,9 @@
-import { supabase } from "@/integrations/supabase/client";
 import type { MatterScope, Source } from "@/lib/chat-types";
 
 /**
- * Research workspace persistence: saved answers, pinned passages, watched
- * topics and their hits, and the saved prompt library.
- *
- * Everything runs through the browser Supabase client under RLS, so a user
- * only ever reads or writes their own rows.
+ * Research workspace persistence for the current browser tab only.
+ * Pins, watches, saved answers, and prompts used to live on the retired
+ * Supabase project. They no longer leave the process.
  */
 
 export type SavedAnswer = {
@@ -55,9 +52,23 @@ export type SavedPrompt = {
   prompt: string;
 };
 
-async function uid(): Promise<string | null> {
-  const { data } = await supabase.auth.getUser();
-  return data.user?.id ?? null;
+type StoredAnswer = SavedAnswer & { matterId: string | null; conversationId: string | null };
+type StoredPin = Pin & { conversationId: string | null };
+type StoredWatch = Watch;
+type StoredHit = WatchHit;
+
+const answers: StoredAnswer[] = [];
+const pins: StoredPin[] = [];
+const watches: StoredWatch[] = [];
+const hits: StoredHit[] = [];
+const prompts: SavedPrompt[] = [];
+
+function id(): string {
+  return crypto.randomUUID();
+}
+
+function now(): string {
+  return new Date().toISOString();
 }
 
 /* ------------------------------------------------------------------ answers */
@@ -69,45 +80,36 @@ export async function saveAnswer(args: {
   answer: string;
   sources: Source[];
 }): Promise<string | null> {
-  const userId = await uid();
-  if (!userId) return null;
-  const { data, error } = await supabase
-    .from("research_saved_answers")
-    .insert({
-      user_id: userId,
-      conversation_id: args.conversationId,
-      matter_id: args.matter?.matterId ?? null,
-      matter_label: args.matter?.label ?? null,
-      question: args.question,
-      answer: args.answer,
-      sources: args.sources as never,
-    })
-    .select("id")
-    .single();
-  if (error || !data) return null;
-  return data.id as string;
+  void args.sources;
+  const row: StoredAnswer = {
+    id: id(),
+    question: args.question,
+    answer: args.answer,
+    matterLabel: args.matter?.label ?? null,
+    createdAt: now(),
+    matterId: args.matter?.matterId ?? null,
+    conversationId: args.conversationId,
+  };
+  answers.unshift(row);
+  return row.id;
 }
 
 export async function listSavedAnswers(matterId?: string): Promise<SavedAnswer[]> {
-  let q = supabase
-    .from("research_saved_answers")
-    .select("id, question, answer, matter_label, created_at")
-    .order("created_at", { ascending: false })
-    .limit(50);
-  if (matterId) q = q.eq("matter_id", matterId);
-  const { data, error } = await q;
-  if (error || !data) return [];
-  return data.map((r) => ({
-    id: r.id as string,
-    question: (r.question as string) ?? "",
-    answer: (r.answer as string) ?? "",
-    matterLabel: (r.matter_label as string | null) ?? null,
-    createdAt: r.created_at as string,
-  }));
+  return answers
+    .filter((r) => !matterId || r.matterId === matterId)
+    .slice(0, 50)
+    .map(({ id, question, answer, matterLabel, createdAt }) => ({
+      id,
+      question,
+      answer,
+      matterLabel,
+      createdAt,
+    }));
 }
 
-export async function deleteSavedAnswer(id: string): Promise<void> {
-  await supabase.from("research_saved_answers").delete().eq("id", id);
+export async function deleteSavedAnswer(rowId: string): Promise<void> {
+  const i = answers.findIndex((r) => r.id === rowId);
+  if (i >= 0) answers.splice(i, 1);
 }
 
 /* --------------------------------------------------------------------- pins */
@@ -119,52 +121,31 @@ export async function addPin(args: {
   note?: string;
   source?: Source | null;
 }): Promise<Pin | null> {
-  const userId = await uid();
-  if (!userId) return null;
-  const { data, error } = await supabase
-    .from("research_pins")
-    .insert({
-      user_id: userId,
-      conversation_id: args.conversationId,
-      matter_id: args.matter?.matterId ?? null,
-      quote: args.quote,
-      note: args.note ?? null,
-      source_ref: args.source?.ref ?? null,
-      citation: args.source?.citation ?? null,
-      source_url: args.source?.source_url ?? null,
-    })
-    .select("id, quote, note, source_ref, citation, source_url, created_at")
-    .single();
-  if (error || !data) return null;
-  return rowToPin(data);
+  void args.matter;
+  const row: StoredPin = {
+    id: id(),
+    quote: args.quote,
+    note: args.note ?? null,
+    sourceRef: args.source?.ref ?? null,
+    citation: args.source?.citation ?? null,
+    sourceUrl: args.source?.source_url ?? null,
+    createdAt: now(),
+    conversationId: args.conversationId,
+  };
+  pins.unshift(row);
+  return row;
 }
 
 export async function listPins(conversationId?: string | null): Promise<Pin[]> {
-  let q = supabase
-    .from("research_pins")
-    .select("id, quote, note, source_ref, citation, source_url, created_at")
-    .order("created_at", { ascending: false })
-    .limit(100);
-  if (conversationId) q = q.eq("conversation_id", conversationId);
-  const { data, error } = await q;
-  if (error || !data) return [];
-  return data.map(rowToPin);
+  return pins
+    .filter((p) => !conversationId || p.conversationId === conversationId)
+    .slice(0, 100)
+    .map(({ conversationId: _c, ...pin }) => pin);
 }
 
-export async function deletePin(id: string): Promise<void> {
-  await supabase.from("research_pins").delete().eq("id", id);
-}
-
-function rowToPin(r: Record<string, unknown>): Pin {
-  return {
-    id: r.id as string,
-    quote: (r.quote as string) ?? "",
-    note: (r.note as string | null) ?? null,
-    sourceRef: (r.source_ref as string | null) ?? null,
-    citation: (r.citation as string | null) ?? null,
-    sourceUrl: (r.source_url as string | null) ?? null,
-    createdAt: r.created_at as string,
-  };
+export async function deletePin(rowId: string): Promise<void> {
+  const i = pins.findIndex((p) => p.id === rowId);
+  if (i >= 0) pins.splice(i, 1);
 }
 
 /* ------------------------------------------------------------------ watches */
@@ -175,127 +156,72 @@ export async function saveWatch(args: {
   matter: MatterScope | null;
   sources: Source[];
 }): Promise<string | null> {
-  const userId = await uid();
-  if (!userId) return null;
-  const seen = args.sources
-    .map((s) => s.source_url)
-    .filter((u): u is string => Boolean(u));
-  const { data, error } = await supabase
-    .from("research_watches")
-    .insert({
-      user_id: userId,
-      question: args.question,
-      label: args.label || shorten(args.question),
-      matter_id: args.matter?.matterId ?? null,
-      matter_label: args.matter?.label ?? null,
-      seen_urls: seen as never,
-    })
-    .select("id")
-    .single();
-  if (error || !data) return null;
-  return data.id as string;
+  void args.sources;
+  const row: StoredWatch = {
+    id: id(),
+    question: args.question,
+    label: args.label || shorten(args.question),
+    matterLabel: args.matter?.label ?? null,
+    active: true,
+    lastCheckedAt: null,
+    unseen: 0,
+  };
+  watches.unshift(row);
+  return row.id;
 }
 
 export async function listWatches(): Promise<Watch[]> {
-  const [watches, hits] = await Promise.all([
-    supabase
-      .from("research_watches")
-      .select("id, question, label, matter_label, active, last_checked_at")
-      .order("updated_at", { ascending: false })
-      .limit(50),
-    supabase
-      .from("research_watch_hits")
-      .select("watch_id, seen")
-      .eq("seen", false),
-  ]);
-  if (watches.error || !watches.data) return [];
   const unseen = new Map<string, number>();
-  for (const h of hits.data ?? []) {
-    const k = h.watch_id as string;
-    unseen.set(k, (unseen.get(k) ?? 0) + 1);
+  for (const h of hits) {
+    if (!h.seen) unseen.set(h.watchId, (unseen.get(h.watchId) ?? 0) + 1);
   }
-  return watches.data.map((r) => ({
-    id: r.id as string,
-    question: (r.question as string) ?? "",
-    label: (r.label as string) || shorten((r.question as string) ?? ""),
-    matterLabel: (r.matter_label as string | null) ?? null,
-    active: Boolean(r.active),
-    lastCheckedAt: (r.last_checked_at as string | null) ?? null,
-    unseen: unseen.get(r.id as string) ?? 0,
-  }));
+  return watches.slice(0, 50).map((w) => ({ ...w, unseen: unseen.get(w.id) ?? 0 }));
 }
 
-export async function deleteWatch(id: string): Promise<void> {
-  await supabase.from("research_watches").delete().eq("id", id);
+export async function deleteWatch(rowId: string): Promise<void> {
+  const i = watches.findIndex((w) => w.id === rowId);
+  if (i >= 0) watches.splice(i, 1);
+  for (let j = hits.length - 1; j >= 0; j--) {
+    if (hits[j]?.watchId === rowId) hits.splice(j, 1);
+  }
 }
 
-export async function setWatchActive(id: string, active: boolean): Promise<void> {
-  await supabase.from("research_watches").update({ active }).eq("id", id);
+export async function setWatchActive(rowId: string, active: boolean): Promise<void> {
+  const row = watches.find((w) => w.id === rowId);
+  if (row) row.active = active;
 }
 
 export async function listWatchHits(watchId: string): Promise<WatchHit[]> {
-  const { data, error } = await supabase
-    .from("research_watch_hits")
-    .select("id, watch_id, title, summary, url, source_label, published_at, seen, created_at")
-    .eq("watch_id", watchId)
-    .order("created_at", { ascending: false })
-    .limit(50);
-  if (error || !data) return [];
-  return data.map((r) => ({
-    id: r.id as string,
-    watchId: r.watch_id as string,
-    title: (r.title as string) ?? "",
-    summary: (r.summary as string | null) ?? null,
-    url: (r.url as string | null) ?? null,
-    sourceLabel: (r.source_label as string | null) ?? null,
-    publishedAt: (r.published_at as string | null) ?? null,
-    seen: Boolean(r.seen),
-    createdAt: r.created_at as string,
-  }));
+  return hits.filter((h) => h.watchId === watchId).slice(0, 50);
 }
 
 export async function markWatchHitsSeen(watchId: string): Promise<void> {
-  await supabase
-    .from("research_watch_hits")
-    .update({ seen: true })
-    .eq("watch_id", watchId)
-    .eq("seen", false);
+  for (const h of hits) {
+    if (h.watchId === watchId) h.seen = true;
+  }
 }
 
 export async function countUnseenHits(): Promise<number> {
-  const { count } = await supabase
-    .from("research_watch_hits")
-    .select("id", { count: "exact", head: true })
-    .eq("seen", false);
-  return count ?? 0;
+  return hits.filter((h) => !h.seen).length;
 }
 
 /* ------------------------------------------------------------------ prompts */
 
 export async function listPrompts(): Promise<SavedPrompt[]> {
-  const { data, error } = await supabase
-    .from("research_prompts")
-    .select("id, title, prompt")
-    .order("created_at", { ascending: false })
-    .limit(50);
-  if (error || !data) return [];
-  return data.map((r) => ({
-    id: r.id as string,
-    title: (r.title as string) ?? "",
-    prompt: (r.prompt as string) ?? "",
-  }));
+  return prompts.slice(0, 50);
 }
 
 export async function savePrompt(title: string, prompt: string): Promise<void> {
-  const userId = await uid();
-  if (!userId) return;
-  await supabase
-    .from("research_prompts")
-    .insert({ user_id: userId, title: title || shorten(prompt), prompt });
+  prompts.unshift({
+    id: id(),
+    title: title || shorten(prompt),
+    prompt,
+  });
 }
 
-export async function deletePrompt(id: string): Promise<void> {
-  await supabase.from("research_prompts").delete().eq("id", id);
+export async function deletePrompt(rowId: string): Promise<void> {
+  const i = prompts.findIndex((p) => p.id === rowId);
+  if (i >= 0) prompts.splice(i, 1);
 }
 
 export function shorten(text: string, max = 70): string {

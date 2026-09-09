@@ -34,6 +34,7 @@ import {
   rpc,
 } from "./store.server";
 import { FIXTURE_DOCKET_CSV, FIXTURE_MANIFEST, FIXTURE_PARTIES_CSV, FIXTURE_PDFS, fixtureBytes } from "./selftest-fixture.server";
+import { embedText } from "@/lib/pile/titan.server";
 
 export type StepStatus = "pass" | "fail" | "skip";
 export type Step = {
@@ -305,28 +306,21 @@ export async function runSelfTest(origin: string): Promise<SelfTestReport> {
     });
 
     // -------------------------------------------------------- 10. embed ---
-    await runner.step("embed", "Voyage embeddings (voyage-law-2, 1024d)", async () => {
-      const key = process.env["VOYAGE_API_KEY"];
+    await runner.step("embed", "Titan embeddings (amazon.titan-embed-text-v2:0, 1024d)", async () => {
+      const { embedText } = await import("@/lib/pile/titan.server");
       const pending = await rpc<{ chunk_id: string; content: string }[]>("etl_selftest_chunks", { p_slug: slug });
-      assert(key, "VOYAGE_API_KEY is not configured");
       assert(pending.length > 0, "no chunks were produced to embed");
-      const res = await fetch("https://api.voyageai.com/v1/embeddings", {
-        method: "POST",
-        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "voyage-law-2",
-          input: pending.map((c) => c.content.slice(0, 8000)),
-          input_type: "document",
-        }),
-      });
-      const body = (await res.json()) as { data?: { embedding: number[] }[]; error?: unknown };
-      assert(res.ok && body.data, `Voyage request failed: ${res.status} ${JSON.stringify(body.error ?? body)}`);
-      const dims = body.data[0]?.embedding.length ?? 0;
+      const vectors: { chunk_id: string; embedding: string }[] = [];
+      for (const chunk of pending) {
+        const embedding = await embedText(chunk.content);
+        assert(embedding, `Titan embed failed for chunk ${chunk.chunk_id}`);
+        vectors.push({
+          chunk_id: chunk.chunk_id,
+          embedding: `[${embedding.map((x) => x.toFixed(6)).join(",")}]`,
+        });
+      }
+      const dims = vectors[0] ? JSON.parse(vectors[0].embedding).length : 0;
       assert(dims === 1024, `expected 1024-dim vectors, got ${dims}`);
-      const vectors = pending.map((c, i) => ({
-        chunk_id: c.chunk_id,
-        embedding: `[${body.data![i]!.embedding.map((x) => x.toFixed(6)).join(",")}]`,
-      }));
       const n = await rpc<number>("etl_selftest_embed", { p_slug: slug, p_vectors: vectors });
       return [`${n} chunks embedded at ${dims} dimensions`, null, { chunks: n, dims }];
     });

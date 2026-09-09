@@ -1,9 +1,10 @@
 # Production application infrastructure
 
-> **NO DEPLOY:** This directory is an Infrastructure as Code deliverable only.
-> Do not upload artifacts, create or execute change sets, create stacks, update
-> stacks, or change regional API Gateway account settings from this runbook.
-> Only the local validation commands below are authorized here.
+> Testing updates use `bun run deploy:testing` from the repo root. That command
+> rebuilds the Lambda zip, uploads a versioned object, and updates
+> `litai-testing-runtime` only. Do not apply `app-foundation.cfn.yaml` in
+> account `475976462949`; it would create a second Cognito pool, Dynamo table,
+> and S3 bucket. Staging and prod remain gated.
 
 These templates describe new greenfield environments. Provision and verify
 `staging` before preparing `prod`. They do not import, discover, reference by
@@ -170,6 +171,8 @@ immutable and reproducible.
 The examples contain invalid account IDs, replacement markers, and `.invalid`
 hosts. They are review inputs, not deployment-ready values:
 
+- `parameters/testing-runtime.parameters.json` (adopts existing
+  Cognito/Dynamo/S3/Aurora IDs; do not apply `app-foundation.cfn.yaml`)
 - `parameters/staging-foundation.parameters.json`
 - `parameters/staging-runtime.parameters.json`
 - `parameters/prod-foundation.parameters.json`

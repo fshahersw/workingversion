@@ -11,9 +11,12 @@ export const Route = createFileRoute("/api/public/intel/run")({
         const cronToken = request.headers.get("x-cron-token");
         let authorized = false;
         if (cronToken) {
-          const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-          const { data } = await supabaseAdmin.rpc("verify_intel_cron_token", { token: cronToken });
-          authorized = data === true;
+          try {
+            const { rpc } = await import("@/lib/ingest/store.server");
+            authorized = (await rpc<boolean>("verify_intel_cron_token", { token: cronToken })) === true;
+          } catch {
+            authorized = false;
+          }
         }
         if (!authorized) {
           const denied = requireIngestAuth(request);

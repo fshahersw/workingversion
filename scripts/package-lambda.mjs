@@ -84,7 +84,7 @@ async function main() {
   const parsedBuildMetadata = JSON.parse(buildMetadata);
   if (
     parsedBuildMetadata?.schema !== 1 ||
-    !["staging", "prod"].includes(parsedBuildMetadata?.environment) ||
+    !["testing", "staging", "prod"].includes(parsedBuildMetadata?.environment) ||
     typeof parsedBuildMetadata?.corpusOrigin !== "string"
   ) {
     throw new Error("Invalid Lambda build metadata");

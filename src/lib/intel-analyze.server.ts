@@ -5,8 +5,13 @@
 // rendering never calls a model. Failures degrade gracefully: a story without
 // analysis still ships with its plain summary.
 
-const GATEWAY = "https://ai.gateway.lovable.dev/v1/chat/completions";
-const MODEL = "google/gemini-3.7-flash";
+import {
+  BEDROCK_AGENT_MODEL,
+  bedrockChat,
+  bedrockEnabled,
+  userText,
+} from "@/lib/agents/bedrock.server";
+import { parseJsonBlock } from "@/lib/agents/json-extract";
 
 export type AnalysisInput = {
   key: string;
@@ -36,13 +41,11 @@ const SYSTEM = [
   "Never speculate, never hedge with filler, never restate the headline. Return JSON only.",
 ].join(" ");
 
-
 function clip(v: string | null | undefined, n: number): string {
   return (v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 }
 
 async function analyzeBatch(
-  apiKey: string,
   batch: AnalysisInput[],
   errors: string[],
 ): Promise<Map<string, Analysis>> {
@@ -61,31 +64,18 @@ async function analyzeBatch(
     .join("\n\n");
 
   try {
-    const res = await fetch(GATEWAY, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: SYSTEM },
-          {
-            role: "user",
-            content: `${prompt}\n\nReturn JSON: {"items":[{"n":1,"lead":"...","bullets":["..."],"impact":"..."}]} covering every item in order.`,
-          },
-        ],
-        response_format: { type: "json_object" },
-      }),
+    const result = await bedrockChat({
+      model: BEDROCK_AGENT_MODEL,
+      system: SYSTEM,
+      messages: [
+        userText(
+          `${prompt}\n\nReturn JSON: {"items":[{"n":1,"lead":"...","bullets":["..."],"impact":"..."}]} covering every item in order.`,
+        ),
+      ],
+      maxTokens: 2_000,
     });
-    if (!res.ok) {
-      errors.push(`analysis ${res.status}: ${(await res.text()).slice(0, 160)}`);
-      return out;
-    }
-    const body = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const raw = body.choices?.[0]?.message?.content ?? "";
-    const parsed = JSON.parse(raw) as { items?: unknown };
-    const items = Array.isArray(parsed.items) ? parsed.items : [];
+    const parsed = parseJsonBlock(result.text, "items");
+    const items = Array.isArray(parsed?.["items"]) ? parsed["items"] : [];
     for (const entry of items) {
       const o = entry as { n?: unknown; lead?: unknown; bullets?: unknown; impact?: unknown };
       const idx = typeof o.n === "number" ? o.n - 1 : -1;
@@ -132,8 +122,9 @@ export async function analyzeItems(
   opts: { cap?: number; batchSize?: number; concurrency?: number } = {},
 ): Promise<{ analyses: Map<string, Analysis>; errors: string[] }> {
   const errors: string[] = [];
-  const apiKey = process.env["LOVABLE_API_KEY"];
-  if (!apiKey) return { analyses: new Map(), errors: ["LOVABLE_API_KEY is not configured"] };
+  if (!bedrockEnabled()) {
+    return { analyses: new Map(), errors: ["Bedrock credentials are not configured"] };
+  }
 
   const cap = opts.cap ?? 80;
   const batchSize = opts.batchSize ?? 4;
@@ -141,9 +132,7 @@ export async function analyzeItems(
   const batches: AnalysisInput[][] = [];
   for (let i = 0; i < slice.length; i += batchSize) batches.push(slice.slice(i, i + batchSize));
 
-  const results = await mapLimit(batches, opts.concurrency ?? 4, (b) =>
-    analyzeBatch(apiKey, b, errors),
-  );
+  const results = await mapLimit(batches, opts.concurrency ?? 4, (b) => analyzeBatch(b, errors));
   const analyses = new Map<string, Analysis>();
   for (const r of results) for (const [k, v] of r) analyses.set(k, v);
   return { analyses, errors };

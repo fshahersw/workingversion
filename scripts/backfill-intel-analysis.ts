@@ -1,6 +1,7 @@
 // One-off: generate cached AI briefings for intel rows that never got one.
 //
-//   CORPUS_SERVICE_KEY=... LOVABLE_API_KEY=... bun scripts/backfill-intel-analysis.ts
+//   CORPUS_SERVICE_KEY=... bun scripts/backfill-intel-analysis.ts
+//   Uses Bedrock Converse via the default AWS credential chain.
 //
 // Idempotent: only touches rows where analysis_lead is null.
 import { corpusUrl } from "@/lib/corpus";

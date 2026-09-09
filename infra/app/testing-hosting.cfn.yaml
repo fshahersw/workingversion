@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Hosting prerequisites for the testing runtime. Creates only an artifact
+  bucket, hosting KMS key, CloudFront origin secret, and an app IAM policy
+  that points at the existing Cognito/Dynamo/S3/Aurora data plane. Does not
+  create a second user pool, table, data bucket, or cluster.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: litai
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+  Environment:
+    Type: String
+    Default: testing
+    AllowedValues:
+      - testing
+  DynamoTableName:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  AppDataBucketName:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+  AppDataKmsKeyArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/[A-Fa-f0-9-]+$"
+  KbClusterArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:rds:[^:]+:[0-9]{12}:cluster:.+$"
+  KbSecretArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+  BdaProjectArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:[0-9]{12}:data-automation-project/[A-Za-z0-9_-]+$"
+  BdaProfileArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:[^:]*:data-automation-profile/[A-Za-z0-9._/-]+$"
+  AgentCoreGatewayArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:bedrock-agentcore:[^:]+:[0-9]{12}:gateway/[A-Za-z0-9_-]+$"
+  AgentCoreCodeInterpreterResourceArn:
+    Type: String
+    Default: "arn:aws:bedrock-agentcore:us-east-1:aws:code-interpreter/aws.codeinterpreter.v1"
+  BedrockModelResourceArns:
+    Type: String
+    AllowedPattern: "^arn:[^\\s,]+(,arn:[^\\s,]+)*$"
+  BedrockRerankResourceArns:
+    Type: String
+    AllowedPattern: "^arn:[^\\s,]+(,arn:[^\\s,]+)*$"
+
+Resources:
+  HostingKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "${NamePrefix}-${Environment} hosting encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountIAMPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogsEncryption
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.${AWS::URLSuffix}"
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/lit-ai/${NamePrefix}/${Environment}/*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  HostingKmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${NamePrefix}/${Environment}/hosting"
+      TargetKeyId: !Ref HostingKmsKey
+
+  DeploymentArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${NamePrefix}-${Environment}-${AWS::AccountId}-artifacts"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt HostingKmsKey.Arn
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireSupersededArtifacts
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  DeploymentArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref DeploymentArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DeploymentArtifactBucket.Arn
+              - !Sub "${DeploymentArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  CloudFrontOriginAccessSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${NamePrefix}/${Environment}/cloudfront-origin"
+      Description: CloudFront-to-API-Gateway origin verification value.
+      KmsKeyId: !GetAtt HostingKmsKey.Arn
+      GenerateSecretString:
+        SecretStringTemplate: '{"purpose":"cloudfront-origin-access"}'
+        GenerateStringKey: originKey
+        PasswordLength: 48
+        ExcludePunctuation: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AppAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${NamePrefix}-${Environment}-app-access"
+      Path: !Sub "/lit-ai/${Environment}/"
+      Description: !Sub "Testing runtime access to the existing data plane for ${NamePrefix}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DynamoTableData
+            Effect: Allow
+            Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:UpdateItem
+            Resource:
+              - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}"
+          - Sid: DynamoIndexRead
+            Effect: Allow
+            Action:
+              - dynamodb:Query
+            Resource:
+              - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoTableName}/index/*"
+          - Sid: S3BucketRead
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${AppDataBucketName}"
+          - Sid: S3ObjectData
+            Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${AppDataBucketName}/*"
+          - Sid: S3KmsKeyUse
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:ReEncryptFrom
+              - kms:ReEncryptTo
+            Resource:
+              - !Ref AppDataKmsKeyArn
+            Condition:
+              StringEquals:
+                "kms:ViaService": !Sub "s3.${AWS::Region}.${AWS::URLSuffix}"
+          - Sid: HostingKmsUse
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource:
+              - !GetAtt HostingKmsKey.Arn
+          - Sid: BedrockModelInvocation
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: !Split
+              - ","
+              - !Ref BedrockModelResourceArns
+          - Sid: BedrockRerankApi
+            Effect: Allow
+            Action:
+              - bedrock:Rerank
+            Resource: "*"
+          - Sid: BedrockRerankModel
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: !Split
+              - ","
+              - !Ref BedrockRerankResourceArns
+          - Sid: BedrockDataAutomationInvoke
+            Effect: Allow
+            Action:
+              - bedrock:InvokeDataAutomationAsync
+            Resource:
+              - !Ref BdaProjectArn
+              - !Ref BdaProfileArn
+          - Sid: BedrockDataAutomationStatus
+            Effect: Allow
+            Action:
+              - bedrock:GetDataAutomationStatus
+            Resource:
+              - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:data-automation-invocation/*"
+          - Sid: AgentCoreGatewayInvoke
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:InvokeGateway
+            Resource:
+              - !Ref AgentCoreGatewayArn
+          - Sid: AgentCoreCodeInterpreterSessions
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:InvokeCodeInterpreter
+              - bedrock-agentcore:StartCodeInterpreterSession
+              - bedrock-agentcore:StopCodeInterpreterSession
+            Resource:
+              - !Ref AgentCoreCodeInterpreterResourceArn
+          - Sid: RdsDataApi
+            Effect: Allow
+            Action:
+              - rds-data:BatchExecuteStatement
+              - rds-data:BeginTransaction
+              - rds-data:CommitTransaction
+              - rds-data:ExecuteStatement
+              - rds-data:RollbackTransaction
+            Resource:
+              - !Ref KbClusterArn
+          - Sid: DatabaseSecretRead
+            Effect: Allow
+            Action:
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Ref KbSecretArn
+
+Outputs:
+  HostingKmsKeyArn:
+    Value: !GetAtt HostingKmsKey.Arn
+  DeploymentArtifactBucketName:
+    Value: !Ref DeploymentArtifactBucket
+  CloudFrontOriginAccessSecretArn:
+    Value: !Ref CloudFrontOriginAccessSecret
+  ApplicationAccessPolicyArn:
+    Value: !Ref AppAccessPolicy

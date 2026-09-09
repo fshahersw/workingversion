@@ -7,6 +7,7 @@ done by hand in dev that is not on this list is a defect in the runbook.
 
 | Environment | Account | SSO profile | Notes |
 | --- | --- | --- | --- |
+| testing | 475976462949 | `AdministratorAccess-475976462949` | Same data plane as local/dev. Hostname `https://testing.seegerweiss.com`. See below. Do not apply stacks until explicitly authorized. |
 | dev | 475976462949 | `AdministratorAccess-475976462949` | DynamoDB `sw-dev-app`, Aurora cluster `sw-kb-kb`, Cognito pool `us-east-1_D7NX6OyAR` |
 | staging | 475976462949 | `AdministratorAccess-475976462949` | Same account, separate stacks via `infra/app/parameters/staging-runtime.parameters.json` |
 | prod | 247011205599 | `AdministratorAccess-sw-kb-prod` | Separate account. Never share tables, buckets or clusters with dev. |
@@ -80,3 +81,34 @@ done by hand in dev that is not on this list is a defect in the runbook.
   numbered references, autosave, two-tab conflict detection, Library listing and reopen
   with the assistant thread: verified in the browser. Not yet clicked live: Export and
   DOCX import (same docgen/mammoth paths the research agent and Working Set already use).
+
+## Testing hostname (`testing.seegerweiss.com`)
+
+Live in account `475976462949`. Reuses Cognito `us-east-1_D7NX6OyAR`, Dynamo
+`sw-dev-app`, S3 `sw-dev-seegerweissai-475976462949`, and Aurora `sw-kb-kb`.
+Do not apply `app-foundation.cfn.yaml`.
+
+Stacks: `litai-testing-hosting`, `litai-testing-runtime`.
+Temporary origin: `https://d1f0twgeed7iq3.cloudfront.net`.
+Parameters: [`infra/app/parameters/testing-runtime.parameters.json`](../../infra/app/parameters/testing-runtime.parameters.json).
+
+Deploy a new build from the repo root:
+
+```
+bun run deploy:testing
+```
+
+`--skip-build` reuses `infra/app/artifacts/app-runtime.zip`. `--flip-slot` when
+REST API methods or integrations change. `--refresh-env` after rotating
+`litai/testing/runtime`. `--attach-alias` only after ACM is ISSUED.
+
+IT DNS, in order:
+
+1. ACM validation CNAME `_3c236d26c4f0a003649a7d365efff816.testing.seegerweiss.com`
+   → `_d975684775b6b3c6a5b56153e079c404.jkddzztszm.acm-validations.aws.`
+2. App CNAME `testing.seegerweiss.com` → `d1f0twgeed7iq3.cloudfront.net`
+3. `bun run deploy:testing -- --attach-alias`
+
+Cognito callbacks and S3 CORS already include `https://testing.seegerweiss.com`.
+Leftover: external corpus HTTP API and the local Vite package
+`@lovable.dev/vite-tanstack-config`.

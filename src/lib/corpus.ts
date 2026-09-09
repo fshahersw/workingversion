@@ -1,16 +1,9 @@
-// ============================================================================
-// Corpus backend client config (external Supabase project holding the corpus).
+// Corpus backend client config (external HTTP project holding the corpus).
 //
 // The app reads the NEW `corpus` schema through public-schema bridge views
 // (public.corpus_*), so the default PostgREST profile works — no
-// Accept-Profile header needed. The legacy `registry` schema remains for the
-// agent tooling until the RAG cutover.
-//
-// The corpus project is NOT the Lovable-managed backend, so generic
-// SUPABASE_URL must not be used: it points at the Lovable-managed project and
-// mismatches CORPUS_SERVICE_KEY (401 "Invalid API key").
-// ============================================================================
-import { createClient } from "@supabase/supabase-js";
+// Accept-Profile header needed. Callers use fetch() + CORPUS_SERVICE_KEY.
+// Storage helpers speak the public object URL / sign API directly.
 import {
   loadCorpusConfig,
   type EnvSource,
@@ -51,20 +44,27 @@ export const CORPUS_BUCKET = "FORAWS";
 /** New canonical corpus bucket: <slug>/pdf|text|incoming/… */
 export const MATTERS_BUCKET = "matters";
 
-let _corpus: ReturnType<typeof createClient> | undefined;
-function corpusClient(): ReturnType<typeof createClient> {
-  if (!_corpus) {
-    const { url, key } = corpusConfig();
-    _corpus = createClient(url, key, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
-  }
-  return _corpus;
+function storageOrigin(): string {
+  return corpusUrl().replace(/\/$/, "");
+}
+
+function encodeObjectPath(path: string): string {
+  return path
+    .split("/")
+    .filter((part) => part.length > 0)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+}
+
+function storageAuthKey(): string {
+  const service =
+    typeof process !== "undefined" ? process.env["CORPUS_SERVICE_KEY"] : undefined;
+  return (service && service.trim()) || corpusConfig().key;
 }
 
 /** Public URL for an object in a corpus storage bucket. */
 export function corpusFileUrl(path: string, bucket: string = CORPUS_BUCKET): string {
-  return corpusClient().storage.from(bucket).getPublicUrl(path).data.publicUrl;
+  return `${storageOrigin()}/storage/v1/object/public/${bucket}/${encodeObjectPath(path)}`;
 }
 
 /** Signed URL (private bucket); falls back to the public URL on failure. */
@@ -73,9 +73,27 @@ export async function corpusSignedUrl(
   expiresIn = 3600,
   bucket: string = CORPUS_BUCKET,
 ): Promise<string> {
-  const { data, error } = await corpusClient()
-    .storage.from(bucket)
-    .createSignedUrl(path, expiresIn);
-  if (error || !data?.signedUrl) return corpusFileUrl(path, bucket);
-  return data.signedUrl;
+  const key = storageAuthKey();
+  try {
+    const res = await fetch(
+      `${storageOrigin()}/storage/v1/object/sign/${bucket}/${encodeObjectPath(path)}`,
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ expiresIn }),
+      },
+    );
+    if (!res.ok) return corpusFileUrl(path, bucket);
+    const data = (await res.json()) as { signedURL?: string; signedUrl?: string };
+    const signed = data.signedURL ?? data.signedUrl;
+    if (!signed) return corpusFileUrl(path, bucket);
+    if (signed.startsWith("http")) return signed;
+    return `${storageOrigin()}${signed.startsWith("/") ? "" : "/"}${signed}`;
+  } catch {
+    return corpusFileUrl(path, bucket);
+  }
 }

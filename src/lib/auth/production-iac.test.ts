@@ -60,7 +60,7 @@ test("Lambda Web Adapter and Nitro use the non-reserved streaming port", () => {
 });
 
 test("CloudFront caches only immutable assets and preserves authenticated state", () => {
-  assert.match(runtime, /DefaultCacheBehavior:[\s\S]*CachePolicyId: 413fca67-6d3c-4916-9ad5-2fa6672c1f02/);
+  assert.match(runtime, /DefaultCacheBehavior:[\s\S]*CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad/);
   assert.match(runtime, /OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac/);
   assert.match(runtime, /PathPattern: \/assets\/\*/);
   assert.match(runtime, /PathPattern: \/assets\/\*[\s\S]*CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6/);
@@ -182,6 +182,21 @@ test("packager creates deterministic Unix-mode entries without extra dependencie
   assert.match(packager, /JSZip\.loadAsync\(bytes\)/);
   assert.match(packager, /build-metadata\.json/);
   assert.match(packager, /run\.sh contains CRLF line endings/);
+});
+
+test("testing deploy updates the runtime stack without applying foundation", () => {
+  const deploy = text("../../../scripts/deploy-testing.mjs");
+  const testingRuntime = text("../../../infra/app/parameters/testing-runtime.parameters.json");
+  const testingHosting = text("../../../infra/app/testing-hosting.cfn.yaml");
+  assert.match(deploy, /create-change-set/);
+  assert.match(deploy, /change-set-type[\s\S]*UPDATE/);
+  assert.match(deploy, /litai-testing-runtime/);
+  assert.match(deploy, /LITAI_BUILD_ENVIRONMENT: "testing"/);
+  assert.doesNotMatch(deploy, /app-foundation\.cfn\.yaml/);
+  assert.match(testingHosting, /Does not\s+create a second user pool/);
+  assert.match(testingRuntime, /"Environment",\s*"ParameterValue": "testing"/);
+  assert.match(testingRuntime, /sw-dev-app/);
+  assert.doesNotMatch(testingRuntime, /replace-with-/);
 });
 
 test("Lambda builds require explicit environment inputs and never load local .env", () => {
