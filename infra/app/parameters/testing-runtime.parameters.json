@@ -141,11 +141,11 @@
   },
   {
     "ParameterKey": "AppAliasDomain",
-    "ParameterValue": ""
+    "ParameterValue": "testing.seegerweiss.com"
   },
   {
     "ParameterKey": "AcmCertificateArn",
-    "ParameterValue": ""
+    "ParameterValue": "arn:aws:acm:us-east-1:475976462949:certificate/a6a6af35-de96-436d-b17e-3298929724fb"
   },
   {
     "ParameterKey": "ApiDeploymentSlot",
