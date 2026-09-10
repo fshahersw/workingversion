@@ -9,8 +9,13 @@ export interface WriterStatus {
 // Platform integration: web_search is available in every mode (it runs through
 // the platform's curated search), so the assistant can look facts up while it
 // drafts instead of needing the separate public-research mode.
-const READ = ['get_document_context', 'read_blocks', 'read_revisions', 'read_comments', 'read_attachment', 'web_search']
-const WRITE = [...READ, 'insert_content', 'replace_blocks', 'apply_commands', 'insert_chart', 'edit_chart']
+// Platform tools (src/office/shared/platform-skill.ts): sandboxed Python,
+// citation checks, page reading, firm guides, diagrams and generated images
+// change nothing in the document, so they are available in every mode;
+// placing an image or creating a separate document is an edit.
+const PLATFORM_READ = ['run_python', 'verify_citations', 'fetch_page', 'load_firm_guide', 'ask_clarification', 'render_diagram', 'generate_image']
+const READ = ['get_document_context', 'read_blocks', 'read_revisions', 'read_comments', 'read_attachment', 'web_search', ...PLATFORM_READ]
+const WRITE = [...READ, 'insert_content', 'replace_blocks', 'apply_commands', 'insert_chart', 'edit_chart', 'insert_image', 'set_header_footer', 'reply_comment', 'resolve_comment', 'create_document']
 export function modeName(value: unknown): WriterMode {
   return value === 'ask' || value === 'review' || value === 'research' ? value : 'write'
 }

@@ -1,0 +1,333 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Seeger Weiss Office engine service: the retained Sheets workbook engine (Node
+  worker per open workbook + Rust xlsx-sidecar) on ECS Fargate behind an
+  internal-facing Application Load Balancer. The service holds no database and
+  no bucket credentials: it loads workbooks from presigned S3 grants issued by
+  the platform and saves revisions back through the platform's token-authenticated
+  callback. Requests are authenticated with RS256 tokens the platform mints;
+  the engine verifies them against the platform's JWKS.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Naming }
+        Parameters: [NamePrefix, Environment]
+      - Label: { default: Network }
+        Parameters: [VpcId, PrivateSubnetIds, PublicSubnetIds, AlbCertificateArn, AlbAllowedCidr]
+      - Label: { default: Platform contract }
+        Parameters: [PlatformUrl, EngineAudience, EngineTenant]
+      - Label: { default: Runtime }
+        Parameters: [ImageUri, DesiredCount, TaskCpu, TaskMemory, MaxSessionsPerTask, MaxSessionsPerUser, LogRetentionDays]
+
+Parameters:
+  NamePrefix:
+    Type: String
+    MinLength: 3
+    MaxLength: 16
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+    Description: Stable lowercase prefix used in physical names (match the app-foundation prefix).
+  Environment:
+    Type: String
+    AllowedValues: [testing, staging, prod]
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the Fargate tasks (need egress to S3 and to the platform origin).
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the ALB. Public when CloudFront is the caller; private when fronted differently.
+  AlbCertificateArn:
+    Type: String
+    AllowedPattern: "^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/.+$"
+    Description: ACM certificate for the ALB HTTPS listener (the CloudFront origin domain).
+  AlbAllowedCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR allowed to reach the ALB on 443. Keep 0.0.0.0/0 only when the listener
+      also requires the CloudFront origin header (see OriginKeyHeaderValue) or
+      when using the CloudFront managed prefix list in a follow-up change.
+  OriginKeyHeaderValue:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: >
+      Optional shared secret CloudFront adds as the X-Office-Origin-Key header.
+      When set, the listener returns 403 for requests without it, so the ALB
+      cannot be called directly around CloudFront and its WAF.
+  PlatformUrl:
+    Type: String
+    AllowedPattern: "^https://[^/]+$"
+    Description: The platform origin (CloudFront domain) that mints engine tokens and stores revisions.
+  EngineAudience:
+    Type: String
+    Default: seegerweiss-office-engine
+  EngineTenant:
+    Type: String
+    Default: seegerweiss
+  ImageUri:
+    Type: String
+    Description: Fully qualified image URI in ECR (built from services/office-engine/Dockerfile).
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+  TaskCpu:
+    Type: String
+    Default: "2048"
+    AllowedValues: ["1024", "2048", "4096"]
+  TaskMemory:
+    Type: String
+    Default: "4096"
+    AllowedValues: ["2048", "4096", "8192", "16384"]
+  MaxSessionsPerTask:
+    Type: Number
+    Default: 24
+  MaxSessionsPerUser:
+    Type: Number
+    Default: 4
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Conditions:
+  HasOriginKey: !Not [!Equals [!Ref OriginKeyHeaderValue, ""]]
+
+Resources:
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${NamePrefix}-${Environment}-office-engine"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${NamePrefix}-${Environment}-office-engine"
+      RetentionInDays: !Ref LogRetentionDays
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # The task role is deliberately empty: the engine reads workbooks through
+  # presigned URLs and writes through the platform API. No S3, DynamoDB, or
+  # Bedrock permissions belong here.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Office engine ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AlbAllowedCidr
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Office engine tasks (ALB ingress only)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8790
+          ToPort: 8790
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-office-eng"
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "180"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 8790
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "60"
+        # Workbook sessions are stateful per task: keep a browser on the task
+        # that opened its session for the life of the cookie.
+        - Key: stickiness.enabled
+          Value: "true"
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: "43200"
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates: [{ CertificateArn: !Ref AlbCertificateArn }]
+      DefaultActions:
+        - !If
+          - HasOriginKey
+          - Type: fixed-response
+            FixedResponseConfig: { StatusCode: "403", ContentType: application/json, MessageBody: '{"error":"forbidden"}' }
+          - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  OriginKeyRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasOriginKey
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Office-Origin-Key
+            Values: [!Ref OriginKeyHeaderValue]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${NamePrefix}-${Environment}-office-engine"
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform: { CpuArchitecture: X86_64, OperatingSystemFamily: LINUX }
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      EphemeralStorage: { SizeInGiB: 40 }
+      ContainerDefinitions:
+        - Name: office-engine
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings: [{ ContainerPort: 8790, Protocol: tcp }]
+          ReadonlyRootFilesystem: false
+          Environment:
+            - { Name: NODE_ENV, Value: production }
+            - { Name: PORT, Value: "8790" }
+            - { Name: HOST, Value: 0.0.0.0 }
+            - { Name: OFFICE_PLATFORM_URL, Value: !Ref PlatformUrl }
+            - { Name: OFFICE_ENGINE_JWT_AUDIENCE, Value: !Ref EngineAudience }
+            - { Name: OFFICE_ENGINE_TENANT, Value: !Ref EngineTenant }
+            - { Name: OFFICE_ENGINE_SCRATCH, Value: /scratch }
+            - { Name: OFFICE_ENGINE_MAX_SESSIONS, Value: !Ref MaxSessionsPerTask }
+            - { Name: OFFICE_ENGINE_MAX_PER_USER, Value: !Ref MaxSessionsPerUser }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: engine
+          HealthCheck:
+            Command: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8790/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 15
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: HttpsListener
+    Properties:
+      ServiceName: !Sub "${NamePrefix}-${Environment}-office-engine"
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref ServiceSecurityGroup]
+      LoadBalancers:
+        - ContainerName: office-engine
+          ContainerPort: 8790
+          TargetGroupArn: !Ref TargetGroup
+
+  Alarm5xx:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Office engine 5xx responses
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - { Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AlarmUnhealthy:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Office engine unhealthy targets
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - { Name: LoadBalancer, Value: !GetAtt LoadBalancer.LoadBalancerFullName }
+        - { Name: TargetGroup, Value: !GetAtt TargetGroup.TargetGroupFullName }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  LoadBalancerDnsName:
+    Description: ALB DNS name; use as the CloudFront origin for the /engine/* behavior.
+    Value: !GetAtt LoadBalancer.DNSName
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name

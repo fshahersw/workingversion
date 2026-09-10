@@ -30,7 +30,13 @@
       "@genoffice/font-metrics": ["./src/writer/packages/font-metrics/src/index.ts"],
       "@genoffice/i18n": ["./src/writer/packages/i18n/src/index.ts"],
       "@genoffice/project-store": ["./src/writer/packages/project-store/src/index.ts"],
+      "@genoffice/pptx-engine": ["./src/writer/packages/pptx-engine/src/index.ts"],
       "@genoffice/pptx-engine/custgeom": ["./src/writer/packages/pptx-engine/src/custgeom.ts"],
+      "@genoffice/pptx-engine/identity": ["./src/writer/packages/pptx-engine/src/identity.ts"],
+      "@genoffice/pptx-engine/table-grid": ["./src/writer/packages/pptx-engine/src/table-grid.ts"],
+      "@genoffice/pptx-engine/background-promote": ["./src/writer/packages/pptx-engine/src/background-promote.ts"],
+      "@genoffice/pptx-engine/smartart-layout": ["./src/writer/packages/pptx-engine/src/smartart-layout.ts"],
+      "@genoffice/pptx-render": ["./src/writer/packages/pptx-render/src/index.ts"],
       "@genoffice/pptx-render/preset-geometry": ["./src/writer/packages/pptx-render/src/preset-geometry.ts"],
       "@genoffice/ui": ["./src/writer/packages/ui/src/index.ts"],
       "@genoffice/ui/*": ["./src/writer/packages/ui/src/*"]

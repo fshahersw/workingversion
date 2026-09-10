@@ -9,6 +9,7 @@ import {
 } from './protocol'
 import {
   AGENT_TOOLS,
+  PLATFORM_SYSTEM_PROMPT,
   executeTool,
   markDocSeen,
   type AiCommentsAccess,
@@ -34,7 +35,10 @@ export function createDocsSkill(
   let frozen: FrozenSelection | null = null
   return {
     id: 'docx',
-    systemPrompt: AGENT_SYSTEM_PROMPT,
+    // Platform build: the shared platform tools (Python, diagrams, citation
+    // checks, guides, clarification card) ride along with the docx tools; their
+    // definitions are appended to AGENT_TOOLS in tools.ts.
+    systemPrompt: AGENT_SYSTEM_PROMPT + '\n\n' + PLATFORM_SYSTEM_PROMPT,
     tools: AGENT_TOOLS,
     buildContext: () => {
       const editor = getEditor()

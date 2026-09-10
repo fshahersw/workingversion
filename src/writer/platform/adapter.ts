@@ -500,6 +500,24 @@ export function installPlatformAdapter(options: PlatformAdapterOptions): void {
     writerApproveResearch: async () => {
       throw new Error("Public research mode is not enabled. Use web search inside Edit or Ask.");
     },
+    // Dictation: hand the recorded clip to the same-origin transcription route
+    // (Bedrock Voxtral). Same auth posture and cookies as the rest of the app.
+    transcribe: async (audioBase64, format) => {
+      try {
+        const res = await fetch("/api/transcribe", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audio: audioBase64, format }),
+        });
+        const data = (await res.json().catch(() => ({}))) as { text?: string; error?: string };
+        if (!res.ok) return { error: data.error || "Transcription failed." };
+        return { text: data.text };
+      } catch {
+        return { error: "Transcription failed." };
+      }
+    },
     openDocx: async () => {
       const [file] = await pickFiles(".docx");
       if (!file) return null;

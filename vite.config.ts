@@ -50,10 +50,28 @@ const writerAliases = [
   { find: /^@genoffice\/font-metrics$/, replacement: writerPkg("font-metrics/src/index.ts") },
   { find: /^@genoffice\/i18n$/, replacement: writerPkg("i18n/src/index.ts") },
   { find: /^@genoffice\/project-store$/, replacement: writerPkg("project-store/src/index.ts") },
+  { find: /^@genoffice\/pptx-engine$/, replacement: writerPkg("pptx-engine/src/index.ts") },
   {
     find: /^@genoffice\/pptx-engine\/custgeom$/,
     replacement: writerPkg("pptx-engine/src/custgeom.ts"),
   },
+  {
+    find: /^@genoffice\/pptx-engine\/identity$/,
+    replacement: writerPkg("pptx-engine/src/identity.ts"),
+  },
+  {
+    find: /^@genoffice\/pptx-engine\/table-grid$/,
+    replacement: writerPkg("pptx-engine/src/table-grid.ts"),
+  },
+  {
+    find: /^@genoffice\/pptx-engine\/background-promote$/,
+    replacement: writerPkg("pptx-engine/src/background-promote.ts"),
+  },
+  {
+    find: /^@genoffice\/pptx-engine\/smartart-layout$/,
+    replacement: writerPkg("pptx-engine/src/smartart-layout.ts"),
+  },
+  { find: /^@genoffice\/pptx-render$/, replacement: writerPkg("pptx-render/src/index.ts") },
   {
     find: /^@genoffice\/pptx-render\/preset-geometry$/,
     replacement: writerPkg("pptx-render/src/preset-geometry.ts"),
@@ -61,6 +79,34 @@ const writerAliases = [
   { find: /^@genoffice\/ui$/, replacement: writerPkg("ui/src/index.ts") },
   { find: /^@genoffice\/ui\/(.+)$/, replacement: `${writerPkg("ui/src")}/$1` },
 ];
+
+// The vendored Sheets and Slides code (src/office/<app>) was written against
+// zod 4 and the Electron preload API. Resolve those specifiers differently only
+// for importers inside each tree: `zod` -> the zod4 alias package, `electron`
+// and the drop-open bridge -> that app's browser shims. The rest of the app
+// keeps zod 3.
+const officeTree = (app: string) => resolve(process.cwd(), "src/office", app).replaceAll("\\", "/");
+const OFFICE_TREES = ["sheets", "slides"].map(officeTree);
+const officeScopedResolver = {
+  name: "sw-office-scoped-resolver",
+  enforce: "pre" as const,
+  async resolveId(
+    this: {
+      resolve: (id: string, importer?: string, opts?: { skipSelf?: boolean }) => Promise<unknown>;
+    },
+    id: string,
+    importer?: string,
+  ) {
+    if (!importer) return null;
+    const from = importer.replaceAll("\\", "/");
+    const tree = OFFICE_TREES.find((t) => from.startsWith(t + "/"));
+    if (!tree) return null;
+    if (id === "zod") return this.resolve("zod4", importer, { skipSelf: true });
+    if (id === "electron") return resolve(tree, "web/host/electron.ts");
+    if (id === "@genoffice/electron-utils/drop-open") return resolve(tree, "web/host/drop-open.ts");
+    return null;
+  },
+};
 
 export default defineConfig({
   tanstackStart: {
@@ -77,5 +123,8 @@ export default defineConfig({
     ...(process.env["LITAI_LAMBDA_BUILD"] === "true" ? { envDir: false } : {}),
     ssr: { external: ["node:sqlite"] },
     resolve: { alias: writerAliases },
+    plugins: [officeScopedResolver],
+    // The Sheets/Slides preloads read this desktop debug flag at module load.
+    define: { "process.env.GENOFFICE_DEBUG_HOOKS": '"0"' },
   },
 });

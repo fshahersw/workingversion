@@ -2,6 +2,9 @@ import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { ChartDisplay, CommentInfo, NewChart } from '@genoffice/docx-engine'
 import type { AgentToolCall, AgentToolDef, CreateDocumentType } from '../../shared/ipc'
+import type { ToolDisplay } from '@genoffice/agent-core'
+import { createPlatformSkill } from '@/office/shared/platform-skill'
+import { getPlatformImage, isPlatformImage } from '@/office/shared/image-store'
 import { t } from '../i18n/locale'
 import { executeCommands, type Command, type CommandEnvelope } from './commands'
 import {
@@ -32,12 +35,14 @@ const READ_MAX_CHARS = 24_000
 export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: 'get_document_context',
+    readOnly: true,
     description:
       'Get the latest state of the current document: block list (index|type|content preview), full-text stats (word/character counts) and the current selection. Block indexes change after modifications; call this when you need up-to-date indexes.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'read_blocks',
+    readOnly: true,
     description:
       'Read the full content of a block range (restricted HTML). Previews in the block list are truncated; you must read the full original text with this tool before rewriting. ' +
       'Long ranges are paged: a truncated result says which offset to continue from; concatenate the slices in order to get the full HTML.',
@@ -104,12 +109,14 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   },
   {
     name: 'read_revisions',
+    readOnly: true,
     description:
       'List every pending tracked revision (insertions, deletions, formatting/move/table changes) with kind, author, date, block index and the affected text. Read-only: revisions are accepted/rejected by the user in the Review tab.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'read_comments',
+    readOnly: true,
     description:
       'List all comment threads (including resolved ones) with ids, authors, anchored block indexes and anchor text. Unresolved threads already ride along in the message context; use this for the full picture.',
     inputSchema: { type: 'object', properties: {}, required: [] },
@@ -141,6 +148,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   },
   {
     name: 'web_search',
+    readOnly: true,
     description:
       'Search the web for textual information (references/data/facts). Use when you need up-to-date information or are unsure about a fact. Returns titles/links/snippets.',
     inputSchema: {
@@ -154,6 +162,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   },
   {
     name: 'image_search',
+    readOnly: true,
     description:
       'Search for images. Returns a list of image imageUrl entries; after picking one, insert it into the document with insert_image.',
     inputSchema: {
@@ -168,11 +177,11 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: 'insert_image',
     description:
-      'Download a direct image link (an imageUrl from image_search) and insert it into the document (at the cursor / end of document).',
+      'Insert an image into the document (at the cursor / end of document): a platform-image:<id> handle returned by render_diagram, generate_image or run_python, or a direct image link.',
     inputSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string', description: 'direct image link' },
+        url: { type: 'string', description: 'platform-image:<id> handle or a direct image link' },
         maxWidthPx: { type: 'integer', description: 'maximum width (px), default 480' },
       },
       required: ['url'],
@@ -181,18 +190,20 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: 'generate_image',
     description:
-      'Generate an illustration with AI from a text prompt and insert it into the document (at the cursor / end of document). For illustration/diagram-style art that image_search cannot find, or when the user asks to generate/draw a picture. Requires Genspark login with cloud tools enabled.',
+      'Generate an illustration with Amazon Nova Canvas from a text prompt and insert it into the document (at the cursor / end of document): cover art, icons, abstract backgrounds, illustrations. Not for real people or trademarks; for diagrams use render_diagram.',
     inputSchema: {
       type: 'object',
       properties: {
         prompt: {
           type: 'string',
-          description: 'detailed English description of the image to generate',
+          description: 'detailed English description of the image to generate (subject, style, composition, palette)',
         },
         aspectRatio: {
           type: 'string',
-          description: 'e.g. "1:1", "16:9", "4:3"; omit for the default',
+          enum: ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'],
+          description: 'default 1:1',
         },
+        negativePrompt: { type: 'string', description: 'what to avoid (text, watermarks, clutter)' },
         maxWidthPx: { type: 'integer', description: 'maximum width (px), default 480' },
       },
       required: ['prompt'],
@@ -297,26 +308,38 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: 'create_document',
     description:
-      'Create a NEW standalone file in the default save folder and open it in a new tab; the current document is not modified. Use when the user asks to put content into a new/separate document instead of this one. ' +
-      "type 'docx' (default) and 'pdf' take the same restricted HTML as insert_content in content; type 'md' takes Markdown source. Images and charts are not supported in the new file's initial content.",
+      'Create a NEW separate document in the Library and return a link to open it; the current document is not modified. Use when the user asks to put content into a new/separate document (a memo from these notes, a deck summarizing this brief). ' +
+      "type 'docx' (default, opens in the Writer), 'pptx' (opens in Slides; each heading becomes a slide, list items become bullets) or 'pdf' (downloaded) take the same restricted HTML as insert_content in content; type 'md' takes Markdown source and produces a Word document. Images and charts are not carried into the new file.",
     inputSchema: {
       type: 'object',
       properties: {
         type: {
           type: 'string',
-          enum: ['docx', 'pdf', 'md'],
+          enum: ['docx', 'pptx', 'pdf', 'md'],
           description: "target file type (default 'docx')",
         },
         title: { type: 'string', description: 'document title, used as the file name' },
         content: {
           type: 'string',
-          description: 'full document content: restricted HTML for docx/pdf, Markdown for md',
+          description: 'full document content: restricted HTML for docx/pptx/pdf, Markdown for md',
         },
       },
       required: ['title', 'content'],
     },
   },
 ]
+
+// Platform build: shared server-side and browser-side tools (Python sandbox,
+// Graphviz/Mermaid diagrams, citation verification, page reading, firm guides,
+// clarification card). generate_image and create_document keep the Writer's own
+// definitions above and are routed to the platform in executeAsyncTool.
+const platformSkill = createPlatformSkill({
+  app: 'writer',
+  exclude: ['generate_image', 'create_document'],
+})
+AGENT_TOOLS.push(...platformSkill.tools)
+export const PLATFORM_SYSTEM_PROMPT = platformSkill.systemPrompt
+const PLATFORM_TOOL_NAMES = new Set(platformSkill.tools.map((tool) => tool.name))
 
 /**
  * App-owned header/footer state, handed to the tool executor. Writes run the
@@ -362,6 +385,8 @@ export interface ToolExecution {
   mutated: boolean
   /** short human-readable label for the chat activity chip */
   summary: string
+  /** UI-only side channel (image thumbnails, links); never sent to the model */
+  display?: ToolDisplay
 }
 
 const fail = (summary: string, output: string): ToolExecution => ({
@@ -517,35 +542,40 @@ async function executeAsyncTool(
       })
     }
     case 'generate_image': {
+      // Platform build: Amazon Nova Canvas through the platform, then the same
+      // protected-image insertion as a downloaded picture.
       const prompt = String(call.input.prompt ?? '').trim()
       if (!prompt) return fail(t('aiSumGenerateImage'), 'prompt must not be empty')
       const aspectRatio = String(call.input.aspectRatio ?? '').trim()
-      const generated = await window.desktop.aiGenerateImage({
-        prompt,
-        ...(aspectRatio ? { aspectRatio } : {}),
-      })
+      const negativePrompt = String(call.input.negativePrompt ?? '').trim()
+      let generated: { mime: 'image/png' | 'image/jpeg'; base64: string }
+      try {
+        const { officeGenerateImageFn } = await import('@/lib/office/tools.functions')
+        generated = await officeGenerateImageFn({
+          data: {
+            prompt,
+            ...(aspectRatio ? { aspectRatio } : {}),
+            ...(negativePrompt ? { negativePrompt } : {}),
+          },
+        })
+      } catch (e) {
+        return fail(t('aiSumGenerateImage'), e instanceof Error ? e.message : 'image generation failed')
+      }
       if (signal?.aborted)
         return fail(t('aiSumGenerateImage'), 'stopped by the user; the image was not inserted')
-      if (!generated.url) {
-        return fail(t('aiSumGenerateImage'), generated.error ?? 'image generation failed')
-      }
-      return insertImageFromUrl(
-        editor,
-        generated.url,
-        Number(call.input.maxWidthPx) || 480,
-        signal,
-        {
-          failLabel: t('aiSumGenerateImage'),
-          doneLabel: t('aiSumInsertedGenImage'),
-          blockLabel: 'Image (AI)',
-        },
-      )
+      return insertImageBase64(editor, generated.base64, Number(call.input.maxWidthPx) || 480, signal, {
+        failLabel: t('aiSumGenerateImage'),
+        doneLabel: t('aiSumInsertedGenImage'),
+        blockLabel: 'Image (AI)',
+      })
     }
     case 'create_document': {
+      // Platform build: the new document lands in the Library (docx opens in
+      // the Writer, pptx in Slides, pdf downloads); the current document is untouched.
       const typeRaw = call.input.type === undefined ? 'docx' : String(call.input.type)
-      if (typeRaw !== 'docx' && typeRaw !== 'pdf' && typeRaw !== 'md')
-        return fail(t('aiSumCreateDocument'), 'type must be one of docx/pdf/md')
-      const type: CreateDocumentType = typeRaw
+      if (typeRaw !== 'docx' && typeRaw !== 'pdf' && typeRaw !== 'md' && typeRaw !== 'pptx')
+        return fail(t('aiSumCreateDocument'), 'type must be one of docx/pptx/pdf/md')
+      const type = typeRaw as CreateDocumentType | 'pptx'
       const title = String(call.input.title ?? '').trim()
       if (!title) return fail(t('aiSumCreateDocument'), 'title must not be empty')
       const content = String(call.input.content ?? '')
@@ -553,8 +583,6 @@ async function executeAsyncTool(
       if (type !== 'md') {
         const echo = toolEchoError(content)
         if (echo) return fail(t('aiSumCreateDocument'), echo)
-        // the new docx tab fills itself after this tool already returned, so
-        // unparseable HTML must be rejected here, where the model can retry
         try {
           if (parseHtmlFragment(content, { bullet: null, ordered: null }).length === 0)
             return fail(t('aiSumCreateDocument'), 'content did not parse into any content blocks')
@@ -562,15 +590,39 @@ async function executeAsyncTool(
           return fail(t('aiSumCreateDocument'), e instanceof Error ? e.message : String(e))
         }
       }
-      const r = await window.desktop.createDocument({ type, title, content })
-      if (!r.ok) return fail(t('aiSumCreateDocument'), r.error ?? 'creating the document failed')
-      const name = `${title}.${type}`
-      return {
-        output: r.path
-          ? `Created the new document at ${r.path} and opened it in a new tab.`
-          : `Created the new document "${name}" in a new tab; it saves itself into the default folder.`,
-        mutated: false,
-        summary: t('aiSumCreatedDocument', { name }),
+      try {
+        const { officeCreateDocumentFn } = await import('@/lib/office/tools.functions')
+        const r = await officeCreateDocumentFn({
+          data: {
+            kind: type === 'md' ? 'docx' : type,
+            title,
+            markdown: content,
+            format: type === 'md' ? 'markdown' : 'html',
+          },
+        })
+        if (r.kind === 'pdf') {
+          const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0))
+          const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+          const a = document.createElement('a')
+          a.href = url
+          a.download = r.name
+          a.click()
+          setTimeout(() => URL.revokeObjectURL(url), 30_000)
+          return {
+            output: `Created ${r.name}; the browser downloaded it.`,
+            mutated: false,
+            summary: t('aiSumCreatedDocument', { name: r.name }),
+          }
+        }
+        const href = `${location.origin}${r.url}`
+        return {
+          output: `Created "${r.doc.name}" in the Library. Open it at ${href} . Tell the user it is ready and give this link.`,
+          mutated: false,
+          summary: t('aiSumCreatedDocument', { name: r.doc.name }),
+          display: { kind: 'links', items: [{ url: href, title: r.doc.name }] },
+        }
+      } catch (e) {
+        return fail(t('aiSumCreateDocument'), e instanceof Error ? e.message : 'creating the document failed')
       }
     }
     default:
@@ -593,7 +645,7 @@ export function sniffImageMime(base64: string): 'image/png' | 'image/jpeg' | 'im
   return null
 }
 
-/** download a direct image URL and insert it at the cursor as a protected image block */
+/** download a direct image URL (or resolve a platform-image handle) and insert it at the cursor as a protected image block */
 async function insertImageFromUrl(
   editor: Editor,
   url: string,
@@ -601,11 +653,29 @@ async function insertImageFromUrl(
   signal: AbortSignal | undefined,
   labels: { failLabel: string; doneLabel: string; blockLabel: string },
 ): Promise<ToolExecution> {
+  if (isPlatformImage(url)) {
+    const stored = getPlatformImage(url)
+    if (!stored)
+      return fail(labels.failLabel, 'that image handle is no longer available; produce the image again')
+    return insertImageBase64(editor, stored.base64, maxW, signal, labels)
+  }
   const fetched = await window.desktop.fetchImage(url)
   // never write after the user hit stop (the download may resolve long after the abort)
   if (signal?.aborted)
     return fail(labels.failLabel, 'stopped by the user; the image was not inserted')
   if (!fetched) return fail(labels.failLabel, 'download failed (the image may not be accessible)')
+  return insertImageBase64(editor, fetched.base64, maxW, signal, labels)
+}
+
+/** insert raw image bytes (base64) at the cursor as a protected image block */
+async function insertImageBase64(
+  editor: Editor,
+  base64: string,
+  maxW: number,
+  signal: AbortSignal | undefined,
+  labels: { failLabel: string; doneLabel: string; blockLabel: string },
+): Promise<ToolExecution> {
+  const fetched = { base64 }
   const mime = sniffImageMime(fetched.base64)
   if (!mime) {
     return fail(
@@ -674,6 +744,14 @@ export function executeTool(
   // synchronously (doesn't break existing tests). No settle here: marking the doc
   // seen after the long download would baptize user edits made meanwhile —
   // insert_image maintains the baseline itself right at its synchronous write.
+  if (PLATFORM_TOOL_NAMES.has(call.name)) {
+    // Platform tools never touch the document; normalize the shared shape to
+    // the Writer's (mutated is required here).
+    return Promise.resolve(platformSkill.executeTool(call, signal)).then((exec) => ({
+      ...exec,
+      mutated: exec.mutated ?? false,
+    }))
+  }
   if (
     call.name === 'web_search' ||
     call.name === 'image_search' ||

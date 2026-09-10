@@ -45,8 +45,8 @@ import {
 import { discoveryTabFor, stashWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { deleteWorkspaceFn, listWorkspacesFn } from "@/lib/kb/workspace.functions";
 import type { WorkspaceSummary, WorkspaceSurface } from "@/lib/kb/workspace.server";
-import { deleteWriterDocFn, listWriterDocsFn } from "@/lib/writer/writer.functions";
-import type { WriterDocSummary } from "@/lib/writer/types";
+import { deleteOfficeDocFn, listOfficeDocsFn } from "@/lib/office/office.functions";
+import { OFFICE_LABEL, type OfficeDocSummary } from "@/lib/office/types";
 
 export const Route = createFileRoute("/_authenticated/library")({
   ssr: false,
@@ -351,13 +351,13 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
 
 function DraftsList() {
   const navigate = useNavigate();
-  const [items, setItems] = useState<WriterDocSummary[] | null>(null);
+  const [items, setItems] = useState<OfficeDocSummary[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const folders = useFolders("draft");
 
   const load = useCallback(async () => {
     try {
-      setItems(await listWriterDocsFn());
+      setItems(await listOfficeDocsFn({ data: {} }));
     } catch {
       setItems([]);
     }
@@ -369,7 +369,7 @@ function DraftsList() {
   const remove = async (id: string) => {
     setBusyId(id);
     try {
-      const result = await deleteWriterDocFn({ data: { draftId: id } });
+      const result = await deleteOfficeDocFn({ data: { docId: id } });
       await load();
       toast.success(result.alreadyDeleted ? "Already deleted" : "Document deleted");
     } catch (err) {
@@ -411,8 +411,9 @@ function DraftsList() {
             <div className="min-w-0 flex-1">
               <p className="truncate text-[13px] font-medium text-foreground">{d.title}</p>
               <p className="text-[11px] text-muted-foreground">
-                Word document{d.version > 0 ? ` · revision ${d.version}` : " · legacy draft"} ·
-                edited {relative(d.updatedAt)}
+                {OFFICE_LABEL[d.kind]}
+                {d.version > 0 ? ` · revision ${d.version}` : " · legacy draft"} · edited{" "}
+                {relative(d.updatedAt)}
               </p>
             </div>
             <MoveToMenu
@@ -432,7 +433,11 @@ function DraftsList() {
             <button
               type="button"
               onClick={() =>
-                void navigate({ to: "/drafts/$draftId", params: { draftId: d.draftId } })
+                void (d.kind === "xlsx"
+                  ? navigate({ to: "/office/sheets/$docId", params: { docId: d.draftId } })
+                  : d.kind === "pptx"
+                    ? navigate({ to: "/office/slides/$docId", params: { docId: d.draftId } })
+                    : navigate({ to: "/office/drafts/$draftId", params: { draftId: d.draftId } }))
               }
               className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
             >

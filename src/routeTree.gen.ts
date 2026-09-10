@@ -31,6 +31,7 @@ import { Route as AuthenticatedDocsRouteImport } from './routes/_authenticated/d
 import { Route as AuthenticatedDiscoveryRouteImport } from './routes/_authenticated/discovery'
 import { Route as AuthenticatedConversationsRouteImport } from './routes/_authenticated/conversations'
 import { Route as AuthenticatedCalendarRouteImport } from './routes/_authenticated/calendar'
+import { Route as AuthenticatedOfficeIndexRouteImport } from './routes/_authenticated/office.index'
 import { Route as AuthenticatedMattersIndexRouteImport } from './routes/_authenticated/matters.index'
 import { Route as AuthenticatedDraftsIndexRouteImport } from './routes/_authenticated/drafts.index'
 import { Route as ApiWriterStreamRouteImport } from './routes/api/writer/stream'
@@ -40,6 +41,9 @@ import { Route as ApiPileStructureRouteImport } from './routes/api/pile/structur
 import { Route as ApiPileRerankRouteImport } from './routes/api/pile/rerank'
 import { Route as ApiPileOcrRouteImport } from './routes/api/pile/ocr'
 import { Route as ApiPileAskRouteImport } from './routes/api/pile/ask'
+import { Route as ApiOfficeStreamRouteImport } from './routes/api/office/stream'
+import { Route as ApiOfficeJwksRouteImport } from './routes/api/office/jwks'
+import { Route as ApiOfficeDocsRouteImport } from './routes/api/office/docs'
 import { Route as ApiKbSearchRouteImport } from './routes/api/kb/search'
 import { Route as ApiKbIngestRouteImport } from './routes/api/kb/ingest'
 import { Route as ApiKbDocumentsRouteImport } from './routes/api/kb/documents'
@@ -47,17 +51,27 @@ import { Route as ApiKbAskRouteImport } from './routes/api/kb/ask'
 import { Route as ApiAuthMeRouteImport } from './routes/api/auth/me'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
 import { Route as AuthenticatedDraftsDraftIdRouteImport } from './routes/_authenticated/drafts.$draftId'
+import { Route as AuthenticatedOfficeSlidesIndexRouteImport } from './routes/_authenticated/office.slides.index'
+import { Route as AuthenticatedOfficeSheetsIndexRouteImport } from './routes/_authenticated/office.sheets.index'
+import { Route as AuthenticatedOfficeDraftsIndexRouteImport } from './routes/_authenticated/office.drafts.index'
 import { Route as ApiPublicWebhooksDocketbirdRouteImport } from './routes/api/public/webhooks/docketbird'
 import { Route as ApiPublicWebhooksCourtlistenerRouteImport } from './routes/api/public/webhooks/courtlistener'
+import { Route as ApiPublicOfficeJwksRouteImport } from './routes/api/public/office/jwks'
 import { Route as ApiPublicIntelRunRouteImport } from './routes/api/public/intel/run'
 import { Route as ApiPublicIngestIntelRouteImport } from './routes/api/public/ingest/intel'
 import { Route as ApiPublicIngestBatchesRouteImport } from './routes/api/public/ingest/batches'
 import { Route as ApiPublicCalendarSyncRouteImport } from './routes/api/public/calendar/sync'
+import { Route as AuthenticatedOfficeSlidesDocIdRouteImport } from './routes/_authenticated/office.slides.$docId'
+import { Route as AuthenticatedOfficeSheetsDocIdRouteImport } from './routes/_authenticated/office.sheets.$docId'
+import { Route as AuthenticatedOfficeDraftsDraftIdRouteImport } from './routes/_authenticated/office.drafts.$draftId'
 import { Route as ApiWriterDocsDraftIdRecoveryRouteImport } from './routes/api/writer/docs.$draftId.recovery'
 import { Route as ApiWriterDocsDraftIdContentRouteImport } from './routes/api/writer/docs.$draftId.content'
 import { Route as ApiPublicIngestBatchesIdRouteImport } from './routes/api/public/ingest/batches.$id'
+import { Route as ApiOfficeDocsDocIdRecoveryRouteImport } from './routes/api/office/docs.$docId.recovery'
+import { Route as ApiOfficeDocsDocIdContentRouteImport } from './routes/api/office/docs.$docId.content'
 import { Route as ApiPublicIngestBatchesIdValidateRouteImport } from './routes/api/public/ingest/batches.$id.validate'
 import { Route as ApiPublicIngestBatchesIdCommitRouteImport } from './routes/api/public/ingest/batches.$id.commit'
+import { Route as ApiPublicOfficeEngineDocsDocIdContentRouteImport } from './routes/api/public/office/engine.docs.$docId.content'
 
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
@@ -169,6 +183,12 @@ const AuthenticatedCalendarRoute = AuthenticatedCalendarRouteImport.update({
   path: '/calendar',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedOfficeIndexRoute =
+  AuthenticatedOfficeIndexRouteImport.update({
+    id: '/office/',
+    path: '/office/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedMattersIndexRoute =
   AuthenticatedMattersIndexRouteImport.update({
     id: '/matters/',
@@ -216,6 +236,21 @@ const ApiPileAskRoute = ApiPileAskRouteImport.update({
   path: '/api/pile/ask',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiOfficeStreamRoute = ApiOfficeStreamRouteImport.update({
+  id: '/api/office/stream',
+  path: '/api/office/stream',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiOfficeJwksRoute = ApiOfficeJwksRouteImport.update({
+  id: '/api/office/jwks',
+  path: '/api/office/jwks',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiOfficeDocsRoute = ApiOfficeDocsRouteImport.update({
+  id: '/api/office/docs',
+  path: '/api/office/docs',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiKbSearchRoute = ApiKbSearchRouteImport.update({
   id: '/api/kb/search',
   path: '/api/kb/search',
@@ -253,6 +288,24 @@ const AuthenticatedDraftsDraftIdRoute =
     path: '/drafts/$draftId',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedOfficeSlidesIndexRoute =
+  AuthenticatedOfficeSlidesIndexRouteImport.update({
+    id: '/office/slides/',
+    path: '/office/slides/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedOfficeSheetsIndexRoute =
+  AuthenticatedOfficeSheetsIndexRouteImport.update({
+    id: '/office/sheets/',
+    path: '/office/sheets/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedOfficeDraftsIndexRoute =
+  AuthenticatedOfficeDraftsIndexRouteImport.update({
+    id: '/office/drafts/',
+    path: '/office/drafts/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const ApiPublicWebhooksDocketbirdRoute =
   ApiPublicWebhooksDocketbirdRouteImport.update({
     id: '/api/public/webhooks/docketbird',
@@ -265,6 +318,11 @@ const ApiPublicWebhooksCourtlistenerRoute =
     path: '/api/public/webhooks/courtlistener',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicOfficeJwksRoute = ApiPublicOfficeJwksRouteImport.update({
+  id: '/api/public/office/jwks',
+  path: '/api/public/office/jwks',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicIntelRunRoute = ApiPublicIntelRunRouteImport.update({
   id: '/api/public/intel/run',
   path: '/api/public/intel/run',
@@ -285,6 +343,24 @@ const ApiPublicCalendarSyncRoute = ApiPublicCalendarSyncRouteImport.update({
   path: '/api/public/calendar/sync',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuthenticatedOfficeSlidesDocIdRoute =
+  AuthenticatedOfficeSlidesDocIdRouteImport.update({
+    id: '/office/slides/$docId',
+    path: '/office/slides/$docId',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedOfficeSheetsDocIdRoute =
+  AuthenticatedOfficeSheetsDocIdRouteImport.update({
+    id: '/office/sheets/$docId',
+    path: '/office/sheets/$docId',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedOfficeDraftsDraftIdRoute =
+  AuthenticatedOfficeDraftsDraftIdRouteImport.update({
+    id: '/office/drafts/$draftId',
+    path: '/office/drafts/$draftId',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const ApiWriterDocsDraftIdRecoveryRoute =
   ApiWriterDocsDraftIdRecoveryRouteImport.update({
     id: '/$draftId/recovery',
@@ -303,6 +379,18 @@ const ApiPublicIngestBatchesIdRoute =
     path: '/$id',
     getParentRoute: () => ApiPublicIngestBatchesRoute,
   } as any)
+const ApiOfficeDocsDocIdRecoveryRoute =
+  ApiOfficeDocsDocIdRecoveryRouteImport.update({
+    id: '/$docId/recovery',
+    path: '/$docId/recovery',
+    getParentRoute: () => ApiOfficeDocsRoute,
+  } as any)
+const ApiOfficeDocsDocIdContentRoute =
+  ApiOfficeDocsDocIdContentRouteImport.update({
+    id: '/$docId/content',
+    path: '/$docId/content',
+    getParentRoute: () => ApiOfficeDocsRoute,
+  } as any)
 const ApiPublicIngestBatchesIdValidateRoute =
   ApiPublicIngestBatchesIdValidateRouteImport.update({
     id: '/validate',
@@ -314,6 +402,12 @@ const ApiPublicIngestBatchesIdCommitRoute =
     id: '/commit',
     path: '/commit',
     getParentRoute: () => ApiPublicIngestBatchesIdRoute,
+  } as any)
+const ApiPublicOfficeEngineDocsDocIdContentRoute =
+  ApiPublicOfficeEngineDocsDocIdContentRouteImport.update({
+    id: '/api/public/office/engine/docs/$docId/content',
+    path: '/api/public/office/engine/docs/$docId/content',
+    getParentRoute: () => rootRouteImport,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -345,6 +439,9 @@ export interface FileRoutesByFullPath {
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
+  '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
+  '/api/office/jwks': typeof ApiOfficeJwksRoute
+  '/api/office/stream': typeof ApiOfficeStreamRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -354,17 +451,28 @@ export interface FileRoutesByFullPath {
   '/api/writer/stream': typeof ApiWriterStreamRoute
   '/drafts/': typeof AuthenticatedDraftsIndexRoute
   '/matters/': typeof AuthenticatedMattersIndexRoute
+  '/office/': typeof AuthenticatedOfficeIndexRoute
+  '/office/drafts/$draftId': typeof AuthenticatedOfficeDraftsDraftIdRoute
+  '/office/sheets/$docId': typeof AuthenticatedOfficeSheetsDocIdRoute
+  '/office/slides/$docId': typeof AuthenticatedOfficeSlidesDocIdRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
+  '/api/public/office/jwks': typeof ApiPublicOfficeJwksRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
+  '/office/drafts/': typeof AuthenticatedOfficeDraftsIndexRoute
+  '/office/sheets/': typeof AuthenticatedOfficeSheetsIndexRoute
+  '/office/slides/': typeof AuthenticatedOfficeSlidesIndexRoute
+  '/api/office/docs/$docId/content': typeof ApiOfficeDocsDocIdContentRoute
+  '/api/office/docs/$docId/recovery': typeof ApiOfficeDocsDocIdRecoveryRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
   '/api/writer/docs/$draftId/content': typeof ApiWriterDocsDraftIdContentRoute
   '/api/writer/docs/$draftId/recovery': typeof ApiWriterDocsDraftIdRecoveryRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
+  '/api/public/office/engine/docs/$docId/content': typeof ApiPublicOfficeEngineDocsDocIdContentRoute
 }
 export interface FileRoutesByTo {
   '/auth': typeof AuthRouteWithChildren
@@ -395,6 +503,9 @@ export interface FileRoutesByTo {
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
+  '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
+  '/api/office/jwks': typeof ApiOfficeJwksRoute
+  '/api/office/stream': typeof ApiOfficeStreamRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -404,17 +515,28 @@ export interface FileRoutesByTo {
   '/api/writer/stream': typeof ApiWriterStreamRoute
   '/drafts': typeof AuthenticatedDraftsIndexRoute
   '/matters': typeof AuthenticatedMattersIndexRoute
+  '/office': typeof AuthenticatedOfficeIndexRoute
+  '/office/drafts/$draftId': typeof AuthenticatedOfficeDraftsDraftIdRoute
+  '/office/sheets/$docId': typeof AuthenticatedOfficeSheetsDocIdRoute
+  '/office/slides/$docId': typeof AuthenticatedOfficeSlidesDocIdRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
+  '/api/public/office/jwks': typeof ApiPublicOfficeJwksRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
+  '/office/drafts': typeof AuthenticatedOfficeDraftsIndexRoute
+  '/office/sheets': typeof AuthenticatedOfficeSheetsIndexRoute
+  '/office/slides': typeof AuthenticatedOfficeSlidesIndexRoute
+  '/api/office/docs/$docId/content': typeof ApiOfficeDocsDocIdContentRoute
+  '/api/office/docs/$docId/recovery': typeof ApiOfficeDocsDocIdRecoveryRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
   '/api/writer/docs/$draftId/content': typeof ApiWriterDocsDraftIdContentRoute
   '/api/writer/docs/$draftId/recovery': typeof ApiWriterDocsDraftIdRecoveryRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
+  '/api/public/office/engine/docs/$docId/content': typeof ApiPublicOfficeEngineDocsDocIdContentRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -447,6 +569,9 @@ export interface FileRoutesById {
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
   '/api/kb/search': typeof ApiKbSearchRoute
+  '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
+  '/api/office/jwks': typeof ApiOfficeJwksRoute
+  '/api/office/stream': typeof ApiOfficeStreamRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -456,17 +581,28 @@ export interface FileRoutesById {
   '/api/writer/stream': typeof ApiWriterStreamRoute
   '/_authenticated/drafts/': typeof AuthenticatedDraftsIndexRoute
   '/_authenticated/matters/': typeof AuthenticatedMattersIndexRoute
+  '/_authenticated/office/': typeof AuthenticatedOfficeIndexRoute
+  '/_authenticated/office/drafts/$draftId': typeof AuthenticatedOfficeDraftsDraftIdRoute
+  '/_authenticated/office/sheets/$docId': typeof AuthenticatedOfficeSheetsDocIdRoute
+  '/_authenticated/office/slides/$docId': typeof AuthenticatedOfficeSlidesDocIdRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
+  '/api/public/office/jwks': typeof ApiPublicOfficeJwksRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
+  '/_authenticated/office/drafts/': typeof AuthenticatedOfficeDraftsIndexRoute
+  '/_authenticated/office/sheets/': typeof AuthenticatedOfficeSheetsIndexRoute
+  '/_authenticated/office/slides/': typeof AuthenticatedOfficeSlidesIndexRoute
+  '/api/office/docs/$docId/content': typeof ApiOfficeDocsDocIdContentRoute
+  '/api/office/docs/$docId/recovery': typeof ApiOfficeDocsDocIdRecoveryRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
   '/api/writer/docs/$draftId/content': typeof ApiWriterDocsDraftIdContentRoute
   '/api/writer/docs/$draftId/recovery': typeof ApiWriterDocsDraftIdRecoveryRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
+  '/api/public/office/engine/docs/$docId/content': typeof ApiPublicOfficeEngineDocsDocIdContentRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -499,6 +635,9 @@ export interface FileRouteTypes {
     | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
+    | '/api/office/docs'
+    | '/api/office/jwks'
+    | '/api/office/stream'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -508,17 +647,28 @@ export interface FileRouteTypes {
     | '/api/writer/stream'
     | '/drafts/'
     | '/matters/'
+    | '/office/'
+    | '/office/drafts/$draftId'
+    | '/office/sheets/$docId'
+    | '/office/slides/$docId'
     | '/api/public/calendar/sync'
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
+    | '/api/public/office/jwks'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
+    | '/office/drafts/'
+    | '/office/sheets/'
+    | '/office/slides/'
+    | '/api/office/docs/$docId/content'
+    | '/api/office/docs/$docId/recovery'
     | '/api/public/ingest/batches/$id'
     | '/api/writer/docs/$draftId/content'
     | '/api/writer/docs/$draftId/recovery'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
+    | '/api/public/office/engine/docs/$docId/content'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/auth'
@@ -549,6 +699,9 @@ export interface FileRouteTypes {
     | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
+    | '/api/office/docs'
+    | '/api/office/jwks'
+    | '/api/office/stream'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -558,17 +711,28 @@ export interface FileRouteTypes {
     | '/api/writer/stream'
     | '/drafts'
     | '/matters'
+    | '/office'
+    | '/office/drafts/$draftId'
+    | '/office/sheets/$docId'
+    | '/office/slides/$docId'
     | '/api/public/calendar/sync'
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
+    | '/api/public/office/jwks'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
+    | '/office/drafts'
+    | '/office/sheets'
+    | '/office/slides'
+    | '/api/office/docs/$docId/content'
+    | '/api/office/docs/$docId/recovery'
     | '/api/public/ingest/batches/$id'
     | '/api/writer/docs/$draftId/content'
     | '/api/writer/docs/$draftId/recovery'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
+    | '/api/public/office/engine/docs/$docId/content'
   id:
     | '__root__'
     | '/_authenticated'
@@ -600,6 +764,9 @@ export interface FileRouteTypes {
     | '/api/kb/documents'
     | '/api/kb/ingest'
     | '/api/kb/search'
+    | '/api/office/docs'
+    | '/api/office/jwks'
+    | '/api/office/stream'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -609,17 +776,28 @@ export interface FileRouteTypes {
     | '/api/writer/stream'
     | '/_authenticated/drafts/'
     | '/_authenticated/matters/'
+    | '/_authenticated/office/'
+    | '/_authenticated/office/drafts/$draftId'
+    | '/_authenticated/office/sheets/$docId'
+    | '/_authenticated/office/slides/$docId'
     | '/api/public/calendar/sync'
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
+    | '/api/public/office/jwks'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
+    | '/_authenticated/office/drafts/'
+    | '/_authenticated/office/sheets/'
+    | '/_authenticated/office/slides/'
+    | '/api/office/docs/$docId/content'
+    | '/api/office/docs/$docId/recovery'
     | '/api/public/ingest/batches/$id'
     | '/api/writer/docs/$draftId/content'
     | '/api/writer/docs/$draftId/recovery'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
+    | '/api/public/office/engine/docs/$docId/content'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -637,6 +815,9 @@ export interface RootRouteChildren {
   ApiKbDocumentsRoute: typeof ApiKbDocumentsRoute
   ApiKbIngestRoute: typeof ApiKbIngestRoute
   ApiKbSearchRoute: typeof ApiKbSearchRoute
+  ApiOfficeDocsRoute: typeof ApiOfficeDocsRouteWithChildren
+  ApiOfficeJwksRoute: typeof ApiOfficeJwksRoute
+  ApiOfficeStreamRoute: typeof ApiOfficeStreamRoute
   ApiPileAskRoute: typeof ApiPileAskRoute
   ApiPileOcrRoute: typeof ApiPileOcrRoute
   ApiPileRerankRoute: typeof ApiPileRerankRoute
@@ -648,8 +829,10 @@ export interface RootRouteChildren {
   ApiPublicIngestBatchesRoute: typeof ApiPublicIngestBatchesRouteWithChildren
   ApiPublicIngestIntelRoute: typeof ApiPublicIngestIntelRoute
   ApiPublicIntelRunRoute: typeof ApiPublicIntelRunRoute
+  ApiPublicOfficeJwksRoute: typeof ApiPublicOfficeJwksRoute
   ApiPublicWebhooksCourtlistenerRoute: typeof ApiPublicWebhooksCourtlistenerRoute
   ApiPublicWebhooksDocketbirdRoute: typeof ApiPublicWebhooksDocketbirdRoute
+  ApiPublicOfficeEngineDocsDocIdContentRoute: typeof ApiPublicOfficeEngineDocsDocIdContentRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -808,6 +991,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedCalendarRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/office/': {
+      id: '/_authenticated/office/'
+      path: '/office'
+      fullPath: '/office/'
+      preLoaderRoute: typeof AuthenticatedOfficeIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/matters/': {
       id: '/_authenticated/matters/'
       path: '/matters'
@@ -871,6 +1061,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPileAskRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/office/stream': {
+      id: '/api/office/stream'
+      path: '/api/office/stream'
+      fullPath: '/api/office/stream'
+      preLoaderRoute: typeof ApiOfficeStreamRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/office/jwks': {
+      id: '/api/office/jwks'
+      path: '/api/office/jwks'
+      fullPath: '/api/office/jwks'
+      preLoaderRoute: typeof ApiOfficeJwksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/office/docs': {
+      id: '/api/office/docs'
+      path: '/api/office/docs'
+      fullPath: '/api/office/docs'
+      preLoaderRoute: typeof ApiOfficeDocsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/kb/search': {
       id: '/api/kb/search'
       path: '/api/kb/search'
@@ -920,6 +1131,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDraftsDraftIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/office/slides/': {
+      id: '/_authenticated/office/slides/'
+      path: '/office/slides'
+      fullPath: '/office/slides/'
+      preLoaderRoute: typeof AuthenticatedOfficeSlidesIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/office/sheets/': {
+      id: '/_authenticated/office/sheets/'
+      path: '/office/sheets'
+      fullPath: '/office/sheets/'
+      preLoaderRoute: typeof AuthenticatedOfficeSheetsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/office/drafts/': {
+      id: '/_authenticated/office/drafts/'
+      path: '/office/drafts'
+      fullPath: '/office/drafts/'
+      preLoaderRoute: typeof AuthenticatedOfficeDraftsIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/api/public/webhooks/docketbird': {
       id: '/api/public/webhooks/docketbird'
       path: '/api/public/webhooks/docketbird'
@@ -932,6 +1164,13 @@ declare module '@tanstack/react-router' {
       path: '/api/public/webhooks/courtlistener'
       fullPath: '/api/public/webhooks/courtlistener'
       preLoaderRoute: typeof ApiPublicWebhooksCourtlistenerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/office/jwks': {
+      id: '/api/public/office/jwks'
+      path: '/api/public/office/jwks'
+      fullPath: '/api/public/office/jwks'
+      preLoaderRoute: typeof ApiPublicOfficeJwksRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/intel/run': {
@@ -962,6 +1201,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCalendarSyncRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_authenticated/office/slides/$docId': {
+      id: '/_authenticated/office/slides/$docId'
+      path: '/office/slides/$docId'
+      fullPath: '/office/slides/$docId'
+      preLoaderRoute: typeof AuthenticatedOfficeSlidesDocIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/office/sheets/$docId': {
+      id: '/_authenticated/office/sheets/$docId'
+      path: '/office/sheets/$docId'
+      fullPath: '/office/sheets/$docId'
+      preLoaderRoute: typeof AuthenticatedOfficeSheetsDocIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/office/drafts/$draftId': {
+      id: '/_authenticated/office/drafts/$draftId'
+      path: '/office/drafts/$draftId'
+      fullPath: '/office/drafts/$draftId'
+      preLoaderRoute: typeof AuthenticatedOfficeDraftsDraftIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/api/writer/docs/$draftId/recovery': {
       id: '/api/writer/docs/$draftId/recovery'
       path: '/$draftId/recovery'
@@ -983,6 +1243,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicIngestBatchesIdRouteImport
       parentRoute: typeof ApiPublicIngestBatchesRoute
     }
+    '/api/office/docs/$docId/recovery': {
+      id: '/api/office/docs/$docId/recovery'
+      path: '/$docId/recovery'
+      fullPath: '/api/office/docs/$docId/recovery'
+      preLoaderRoute: typeof ApiOfficeDocsDocIdRecoveryRouteImport
+      parentRoute: typeof ApiOfficeDocsRoute
+    }
+    '/api/office/docs/$docId/content': {
+      id: '/api/office/docs/$docId/content'
+      path: '/$docId/content'
+      fullPath: '/api/office/docs/$docId/content'
+      preLoaderRoute: typeof ApiOfficeDocsDocIdContentRouteImport
+      parentRoute: typeof ApiOfficeDocsRoute
+    }
     '/api/public/ingest/batches/$id/validate': {
       id: '/api/public/ingest/batches/$id/validate'
       path: '/validate'
@@ -996,6 +1270,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/api/public/ingest/batches/$id/commit'
       preLoaderRoute: typeof ApiPublicIngestBatchesIdCommitRouteImport
       parentRoute: typeof ApiPublicIngestBatchesIdRoute
+    }
+    '/api/public/office/engine/docs/$docId/content': {
+      id: '/api/public/office/engine/docs/$docId/content'
+      path: '/api/public/office/engine/docs/$docId/content'
+      fullPath: '/api/public/office/engine/docs/$docId/content'
+      preLoaderRoute: typeof ApiPublicOfficeEngineDocsDocIdContentRouteImport
+      parentRoute: typeof rootRouteImport
     }
   }
 }
@@ -1015,6 +1296,13 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedMattersSlugRoute: typeof AuthenticatedMattersSlugRoute
   AuthenticatedDraftsIndexRoute: typeof AuthenticatedDraftsIndexRoute
   AuthenticatedMattersIndexRoute: typeof AuthenticatedMattersIndexRoute
+  AuthenticatedOfficeIndexRoute: typeof AuthenticatedOfficeIndexRoute
+  AuthenticatedOfficeDraftsDraftIdRoute: typeof AuthenticatedOfficeDraftsDraftIdRoute
+  AuthenticatedOfficeSheetsDocIdRoute: typeof AuthenticatedOfficeSheetsDocIdRoute
+  AuthenticatedOfficeSlidesDocIdRoute: typeof AuthenticatedOfficeSlidesDocIdRoute
+  AuthenticatedOfficeDraftsIndexRoute: typeof AuthenticatedOfficeDraftsIndexRoute
+  AuthenticatedOfficeSheetsIndexRoute: typeof AuthenticatedOfficeSheetsIndexRoute
+  AuthenticatedOfficeSlidesIndexRoute: typeof AuthenticatedOfficeSlidesIndexRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
@@ -1032,6 +1320,13 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedMattersSlugRoute: AuthenticatedMattersSlugRoute,
   AuthenticatedDraftsIndexRoute: AuthenticatedDraftsIndexRoute,
   AuthenticatedMattersIndexRoute: AuthenticatedMattersIndexRoute,
+  AuthenticatedOfficeIndexRoute: AuthenticatedOfficeIndexRoute,
+  AuthenticatedOfficeDraftsDraftIdRoute: AuthenticatedOfficeDraftsDraftIdRoute,
+  AuthenticatedOfficeSheetsDocIdRoute: AuthenticatedOfficeSheetsDocIdRoute,
+  AuthenticatedOfficeSlidesDocIdRoute: AuthenticatedOfficeSlidesDocIdRoute,
+  AuthenticatedOfficeDraftsIndexRoute: AuthenticatedOfficeDraftsIndexRoute,
+  AuthenticatedOfficeSheetsIndexRoute: AuthenticatedOfficeSheetsIndexRoute,
+  AuthenticatedOfficeSlidesIndexRoute: AuthenticatedOfficeSlidesIndexRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =
@@ -1050,6 +1345,20 @@ const AuthRouteChildren: AuthRouteChildren = {
 }
 
 const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)
+
+interface ApiOfficeDocsRouteChildren {
+  ApiOfficeDocsDocIdContentRoute: typeof ApiOfficeDocsDocIdContentRoute
+  ApiOfficeDocsDocIdRecoveryRoute: typeof ApiOfficeDocsDocIdRecoveryRoute
+}
+
+const ApiOfficeDocsRouteChildren: ApiOfficeDocsRouteChildren = {
+  ApiOfficeDocsDocIdContentRoute: ApiOfficeDocsDocIdContentRoute,
+  ApiOfficeDocsDocIdRecoveryRoute: ApiOfficeDocsDocIdRecoveryRoute,
+}
+
+const ApiOfficeDocsRouteWithChildren = ApiOfficeDocsRoute._addFileChildren(
+  ApiOfficeDocsRouteChildren,
+)
 
 interface ApiWriterDocsRouteChildren {
   ApiWriterDocsDraftIdContentRoute: typeof ApiWriterDocsDraftIdContentRoute
@@ -1111,6 +1420,9 @@ const rootRouteChildren: RootRouteChildren = {
   ApiKbDocumentsRoute: ApiKbDocumentsRoute,
   ApiKbIngestRoute: ApiKbIngestRoute,
   ApiKbSearchRoute: ApiKbSearchRoute,
+  ApiOfficeDocsRoute: ApiOfficeDocsRouteWithChildren,
+  ApiOfficeJwksRoute: ApiOfficeJwksRoute,
+  ApiOfficeStreamRoute: ApiOfficeStreamRoute,
   ApiPileAskRoute: ApiPileAskRoute,
   ApiPileOcrRoute: ApiPileOcrRoute,
   ApiPileRerankRoute: ApiPileRerankRoute,
@@ -1122,8 +1434,11 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicIngestBatchesRoute: ApiPublicIngestBatchesRouteWithChildren,
   ApiPublicIngestIntelRoute: ApiPublicIngestIntelRoute,
   ApiPublicIntelRunRoute: ApiPublicIntelRunRoute,
+  ApiPublicOfficeJwksRoute: ApiPublicOfficeJwksRoute,
   ApiPublicWebhooksCourtlistenerRoute: ApiPublicWebhooksCourtlistenerRoute,
   ApiPublicWebhooksDocketbirdRoute: ApiPublicWebhooksDocketbirdRoute,
+  ApiPublicOfficeEngineDocsDocIdContentRoute:
+    ApiPublicOfficeEngineDocsDocIdContentRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

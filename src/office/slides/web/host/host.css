@@ -1,0 +1,17 @@
+:root{--office-web-line:#dfe6ed;--office-web-wash:#f5f8fa;--office-web-accent:#174b70;--office-web-warning:#9b402f}
+.web-editor-header{height:48px;min-height:48px;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--office-web-line);background:var(--surface,#fff);font:12px/1.5 'Segoe UI',sans-serif;color:var(--text,#22303c);box-sizing:border-box;flex-shrink:0}
+.web-editor-header>span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:30vw}
+.web-editor-header small{color:var(--text-muted,#60768a);font-size:10px}
+.web-editor-header nav{margin-left:auto;display:flex;gap:7px}
+.web-editor-header button,.web-connection-dialog button{border:1px solid var(--office-web-line);background:var(--surface,#fff);color:var(--office-web-accent);padding:6px 10px;border-radius:6px;font:inherit;cursor:pointer}
+.web-editor-header button:disabled{opacity:.4;cursor:default}
+.web-editor-header button:hover:not(:disabled){background:var(--office-web-wash)}
+.web-editor-inline{height:auto;min-height:0;border-bottom:0;background:transparent;padding:0 0 4px 8px;gap:8px;-webkit-app-region:no-drag}.web-editor-inline nav{gap:5px}.web-editor-inline button{padding:3px 9px;font-size:11px;border-radius:4px;line-height:1.4}
+.web-editor-error-float{position:fixed;top:40px;right:12px;z-index:60;max-width:440px;border:1px solid var(--office-web-line);border-radius:6px}
+.ribbon-tabs-win:has(.web-editor-inline){padding-right:8px}
+.web-editor-error{padding:8px 16px;background:var(--surface,#fff);color:var(--office-web-warning);font:12px/1.5 'Segoe UI',sans-serif;border-bottom:1px solid var(--office-web-line);display:flex;gap:8px}
+.web-editor-error button{margin-left:auto;border:0;background:transparent;color:inherit}
+.web-connection-dialog{width:min(480px,85vw);border:1px solid var(--office-web-line);border-radius:10px;padding:22px;color:var(--text,#22303c);background:var(--surface,#fff);font:13px/1.65 'Segoe UI',sans-serif}
+.web-connection-dialog header{display:flex;justify-content:space-between;align-items:center;gap:20px}.web-connection-dialog h2{font-size:18px;margin:0}
+.web-connection-dialog::backdrop{background:var(--modal-backdrop,rgba(0,0,0,.25))}
+@media(max-width:1000px){.web-editor-header{gap:7px;padding-inline:9px}.web-editor-header small{display:none}.web-editor-header button{padding:5px 7px;font-size:10px}.web-editor-inline{gap:4px}.web-editor-inline button{padding:3px 6px}}

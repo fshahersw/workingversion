@@ -28,12 +28,56 @@ export const WRITER_MODEL =
 
 const MAX_TOKENS: Record<WriterProfile, number> = { standard: 8192, thorough: 16384 };
 
-/** Optional adaptive-thinking effort (off unless WRITER_THINKING_EFFORT is set). */
-const THINKING_EFFORT = process.env["WRITER_THINKING_EFFORT"] ?? "";
+/**
+ * Adaptive-thinking effort per profile. Defaults: a light budget for
+ * Standard (tool-call accuracy without a latency hit), a high budget for
+ * Thorough. `WRITER_THINKING_EFFORT` overrides both; `off` disables thinking.
+ */
+const THINKING_LEVELS = new Set(["low", "medium", "high", "max"]);
+function thinkingEffort(profile: WriterProfile): string {
+  const global = (process.env["WRITER_THINKING_EFFORT"] ?? "").trim().toLowerCase();
+  const perProfile = (
+    process.env[`WRITER_THINKING_EFFORT_${profile.toUpperCase()}`] ?? ""
+  )
+    .trim()
+    .toLowerCase();
+  const value = global || perProfile || (profile === "thorough" ? "high" : "low");
+  return THINKING_LEVELS.has(value) ? value : "";
+}
 
-// --- Tool policy (mirrors src/writer/shared/sw-policy.ts) --------------------------
+/**
+ * Prompt caching. The system prompt, the tool schemas and the conversation
+ * prefix are identical from one tool round to the next, so mark each as a
+ * Bedrock cache checkpoint: cached input is read at a fraction of the price
+ * and the time-to-first-token of every follow-up round drops with it.
+ * Segments below the model's minimum cacheable size are simply not cached.
+ * Disable with WRITER_PROMPT_CACHE=off.
+ */
+const PROMPT_CACHE = (process.env["WRITER_PROMPT_CACHE"] ?? "on").toLowerCase() !== "off";
+const CACHE_POINT = { cachePoint: { type: "default" } };
 
-const READ_TOOLS = [
+// --- Tool policy (mirrors each app's src/shared/sw-policy.ts) ----------------------
+
+export type OfficeApp = "writer" | "sheets" | "slides";
+
+export function isOfficeApp(v: unknown): v is OfficeApp {
+  return v === "writer" || v === "sheets" || v === "slides";
+}
+
+// Platform-executed tools (src/office/shared/platform-skill.ts): none of them
+// changes the open document, so every mode may call them.
+const PLATFORM_READ = [
+  "run_python",
+  "verify_citations",
+  "fetch_page",
+  "load_firm_guide",
+  "ask_clarification",
+  "render_diagram",
+  "generate_image",
+];
+
+const WRITER_READ = [
+  ...PLATFORM_READ,
   "get_document_context",
   "read_blocks",
   "read_revisions",
@@ -41,18 +85,74 @@ const READ_TOOLS = [
   "read_attachment",
   "web_search",
 ];
-const WRITE_TOOLS = [
-  ...READ_TOOLS,
+const WRITER_WRITE = [
+  ...WRITER_READ,
   "insert_content",
   "replace_blocks",
   "apply_commands",
   "insert_chart",
   "edit_chart",
+  "insert_image",
+  "set_header_footer",
+  "reply_comment",
+  "resolve_comment",
+  "create_document",
 ];
 
-export function allowedToolNames(mode: WriterMode): Set<string> {
+// Sheets cannot embed generated images (the engine's add_image path is
+// path-based and blocked at the boundary), so the image tools stay out.
+const SHEETS_READ = [
+  ...PLATFORM_READ.filter((n) => n !== "render_diagram" && n !== "generate_image"),
+  "get_workbook_context",
+  "read_range",
+  "aggregate_range",
+  "load_guide",
+  "read_formats",
+  "read_sheet_features",
+  "read_cells",
+  "find_cells",
+  "select_range",
+  "trace_precedents",
+  "trace_dependents",
+  "read_attachment",
+  "web_search",
+];
+const SHEETS_WRITE = [...SHEETS_READ, "propose_operations", "create_document"];
+
+const SLIDES_READ = [
+  ...PLATFORM_READ,
+  "read_slide",
+  "load_guide",
+  "read_attachment",
+  "list_slide_templates",
+  "audit_layout",
+  "list_style_templates",
+  "web_search",
+];
+const SLIDES_WRITE = [
+  ...SLIDES_READ,
+  "execute_slide_script",
+  "add_slide",
+  "edit_table_style",
+  "edit_chart",
+  "apply_ops",
+  "save_style_template",
+  "create_presentation",
+  "insert_web_image",
+  "replace_image",
+  "create_document",
+];
+
+const POLICY: Record<OfficeApp, { read: string[]; write: string[] }> = {
+  writer: { read: WRITER_READ, write: WRITER_WRITE },
+  sheets: { read: SHEETS_READ, write: SHEETS_WRITE },
+  slides: { read: SLIDES_READ, write: SLIDES_WRITE },
+};
+
+export function allowedToolNames(mode: WriterMode, app: OfficeApp = "writer"): Set<string> {
   if (mode === "research") return new Set(["web_search"]);
-  return new Set(mode === "write" ? WRITE_TOOLS : READ_TOOLS);
+  const policy = POLICY[app];
+  return new Set(mode === "write" ? policy.write : policy.read);
 }
 
 export function isWriterMode(v: unknown): v is WriterMode {
@@ -205,11 +305,19 @@ function parseToolCall(
   }
 }
 
+export type WriterUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
 export type WriterStreamCallbacks = {
   onDelta(text: string): void;
   onReasoning(text: string): void;
   onToolCall(call: AgentToolCall): void;
   onStopReason(reason: string): void;
+  onUsage?(usage: WriterUsage): void;
 };
 
 /**
@@ -227,38 +335,62 @@ export async function streamWriterTurn(
   cb: WriterStreamCallbacks,
 ): Promise<void> {
   const allowed = new Set(req.tools.map((t) => t.name));
-  const body: Record<string, unknown> = {
-    system: [{ text: req.system }],
-    messages: converseMessages(req.messages),
+  const messages = converseMessages(req.messages) as Array<{ role: string; content: unknown[] }>;
+  if (PROMPT_CACHE && messages.length) {
+    // Checkpoint the whole conversation prefix at the newest message: the next
+    // round appends the assistant turn and tool results after this point.
+    const last = messages[messages.length - 1]!;
+    last.content = [...last.content, CACHE_POINT];
+  }
+  const buildBody = (effort: string): Record<string, unknown> => ({
+    system: PROMPT_CACHE ? [{ text: req.system }, CACHE_POINT] : [{ text: req.system }],
+    messages,
     inferenceConfig: { maxTokens: MAX_TOKENS[req.profile] },
     ...(req.tools.length
       ? {
           toolConfig: {
-            tools: req.tools.map((t) => ({
-              toolSpec: {
-                name: t.name,
-                description: t.description,
-                inputSchema: { json: t.inputSchema },
-              },
-            })),
+            tools: [
+              ...req.tools.map((t) => ({
+                toolSpec: {
+                  name: t.name,
+                  description: t.description,
+                  inputSchema: { json: t.inputSchema },
+                },
+              })),
+              ...(PROMPT_CACHE ? [CACHE_POINT] : []),
+            ],
           },
         }
       : {}),
-    ...(THINKING_EFFORT
+    ...(effort
       ? {
           additionalModelRequestFields: {
             thinking: { type: "adaptive" },
-            output_config: { effort: THINKING_EFFORT },
+            output_config: { effort },
           },
         }
       : {}),
-  };
-
-  const res = await signedBedrockFetch(converseStreamEndpoint(WRITER_MODEL), {
-    headers: { accept: "application/vnd.amazon.eventstream" },
-    body: JSON.stringify(body),
-    signal: req.signal,
   });
+
+  const request = (effort: string) =>
+    signedBedrockFetch(converseStreamEndpoint(WRITER_MODEL), {
+      headers: { accept: "application/vnd.amazon.eventstream" },
+      body: JSON.stringify(buildBody(effort)),
+      signal: req.signal,
+    });
+
+  let effort = thinkingEffort(req.profile);
+  let res = await request(effort);
+  if (!res.ok && effort && res.status === 400) {
+    // The configured model does not accept adaptive thinking (or this effort
+    // value): fall back to a plain request rather than failing the turn.
+    const detail = await res.text().catch(() => "");
+    console.warn(
+      `[office] adaptive thinking rejected by ${WRITER_MODEL}; retrying without it: ${detail.slice(0, 200)}`,
+    );
+    effort = "";
+    res = await request(effort);
+  }
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => "");
     throw new BedrockClaudeError(
@@ -337,6 +469,18 @@ export async function streamWriterTurn(
           complete = true;
           truncated = evt["stopReason"] === "max_tokens";
           cb.onStopReason(String(evt["stopReason"] || "end_turn"));
+          continue;
+        }
+
+        // metadata: token accounting (cache hits confirm the checkpoints work).
+        const usage = evt["usage"] as Record<string, unknown> | undefined;
+        if (usage && typeof usage === "object") {
+          cb.onUsage?.({
+            inputTokens: Number(usage["inputTokens"] ?? 0),
+            outputTokens: Number(usage["outputTokens"] ?? 0),
+            cacheReadTokens: Number(usage["cacheReadInputTokens"] ?? 0),
+            cacheWriteTokens: Number(usage["cacheWriteInputTokens"] ?? 0),
+          });
           continue;
         }
 

@@ -34,7 +34,7 @@ const primaryNav: readonly NavItem[] = [
   { icon: Search, label: "Research", to: "/research" },
   { icon: CalendarDays, label: "Calendar", to: "/calendar" },
   { icon: FileSearch, label: "Discovery", to: "/docs" },
-  { icon: PenLine, label: "Drafts", to: "/drafts" },
+  { icon: PenLine, label: "Office", to: "/office" },
   { icon: Library, label: "Library", to: "/library" },
 ] as const;
 
@@ -76,9 +76,7 @@ function NavRow({
         strokeWidth={2}
       />
       {expanded && (
-        <span className="truncate text-[12.5px] font-medium tracking-[-0.005em]">
-          {item.label}
-        </span>
+        <span className="truncate text-[12.5px] font-medium tracking-[-0.005em]">{item.label}</span>
       )}
     </Link>
   );
@@ -186,9 +184,7 @@ function SidebarInner({
             strokeWidth={2}
           />
           {expanded && (
-            <span className="truncate text-[12.5px] font-medium tracking-[-0.005em]">
-              Matters
-            </span>
+            <span className="truncate text-[12.5px] font-medium tracking-[-0.005em]">Matters</span>
           )}
         </button>
 
@@ -220,10 +216,10 @@ function SidebarInner({
           onClick={onNavigate}
         />
 
-        {/* Drafts */}
+        {/* Office (Drafts, Sheets) */}
         <NavRow
           item={primaryNav[4]}
-          active={pathname.startsWith("/drafts")}
+          active={pathname.startsWith("/office") || pathname.startsWith("/drafts")}
           expanded={expanded}
           onClick={onNavigate}
         />
@@ -249,9 +245,7 @@ function SidebarInner({
             {email}
           </p>
         )}
-        {[
-          { icon: LogOut, label: "Sign out", onClick: onSignOut },
-        ].map((row) => (
+        {[{ icon: LogOut, label: "Sign out", onClick: onSignOut }].map((row) => (
           <button
             key={row.label}
             type="button"
@@ -269,9 +263,7 @@ function SidebarInner({
               className={expanded ? "h-4 w-4 shrink-0" : "h-[18px] w-[18px] shrink-0"}
               strokeWidth={2}
             />
-            {expanded && (
-              <span className="truncate text-[12.5px] font-medium">{row.label}</span>
-            )}
+            {expanded && <span className="truncate text-[12.5px] font-medium">{row.label}</span>}
           </button>
         ))}
       </div>
@@ -354,7 +346,9 @@ export function AppShell({ children }: { showHeaderLogo?: boolean; children?: Re
             pathname={pathname}
             onNavigate={() => setMobileOpen(false)}
             showToggle={false}
-            onSignOut={() => { void handleSignOut(); }}
+            onSignOut={() => {
+              void handleSignOut();
+            }}
             email={user?.email ?? null}
             onOpenSelector={() => setSelectorOpen(true)}
           />
@@ -364,14 +358,21 @@ export function AppShell({ children }: { showHeaderLogo?: boolean; children?: Re
       {/* Desktop sidebar */}
       <aside
         className="fixed inset-y-0 left-0 z-40 hidden border-r border-border/70 bg-card transition-[width] duration-300 md:block"
-        style={{ width: desktopW, minWidth: desktopW, maxWidth: desktopW, transitionTimingFunction: transitionEase }}
+        style={{
+          width: desktopW,
+          minWidth: desktopW,
+          maxWidth: desktopW,
+          transitionTimingFunction: transitionEase,
+        }}
       >
         <SidebarInner
           expanded={expanded}
           pathname={pathname}
           onToggle={() => setExpanded((v) => !v)}
           showToggle
-          onSignOut={() => { void handleSignOut(); }}
+          onSignOut={() => {
+            void handleSignOut();
+          }}
           email={user?.email ?? null}
           onOpenSelector={() => setSelectorOpen(true)}
         />
@@ -381,7 +382,11 @@ export function AppShell({ children }: { showHeaderLogo?: boolean; children?: Re
 
       <div
         className="flex h-full min-h-0 flex-col transition-[padding-left] duration-300 md:pl-[var(--wr-sidebar-w)]"
-        style={{ paddingLeft: `var(--wr-sidebar-w)`, ["--wr-sidebar-w" as string]: `${desktopW}px`, transitionTimingFunction: transitionEase }}
+        style={{
+          paddingLeft: `var(--wr-sidebar-w)`,
+          ["--wr-sidebar-w" as string]: `${desktopW}px`,
+          transitionTimingFunction: transitionEase,
+        }}
       >
         <header className="flex h-14 shrink-0 items-center px-4 sm:px-6 md:hidden">
           <button

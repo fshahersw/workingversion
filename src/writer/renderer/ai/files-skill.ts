@@ -31,6 +31,7 @@ export function createFilesSkill(getAttachments: () => AttachmentMeta[]): AgentS
     tools: [
       {
         name: 'read_attachment',
+        readOnly: true,
         description:
           'Read the text content of an attachment (parsed locally). Long files are paged: read offset=0 first, then decide whether to continue based on the returned total character count.',
         inputSchema: {

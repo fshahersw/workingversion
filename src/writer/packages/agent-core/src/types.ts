@@ -4,6 +4,14 @@ export interface AgentToolDef {
   description: string
   /** JSON Schema (object) describing the tool input */
   inputSchema: Record<string, unknown>
+  /**
+   * The tool never changes the artifact and does not depend on the outcome of
+   * sibling calls in the same turn (reads, searches, lookups). Consecutive
+   * read-only calls in one model turn run concurrently; anything else runs in
+   * order. Never mark a tool that writes, or that reads state a preceding
+   * write in the same turn could change.
+   */
+  readOnly?: boolean
 }
 
 export interface AgentToolCall {

@@ -188,6 +188,11 @@ export interface DesktopApi {
   writerTestConnection(): Promise<import('./sw-policy').WriterStatus>
   writerApproveResearch(query: string): Promise<string>
 
+  /** Dictation: transcribe a base64-encoded audio clip to text. Optional — the
+   *  web platform implements it via /api/transcribe; absent where unsupported, so
+   *  the composer mic button hides itself unless this is present. */
+  transcribe?(audioBase64: string, format: string): Promise<{ text?: string; error?: string }>
+
   /** current UI language (persisted by the shell in app-settings.json) */
   getLanguage(): Promise<'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'>
   /** language switched from the shell home page */

@@ -7474,6 +7474,50 @@ body.docs-crop-active
   filter: brightness(0.7);
 }
 
+/* dictation mic: same footprint as the attach button; red while recording,
+   spinning while transcribing */
+.ai-mic-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition: all var(--transition-fast);
+}
+
+.ai-mic-btn:hover:not(:disabled) {
+  color: var(--color-text-primary);
+}
+
+.ai-mic-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ai-mic-btn.recording {
+  color: #c0392b;
+}
+
+.ai-mic-btn.busy svg {
+  animation: ai-mic-spin 0.8s linear infinite;
+}
+
+.ai-mic-btn svg {
+  display: block;
+}
+
+@keyframes ai-mic-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* track-changes pill: quiet gray when off, guide-blue tinted when on */
 .ai-track-btn {
   display: inline-flex;

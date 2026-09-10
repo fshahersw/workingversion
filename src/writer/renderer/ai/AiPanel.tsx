@@ -26,6 +26,7 @@ import { waitForFullContent } from '../phased-content'
 import { currentDocGeneration } from '../file-actions'
 import { createFilesSkill } from './files-skill'
 import { createElectronTransport } from './transport'
+import { useDictation } from './useDictation'
 import { writerSkill } from './sw-skill'
 import { modeName, profileName, publicQuery, type WriterMode, type WriterProfile } from '../../shared/sw-policy'
 import { useI18n, t as tModule, aiLangDirective, type StringKey } from '../i18n/locale'
@@ -323,6 +324,11 @@ export function AiPanel({
   // Panel chrome follows the UI language; message text follows its own content (dir=auto below)
   const isRtl = lang === 'ar' || lang === 'he'
   const [input, setInput] = useState('')
+  // Dictation: append the transcript to whatever is already typed, so the user
+  // can dictate then edit before sending (never auto-sends).
+  const dictation = useDictation((text) =>
+    setInput((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text)),
+  )
   const [busy, setBusy] = useState(false)
   const [writerMode, setWriterMode] = useState<WriterMode>('write')
   const [writerProfile, setWriterProfile] = useState<WriterProfile>('standard')
@@ -1427,6 +1433,24 @@ ${notes}`);inputRef.current?.focus()}}>Use in writing</button>}
               >
                 <img src={attachIcon} alt="" aria-hidden />
               </button>
+              {dictation.supported && (
+                <button
+                  type="button"
+                  className={`ai-mic-btn${dictation.state === 'recording' ? ' recording' : ''}${dictation.state === 'transcribing' ? ' busy' : ''}`}
+                  disabled={busy || dictation.state === 'transcribing'}
+                  onClick={() => { if (dictation.state === 'recording') void dictation.stop(); else void dictation.start() }}
+                  data-tip={dictation.error ?? (dictation.state === 'recording' ? 'Stop & transcribe' : dictation.state === 'transcribing' ? 'Transcribing…' : 'Dictate')}
+                  aria-label={dictation.state === 'recording' ? 'Stop recording' : 'Dictate'}
+                >
+                  {dictation.state === 'transcribing' ? (
+                    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden><path d="M12 3a9 9 0 1 0 9 9" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"/></svg>
+                  ) : dictation.state === 'recording' ? (
+                    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden><path d="M12 15a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v5.5A3.5 3.5 0 0 0 12 15Z" fill="currentColor"/><path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21M9 21h6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg>
+                  )}
+                </button>
+              )}
               <button
                 className={`ai-track-btn${trackChanges ? ' on' : ''}`}
                 onClick={toggleTrackChanges}

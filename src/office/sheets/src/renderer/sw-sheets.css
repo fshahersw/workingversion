@@ -1,0 +1,40 @@
+/* Seeger Weiss application chrome. Does not change workbook formatting. */
+:root, [data-theme='light'] { --excel-green: #0f4a74; --excel-green-dark: #093857; --excel-green-soft: #edf4f9; --sw-surface: #ffffff; --sw-ink: #18252f; --sw-muted: #667782; --sw-line: #dde4e9; --sw-bg: #f5f7f9; --sw-shadow: 0 16px 50px #142c4033; --focus: #0f4a7433; --surface-hover: #edf2f6; }
+[data-theme='dark'] { --sw-surface: #20272e; --sw-ink: #e3eaf0; --sw-muted: #a6b4bf; --sw-line: #3d4b56; --sw-bg: #182026; --sw-shadow: 0 16px 50px #00000066; }
+@media (prefers-color-scheme:dark) { :root:not([data-theme]) { --sw-surface:#20272e;--sw-ink:#e3eaf0;--sw-muted:#a6b4bf;--sw-line:#3d4b56;--sw-bg:#182026;--sw-shadow:0 16px 50px #00000066; } }
+.app-shell { grid-template-rows: auto auto minmax(0,1fr); }
+.sw-app-header { min-height:56px;display:flex;align-items:center;gap:18px;padding:0 20px;background:var(--sw-surface);border-bottom:1px solid var(--sw-line);color:var(--sw-ink); }
+.sw-app-header img { width:177px; height:38px;object-fit:contain; }
+.sw-header-divider { width:1px;height:26px;background:var(--sw-line); }
+.sw-app-header strong { display:block;font-weight:600;font-size:14px; }
+.sw-app-header div>span { display:block;font-size:11px;color:var(--sw-muted);margin-top:2px; }
+.sw-local-status { margin-left:auto;font-size:11px;color:var(--sw-muted); }
+.sw-app-header button,.sw-connection-row button { background:var(--sw-surface);border:1px solid var(--sw-line);border-radius:5px;padding:6px 10px;color:var(--sw-ink);font-size:12px;cursor:pointer; }
+.sheet-body { grid-template-columns:minmax(0,1fr) var(--copilot-width,370px); }
+.sheet-main { grid-column:1;grid-row:1; }
+.copilot { grid-column:2;grid-row:1;border-right:0;border-left:1px solid var(--sw-line);box-shadow:none; }
+.app-shell.copilot-collapsed .sheet-body { grid-template-columns:minmax(0,1fr) 36px; }
+.ai-panel-resizer { left:0;right:auto; }
+.ai-panel-header { padding:14px 15px;min-height:48px;border-bottom:1px solid var(--sw-line); }
+.ai-panel-title { font-size:13px;gap:8px; }
+.sw-mark { font-family:'Segoe UI',sans-serif;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;letter-spacing:-1px;color:var(--accent);width:24px;height:24px;border:1px solid var(--sw-line);border-radius:6px;background:var(--sw-surface); }
+.sw-task-tabs { display:grid;grid-template-columns:repeat(4,1fr);padding:7px 12px;gap:4px;border-bottom:1px solid var(--sw-line); }
+.sw-task-tabs button { background:transparent;border:0;padding:8px 2px;border-radius:5px;color:var(--sw-muted);font:500 12px 'Segoe UI',sans-serif;cursor:pointer; }
+.sw-task-tabs button[aria-selected='true'] { color:var(--accent);background:var(--accent-soft);font-weight:650; }
+.sw-task-tabs button:disabled { opacity:.6;cursor:default; }
+.sw-connection-row { padding:7px 14px;display:flex;align-items:center;justify-content:space-between; }
+.sw-connection-row select { background:var(--sw-surface);color:var(--sw-ink);border:1px solid var(--sw-line);border-radius:5px;font-size:12px;padding:5px; }
+.sw-mode-note { margin:6px 14px;font-size:11px;line-height:1.55;color:var(--sw-muted); }
+.sw-connection-backdrop { position:fixed;inset:0;z-index:1200;background:var(--sheets-mask-bg);display:flex;align-items:center;justify-content:center; }
+.sw-connection-dialog { width:min(470px,calc(100vw - 40px));background:var(--sw-surface);color:var(--sw-ink);border:1px solid var(--sw-line);border-radius:10px;padding:22px;box-shadow:var(--sw-shadow);font-size:13px; }
+.sw-connection-dialog header { display:flex;justify-content:space-between;align-items:center;margin-bottom:12px; }
+.sw-connection-dialog h2 { margin:0;font-size:18px; }
+.sw-connection-dialog header button { border:0;background:none;color:var(--sw-muted);font-size:24px;cursor:pointer; }
+.sw-connection-dialog p { line-height:1.6; }
+.sw-connection-dialog dl { display:grid;grid-template-columns:95px 1fr;gap:10px;border-top:1px solid var(--sw-line);border-bottom:1px solid var(--sw-line);padding:14px 0; }
+.sw-connection-dialog dt { color:var(--sw-muted); }.sw-connection-dialog dd { margin:0; }
+.sw-config-path { overflow-wrap:anywhere;font-size:11px;color:var(--sw-muted);background:var(--sw-bg);padding:10px;border-radius:5px; }
+.sw-connection-dialog footer { display:flex;justify-content:flex-end;gap:8px;margin-top:18px; }
+.sw-connection-dialog footer button { padding:8px 12px;border:1px solid var(--sw-line);border-radius:5px;background:var(--sw-surface);color:var(--sw-ink);cursor:pointer; }
+.sw-connection-dialog .sw-primary { background:var(--accent);border-color:var(--accent);color:var(--sheets-on-accent); }
+@media(max-width:1000px) { .sw-local-status { display:none; }.sw-app-header button:first-of-type { margin-left:auto; }.sheet-body { --copilot-width:320px; }.sw-app-header { gap:12px;padding:0 12px; }.sw-app-header img { width:148px; } }

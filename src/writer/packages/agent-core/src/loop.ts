@@ -672,46 +672,26 @@ export class AgentLoop<TSnapshot = unknown> {
     const generation = this.generation
     const results: AgentToolResult[] = []
     let turnMutated = false
-    for (const call of toolCalls) {
-      // The user hit stop while an earlier tool was running: skip remaining tools,
-      // but fill in paired error results to keep tool_use/tool_result pairs valid for the next request
-      if (this.cancelled) {
-        results.push({
-          id: call.id,
-          name: call.name,
-          output: '(the user stopped the run; this tool was not executed)',
-          isError: true,
-        })
-        continue
-      }
-      // Unusable input (truncated by the token limit, or JSON that failed to parse):
-      // don't execute; feed a targeted error back so the model retries correctly
-      if (call.truncated || call.inputError) {
-        this.inputParseFails++
-        const output = call.truncated
-          ? 'Tool arguments were cut off by the output length limit; the tool was not executed. Split this operation into several smaller tool calls (less content per call) and try again.'
-          : `Tool input JSON failed to parse; the tool was not executed: ${call.inputError}\nFix the arguments (make sure quotes inside strings are escaped) and call again.`
-        results.push({ id: call.id, name: call.name, output, isError: true })
-        events?.onToolExecuted?.({
-          call,
-          execution: { output, isError: true, summary: call.name },
-        })
-        continue
-      }
-      this.inputParseFails = 0
-      events?.onToolStart?.(call)
-      const snapshot = !this.mutationSeen ? captureSnapshot?.() : undefined
-      let execution: ToolExecution
+    // Run one executed tool call: raises the execution error into a result so
+    // a failing tool never aborts the turn.
+    const execute = async (call: AgentToolCall): Promise<ToolExecution> => {
       try {
-        execution = await skill.executeTool(call, this.abortController?.signal)
+        return await skill.executeTool(call, this.abortController?.signal)
       } catch (e) {
-        execution = {
+        return {
           output: e instanceof Error ? e.message : String(e),
           isError: true,
           summary: call.name,
         }
       }
-      if (generation !== this.generation) return // reset while a tool was running
+    }
+    // Book-keeping after a call finished, in call order (results must pair
+    // with tool_use blocks in the order the model emitted them).
+    const record = (
+      call: AgentToolCall,
+      execution: ToolExecution,
+      snapshot: TSnapshot | undefined,
+    ): void => {
       this.executedCalls.push({ name: call.name, ok: !execution.isError })
       const firstMutation = !!execution.mutated && !this.mutationSeen
       if (execution.mutated) {
@@ -729,6 +709,83 @@ export class AgentLoop<TSnapshot = unknown> {
         execution,
         snapshotBefore: firstMutation ? snapshot : undefined,
       })
+    }
+    const readOnlyNames = new Set(
+      skill.tools.filter((t) => t.readOnly).map((t) => t.name),
+    )
+    // Returns true when the call was consumed without executing (stop pressed
+    // or unusable input); the paired error result is already recorded.
+    const consumedWithoutRun = (call: AgentToolCall): boolean => {
+      // The user hit stop while an earlier tool was running: skip remaining tools,
+      // but fill in paired error results to keep tool_use/tool_result pairs valid for the next request
+      if (this.cancelled) {
+        results.push({
+          id: call.id,
+          name: call.name,
+          output: '(the user stopped the run; this tool was not executed)',
+          isError: true,
+        })
+        return true
+      }
+      // Unusable input (truncated by the token limit, or JSON that failed to parse):
+      // don't execute; feed a targeted error back so the model retries correctly
+      if (call.truncated || call.inputError) {
+        this.inputParseFails++
+        const output = call.truncated
+          ? 'Tool arguments were cut off by the output length limit; the tool was not executed. Split this operation into several smaller tool calls (less content per call) and try again.'
+          : `Tool input JSON failed to parse; the tool was not executed: ${call.inputError}\nFix the arguments (make sure quotes inside strings are escaped) and call again.`
+        results.push({ id: call.id, name: call.name, output, isError: true })
+        events?.onToolExecuted?.({
+          call,
+          execution: { output, isError: true, summary: call.name },
+        })
+        return true
+      }
+      return false
+    }
+
+    let i = 0
+    while (i < toolCalls.length) {
+      const call = toolCalls[i]!
+      if (consumedWithoutRun(call)) {
+        i++
+        continue
+      }
+      this.inputParseFails = 0
+
+      // A run of consecutive read-only calls (reads, searches, lookups)
+      // executes concurrently: none of them changes the artifact, so their
+      // relative order cannot matter, and the model usually asks for several
+      // at once. Everything else keeps strict order.
+      if (readOnlyNames.has(call.name)) {
+        const batch: AgentToolCall[] = [call]
+        let j = i + 1
+        while (
+          j < toolCalls.length &&
+          readOnlyNames.has(toolCalls[j]!.name) &&
+          !toolCalls[j]!.truncated &&
+          !toolCalls[j]!.inputError
+        ) {
+          batch.push(toolCalls[j]!)
+          j++
+        }
+        for (const b of batch) events?.onToolStart?.(b)
+        // Read-only tools should never mutate; keep the pre-state anyway so a
+        // mis-flagged tool still gets a roll-back point.
+        const batchSnapshot = !this.mutationSeen ? captureSnapshot?.() : undefined
+        const executions = await Promise.all(batch.map((b) => execute(b)))
+        if (generation !== this.generation) return // reset while tools were running
+        executions.forEach((execution, k) => record(batch[k]!, execution, batchSnapshot))
+        i = j
+        continue
+      }
+
+      events?.onToolStart?.(call)
+      const snapshot = !this.mutationSeen ? captureSnapshot?.() : undefined
+      const execution = await execute(call)
+      if (generation !== this.generation) return // reset while a tool was running
+      record(call, execution, snapshot)
+      i++
     }
     this.history.push({ role: 'tool', results })
 
