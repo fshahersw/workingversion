@@ -20,8 +20,8 @@ import { loadBedrockRegion } from "../config.server";
 
 // One signer per AWS region/service pair (e.g. "bedrock-agentcore").
 const _signers = new Map<string, SignatureV4>();
-function signer(service: string): SignatureV4 {
-  const region = loadBedrockRegion();
+function signer(service: string, regionOverride?: string): SignatureV4 {
+  const region = regionOverride || loadBedrockRegion();
   const key = `${region}:${service}`;
   let s = _signers.get(key);
   if (!s) {
@@ -45,7 +45,14 @@ function signer(service: string): SignatureV4 {
 export async function signedAwsFetch(
   service: string,
   url: string,
-  opts: { method?: string; body: string; headers?: Record<string, string>; signal?: AbortSignal },
+  opts: {
+    method?: string;
+    body: string;
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+    /** Sign for a region other than the configured Bedrock region (the URL's host must match). */
+    region?: string;
+  },
 ): Promise<Response> {
   const u = new URL(url);
   const request = new HttpRequest({
@@ -61,7 +68,7 @@ export async function signedAwsFetch(
     },
     body: opts.body,
   });
-  const signed = await signer(service).sign(request);
+  const signed = await signer(service, opts.region).sign(request);
   return fetch(url, {
     method: request.method,
     headers: signed.headers,
@@ -73,7 +80,13 @@ export async function signedAwsFetch(
 /** SigV4-sign a Bedrock (data-plane) request and fetch it. */
 export async function signedBedrockFetch(
   url: string,
-  opts: { method?: string; body: string; headers?: Record<string, string>; signal?: AbortSignal },
+  opts: {
+    method?: string;
+    body: string;
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+    region?: string;
+  },
 ): Promise<Response> {
   return signedAwsFetch("bedrock", url, opts);
 }

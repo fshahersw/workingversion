@@ -17,6 +17,8 @@ import {
   type GatewayKey,
   type GatewayResult,
 } from "./agentcore-search.server";
+import { braveSearch, braveConfigured } from "./brave-search.server";
+import { tavilySearch, tavilyConfigured } from "./tavily-search.server";
 import {
   searchFilings,
   getFilingText,
@@ -277,8 +279,9 @@ export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   book: SourceBook,
+  opts?: { brave?: boolean },
 ): Promise<ToolOutcome> {
-  if (name === "web_search") return webSearch(input, book);
+  if (name === "web_search") return webSearch(input, book, opts);
 
   if (name === "db_find_case") return dbFindCase(input, book);
   if (name === "db_docket_sheet") return dbDocketSheet(input, book);
@@ -329,6 +332,7 @@ async function categorySearch(
   cfg: Category,
   input: Record<string, unknown>,
   book: SourceBook,
+  opts?: { brave?: boolean },
 ): Promise<ToolOutcome> {
   if (!agentCoreConfigured())
     return {
@@ -395,23 +399,91 @@ async function categorySearch(
     }
   }
 
+  // Brave + Tavily are additional sources merged in parallel, but ONLY for the
+  // research agent (opts.brave) and ONLY when their keys are set. The writer/Drafts
+  // path calls executeTool without the flag, so `research` is false and the fan-out
+  // stays byte-identical to before — no interference with that build.
+  const research = !!opts?.brave;
+  const brave = research && braveConfigured();
+  const tavily = research && tavilyConfigured();
+  // AgentCore + (optionally) Brave for one query, merged into one candidate pool.
+  // Brave OFF => exactly agentCoreSearch(...) (unchanged). Brave ON => AgentCore
+  // errors are swallowed so a gateway blip still yields Brave results (Brave itself
+  // already returns [] on any error). Ranking + EXCLUDED_DOMAINS below filter both.
+  const merged = (
+    q: string,
+    acOpts?: { publishedAfter?: string; openWeb?: boolean },
+  ): Promise<GatewayResult[]> => {
+    if (!brave) return agentCoreSearch(cfg.key, q, CANDIDATE_POOL, acOpts);
+    return Promise.all([
+      agentCoreSearch(cfg.key, q, CANDIDATE_POOL, acOpts).catch(() => [] as GatewayResult[]),
+      braveSearch(
+        q,
+        CANDIDATE_POOL,
+        acOpts?.publishedAfter ? { publishedAfter: acOpts.publishedAfter } : undefined,
+      ),
+    ]).then(([ac, br]) => [...ac, ...br]);
+  };
+
   const fetchPool = (q: string) =>
     memoTTL(
       // Cache raw gateway hits (not the [S#]-tagged outcome): a repeat of the
       // same category+query within the window reuses one upstream call, and
-      // SourceBook still assigns this run's own refs below.
-      toolCacheKey(`ac:${cfg.key}`, { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }),
+      // SourceBook still assigns this run's own refs below. `brave` is in the key so
+      // research (merged) and writer (AgentCore-only) never share a cache entry.
+      toolCacheKey(`ac:${cfg.key}`, { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "", brave }),
       TOOL_CACHE_TTL_MS,
-      () => agentCoreSearch(cfg.key, q, CANDIDATE_POOL, effectiveAfter ? { publishedAfter: effectiveAfter } : undefined),
+      () => merged(q, effectiveAfter ? { publishedAfter: effectiveAfter } : undefined),
     );
 
   let results: GatewayResult[];
-  try {
-    const pools = await Promise.all(variants.map((q) => fetchPool(q)));
-    results = pools.flat();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "search failed";
-    return { text: `${cfg.key} failed: ${trunc(msg, 220)}`, hits: 0, refs: [] };
+  if (research && (brave || tavily)) {
+    // RESEARCH path — MINIMIZE AgentCore, PRIORITIZE the paid services. AgentCore
+    // runs ONCE on the primary query (its in-account, allow-list-curated anchor);
+    // Brave + Tavily — the fast, accurate paid sources — run across the primary + the
+    // two deterministic lean combos for recall. Everything merges into one pool;
+    // rankResults + EXCLUDED_DOMAINS + dedupe below pick the survivors. Each upstream
+    // call is memoized for the run (Brave/Tavily keys are category-agnostic).
+    const afterOpt = effectiveAfter ? { publishedAfter: effectiveAfter } : undefined;
+    const leanQueries: string[] = [];
+    for (const combo of [distinctiveTerms(query, 4), distinctiveTerms(query, 4, { dropYears: true })]) {
+      const lq = combo.join(" ");
+      if (combo.length >= 3 && lq.toLowerCase() !== effectiveQuery.toLowerCase() && !leanQueries.includes(lq)) {
+        leanQueries.push(lq);
+      }
+    }
+    const paidQueries = [effectiveQuery, ...leanQueries];
+    const jobs: Promise<GatewayResult[]>[] = [
+      memoTTL(
+        toolCacheKey(`ac:${cfg.key}`, { query: effectiveQuery, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }),
+        TOOL_CACHE_TTL_MS,
+        () => agentCoreSearch(cfg.key, effectiveQuery, CANDIDATE_POOL, afterOpt),
+      ).catch(() => [] as GatewayResult[]),
+    ];
+    for (const q of paidQueries) {
+      if (brave)
+        jobs.push(
+          memoTTL(toolCacheKey("brave", { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }), TOOL_CACHE_TTL_MS, () =>
+            braveSearch(q, CANDIDATE_POOL, afterOpt),
+          ).catch(() => [] as GatewayResult[]),
+        );
+      if (tavily)
+        jobs.push(
+          memoTTL(toolCacheKey("tavily", { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }), TOOL_CACHE_TTL_MS, () =>
+            tavilySearch(q, CANDIDATE_POOL, afterOpt),
+          ).catch(() => [] as GatewayResult[]),
+        );
+    }
+    results = (await Promise.all(jobs)).flat();
+  } else {
+    // WRITER / default path — unchanged: AgentCore across all variants, memoized.
+    try {
+      const pools = await Promise.all(variants.map((q) => fetchPool(q)));
+      results = pools.flat();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "search failed";
+      return { text: `${cfg.key} failed: ${trunc(msg, 220)}`, hits: 0, refs: [] };
+    }
   }
 
   // EMPTY-RESULT ESCALATION LADDER — the fix for the false zero. The category
@@ -428,9 +500,9 @@ async function categorySearch(
       // (1) leanest query, SAME whitelist + 30-day window (a stuffed query was the miss)
       () => fetchPool(leanQ),
       // (2) SAME whitelist, NO date floor (the 30-day window was the miss)
-      () => agentCoreSearch(cfg.key, leanQ, CANDIDATE_POOL),
+      () => merged(leanQ),
       // (3) OPEN WEB (exclude-only) + NO date floor (the category whitelist was the miss)
-      () => agentCoreSearch(cfg.key, leanQ, CANDIDATE_POOL, { openWeb: true }),
+      () => merged(leanQ, { openWeb: true }),
     ];
     for (const step of ladder) {
       try {
@@ -511,6 +583,7 @@ async function categorySearch(
 async function webSearch(
   input: Record<string, unknown>,
   book: SourceBook,
+  opts?: { brave?: boolean },
 ): Promise<ToolOutcome> {
   const query = str(input["query"]);
   if (query.length < 3) return { text: "query must be at least 3 characters.", hits: 0, refs: [] };
@@ -531,7 +604,7 @@ async function webSearch(
   const publishedAfter = str(input["published_after"]) || undefined;
   const outcomes = await Promise.all(
     cfgs.map((cfg) =>
-      categorySearch(cfg, { query, queries, limit, published_after: publishedAfter }, book),
+      categorySearch(cfg, { query, queries, limit, published_after: publishedAfter }, book, opts),
     ),
   );
   return {

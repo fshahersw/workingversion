@@ -1,24 +1,27 @@
 // Loop vs writer model selection for the research agent.
 //
-// FAST mode runs the tool loop on Sonnet 5 (fastRouterPrompt — gather only, never
-// writes) and hands the FINAL written answer to Sonnet 5 (fastWriterPrompt). Same
-// model, two DISTINCT prompts: a lean gather-only router and a writer. THINK mode
-// stays Sonnet 5 end to end on the single combined prompt. Fast is still tighter
-// than think (leaner prompts, smaller budget, no coverage gate / faithfulness
-// judge), just no longer on a weaker loop model (Nemotron/Haiku both underperformed
-// on query discipline).
+// FAST mode runs the tool loop on Nemotron (fastRouterPrompt — gather only, never
+// writes) and hands the FINAL written answer to Sonnet 5 (fastWriterPrompt). Two
+// models, two DISTINCT prompts: a cheap/fast Nemotron tool-caller for the loop, a
+// Sonnet writer for the prose. THINK mode stays Sonnet 5 end to end on the single
+// combined prompt. The deterministic search backend (lean query combos, empty-result
+// escalation ladder, Brave+AgentCore parallel merge, 30-day recency default) absorbs
+// Nemotron's weaker query shaping, so the loop can stay on the cheap workhorse while
+// the writer stays Sonnet quality. cache + adaptive-thinking are gated on
+// isClaudeModel, so Nemotron (non-Claude) never 400s; stripReasoningBlocks + the
+// <think>-tag strip already handle the Nemotron-loop → Sonnet-writer handoff.
 //
-// Safety: nothing silently changes deployed traffic. Every runtime — dev and
-// hosted — resolves FAST to the research model (Sonnet 5) unless BEDROCK_FAST_MODEL
-// is set. Override or A/B at any time via BEDROCK_FAST_MODEL (e.g. set it to
-// us.anthropic.claude-haiku-4-5-20251001-v1:0 or nvidia.nemotron-super-3-120b).
+// Safety: nothing silently changes deployed traffic. On a hosted runtime FAST stays
+// on the research model (Sonnet 5) unless BEDROCK_FAST_MODEL is set; local dev
+// defaults FAST to Nemotron so it can be exercised. Override/rollback/A-B via
+// BEDROCK_FAST_MODEL (e.g. us.anthropic.claude-sonnet-5 to force fast = Sonnet).
 export type EnvSource = Readonly<Record<string, string | undefined>>;
 export type LoopMode = "fast" | "think";
 
 export const DEFAULT_RESEARCH_MODEL = "us.anthropic.claude-sonnet-5";
-// Fast loop tool-caller = Sonnet 5 (same as the writer, but a separate gather-only
-// prompt). Override/rollback via BEDROCK_FAST_MODEL.
-export const DEFAULT_FAST_MODEL = "us.anthropic.claude-sonnet-5";
+// Fast loop tool-caller = Nemotron (cheap workhorse); the writer stays Sonnet 5 via
+// loadFastWriterModel(). Override/rollback via BEDROCK_FAST_MODEL.
+export const DEFAULT_FAST_MODEL = "nvidia.nemotron-super-3-120b";
 // Frontier redesign (referenceforagentarchitecture.md §2.1): the pure routing
 // controller. Small structured RoutePlan output only, no prose, no tools.
 export const DEFAULT_ROUTER_MODEL = "nvidia.nemotron-super-3-120b";

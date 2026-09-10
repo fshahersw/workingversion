@@ -36,6 +36,10 @@ import {
  *  and hands the final write to loadFastWriterModel() (Sonnet). */
 const RESEARCH_MODEL = loadResearchModel();
 const MAX_STEPS = 5;
+/** DocketBird (the db_* tools) is THINK-only: fast mode is web-first and fast, and
+ *  the sequential docket calls are the slow part. Fast gets every research tool
+ *  EXCEPT db_*; Think gets the full set (and does the real docket/PACER pulls). */
+const FAST_TOOLS = RESEARCH_TOOLS.filter((t) => !t.name.startsWith("db_"));
 const RESEARCH_DEADLINE_MS = 40_000;
 // Adaptive-thinking effort dial (Phase 4). ON by default (research=low,
 // synthesis=medium): the 6-case x3 variance run showed this LIFTS quality
@@ -318,7 +322,7 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                 ? "Research this with your tools — narrate one line before each batch, call them in parallel where independent — then STOP. A separate writer composes the final answer from the sources you gather; do not write it yourself."
                 : "Research this with your tools (narrate one line before each batch, call them in parallel where independent), then write the final answer for the reader."
             }`,
-            tools: RESEARCH_TOOLS,
+            tools: mode === "fast" ? FAST_TOOLS : RESEARCH_TOOLS,
             maxTokens: 2000,
             maxSteps: cfg.maxSteps,
             synthesisUser: docReq.wants

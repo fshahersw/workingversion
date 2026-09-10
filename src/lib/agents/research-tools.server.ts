@@ -579,8 +579,11 @@ export async function executeResearchTool(
   if (name === "run_python") return runPythonTool(input);
   if (name === "read_document") return readDocumentTool(input, attachments);
   if (name === "create_document") return createDocumentTool(input);
-  // web_search (category-scoped domain sets) and every db_* tool.
-  return executeTool(name, input, book);
+  // web_search (category-scoped domain sets) and every db_* tool. brave:true opts
+  // the research agent into the Brave+AgentCore parallel merge (a no-op unless
+  // BRAVE_API_KEY is set); the writer/Drafts path calls executeTool WITHOUT this,
+  // so its web search is unchanged.
+  return executeTool(name, input, book, { brave: true });
 }
 
 export const clampLimit = clamp;
