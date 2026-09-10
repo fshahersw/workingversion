@@ -18,7 +18,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node --experimental-strip-types --test src/lib/*.test.ts src/lib/pile/*.test.ts src/lib/agents/*.test.ts src/lib/auth/*.test.ts src/lib/kb/*.test.ts src/lib/review/*.test.ts src/lib/library/*.test.ts src/lib/drafts/*.test.ts"
+    "test": "node --experimental-strip-types --test src/lib/*.test.ts src/lib/pile/*.test.ts src/lib/agents/*.test.ts src/lib/auth/*.test.ts src/lib/kb/*.test.ts src/lib/review/*.test.ts src/lib/library/*.test.ts src/lib/writer/*.test.ts"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
@@ -70,6 +70,7 @@
     "@tiptap/extension-placeholder": "^3.31.3",
     "@tiptap/extension-table": "^3.31.3",
     "@tiptap/extension-text-align": "^3.31.3",
+    "@tiptap/extensions": "3.31.3",
     "@tiptap/markdown": "^3.31.3",
     "@tiptap/pm": "^3.31.3",
     "@tiptap/react": "^3.31.3",
@@ -81,12 +82,14 @@
     "docx": "^9.7.1",
     "embla-carousel-react": "^8.6.0",
     "exceljs": "^4",
+    "fast-xml-parser": "5.10.1",
     "framer-motion": "^12.41.0",
     "input-otp": "^1.4.2",
     "jose": "^5.9.6",
     "jszip": "^3.10.1",
     "lucide-react": "^0.575.0",
     "mammoth": "^1.12.1",
+    "marked": "17.0.6",
     "mermaid": "^11.17.2",
     "pdfjs-dist": "^5",
     "react": "^19.2.0",
@@ -103,6 +106,7 @@
     "tesseract.js": "^5",
     "tw-animate-css": "^1.3.4",
     "ulid": "^2.3.0",
+    "utif2": "4.1.0",
     "vaul": "^1.1.2",
     "vite-tsconfig-paths": "^6.0.2",
     "zod": "^3.24.2"

@@ -91,13 +91,7 @@ export function agentMeta(k: string) {
 
 /** Plain-English display names for the research tools. */
 const TOOL_LABELS: Record<string, string> = {
-  search_case_law: "Case Law & Dockets",
-  search_regulatory_text: "Regulatory Text",
-  search_enforcement_history: "Enforcement History",
-  search_scientific_literature: "Scientific Literature",
-  search_technical_environmental: "Technical & Environmental",
-  search_judicial_parties: "Judicial & Parties",
-  search_legal_news: "Legal News",
+  web_search: "Web Search",
   db_search_filings: "Docket Search",
   db_read_filing: "Filing Text",
   db_get_case: "Case Lookup",
@@ -107,9 +101,6 @@ const TOOL_LABELS: Record<string, string> = {
   db_calendar: "Case Calendar",
   db_graph_ask: "Litigation Graph",
   fetch_page: "Reading Page",
-  recap_search: "RECAP Search",
-  recap_docket: "RECAP Docket",
-  recap_read: "Reading Filing",
 };
 
 const WEB_SCOPE_LABELS: Record<string, string> = {
@@ -119,7 +110,8 @@ const WEB_SCOPE_LABELS: Record<string, string> = {
 };
 
 export function toolLabel(tool: string, scope?: string): string {
-  if (tool === "web_search")
+  if (tool === "web_search") return "Web Search";
+  if (tool === "search_authorities")
     return WEB_SCOPE_LABELS[scope ?? "primary"] ?? "Authority Sweep";
   return (
     TOOL_LABELS[tool] ??

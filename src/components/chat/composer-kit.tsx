@@ -227,14 +227,13 @@ export function UploadButton({
         disabled={disabled || uploading}
         title="Upload file(s) — usable by the code interpreter"
         aria-label="Upload files"
-        className="flex h-8 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-brand-navy disabled:opacity-50"
+        className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-brand-navy disabled:opacity-50"
       >
         {uploading ? (
           <Loader2 className="h-[15px] w-[15px] animate-spin" />
         ) : (
           <Paperclip className="h-[15px] w-[15px]" strokeWidth={1.85} />
         )}
-        <span className="hidden sm:inline">Upload</span>
       </button>
     </>
   );

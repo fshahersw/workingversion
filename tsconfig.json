@@ -21,7 +21,19 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@genoffice/agent-core": ["./src/writer/packages/agent-core/src/index.ts"],
+      "@genoffice/ai-provider": ["./src/writer/packages/ai-provider/src/index.ts"],
+      "@genoffice/docx-engine": ["./src/writer/packages/docx-engine/src/index.ts"],
+      "@genoffice/docx-engine/math": ["./src/writer/packages/docx-engine/src/math.ts"],
+      "@genoffice/docx-engine/metafile": ["./src/writer/packages/docx-engine/src/metafile.ts"],
+      "@genoffice/font-metrics": ["./src/writer/packages/font-metrics/src/index.ts"],
+      "@genoffice/i18n": ["./src/writer/packages/i18n/src/index.ts"],
+      "@genoffice/project-store": ["./src/writer/packages/project-store/src/index.ts"],
+      "@genoffice/pptx-engine/custgeom": ["./src/writer/packages/pptx-engine/src/custgeom.ts"],
+      "@genoffice/pptx-render/preset-geometry": ["./src/writer/packages/pptx-render/src/preset-geometry.ts"],
+      "@genoffice/ui": ["./src/writer/packages/ui/src/index.ts"],
+      "@genoffice/ui/*": ["./src/writer/packages/ui/src/*"]
     }
   }
 }

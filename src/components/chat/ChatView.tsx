@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertCircle,
+  ArrowRight,
   ArrowUp,
   Loader2,
   ShieldCheck,
@@ -27,7 +28,7 @@ import {
   persistMode,
   type ComposerMode,
 } from "./composer-kit";
-import { ConversationHistory } from "./ConversationHistory";
+import { MicButton } from "./MicButton";
 import { ActivityPanel } from "./ActivityPanel";
 import { AnswerMarkdown } from "./AnswerMarkdown";
 import { ArtifactPanel } from "./ArtifactPanel";
@@ -50,7 +51,6 @@ export function ChatView({
   onNewChat,
   sessionId,
   matter,
-  onOpenConversation,
   conversationId,
 }: {
   messages: Message[];
@@ -62,7 +62,6 @@ export function ChatView({
   onNewChat: () => void;
   sessionId: string;
   matter: MatterScope | null;
-  onOpenConversation: (id: string) => void;
   conversationId: string | null;
 }) {
   const [leftPct, setLeftPct] = useState<number>(() => {
@@ -376,18 +375,21 @@ export function ChatView({
 
                 {!lastBusy && lastFollowups.length > 0 && (
                   <div className="mb-4">
-                    <div className="mb-2 text-xs text-muted-foreground">
+                    <div className="mb-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                       Suggested follow-ups
                     </div>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="grid grid-cols-1 gap-2 md:grid-cols-3 md:gap-2.5">
                       {lastFollowups.map((f, i) => (
                         <button
                           key={`${i}-${f}`}
                           onClick={() => onSend(f)}
-                          className="max-w-full truncate rounded-md border border-border bg-card px-2.5 py-1 text-xs text-foreground shadow-sm transition-colors hover:bg-muted/60"
                           title={f}
+                          className="group flex h-full items-start gap-2 rounded-lg border border-border bg-card px-3 py-2.5 text-left transition-colors hover:border-primary/30 hover:bg-muted/40"
                         >
-                          {f}
+                          <span className="line-clamp-3 flex-1 text-[12.5px] leading-snug text-foreground">
+                            {f}
+                          </span>
+                          <ArrowRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand-navy/0 transition-colors group-hover:text-brand-navy/60" />
                         </button>
                       ))}
                     </div>
@@ -412,8 +414,6 @@ export function ChatView({
                 busy={busy}
                 onNewChat={onNewChat}
                 textareaRef={composerRef}
-                onOpenConversation={onOpenConversation}
-                conversationId={conversationId}
               />
             </div>
           </div>
@@ -527,8 +527,6 @@ function ChatComposer({
   busy,
   onNewChat,
   textareaRef,
-  onOpenConversation,
-  conversationId,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -536,8 +534,6 @@ function ChatComposer({
   busy: boolean;
   onNewChat: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
-  onOpenConversation: (id: string) => void;
-  conversationId: string | null;
 }) {
   const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
   const setMode = useCallback((m: ComposerMode) => {
@@ -612,7 +608,7 @@ function ChatComposer({
       className="relative flex w-full flex-col rounded-lg border border-border bg-card/95 shadow-[0_8px_28px_-14px_rgba(31,42,94,0.22)] backdrop-blur-md transition-all focus-within:border-primary/40 focus-within:shadow-[0_12px_32px_-16px_rgba(31,42,94,0.28)]"
     >
       <FileChips files={files} onRemove={removeFile} className="px-2.5 pt-2" />
-      <div className="flex items-end gap-1.5 px-2.5 pt-2">
+      <div className="px-2.5 pt-2">
         <textarea
           ref={textareaRef}
           value={value}
@@ -626,38 +622,42 @@ function ChatComposer({
           rows={1}
           disabled={busy}
           placeholder="Ask a follow-up about MDLs, bellwethers, or precedent…"
-          className="block max-h-[220px] min-h-[44px] w-full min-w-0 resize-none bg-transparent px-1.5 py-1.5 text-[14px] leading-[1.55] placeholder:text-muted-foreground/80 focus:outline-none"
+          className="block max-h-[220px] min-h-[44px] w-full resize-none bg-transparent px-1.5 py-1.5 text-[14px] leading-[1.55] placeholder:text-muted-foreground/80 focus:outline-none"
         />
-        <button
-          type="submit"
-          disabled={busy || !value.trim()}
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all duration-200 hover:bg-brand-navy/90 disabled:opacity-40"
-          aria-label="Send"
-        >
-          {busy ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <ArrowUp className="h-[18px] w-[18px]" strokeWidth={2.4} />
-          )}
-        </button>
       </div>
-      <div className="mt-1 flex items-center gap-1 border-t border-border/60 px-2 py-1.5">
-        <ModeDropdown mode={mode} onChange={setMode} disabled={busy} />
-        <UploadButton onFiles={handleFiles} uploading={uploading} disabled={busy} />
-        <span className="mx-0.5 h-4 w-px bg-border/70" />
-        <button
-          type="button"
-          onClick={onNewChat}
-          title="New chat"
-          aria-label="New chat"
-          className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-brand-navy"
-        >
-          <SquarePen className="h-[15px] w-[15px]" strokeWidth={1.85} />
-        </button>
-        <ConversationHistory
-          activeId={conversationId}
-          onOpen={onOpenConversation}
-        />
+      <div className="mt-1 flex items-center justify-between gap-1 border-t border-border/60 px-2 py-1.5">
+        <div className="flex items-center gap-1">
+          <ModeDropdown mode={mode} onChange={setMode} disabled={busy} />
+          <span className="mx-0.5 h-4 w-px bg-border/70" />
+          <button
+            type="button"
+            onClick={onNewChat}
+            title="New chat"
+            aria-label="New chat"
+            className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-brand-navy"
+          >
+            <SquarePen className="h-[15px] w-[15px]" strokeWidth={1.85} />
+          </button>
+        </div>
+        <div className="flex items-center gap-1">
+          <UploadButton onFiles={handleFiles} uploading={uploading} disabled={busy} />
+          <MicButton
+            onTranscript={(t) => onChange(value.trim() ? `${value.trim()} ${t}` : t)}
+            disabled={busy}
+          />
+          <button
+            type="submit"
+            disabled={busy || !value.trim()}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all duration-200 hover:bg-brand-navy/90 disabled:opacity-40"
+            aria-label="Send"
+          >
+            {busy ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ArrowUp className="h-[16px] w-[16px]" strokeWidth={2.4} />
+            )}
+          </button>
+        </div>
       </div>
       {uploadError && (
         <div className="pb-2 text-center text-[11px] text-destructive">

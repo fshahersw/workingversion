@@ -17,26 +17,190 @@
 // ============================================================================
 import { loadAgentCoreConfig } from "../config.server";
 import { signedAwsFetch } from "./bedrock-sign.server";
+import { EXCLUDED_DOMAINS } from "./web-rank";
 
 // This gateway negotiates MCP 2025-03-26 (not the newer 2025-11-25).
 const PROTOCOL_VERSION = "2025-03-26";
 const JSONRPC_ID = 1;
 
-/** Category keys the research tools use. All route to the one gateway tool;
- *  each MAY carry a domain allow-list (see DOMAIN_FILTERS) for scoping. */
+/**
+ * Category keys the research agent's single `web_search` tool exposes. All route
+ * to the ONE AgentCore gateway tool; each carries a curated authoritative
+ * domain allow-list (DOMAIN_FILTERS) sent PER REQUEST as filters.domainFilter.
+ * `general_web` is the deliberate exception — no allow-list, so it runs an open
+ * web search with only the junk-domain EXCLUDE guardrail applied.
+ */
 export type GatewayKey =
-  | "case_law"
-  | "regulatory_statutory"
-  | "regulatory_enforcement"
-  | "scientific_research"
-  | "technical_environmental"
-  | "judicial_parties"
-  | "legal_news";
+  | "federal_case_law"
+  | "state_case_law"
+  | "mdl_class_action"
+  | "statutes_legislation"
+  | "congressional"
+  | "federal_regulations"
+  | "state_ag_regulatory"
+  | "sec_securities"
+  | "fda_drug_device"
+  | "agency_enforcement"
+  | "scientific_medical"
+  | "clinical_trials_safety"
+  | "environmental_tox"
+  | "company_business"
+  | "judges_attorneys"
+  | "legal_news"
+  | "general_web";
 
-/** Optional per-category domain allow-lists, merged with the connector's
- *  admin-level filter. Empty by default (unrestricted authoritative search);
- *  populate a category to scope it, e.g. scientific_research -> pubmed/nih. */
-const DOMAIN_FILTERS: Partial<Record<GatewayKey, string[]>> = {};
+/**
+ * Per-category domain allow-lists (request-level filters.domainFilter.include,
+ * confirmed honored by the connector). Curated toward PRIMARY and authoritative
+ * sources and deliberately AVOIDING the lead-gen / aggregator hosts web-rank.ts
+ * drops (topclassactions, classaction, drugwatch, avvo, ...) so an include never
+ * fetches a host the ranker discards. `include` is a whitelist: only these
+ * domains (and their subdomains) return. `general_web` has NO entry on purpose
+ * -> open search with the EXCLUDED_DOMAINS guardrail (see buildFilters).
+ */
+const DOMAIN_FILTERS: Partial<Record<GatewayKey, string[]>> = {
+  federal_case_law: [
+    "courtlistener.com", "supremecourt.gov", "uscourts.gov", "govinfo.gov", "gpo.gov",
+    "law.cornell.edu", "justia.com", "casetext.com", "vlex.com", "fastcase.com",
+    "casemine.com", "leagle.com", "openjurist.org", "plol.org", "oyez.org",
+    "scholar.google.com", "findlaw.com", "anylaw.com", "scotusblog.com", "ssrn.com",
+    "jdsupra.com", "natlawreview.com", "americanbar.org", "abajournal.com", "law360.com",
+    "bloomberglaw.com", "reuters.com", "harvardlawreview.org", "columbialawreview.org", "yalelawjournal.org",
+  ],
+  state_case_law: [
+    "courtlistener.com", "justia.com", "casetext.com", "vlex.com", "fastcase.com",
+    "casemine.com", "findlaw.com", "leagle.com", "trellis.law", "unicourt.com",
+    "nycourts.gov", "courts.ca.gov", "lacourt.org", "njcourts.gov", "pacourts.us",
+    "txcourts.gov", "illinoiscourts.gov", "flcourts.gov", "courts.mi.gov", "mass.gov",
+    "nccourts.gov", "courts.wa.gov", "courts.mo.gov", "mncourts.gov", "sccourts.org",
+    "mdcourts.gov", "gacourts.gov", "courts.delaware.gov", "azcourts.gov", "utcourts.gov",
+  ],
+  mdl_class_action: [
+    "jpml.uscourts.gov", "uscourts.gov", "courtlistener.com", "govinfo.gov", "bloomberglaw.com",
+    "law360.com", "reuters.com", "law.com", "courthousenews.com", "jdsupra.com",
+    "lexology.com", "natlawreview.com", "abajournal.com", "americanbar.org", "duanemorris.com",
+    "securities.stanford.edu", "epiqglobal.com", "angeiongroup.com", "kroll.com", "jndla.com",
+    "gilardi.com", "simpluris.com", "dahladministration.com", "bmcgroup.com", "rustconsulting.com",
+    "prnewswire.com", "businesswire.com", "globenewswire.com",
+  ],
+  statutes_legislation: [
+    "congress.gov", "govinfo.gov", "gpo.gov", "uscode.house.gov", "law.cornell.edu",
+    "govtrack.us", "legiscan.com", "openstates.org", "ncsl.org", "uniformlaws.org",
+    "ali.org", "loc.gov", "justia.com", "findlaw.com", "leginfo.legislature.ca.gov",
+    "nysenate.gov", "nyassembly.gov", "njleg.gov", "capitol.texas.gov", "ilga.gov",
+    "flsenate.gov", "legislature.mi.gov", "billtrack50.com", "plol.org",
+  ],
+  congressional: [
+    "congress.gov", "house.gov", "senate.gov", "govinfo.gov", "gpo.gov",
+    "gao.gov", "crsreports.congress.gov", "everycrsreport.com", "cbo.gov", "c-span.org",
+    "whitehouse.gov", "reginfo.gov", "govtrack.us", "propublica.org", "rollcall.com",
+    "thehill.com", "politico.com", "loc.gov", "judiciary.senate.gov", "energycommerce.house.gov",
+    "oversight.house.gov", "help.senate.gov", "finance.senate.gov", "commerce.senate.gov",
+  ],
+  federal_regulations: [
+    "federalregister.gov", "regulations.gov", "ecfr.gov", "reginfo.gov", "govinfo.gov",
+    "gpo.gov", "whitehouse.gov", "law.cornell.edu", "acus.gov", "fda.gov",
+    "epa.gov", "ftc.gov", "cpsc.gov", "nhtsa.gov", "osha.gov",
+    "cms.gov", "sec.gov", "fcc.gov", "dol.gov", "hhs.gov", "uspto.gov", "energy.gov",
+  ],
+  state_ag_regulatory: [
+    "naag.org", "oag.ca.gov", "oehha.ca.gov", "dtsc.ca.gov", "ag.ny.gov",
+    "nj.gov", "attorneygeneral.gov", "texasattorneygeneral.gov", "illinoisattorneygeneral.gov", "myfloridalegal.com",
+    "ncdoj.gov", "ohioattorneygeneral.gov", "atg.wa.gov", "coag.gov", "ago.mo.gov",
+    "mass.gov", "oag.dc.gov", "michigan.gov", "ncsl.org", "csg.org", "naic.org", "cdph.ca.gov",
+  ],
+  sec_securities: [
+    "sec.gov", "pcaobus.org", "finra.org", "investor.gov", "securities.stanford.edu",
+    "cornerstone.com", "sec.report", "bamsec.com", "last10k.com", "annualreports.com",
+    "msrb.org", "sipc.org", "nasaa.org", "issgovernance.com", "fasb.org",
+    "cfainstitute.org", "bloomberglaw.com", "bloomberg.com", "reuters.com", "wsj.com",
+    "marketwatch.com", "law360.com",
+  ],
+  fda_drug_device: [
+    "fda.gov", "api.fda.gov", "dailymed.nlm.nih.gov", "medlineplus.gov", "nih.gov",
+    "ncbi.nlm.nih.gov", "drugs.com", "rxlist.com", "fda.report", "recalls.gov",
+    "ema.europa.eu", "who.int", "raps.org", "fiercepharma.com", "fiercebiotech.com",
+    "endpts.com", "statnews.com", "biospace.com", "fdanews.com", "regulations.gov",
+    "reuters.com", "bloomberglaw.com",
+  ],
+  agency_enforcement: [
+    "ftc.gov", "cpsc.gov", "saferproducts.gov", "nhtsa.gov", "epa.gov",
+    "osha.gov", "cms.gov", "hhs.gov", "oig.hhs.gov", "justice.gov",
+    "consumerfinance.gov", "recalls.gov", "sec.gov", "fdic.gov", "occ.gov",
+    "federalreserve.gov", "faa.gov", "usda.gov", "fsis.usda.gov", "dol.gov",
+    "msha.gov", "dea.gov", "treasury.gov", "fincen.gov", "fcc.gov", "fec.gov",
+  ],
+  scientific_medical: [
+    "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "nih.gov", "nlm.nih.gov", "who.int",
+    "cochranelibrary.com", "nejm.org", "jamanetwork.com", "thelancet.com", "bmj.com",
+    "sciencedirect.com", "nature.com", "cell.com", "springer.com", "onlinelibrary.wiley.com",
+    "academic.oup.com", "tandfonline.com", "sagepub.com", "plos.org", "pnas.org",
+    "science.org", "medrxiv.org", "biorxiv.org", "semanticscholar.org", "europepmc.org",
+    "medlineplus.gov", "cdc.gov", "ahrq.gov", "nasem.org", "annals.org",
+  ],
+  clinical_trials_safety: [
+    "clinicaltrials.gov", "who.int", "clinicaltrialsregister.eu", "euclinicaltrials.eu", "ema.europa.eu",
+    "dailymed.nlm.nih.gov", "api.fda.gov", "fis.fda.gov", "vaers.hhs.gov", "wonder.cdc.gov",
+    "cdc.gov", "fda.gov", "accessdata.fda.gov", "isrctn.com", "anzctr.org.au",
+    "pmda.go.jp", "gov.uk", "ncbi.nlm.nih.gov", "cochranelibrary.com", "openpaymentsdata.cms.gov",
+    "cms.gov", "nih.gov",
+  ],
+  environmental_tox: [
+    "epa.gov", "cdc.gov", "atsdr.cdc.gov", "niehs.nih.gov", "ntp.niehs.nih.gov",
+    "iarc.who.int", "iarc.fr", "who.int", "pubchem.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
+    "usgs.gov", "noaa.gov", "osha.gov", "nih.gov", "nist.gov",
+    "astm.org", "ansi.org", "asme.org", "acgih.org", "ul.com",
+    "nfpa.org", "iso.org", "ieee.org", "energy.gov", "nsf.org", "aiha.org",
+  ],
+  company_business: [
+    "sec.gov", "opencorporates.com", "sec.report", "bamsec.com", "annualreports.com",
+    "dnb.com", "crunchbase.com", "hoovers.com", "bizapedia.com", "corporationwiki.com",
+    "bizfileonline.sos.ca.gov", "dos.ny.gov", "sunbiz.org", "icis.corp.delaware.gov", "bloomberg.com",
+    "reuters.com", "wsj.com", "ft.com", "cnbc.com", "forbes.com",
+    "marketwatch.com", "stockanalysis.com", "businesswire.com", "prnewswire.com", "globenewswire.com",
+  ],
+  judges_attorneys: [
+    "courtlistener.com", "fjc.gov", "uscourts.gov", "supremecourt.gov", "ballotpedia.org",
+    "govinfo.gov", "congress.gov", "judiciary.senate.gov", "ncsc.org", "americanbar.org",
+    "abajournal.com", "calbar.ca.gov", "nysba.org", "floridabar.org", "texasbar.com",
+    "iardc.org", "dcbar.org", "njcourts.gov", "nycourts.gov", "law.com",
+    "bloomberglaw.com", "law360.com", "oyez.org", "jdsupra.com",
+  ],
+  legal_news: [
+    "law360.com", "reuters.com", "bloomberglaw.com", "bloomberg.com", "law.com",
+    "courthousenews.com", "jdsupra.com", "natlawreview.com", "lexology.com", "abajournal.com",
+    "apnews.com", "politico.com", "thehill.com", "statnews.com", "fiercepharma.com",
+    "fiercebiotech.com", "endpts.com", "insidehealthpolicy.com", "legaldive.com", "abovethelaw.com",
+    "legalnewsline.com", "harrismartin.com", "jurist.org", "wsj.com", "nytimes.com", "washingtonpost.com",
+  ],
+};
+
+/** Normalize a caller's `published_after` (YYYY-MM-DD or ISO) to ISO-8601 UTC. */
+function isoFrom(d?: string): string | undefined {
+  if (!d) return undefined;
+  const s = d.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00:00Z`;
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? undefined : new Date(t).toISOString();
+}
+
+/** Build the request-level `filters` object: per-category include (whitelist),
+ *  else the junk-domain exclude for open search, plus an optional date floor.
+ *  `openWeb` forces the exclude-only guardrail even for a whitelisted category —
+ *  the escape hatch when a category's allow-list is what starved the results. */
+function buildFilters(
+  gatewayKey: GatewayKey,
+  publishedAfter?: string,
+  openWeb?: boolean,
+): Record<string, unknown> | undefined {
+  const filters: Record<string, unknown> = {};
+  const include = openWeb ? undefined : DOMAIN_FILTERS[gatewayKey];
+  if (include && include.length) filters["domainFilter"] = { include };
+  else filters["domainFilter"] = { exclude: EXCLUDED_DOMAINS };
+  const from = isoFrom(publishedAfter);
+  if (from) filters["publishedDateFilter"] = { from };
+  return Object.keys(filters).length ? filters : undefined;
+}
 
 export type GatewayResult = {
   title?: string;
@@ -139,20 +303,18 @@ export async function agentCoreSearch(
   gatewayKey: GatewayKey,
   query: string,
   maxResults = 5,
-  opts?: { signal?: AbortSignal; timeoutMs?: number },
+  opts?: { signal?: AbortSignal; timeoutMs?: number; publishedAfter?: string; openWeb?: boolean },
 ): Promise<GatewayResult[]> {
   const q = (query || "").trim().slice(0, 200);
   if (!q) return [];
 
   const config = loadAgentCoreConfig();
-  const domains = DOMAIN_FILTERS[gatewayKey];
   const args: Record<string, unknown> = {
     query: q,
     maxResults: Math.max(1, Math.min(Math.floor(maxResults || 5), 25)),
   };
-  if (domains && domains.length) {
-    args["filters"] = { domainFilter: { include: domains } };
-  }
+  const filters = buildFilters(gatewayKey, opts?.publishedAfter, opts?.openWeb);
+  if (filters) args["filters"] = filters;
 
   const body = JSON.stringify({
     jsonrpc: "2.0",

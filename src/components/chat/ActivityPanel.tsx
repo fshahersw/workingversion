@@ -1,5 +1,4 @@
 import {
-  Brain,
   Check,
   ChevronDown,
   FileOutput,
@@ -15,11 +14,10 @@ import { summarizeResearchActivity } from "@/lib/agents/research-activity";
 import { toolLabel, type Message, type ToolCall } from "@/lib/chat-types";
 
 /**
- * One quiet panel for everything the agent does before the answer: the live
- * status line, the tool calls as they start and fill in, and the model's own
- * reasoning. Open while the agent works, folds to a single summary line the
- * moment the answer starts, and stays available as a trace afterwards. No
- * rounds, no agent names, no truncated text.
+ * One quiet panel for what the agent does before the answer: the live status
+ * line and the tool calls as they start and fill in. Open while the agent
+ * works, folds to a single summary line the moment the answer starts, and stays
+ * available as a trace afterwards. Raw model reasoning is never shown.
  */
 export function ActivityPanel({ msg }: { msg: Message }) {
   const running = msg.status === "thinking";
@@ -49,7 +47,6 @@ export function ActivityPanel({ msg }: { msg: Message }) {
       .map((text) => ({ text, at: 0 }));
   }, [msg.narration, msg.thinking]);
   const timeline = useMemo(() => buildTimeline(narration, steps), [narration, steps]);
-  const reasoning = (msg.reasoning ?? "").trim();
   const summary = useMemo(
     () => summarizeResearchActivity(msg.rounds, settled),
     [msg.rounds, settled],
@@ -57,7 +54,7 @@ export function ActivityPanel({ msg }: { msg: Message }) {
   const sourceCount = msg.sources?.length ?? 0;
   const pending = steps.filter((step) => typeof step.hits !== "number").length;
 
-  if (!steps.length && !narration.length && !reasoning && !running) return null;
+  if (!steps.length && !narration.length && !running) return null;
   if (msg.mode === "conversational") return null;
 
   const title = running
@@ -76,7 +73,7 @@ export function ActivityPanel({ msg }: { msg: Message }) {
     msg.mode && msg.mode !== "conversational" && settled ? modeLabel(msg.mode) : null,
   ].filter(Boolean);
 
-  const showBody = open && (timeline.length > 0 || reasoning.length > 0);
+  const showBody = open && timeline.length > 0;
 
   return (
     <section className="mb-3 overflow-hidden rounded-md border border-border/80 bg-surface">
@@ -111,8 +108,7 @@ export function ActivityPanel({ msg }: { msg: Message }) {
 
       {showBody ? (
         <div className="border-t border-border/60">
-          {timeline.length > 0 && <Timeline items={timeline} live={running} />}
-          {reasoning && <ReasoningBlock text={reasoning} live={running} defaultOpen={running} />}
+          <Timeline items={timeline} live={running} />
         </div>
       ) : null}
     </section>
@@ -212,55 +208,11 @@ function Timeline({ items, live }: { items: TimelineItem[]; live: boolean }) {
   );
 }
 
-function ReasoningBlock({
-  text,
-  live,
-  defaultOpen,
-}: {
-  text: string;
-  live: boolean;
-  defaultOpen: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  // Follow the stream while it is being written; leave the reader alone after.
-  useEffect(() => {
-    if (!live || !open) return;
-    const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [text, live, open]);
-
-  return (
-    <div className="border-t border-border/60">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] font-medium text-muted-foreground hover:text-foreground"
-      >
-        <Brain className="h-3.5 w-3.5 shrink-0" strokeWidth={1.9} />
-        Reasoning
-        {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-orange" />}
-        <span className="ml-auto text-[10.5px] tabular-nums">{words(text)} words</span>
-        <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && (
-        <div
-          ref={bodyRef}
-          className="wr-app-scroll max-h-52 overflow-y-auto whitespace-pre-wrap px-3 pb-2.5 text-[12px] leading-relaxed text-foreground/65"
-        >
-          {text}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function iconFor(tool: string) {
   if (tool === "fetch_page") return Globe;
   if (tool === "run_python") return Terminal;
   if (tool === "create_document") return FileOutput;
-  if (tool === "read_document" || tool === "db_read_filing" || tool === "recap_read")
+  if (tool === "read_document" || tool === "db_read_filing")
     return FileText;
   return Search;
 }
@@ -268,7 +220,7 @@ function iconFor(tool: string) {
 function resultLabel(tool: string, hits: number): string {
   if (tool === "run_python") return hits ? "ran" : "no output";
   if (tool === "create_document") return hits ? "file ready" : "failed";
-  if (tool === "fetch_page" || tool === "recap_read" || tool === "db_read_filing") {
+  if (tool === "fetch_page" || tool === "db_read_filing") {
     return hits ? "read" : "no text";
   }
   if (tool === "verify_citations") return hits ? `${hits} checked` : "none found";
@@ -286,8 +238,4 @@ function elapsed(ms: number | null): string | null {
   if (ms < 1_000) return "<1s";
   const seconds = Math.round(ms / 1_000);
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
-
-function words(text: string): number {
-  return text.split(/\s+/).filter(Boolean).length;
 }

@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   allStale,
+  distinctiveTerms,
   extractEvidence,
   normalizeUrl,
   queryTerms,
@@ -23,6 +24,51 @@ test("queryTerms drops stopwords and short tokens", () => {
     "3080",
     "ruling",
   ]);
+});
+
+test("distinctiveTerms returns a short query unchanged", () => {
+  assert.deepEqual(distinctiveTerms("medroxyprogesterone meningioma EMA", 4), [
+    "medroxyprogesterone",
+    "meningioma",
+    "ema",
+  ]);
+});
+
+test("distinctiveTerms drops generic filler and month names, keeps identifiers + proper nouns", () => {
+  // The exact failing screenshot query: 9 ANDed content words -> 1 result.
+  const lean = distinctiveTerms(
+    "JCCP bellwether trial October 2026 November 2026 schedule MDL 3047",
+    4,
+  );
+  // "trial", "october", "november", "schedule" are generic/temporal filler and drop out.
+  assert.ok(!lean.includes("trial"));
+  assert.ok(!lean.includes("october"));
+  assert.ok(!lean.includes("november"));
+  assert.ok(!lean.includes("schedule"));
+  // Identifiers (year, MDL number) and the distinctive proper noun survive.
+  assert.ok(lean.includes("2026"));
+  assert.ok(lean.includes("3047"));
+  assert.ok(lean.includes("jccp") || lean.includes("bellwether"));
+  assert.ok(lean.length <= 4);
+});
+
+test("distinctiveTerms dropYears produces a different, date-relaxed combo", () => {
+  const q = "JCCP bellwether trial October 2026 November 2026 schedule MDL 3047";
+  const a = distinctiveTerms(q, 4);
+  const b = distinctiveTerms(q, 4, { dropYears: true });
+  assert.ok(a.includes("2026")); // precise anchor keeps the year
+  assert.ok(!b.includes("2026")); // relaxed angle drops the bare year
+  assert.ok(b.includes("3047")); // ...but keeps the docket/MDL number
+  assert.notDeepEqual(a, b); // the two parallel combos genuinely differ
+});
+
+test("distinctiveTerms preserves capitalized proper nouns over generic words", () => {
+  const lean = distinctiveTerms("Meta YouTube bellwether trial status update Kuhl", 4);
+  assert.ok(lean.includes("meta"));
+  assert.ok(lean.includes("youtube"));
+  assert.ok(lean.includes("kuhl"));
+  assert.ok(!lean.includes("status"));
+  assert.ok(!lean.includes("update"));
 });
 
 test("wantsRecency detects recency intent", () => {

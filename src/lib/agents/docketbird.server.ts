@@ -6,6 +6,23 @@
 // Powers the docket_research sub-agent. Full-text search works across all
 // filings; reading a filing's text/metadata requires the firm to follow that
 // case (own matters work; others return a "follow it" 403 the agent surfaces).
+//
+// NOTE (verified live + docs 2026-09): /cases/search and /documents/search take
+// q= (REQUIRED) + size= (default 25, max 100) and return { data: { cases|documents:
+// [...], found, next_cursor } }. /documents/search also takes case_id, court_id
+// (comma-list; slug/abbrev/full name), filed_after/before, sort=relevance|recency,
+// my_cases_only, and cursor; its q supports "exact phrase", term*, a /s b, a /n b,
+// a /p b, OR, and -exclude. These search endpoints are live-verified but NOT in the
+// published SwaggerHub v1.4 spec (which documents /cases [needs scope=company|user],
+// /cases/{id}, /calendar_entries, /courts). PAGINATION: next_cursor===null is the
+// ONLY end-of-results signal; a page can be short or EMPTY while more results exist
+// (restricted docs are dropped per page AFTER matching) — searchFilings follows the
+// cursor so an empty first page never reads as 0 results (searchCases guards the same
+// false-zero). Case search matches the case CAPTION + docket number, NOT party names —
+// an over-specified query returns zero. /calendar_entries: WITH case_id = that case's
+// entries (id, uuid, case_id, document_id, iso8601_datetime, title); WITHOUT case_id =
+// company-wide rollup over the next `days` (1-90, default 7), which may return 202 while
+// the rollup builds (retry after ~1-2 min).
 // ============================================================================
 
 const BASE = process.env["DOCKETBIRD_API_BASE"] || "https://api.docketbird.com";
@@ -111,21 +128,39 @@ export async function searchFilings(params: {
   courtId?: string;
   filedAfter?: string;
   filedBefore?: string;
+  sort?: "relevance" | "recency";
   size?: number;
   signal?: AbortSignal;
 }): Promise<DbFiling[]> {
-  const data = await db<{ documents?: DbFiling[] }>(
-    `/documents/search${qp({
-      q: params.q,
-      case_id: params.caseId,
-      court_id: params.courtId,
-      filed_after: params.filedAfter,
-      filed_before: params.filedBefore,
-      size: params.size ?? 8,
-    })}`,
-    params.signal ? { signal: params.signal } : undefined,
-  );
-  return data.documents ?? [];
+  // PAGINATION CONTRACT (per the API docs): restricted documents are removed from
+  // a page AFTER matching, so a page can be short — even EMPTY — while more results
+  // exist; next_cursor === null is the ONLY end-of-results signal. Follow the cursor
+  // (bounded) so a first page emptied by restricted docs never reads as "0 results".
+  // Fetch a full page (>=25) to cut round-trips.
+  const desired = params.size ?? 8;
+  const pageSize = Math.min(Math.max(desired, 25), 100);
+  const out: DbFiling[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 4; page++) {
+    const data = await db<{ documents?: DbFiling[]; next_cursor?: string | null }>(
+      `/documents/search${qp({
+        q: params.q,
+        case_id: params.caseId,
+        court_id: params.courtId,
+        filed_after: params.filedAfter,
+        filed_before: params.filedBefore,
+        sort: params.sort,
+        size: pageSize,
+        cursor,
+      })}`,
+      params.signal ? { signal: params.signal } : undefined,
+    );
+    out.push(...(data.documents ?? []));
+    const next = data.next_cursor;
+    if (out.length >= desired || !next) break; // null cursor = truly done
+    cursor = next;
+  }
+  return out.slice(0, desired);
 }
 
 /** Full extracted text of a filing (own/followed cases only). */
@@ -174,17 +209,31 @@ export async function searchCases(params: {
   size?: number;
   signal?: AbortSignal;
 }): Promise<DbCaseHit[]> {
-  const data = await db<{ cases?: DbCaseHit[] }>(
-    `/cases/search${qp({
-      q: params.q,
-      court_id: params.courtId,
-      filed_after: params.filedAfter,
-      filed_before: params.filedBefore,
-      size: params.size ?? 10,
-    })}`,
-    params.signal ? { signal: params.signal } : undefined,
-  );
-  return data.cases ?? [];
+  // Same next_cursor contract as /documents/search: an empty page can precede more
+  // results, and next_cursor === null is the ONLY end signal. Cases are relevance-
+  // sorted (best match on page 1), so we page PAST an empty-but-cursored page only —
+  // guarding the documented false-zero without over-fetching lower-relevance pages.
+  const size = params.size ?? 10;
+  const out: DbCaseHit[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 3; page++) {
+    const data = await db<{ cases?: DbCaseHit[]; next_cursor?: string | null }>(
+      `/cases/search${qp({
+        q: params.q,
+        court_id: params.courtId,
+        filed_after: params.filedAfter,
+        filed_before: params.filedBefore,
+        size,
+        cursor,
+      })}`,
+      params.signal ? { signal: params.signal } : undefined,
+    );
+    out.push(...(data.cases ?? []));
+    const next = data.next_cursor;
+    if (out.length > 0 || !next) break; // have hits, or truly done
+    cursor = next;
+  }
+  return out;
 }
 
 // --- Docket sheet (GET /documents?case_id=) --------------------------------

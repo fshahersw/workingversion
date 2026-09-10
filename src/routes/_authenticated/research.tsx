@@ -21,7 +21,7 @@ import {
 
 import { AppShell } from "@/components/app-shell";
 import { ChatView } from "@/components/chat/ChatView";
-import { ConversationHistory } from "@/components/chat/ConversationHistory";
+import { MicButton } from "@/components/chat/MicButton";
 import {
   ModeDropdown,
   useUploads,
@@ -180,7 +180,6 @@ function ResearchPage() {
                   onSubmit={sendScoped}
                   disabled={busy}
                   initialValue={prefill}
-                  onOpenConversation={openConversation}
                 />
               </div>
 
@@ -211,7 +210,6 @@ function ResearchPage() {
               onNewChat={reset}
               sessionId={sessionId}
               matter={matter}
-              onOpenConversation={openConversation}
               conversationId={conversationId}
             />
           </motion.div>
@@ -225,7 +223,6 @@ function HeroComposer({
   onSubmit,
   disabled,
   initialValue = "",
-  onOpenConversation,
 }: {
   onSubmit: (
     t: string,
@@ -233,7 +230,6 @@ function HeroComposer({
   ) => void;
   disabled: boolean;
   initialValue?: string;
-  onOpenConversation: (id: string) => void;
 }) {
   const [v, setV] = useState(initialValue);
   const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
@@ -279,7 +275,7 @@ function HeroComposer({
         }}
       >
         <FileChips files={files} onRemove={removeFile} className="px-3 pt-2.5" />
-        <div className="flex items-end gap-2 px-3 pt-2.5">
+        <div className="px-3 pt-2.5">
           <textarea
             ref={ref}
             autoFocus
@@ -295,22 +291,25 @@ function HeroComposer({
             placeholder="Ask about MDLs, bellwethers, causation experts, recalls, or settlements…"
             className="block max-h-[200px] min-h-[52px] w-full resize-none bg-transparent px-1 py-1.5 text-[15px] leading-[1.5] text-foreground placeholder:text-muted-foreground/80 focus:outline-none"
           />
-          <button
-            type="submit"
-            disabled={disabled || !v.trim()}
-            aria-label="Send"
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all hover:bg-brand-navy/90 disabled:opacity-40"
-          >
-            <ArrowUp className="h-[17px] w-[17px]" strokeWidth={2.4} />
-          </button>
         </div>
-        <div className="mt-1.5 flex items-center gap-1 border-t border-border/60 px-2 py-1.5">
+        <div className="mt-1.5 flex items-center justify-between gap-1 border-t border-border/60 px-2 py-1.5">
           <ModeDropdown mode={mode} onChange={setMode} disabled={disabled} />
-          <UploadButton onFiles={handleFiles} uploading={uploading} disabled={disabled} />
-          <ConversationHistory activeId={null} onOpen={onOpenConversation} />
-          <span className="ml-auto hidden text-[10.5px] text-muted-foreground/70 sm:block">
-            Enter to send · Shift+Enter for a new line
-          </span>
+          <div className="flex items-center gap-1">
+            <UploadButton onFiles={handleFiles} uploading={uploading} disabled={disabled} />
+            <MicButton
+              onTranscript={(t) => setV(v.trim() ? `${v.trim()} ${t}` : t)}
+              disabled={disabled}
+            />
+            <button
+              type="submit"
+              disabled={disabled || !v.trim()}
+              aria-label="Send"
+              title="Send"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all hover:bg-brand-navy/90 disabled:opacity-40"
+            >
+              <ArrowUp className="h-[16px] w-[16px]" strokeWidth={2.4} />
+            </button>
+          </div>
         </div>
         {uploadError && (
           <div className="px-3 pb-2 text-center text-[11px] text-destructive">

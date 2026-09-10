@@ -33,6 +33,35 @@ function applyLocalEnv() {
 
 applyLocalEnv();
 
+// The vendored Writer (src/writer) keeps its upstream `@genoffice/*` package
+// specifiers. Resolve them here explicitly (regexes, most specific first) so
+// dev and build do not depend on the tsconfig-paths plugin having read the
+// matching `paths` entries.
+const writerPkg = (p: string) => resolve(process.cwd(), "src/writer/packages", p);
+const writerAliases = [
+  { find: /^@genoffice\/agent-core$/, replacement: writerPkg("agent-core/src/index.ts") },
+  { find: /^@genoffice\/ai-provider$/, replacement: writerPkg("ai-provider/src/index.ts") },
+  { find: /^@genoffice\/docx-engine$/, replacement: writerPkg("docx-engine/src/index.ts") },
+  { find: /^@genoffice\/docx-engine\/math$/, replacement: writerPkg("docx-engine/src/math.ts") },
+  {
+    find: /^@genoffice\/docx-engine\/metafile$/,
+    replacement: writerPkg("docx-engine/src/metafile.ts"),
+  },
+  { find: /^@genoffice\/font-metrics$/, replacement: writerPkg("font-metrics/src/index.ts") },
+  { find: /^@genoffice\/i18n$/, replacement: writerPkg("i18n/src/index.ts") },
+  { find: /^@genoffice\/project-store$/, replacement: writerPkg("project-store/src/index.ts") },
+  {
+    find: /^@genoffice\/pptx-engine\/custgeom$/,
+    replacement: writerPkg("pptx-engine/src/custgeom.ts"),
+  },
+  {
+    find: /^@genoffice\/pptx-render\/preset-geometry$/,
+    replacement: writerPkg("pptx-render/src/preset-geometry.ts"),
+  },
+  { find: /^@genoffice\/ui$/, replacement: writerPkg("ui/src/index.ts") },
+  { find: /^@genoffice\/ui\/(.+)$/, replacement: `${writerPkg("ui/src")}/$1` },
+];
+
 export default defineConfig({
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
@@ -47,5 +76,6 @@ export default defineConfig({
   vite: {
     ...(process.env["LITAI_LAMBDA_BUILD"] === "true" ? { envDir: false } : {}),
     ssr: { external: ["node:sqlite"] },
+    resolve: { alias: writerAliases },
   },
 });

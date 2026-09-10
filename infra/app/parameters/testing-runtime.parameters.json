@@ -117,7 +117,7 @@
   },
   {
     "ParameterKey": "AgentCoreGatewayUrl",
-    "ParameterValue": "https://claudeaddinwebsearchiamgateway-x9d5bnlhd4.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+    "ParameterValue": "https://agenticwebsearch-kqnvc6gbhf.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
   },
   {
     "ParameterKey": "AgentCoreSearchTool",

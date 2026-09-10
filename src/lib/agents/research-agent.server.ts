@@ -7,12 +7,13 @@
 // SSE event vocabulary the chat UI already renders.
 // ============================================================================
 import type { Emit, OrchestrateInput } from "./orchestration-types";
-import { researchAgentPrompt, directAnswerPrompt } from "./prompts";
+import { researchAgentPrompt, fastRouterPrompt, fastWriterPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
 import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
 import { buildReportMarkdown } from "./report.server";
 import { planSubquestions, runSubagents, assembleFindings, subagentsEnabled } from "./subagent.server";
 import { streamConverseToolLoop } from "./bedrock-stream-tools.server";
+import { loadResearchModel, loadFastModel, loadFastWriterModel } from "./research-models";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
 import { agentLog, agentError, since, trunc } from "./log.server";
@@ -30,8 +31,10 @@ import {
   type SessionMemory,
 } from "./memory.server";
 
-/** Loop model — one strong tool-caller. Sonnet 5 by default; override via env. */
-const RESEARCH_MODEL = process.env["BEDROCK_RESEARCH_MODEL"] || "us.anthropic.claude-sonnet-5";
+/** THINK loop + writer model (Sonnet 5 by default; override via BEDROCK_RESEARCH_MODEL).
+ *  FAST runs its tool loop on loadFastModel() (Nemotron on dev / opt-in on prod)
+ *  and hands the final write to loadFastWriterModel() (Sonnet). */
+const RESEARCH_MODEL = loadResearchModel();
 const MAX_STEPS = 5;
 const RESEARCH_DEADLINE_MS = 40_000;
 // Adaptive-thinking effort dial (Phase 4). ON by default (research=low,
@@ -67,12 +70,17 @@ type ModeCfg = {
 function modeConfig(mode: EffortMode): ModeCfg {
   if (mode === "fast") {
     return {
-      maxSteps: 3,
-      callBudget: { perTool: 3, total: 8 },
+      // Widened so a parallel fan-out (race docket + web + a reformulation) and a
+      // full answer fit — the old 3-step/30s/8k budget starved live-docket work.
+      maxSteps: 5,
+      callBudget: { perTool: 4, total: 14 },
+      // Both efforts LOW to keep FAST fast. Writer thoroughness comes from the
+      // PROMPT + synthesis instruction (thorough, length-matched), not from spending
+      // reasoning latency; 12k is ample for a low-effort thorough write.
       researchEffort: "low",
       synthesisEffort: "low",
-      synthesisMaxTokens: 8000,
-      deadlineMs: 30_000,
+      synthesisMaxTokens: 12_000,
+      deadlineMs: 50_000,
     };
   }
   // think (and any non-conversational fallback) — the validated full loop.
@@ -299,18 +307,24 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
       try {
         const res = await streamConverseToolLoop(
           {
-            model: RESEARCH_MODEL,
-            system: researchAgentPrompt(),
-            user: `${scopeBlock(input)}${attachmentsBlock(input)}${historyPreamble}${contextBlock ? `${contextBlock}\n\n---\n\n` : ""}QUESTION\n${resolved.query}\n\nResearch this with your tools (narrate one line before each batch, call them in parallel where independent), then write the final answer for the attorney.`,
+            model: mode === "fast" ? loadFastModel() : RESEARCH_MODEL,
+            synthesisModel: mode === "fast" ? loadFastWriterModel() : RESEARCH_MODEL,
+            system: mode === "fast" ? fastRouterPrompt() : researchAgentPrompt(),
+            // FAST splits the loop and the write: the router (system) gathers and
+            // never writes; the writer (synthesisSystem) composes the answer.
+            ...(mode === "fast" ? { synthesisSystem: fastWriterPrompt() } : {}),
+            user: `${scopeBlock(input)}${attachmentsBlock(input)}${historyPreamble}${contextBlock ? `${contextBlock}\n\n---\n\n` : ""}QUESTION\n${resolved.query}\n\n${
+              mode === "fast"
+                ? "Research this with your tools — narrate one line before each batch, call them in parallel where independent — then STOP. A separate writer composes the final answer from the sources you gather; do not write it yourself."
+                : "Research this with your tools (narrate one line before each batch, call them in parallel where independent), then write the final answer for the reader."
+            }`,
             tools: RESEARCH_TOOLS,
             maxTokens: 2000,
             maxSteps: cfg.maxSteps,
             synthesisUser: docReq.wants
               ? "Research complete — do NOT call any more tools. Write a DENSE research digest that a formatted report will be built from: capture every key fact, date, holding, figure, party, defendant, procedural milestone, and expert/Daubert point you found, each with its [S#] citation. Terse notes and bullet fragments are fine — completeness over prose. This is raw material, NOT the finished report: do not add a title, cover, or any 'Executive Summary'/'Bottom line' section — just get all the substance down with citations."
-              : "Research complete — do NOT call any more tools. Now write the final answer for the attorney, using the sources you gathered above and citing them with [S#]. Open with the direct answer, shape the format to the question, and end on the substance (no verification/next-steps closer)." +
-                (mode === "fast"
-                  ? " This is FAST mode: keep it tight and direct — answer the question in a few well-cited sentences or a short list, no exhaustive survey."
-                  : " This is THINK mode: be thorough and well-structured — cover the sub-issues, note tensions or splits, and cite precisely."),
+              : "Research complete — do NOT call any more tools. Now write the final answer for the reader who asked, using the sources you gathered above and citing them with [S#]. Open with the direct answer, shape the format to the question, and end on the substance (no verification/next-steps closer)." +
+                " Be thorough and well-structured — cover the sub-issues the question raises, note any tensions or splits, and cite precisely. Match the length to the question and never truncate real substance to be brief; a short question still gets a tight answer, but a multi-part or status question gets the full, well-organized treatment with the dates, parties, orders, and figures that matter.",
             // Sonnet 5 adaptive thinking is ALWAYS ON and shares this budget with
             // the answer. At 4000, heavy thinking on deep multi-part questions
             // consumed the whole budget and returned an EMPTY answer
@@ -371,12 +385,17 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                   },
                 }
               : {}),
-            // A follow-up the model can answer from the conversation and the
-            // carried sources streams its first tool-less reply as the answer
-            // (one turn instead of draft + synthesis). A fresh question with no
-            // context gets one nudge to research before answering from memory.
+            // In FAST the loop model (Nemotron) NEVER emits the answer — the writer
+            // always composes it — so fast skips the direct-answer shortcut: a
+            // no-tool turn just breaks through to the writer synthesis. In THINK
+            // (one Sonnet doing both) a follow-up answerable from the conversation
+            // and carried sources still streams its first tool-less reply as the
+            // answer (one turn instead of draft + synthesis). Either mode, a fresh
+            // question with no context gets one nudge to research before recall.
             ...(hasFollowupContext
-              ? { directAnswer: { minChars: 160 } }
+              ? mode === "fast"
+                ? {}
+                : { directAnswer: { minChars: 160 } }
               : { noToolNudge: NO_TOOL_NUDGE }),
             ...(input.signal ? { signal: input.signal } : {}),
           },

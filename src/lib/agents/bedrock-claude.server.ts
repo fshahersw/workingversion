@@ -99,9 +99,10 @@ export type BedrockClaudeRequest = {
 // Converse-stream payload:  the Converse event JSON, verbatim.
 // ---------------------------------------------------------------------------
 
-type Bytes = Uint8Array<ArrayBufferLike>;
+export type Bytes = Uint8Array<ArrayBufferLike>;
 
-function decodeFrames(buf: Bytes): { events: string[]; rest: Bytes } {
+/** Split an AWS event-stream buffer into complete frame payloads (exported for the Writer stream). */
+export function decodeFrames(buf: Bytes): { events: string[]; rest: Bytes } {
   const events: string[] = [];
   let offset = 0;
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -125,7 +126,7 @@ function decodeFrames(buf: Bytes): { events: string[]; rest: Bytes } {
   return { events, rest: buf.subarray(offset) };
 }
 
-function concat(a: Bytes, b: Bytes): Bytes {
+export function concat(a: Bytes, b: Bytes): Bytes {
   const out = new Uint8Array(a.byteLength + b.byteLength);
   out.set(a, 0);
   out.set(b, a.byteLength);
@@ -145,7 +146,7 @@ function invokeEndpoint(model: string): string {
   )}/invoke-with-response-stream`;
 }
 
-function converseStreamEndpoint(model: string): string {
+export function converseStreamEndpoint(model: string): string {
   return `https://bedrock-runtime.${REGION}.amazonaws.com/model/${encodeURIComponent(
     model,
   )}/converse-stream`;

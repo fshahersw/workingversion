@@ -2,6 +2,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import type { HistoryTurn } from "@/lib/agents/orchestration-types";
 import { runResearchAgent } from "@/lib/agents/research-agent.server";
+import { runFrontierAgent } from "@/lib/agents/frontier-controller.server";
+import { frontierEnabled } from "@/lib/agents/research-models";
 import type { Attachment } from "@/lib/chat-types";
 import { startSseHeartbeat } from "@/lib/sse.server";
 
@@ -59,7 +61,10 @@ export const Route = createFileRoute("/api/orchestrate")({
               if (!closed) controller.enqueue(encoder.encode(comment));
             }, request.signal);
             try {
-              await runResearchAgent(
+              // FRONTIER_AGENT (off by default) routes through the new Nemotron
+              // router + Grok writer path; otherwise the proven loop runs.
+              const runAgent = frontierEnabled() ? runFrontierAgent : runResearchAgent;
+              await runAgent(
                 {
                   query,
                   history: body.history,

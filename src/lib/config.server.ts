@@ -218,7 +218,9 @@ export function loadAgentCoreConfig(env: EnvSource = runtimeEnv()): {
   return {
     gatewayUrl: envOrDevDefault(
       "AGENTCORE_SEARCH_URL",
-      "https://claudeaddinwebsearchiamgateway-x9d5bnlhd4.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+      // App-owned gateway `agenticWebsearch` (was the Word add-in's shared
+      // ClaudeAddinWebSearchIamGateway). Deployed envs override via param.
+      "https://agenticwebsearch-kqnvc6gbhf.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
       env,
     ),
     toolName: envOrDevDefault("AGENTCORE_SEARCH_TOOL", "general___WebSearch", env),

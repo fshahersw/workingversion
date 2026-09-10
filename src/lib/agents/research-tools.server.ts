@@ -2,23 +2,24 @@
 // Unified tool set for the single research agent (server-only).
 //
 // Reuses the existing, battle-tested search + DocketBird tools (executeTool in
-// tools.server) and ADDS the new capabilities: fetch_page (read a primary
-// source in full) and CourtListener RECAP (search / list entries / read a
-// filing's free text). One flat tool list, one executor, one shared SourceBook
-// so [S#] refs stay stable across the whole run.
+// tools.server) and ADDS fetch_page (read a primary source in full) and
+// verify_citations (confirm a reporter cite against CourtListener's opinion DB).
+// One flat tool list, one executor, one shared SourceBook so [S#] refs stay
+// stable across the whole run.
 // ============================================================================
 import type { ToolDef } from "./anthropic.server";
 import { AGENT_TOOLS, SourceBook, executeTool, type ToolOutcome } from "./tools.server";
 import { fetchPage } from "./fetch-page.server";
 import { memoTTL, toolCacheKey, TOOL_CACHE_TTL_MS } from "./run-state.server";
+import { courtlistenerConfigured, lookupCitations } from "./courtlistener.server";
 import {
-  recapSearch,
-  getDocketEntries,
-  readRecapDocument,
-  courtlistenerConfigured,
-  lookupCitations,
-} from "./courtlistener.server";
-import { fdaSearch, fedRegSearch, ecfrSearch, type FdaEndpoint } from "./regulatory-sources.server";
+  fdaSearch,
+  fedRegSearch,
+  ecfrSearch,
+  secSearch,
+  clinicalTrialsSearch,
+  type FdaEndpoint,
+} from "./regulatory-sources.server";
 import { pubmedSearch } from "./pubmed.server";
 import { runPython, collectNewArtifacts, readDocument } from "./code-interpreter.server";
 import { searchMarkdownKey } from "./bda.server";
@@ -37,7 +38,7 @@ const clamp = (v: unknown, def: number, max: number) => {
 const FETCH_PAGE_TOOL: ToolDef = {
   name: "fetch_page",
   description:
-    "Fetch a URL and read its main text + outbound links as clean text. Use to READ a primary source in full — a court opinion page, an agency rule, a news article, a docket page — after a search surfaces it. Reading the actual page beats reasoning from a search snippet. For a court FILING's text, prefer recap_read or db_read_filing.",
+    "Fetch a URL and read its main text + outbound links as clean text. Use to READ a primary source in full — a court opinion page, an agency rule, a news article, a docket page — after a search surfaces it. Reading the actual page beats reasoning from a search snippet. For a court FILING's text, prefer db_read_filing.",
   input_schema: {
     type: "object",
     properties: { url: { type: "string", description: "Absolute http(s) URL to fetch and read." } },
@@ -45,49 +46,10 @@ const FETCH_PAGE_TOOL: ToolDef = {
   },
 };
 
-const RECAP_SEARCH_TOOL: ToolDef = {
-  name: "recap_search",
-  description:
-    "Search CourtListener's FREE RECAP archive of PACER dockets and filings (broad federal coverage). Use to find a docket or filing — especially when DocketBird returns access-limited, or to corroborate. Returns matching dockets with their docket_id and nested document ids you can then read with recap_read.",
-  input_schema: {
-    type: "object",
-    properties: {
-      query: { type: "string", description: "Distinctive terms — party, doctrine, or a case caption." },
-      court: { type: "string", description: "Optional court id filter, e.g. 'scd', 'njd', 'nysd'." },
-      docket_number: { type: "string", description: "Optional docket number filter, e.g. '2:18-mn-2873'." },
-      filed_after: { type: "string", description: "YYYY-MM-DD, inclusive." },
-      filed_before: { type: "string", description: "YYYY-MM-DD, inclusive." },
-    },
-    required: ["query"],
-  },
-};
-
-const RECAP_DOCKET_TOOL: ToolDef = {
-  name: "recap_docket",
-  description:
-    "List the docket ENTRIES for a RECAP docket_id (from recap_search), newest identifiers first, with each entry's documents (id, number, page count, availability). Use to locate the specific filing to read with recap_read.",
-  input_schema: {
-    type: "object",
-    properties: { docket_id: { type: "string", description: "RECAP docket_id from recap_search." } },
-    required: ["docket_id"],
-  },
-};
-
-const RECAP_READ_TOOL: ToolDef = {
-  name: "recap_read",
-  description:
-    "Read the full extracted TEXT of a RECAP document by its document id (from recap_search or recap_docket). FREE for archived filings — this is how you actually PULL a filing's text when DocketBird cannot. Returns the plain text plus a PDF link.",
-  input_schema: {
-    type: "object",
-    properties: { document_id: { type: "string", description: "RECAP recap-document id." } },
-    required: ["document_id"],
-  },
-};
-
 const VERIFY_CITATIONS_TOOL: ToolDef = {
   name: "verify_citations",
   description:
-    "Verify reporter-style legal citations (e.g. '576 U.S. 644', '2023 WL 12345', F.3d / F. Supp. 3d) against CourtListener's opinion database. Pass a block of TEXT (a paragraph of your draft, or a list of cites) and each citation resolves to a real case or is flagged not-found / ambiguous. Use to CONFIRM a case citation is real before you rely on it. For docket/PACER filings use recap_* or db_* instead.",
+    "Verify reporter-style legal citations (e.g. '576 U.S. 644', '2023 WL 12345', F.3d / F. Supp. 3d) against CourtListener's opinion database. Pass a block of TEXT (a paragraph of your draft, or a list of cites) and each citation resolves to a real case or is flagged not-found / ambiguous. Use to CONFIRM a case citation is real before you rely on it. For docket/PACER filings use db_* instead.",
   input_schema: {
     type: "object",
     properties: { text: { type: "string", description: "Text containing one or more legal citations to resolve." } },
@@ -158,6 +120,35 @@ const PUBMED_TOOL: ToolDef = {
   },
 };
 
+const SEC_SEARCH_TOOL: ToolDef = {
+  name: "sec_search",
+  description:
+    "Full-text search of SEC EDGAR filings (10-K, 10-Q, 8-K, proxy statements, prospectuses). Use to find what a PUBLIC-COMPANY DEFENDANT disclosed in its OWN filings — product risks and warnings, litigation reserves and contingencies, recalls, regulatory actions, financial condition. Query the company name plus a topic (e.g. 'Bayer glyphosate litigation reserve', 'Philips Respironics recall'). Optional forms filter (e.g. '10-K') and after (YYYY-MM-DD). Primary corporate disclosure — outranks news reporting of it.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Company + topic terms (a distinctive phrase works best)." },
+      forms: { type: "string", description: "Optional SEC form-type filter, e.g. '10-K' or '8-K'." },
+      after: { type: "string", description: "Optional YYYY-MM-DD; only filings on/after this date." },
+    },
+    required: ["query"],
+  },
+};
+
+const CLINICALTRIALS_TOOL: ToolDef = {
+  name: "clinicaltrials_search",
+  description:
+    "Search ClinicalTrials.gov (the NIH trial registry) for clinical trials of a drug or device — trial status, phase, lead sponsor, conditions studied, and start date. Use in a drug/device mass tort for what trials exist for a product, who sponsored them, the indication/population studied, and trial timing relative to marketing or a known risk. Query the drug/device plus condition (e.g. 'semaglutide gastroparesis', 'Bard hernia mesh adhesion'). Complements search_pubmed (published results) with the registry record.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Drug/device + condition terms." },
+      limit: { type: "number", description: "Max studies (default 5, hard cap 20)." },
+    },
+    required: ["query"],
+  },
+};
+
 const RUN_PYTHON_TOOL: ToolDef = {
   name: "run_python",
   description:
@@ -202,16 +193,15 @@ const CREATE_DOCUMENT_TOOL: ToolDef = {
 
 /** The full flat tool list the single agent sees. */
 export const RESEARCH_TOOLS: ToolDef[] = [
-  ...AGENT_TOOLS.legal_research, // search_authorities + 7 category web-search tools
+  ...AGENT_TOOLS.legal_research, // the single web_search tool (16 category domain-sets + general_web)
   FETCH_PAGE_TOOL,
-  RECAP_SEARCH_TOOL,
-  RECAP_DOCKET_TOOL,
-  RECAP_READ_TOOL,
   VERIFY_CITATIONS_TOOL,
   FDA_SEARCH_TOOL,
   FED_REGISTER_TOOL,
   ECFR_TOOL,
   PUBMED_TOOL,
+  SEC_SEARCH_TOOL,
+  CLINICALTRIALS_TOOL,
   RUN_PYTHON_TOOL,
   READ_DOCUMENT_TOOL,
   CREATE_DOCUMENT_TOOL,
@@ -243,107 +233,6 @@ async function fetchPageTool(input: Record<string, unknown>, book: SourceBook): 
   } catch (err) {
     return { text: `fetch_page failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
   }
-}
-
-async function recapSearchTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
-  if (!courtlistenerConfigured()) return { text: "RECAP is not configured (COURTLISTENER_API_TOKEN missing).", hits: 0, refs: [] };
-  const query = str(input["query"]);
-  if (query.length < 3) return { text: "Query must be at least 3 characters.", hits: 0, refs: [] };
-  const searchArgs = {
-    court: str(input["court"]) || undefined,
-    docketNumber: str(input["docket_number"]) || undefined,
-    filedAfter: str(input["filed_after"]) || undefined,
-    filedBefore: str(input["filed_before"]) || undefined,
-  };
-  let hits;
-  try {
-    hits = await memoTTL(
-      toolCacheKey("recap_search", { query, ...searchArgs }),
-      TOOL_CACHE_TTL_MS,
-      () => recapSearch(query, { type: "r", ...searchArgs, orderBy: "dateFiled desc" }),
-    );
-  } catch (err) {
-    return { text: `recap_search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
-  }
-  if (!hits.length) return { text: `No RECAP dockets for "${query}".`, hits: 0, refs: [] };
-
-  const refs: string[] = [];
-  const lines = hits.slice(0, 8).map((h) => {
-    const src = book.add({
-      citation: `${h.caseName}${h.docketNumber ? ` (${h.docketNumber})` : ""}${h.court ? ` — ${h.court}` : ""}`,
-      authority: "registry",
-      source_type: "docket",
-      source_url: h.absoluteUrl ?? undefined,
-      effective_date: h.dateFiled ?? undefined,
-      content: `RECAP docket ${h.docketNumber ?? ""} (${h.court ?? ""})`,
-    });
-    refs.push(src.ref);
-    const docs = h.documents
-      .slice(0, 3)
-      .map((d) => `    doc id=${d.id} #${d.documentNumber ?? "?"} ${trunc(d.description || d.snippet, 90)}`)
-      .join("\n");
-    return `[${src.ref}] docket_id=${h.docketId} — ${h.caseName} (${h.docketNumber ?? "?"}, ${h.court ?? "?"})${h.moreDocs ? " [more docs available]" : ""}${docs ? `\n${docs}` : ""}`;
-  });
-  return {
-    text: `${lines.join("\n\n")}\n\nNEXT: recap_docket <docket_id> to list all entries, or recap_read <doc id> to read a filing's text.`,
-    hits: hits.length,
-    refs,
-  };
-}
-
-async function recapDocketTool(input: Record<string, unknown>): Promise<ToolOutcome> {
-  if (!courtlistenerConfigured()) return { text: "RECAP is not configured.", hits: 0, refs: [] };
-  const docketId = str(input["docket_id"]);
-  if (!docketId) return { text: "docket_id is required (from recap_search).", hits: 0, refs: [] };
-  let entries;
-  try {
-    entries = await memoTTL(toolCacheKey("recap_docket", { docketId }), TOOL_CACHE_TTL_MS, () => getDocketEntries(docketId, { pageSize: 100 }));
-  } catch (err) {
-    return { text: `recap_docket failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
-  }
-  if (!entries.length) return { text: `No docket entries for RECAP docket ${docketId}.`, hits: 0, refs: [] };
-  const lines = entries.slice(0, 60).map((e) => {
-    const docs = e.documents
-      .map((d) => `    doc id=${d.id} #${d.documentNumber ?? "?"}${d.attachmentNumber != null ? `.${d.attachmentNumber}` : ""} (${d.pageCount ?? "?"}pp, ${d.isAvailable ? "available" : "not archived"})`)
-      .join("\n");
-    return `#${e.entryNumber ?? "?"} ${e.dateFiled ?? ""} — ${trunc(e.description, 120)}${docs ? `\n${docs}` : ""}`;
-  });
-  return {
-    text: `RECAP docket ${docketId} — ${entries.length} entries:\n${lines.join("\n")}\n\nRead a filing with recap_read <doc id>.`,
-    hits: entries.length,
-    refs: [],
-  };
-}
-
-async function recapReadTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
-  if (!courtlistenerConfigured()) return { text: "RECAP is not configured.", hits: 0, refs: [] };
-  const documentId = str(input["document_id"]);
-  if (!documentId) return { text: "document_id is required (from recap_search or recap_docket).", hits: 0, refs: [] };
-  let doc;
-  try {
-    doc = await memoTTL(toolCacheKey("recap_read", { documentId }), TOOL_CACHE_TTL_MS, () => readRecapDocument(documentId));
-  } catch (err) {
-    return { text: `recap_read failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
-  }
-  if (!doc.plainText.trim()) {
-    return {
-      text: `RECAP document ${documentId} has no extracted text${doc.pdfUrl ? ` (scanned filing; PDF: ${doc.pdfUrl})` : " and no archived PDF"}. ${doc.isAvailable ? "" : "It is not in the free archive."}`,
-      hits: 0,
-      refs: [],
-    };
-  }
-  const src = book.add({
-    citation: doc.description || `RECAP filing #${doc.documentNumber ?? documentId}`,
-    authority: "registry",
-    source_type: "filing",
-    source_url: doc.pdfUrl ?? undefined,
-    content: trunc(doc.plainText, 3000),
-  });
-  return {
-    text: `[${src.ref}] ${doc.description || `filing #${doc.documentNumber ?? ""}`} (${doc.pageCount ?? "?"}pp${doc.ocrStatus ? `, ocr=${doc.ocrStatus}` : ""})\n${trunc(doc.plainText, 3500)}`,
-    hits: 1,
-    refs: [src.ref],
-  };
 }
 
 async function verifyCitationsTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
@@ -492,6 +381,70 @@ async function pubmedSearchTool(input: Record<string, unknown>, book: SourceBook
   return { text: `PubMed (${hits.length}):\n${lines.join("\n\n")}`, hits: hits.length, refs };
 }
 
+async function secSearchTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+  const query = str(input["query"]);
+  if (query.length < 3) return { text: "sec_search needs a query of at least 3 characters.", hits: 0, refs: [] };
+  const forms = str(input["forms"]) || undefined;
+  const after = str(input["after"]) || undefined;
+  let hits;
+  try {
+    hits = await memoTTL(
+      toolCacheKey("sec_search", { query, forms: forms ?? "", after: after ?? "" }),
+      TOOL_CACHE_TTL_MS,
+      () => secSearch(query, { ...(forms ? { forms } : {}), ...(after ? { after } : {}) }),
+    );
+  } catch (err) {
+    return { text: `sec_search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  if (!hits.length) return { text: `No SEC EDGAR filings for "${query}".`, hits: 0, refs: [] };
+  const refs: string[] = [];
+  const lines = hits.map((h) => {
+    const src = book.add({
+      citation: `${h.company || "SEC filer"} — ${h.form || "filing"}`,
+      authority: "primary",
+      source_type: "sec",
+      source_url: h.url || undefined,
+      effective_date: h.date || undefined,
+      content: `${h.form || "Filing"}${h.date ? ` filed ${h.date}` : ""}${h.company ? ` by ${h.company}` : ""}`,
+    });
+    refs.push(src.ref);
+    return `[${src.ref}] ${h.date ? `${h.date} · ` : ""}${h.form || "filing"} — ${h.company || "SEC filer"}`;
+  });
+  return { text: `SEC EDGAR (${hits.length}):\n${lines.join("\n")}`, hits: hits.length, refs };
+}
+
+async function clinicalTrialsSearchTool(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+  const query = str(input["query"]);
+  if (query.length < 3) return { text: "clinicaltrials_search needs a query of at least 3 characters.", hits: 0, refs: [] };
+  const limit = clamp(input["limit"], 5, 20);
+  let hits;
+  try {
+    hits = await memoTTL(toolCacheKey("clinicaltrials", { query, limit }), TOOL_CACHE_TTL_MS, () =>
+      clinicalTrialsSearch(query, limit),
+    );
+  } catch (err) {
+    return { text: `clinicaltrials_search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+  }
+  if (!hits.length) return { text: `No ClinicalTrials.gov studies for "${query}".`, hits: 0, refs: [] };
+  const refs: string[] = [];
+  const lines = hits.map((h) => {
+    const detail = [h.status, h.phase, h.conditions ? `conditions: ${h.conditions}` : "", h.sponsor ? `sponsor: ${h.sponsor}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+    const src = book.add({
+      citation: `${h.title}${h.nctId ? ` (${h.nctId})` : ""}`,
+      authority: "primary",
+      source_type: "science",
+      source_url: h.url || undefined,
+      effective_date: h.date || undefined,
+      content: `${h.title} — ${detail}`,
+    });
+    refs.push(src.ref);
+    return `[${src.ref}] ${h.nctId} — ${h.title}\n    ${detail}`;
+  });
+  return { text: `ClinicalTrials.gov (${hits.length}):\n${lines.join("\n\n")}`, hits: hits.length, refs };
+}
+
 const MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -616,18 +569,17 @@ export async function executeResearchTool(
   attachments?: Attachment[],
 ): Promise<ToolOutcome> {
   if (name === "fetch_page") return fetchPageTool(input, book);
-  if (name === "recap_search") return recapSearchTool(input, book);
-  if (name === "recap_docket") return recapDocketTool(input);
-  if (name === "recap_read") return recapReadTool(input, book);
   if (name === "verify_citations") return verifyCitationsTool(input, book);
   if (name === "fda_search") return fdaSearchTool(input, book);
   if (name === "federal_register_search") return fedRegSearchTool(input, book);
   if (name === "ecfr_search") return ecfrSearchTool(input, book);
   if (name === "search_pubmed") return pubmedSearchTool(input, book);
+  if (name === "sec_search") return secSearchTool(input, book);
+  if (name === "clinicaltrials_search") return clinicalTrialsSearchTool(input, book);
   if (name === "run_python") return runPythonTool(input);
   if (name === "read_document") return readDocumentTool(input, attachments);
   if (name === "create_document") return createDocumentTool(input);
-  // search_authorities, the category web tools, and every db_* tool.
+  // web_search (category-scoped domain sets) and every db_* tool.
   return executeTool(name, input, book);
 }
 

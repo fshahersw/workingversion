@@ -59,9 +59,74 @@ export function queryTerms(query: string): string[] {
   return out;
 }
 
+/** Generic legal + temporal filler that ANDs poorly: present in nearly every
+ *  litigation query, so keeping it in a short high-recall variant only shrinks
+ *  the result set. Distinctive MATTER terms (party, drug, docket/MDL number,
+ *  judge surname, doctrine) are what should survive. Month NAMES are here too —
+ *  a bare year is a fine anchor, but "october" AND "november" both required kills
+ *  recall. (The year token itself is numeric and scored up separately.) */
+const GENERIC_TERMS = new Set([
+  "trial", "trials", "case", "cases", "court", "courts", "order", "orders",
+  "schedule", "scheduled", "scheduling", "setting", "date", "dates", "deadline", "deadlines",
+  "litigation", "lawsuit", "lawsuits", "suit", "suits", "motion", "motions",
+  "ruling", "rulings", "hearing", "hearings", "update", "updates", "upcoming",
+  "news", "latest", "recent", "current", "ongoing", "pending", "status",
+  "filing", "filings", "docket", "dockets", "plaintiff", "plaintiffs",
+  "defendant", "defendants", "complaint", "complaints", "proceeding",
+  "proceedings", "action", "actions", "judge", "judges", "attorney",
+  "attorneys", "counsel", "january", "february", "march", "april", "june",
+  "july", "august", "september", "october", "november", "december",
+]);
+
+/** Lowercased forms of tokens that appear Capitalized or ALL-CAPS in the raw
+ *  query — a cheap proper-noun signal (Meta, YouTube, JCCP, Kuhl, MDL). */
+function capitalizedForms(query: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of query.match(/[A-Za-z][A-Za-z0-9]*/g) ?? []) {
+    if (/^[A-Z]/.test(m)) out.add(m.toLowerCase());
+  }
+  return out;
+}
+
+/** Deterministic keyword extraction: the most DISTINCTIVE terms of a query,
+ *  ranked so identifiers (docket/MDL/JCCP numbers, years) and proper nouns
+ *  (party, drug, judge, doctrine names) come first and generic legal/temporal
+ *  filler ("trial", "schedule", "october", "status") is dropped. Used to build a
+ *  short, high-recall search variant from an over-stuffed model query — the
+ *  reliable fix for a smaller model's habit of ANDing 8-9 terms into 1-2 hits.
+ *  Returns the ORIGINAL first-seen order among the survivors so the query stays
+ *  readable. A query already at/under `max` distinctive terms is returned as-is.
+ *  `dropYears` removes bare 19xx/20xx year tokens first (keeping docket/MDL/case
+ *  numbers) to build a second, date-relaxed combo that is not pinned to one year. */
+export function distinctiveTerms(
+  query: string,
+  max = 4,
+  opts?: { dropYears?: boolean },
+): string[] {
+  let terms = queryTerms(query);
+  if (opts?.dropYears) terms = terms.filter((t) => !/^(19|20)\d{2}$/.test(t));
+  if (terms.length <= max) return terms;
+  const caps = capitalizedForms(query);
+  const score = (t: string): number => {
+    let s = 0;
+    if (/\d/.test(t)) s += 4; // years, docket / MDL / JCCP numbers
+    if (caps.has(t)) s += 3; // proper nouns: Meta, YouTube, Kuhl, JCCP
+    if (t.length >= 9) s += 2; // long specific terms (drug / doctrine names)
+    else if (t.length >= 6) s += 1;
+    if (GENERIC_TERMS.has(t)) s -= 5; // generic legal / temporal filler
+    return s;
+  };
+  return terms
+    .map((t, i) => ({ t, i, s: score(t) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i) // score desc, then original order
+    .slice(0, max)
+    .sort((a, b) => a.i - b.i) // restore readable order
+    .map((x) => x.t);
+}
+
 /** Recency intent in the user's question / the agent's focus. */
 export function wantsRecency(text: string): boolean {
-  return /\b(latest|recent|recently|current|currently|now|today|this (week|month|year)|newest|up[- ]to[- ]date|still (pending|open)|ongoing|as of|202\d)\b/i.test(
+  return /\b(latest|recent|recently|current|currently|now|today|this (week|month|year)|newest|up[- ]to[- ]date|next|upcoming|scheduled?|set for|trial date|hearing date|deadline|pending|still (pending|open)|ongoing|as of|202\d)\b/i.test(
     text || "",
   );
 }

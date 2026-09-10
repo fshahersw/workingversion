@@ -1,11 +1,12 @@
 // ============================================================================
 // Research tools available to the Claude/Nemotron sub-agent (server-only).
 //
-// The sub-agent's tools are seven category-scoped AWS Bedrock AgentCore search
-// gateways (case law, regulatory text, enforcement history, science, technical/
-// environmental, judicial-parties, legal news) — allow-listed authoritative web
-// search, one MCP tool each. They replaced the Supabase corpus tools and the
-// single Tavily web_search. Every result is registered as a citable [S#] source.
+// The web-search surface is ONE `web_search` tool over 16 category-scoped,
+// authoritative domain allow-lists (federal/state case law, MDL/class-action,
+// statutes, congressional, federal & state regulatory, SEC, FDA, agency
+// enforcement, science, clinical trials, environmental/tox, company, judges/
+// attorneys, legal news) + a general_web fallback — request-level domain
+// filtering via the AgentCore gateway. Every result is a citable [S#] source.
 // ============================================================================
 import type { Artifact, Source } from "@/lib/chat-types";
 import type { ToolDef } from "./anthropic.server";
@@ -14,6 +15,7 @@ import {
   agentCoreSearch,
   agentCoreConfigured,
   type GatewayKey,
+  type GatewayResult,
 } from "./agentcore-search.server";
 import {
   searchFilings,
@@ -28,7 +30,7 @@ import {
   type DbCase,
 } from "./docketbird.server";
 import { memoTTL, toolCacheKey, TOOL_CACHE_TTL_MS } from "./run-state.server";
-import { rankResults, allStale, wantsRecency } from "./web-rank";
+import { rankResults, allStale, wantsRecency, distinctiveTerms } from "./web-rank";
 
 
 /** Assigns S1..Sn refs and dedupes sources across the whole run. */
@@ -101,119 +103,74 @@ const clamp = (v: unknown, def: number, max: number) => {
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const trunc = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : v);
 
-// --- Category tools --------------------------------------------------------
-// One tool per gateway. Descriptions are what the sub-agent uses to pick the
-// right source, so the regulatory-text vs. enforcement-history split is spelled
-// out explicitly — they are easy to conflate from the name alone.
+// --- Web search (ONE tool, 17 category-scoped domain sets) -----------------
+// A single `web_search` tool. `categories` selects 1-4 curated authoritative
+// domain allow-lists (agentcore-search DOMAIN_FILTERS) searched IN PARALLEL; the
+// model picks by the job, adds published_after for recency, and passes 1-2 query
+// reformulations. Replaces the old 7 category tools + search_authorities.
 
-type CategoryTool = {
-  name: string;
-  gateway: GatewayKey;
-  sourceType: string;
-  description: string;
-};
+type Category = { key: GatewayKey; sourceType: string; blurb: string };
 
-const CATEGORY_TOOLS: CategoryTool[] = [
-  {
-    name: "search_case_law",
-    gateway: "case_law",
-    sourceType: "case_law",
-    description:
-      "Search official case law, court dockets, and appellate opinions (Supreme Court, circuit courts, PACER-sourced dockets). Use for precedent, holdings, procedural history, and jurisdiction or court-procedure questions.",
-  },
-  {
-    name: "search_regulatory_text",
-    gateway: "regulatory_statutory",
-    sourceType: "regulation",
-    description:
-      "Search primary regulatory and statutory TEXT: the CFR, Federal Register, and agency rules. Use for the language of a regulation or statute — NOT its enforcement history.",
-  },
-  {
-    name: "search_enforcement_history",
-    gateway: "regulatory_enforcement",
-    sourceType: "enforcement",
-    description:
-      "Search regulatory ENFORCEMENT history: recalls, FDA and agency warning letters, consent decrees, and violations. Use for a defendant's compliance, notice, or prior-violation history — distinct from regulatory text.",
-  },
-  {
-    name: "search_scientific_literature",
-    gateway: "scientific_research",
-    sourceType: "science",
-    description:
-      "Search peer-reviewed medical and epidemiological literature. Use for general and specific causation, study design and quality, clinical evidence, and an expert witness's publication record.",
-  },
-  {
-    name: "search_technical_environmental",
-    gateway: "technical_environmental",
-    sourceType: "technical",
-    description:
-      "Search engineering standards bodies and environmental-science sources. Use for product-defect, materials, exposure-modeling, and environmental-contamination questions.",
-  },
-  {
-    name: "search_judicial_parties",
-    gateway: "judicial_parties",
-    sourceType: "directory",
-    description:
-      "Search official judicial and attorney-registration records for judge, attorney, and firm background. Professional records only — never request or surface personal or home information.",
-  },
-  {
-    name: "search_legal_news",
-    gateway: "legal_news",
-    sourceType: "news",
-    description:
-      "Search legal trade press for current litigation news and developments. Use for recent events the primary sources have not yet captured.",
-  },
+const CATEGORIES: Category[] = [
+  { key: "federal_case_law", sourceType: "case_law", blurb: "federal opinions, dockets, appellate & Supreme Court decisions, free-law databases — precedent, holdings, posture" },
+  { key: "state_case_law", sourceType: "case_law", blurb: "STATE courts & opinions incl. coordinated proceedings (CA JCCP, NJ MCL) — the state track federal PACER misses" },
+  { key: "mdl_class_action", sourceType: "case_law", blurb: "JPML, MDL & class-action tracking, settlement administrators, class-action press — aggregation posture & settlements" },
+  { key: "statutes_legislation", sourceType: "regulation", blurb: "federal & state statutes, codes, and bills — the text of a law and its legislative status" },
+  { key: "congressional", sourceType: "regulation", blurb: "hearings, committee reports, GAO/CRS/CBO, oversight — congressional activity on an industry or defendant" },
+  { key: "federal_regulations", sourceType: "regulation", blurb: "Federal Register, CFR/eCFR, regulations.gov, OIRA — the text and status of a federal rule" },
+  { key: "state_ag_regulatory", sourceType: "regulation", blurb: "state AGs, state agencies (Prop 65/OEHHA, health & enviro depts), NCSL — state enforcement & regulation" },
+  { key: "sec_securities", sourceType: "sec", blurb: "SEC/EDGAR, PCAOB, FINRA, Stanford SCAC — a public defendant's disclosures & securities suits" },
+  { key: "fda_drug_device", sourceType: "enforcement", blurb: "FDA (recalls, warning letters, labels, MAUDE), EMA, DailyMed, pharma trade press — drug/device regulatory history" },
+  { key: "agency_enforcement", sourceType: "enforcement", blurb: "FTC/CPSC/NHTSA/EPA/OSHA/CFPB/DOJ enforcement — recalls, consent decrees, violations, a defendant's compliance history" },
+  { key: "scientific_medical", sourceType: "science", blurb: "peer-reviewed medicine & epidemiology (PubMed/PMC, top journals, Cochrane) — general & specific causation, study quality" },
+  { key: "clinical_trials_safety", sourceType: "science", blurb: "ClinicalTrials.gov, EMA, FAERS/VAERS — trial records, sponsors, and drug-safety signals" },
+  { key: "environmental_tox", sourceType: "technical", blurb: "EPA/ATSDR/IARC/NTP/NIEHS + engineering standards (ASTM/ANSI/UL/NIST) — toxicology, exposure, product/environmental science" },
+  { key: "company_business", sourceType: "directory", blurb: "corporate background, SEC filings, business registries, financial press — a defendant's identity, structure & finances" },
+  { key: "judges_attorneys", sourceType: "directory", blurb: "judge & attorney professional records (CourtListener, FJC, state bars, Ballotpedia) — background on the bench and counsel" },
+  { key: "legal_news", sourceType: "news", blurb: "legal & industry trade press (Law360, Bloomberg Law, Reuters, Law.com, HarrisMartin) — current developments primaries haven't captured" },
+  { key: "general_web", sourceType: "web", blurb: "OPEN web search (junk domains excluded) — ONLY when no category above fits: general current events, entity discovery, an obscure source" },
 ];
 
-const CATEGORY_BY_NAME = new Map(CATEGORY_TOOLS.map((t) => [t.name, t]));
+const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
+const CATEGORY_KEYS: GatewayKey[] = CATEGORIES.map((c) => c.key);
 
-const toToolDef = (t: CategoryTool): ToolDef => ({
-  name: t.name,
-  description: t.description,
-  input_schema: {
-    type: "object",
-    properties: {
-      query: {
-        type: "string",
-        description:
-          "A focused query of a few distinctive terms — a statute or rule number, a party/drug/device name, a doctrine, or a holding. Keep it tight.",
-      },
-      limit: { type: "number", description: "Max results (default 5, hard cap 10)." },
-    },
-    required: ["query"],
-  },
-});
-
-const MULTI_SEARCH_TOOL: ToolDef = {
-  name: "search_authorities",
+const WEB_SEARCH_TOOL: ToolDef = {
+  name: "web_search",
   description:
-    "PREFERRED FIRST CALL. Runs the SAME query against 2-3 category gateways CONCURRENTLY in one step, instead of one call per category. Results are deduped, date-stamped, and ranked newest-and-most-relevant-first. Use the single-category tools only for a targeted follow-up.",
+    "Authoritative web search over CURATED, category-scoped domain allow-lists (one gateway, request-level domain filtering). Pick 1-4 `categories` that best fit the job — they are searched IN PARALLEL, deduped, date-stamped, and ranked newest-and-most-relevant-first. RESULTS DEFAULT TO THE LAST 30 DAYS (deliberate, to keep answers current) — for anything OLDER (case law, statutes, a past ruling, historical filings, company background) you MUST pass `published_after` with an earlier date (e.g. '2020-01-01', or the specific year you need); omit it and you get ONLY the last 30 days. Pass 1-2 `queries` reformulations to run alongside the main query. CATEGORIES:\n" +
+    CATEGORIES.map((c) => `- ${c.key}: ${c.blurb}`).join("\n") +
+    "\nName specific entities in every query (party, drug/device, docket or rule number, doctrine, date). Prefer a scoped category over general_web. For dedicated STRUCTURED sources use the specialized tools instead (search_pubmed, sec_search, fda_search, federal_register_search, ecfr_search, clinicaltrials_search, db_*).",
   input_schema: {
     type: "object",
     properties: {
       query: {
         type: "string",
         description:
-          "A focused query of a few distinctive terms — a statute or rule number, a party/drug/device name, a doctrine, or a holding. Name the specific entities (parties, docket/rule numbers, agencies), never a generic one-liner.",
+          "A focused query of MAX 4 WORDS — the most distinctive terms only (a party/drug/device name, a docket or rule number, a doctrine, a holding). Never a sentence; every extra word ANDs the results smaller. Spread more entities across `queries` instead of lengthening this one.",
+      },
+      categories: {
+        type: "array",
+        items: { type: "string", enum: CATEGORY_KEYS },
+        description: "1-4 category keys to search in parallel (see the list in the tool description). Use the smallest set that fits.",
       },
       queries: {
         type: "array",
         items: { type: "string" },
         description:
-          "1-2 REFORMULATIONS of the main query run in parallel with it (one alternate angle, one anchored to the current month+year for anything live). Distinct angles, not near-duplicates.",
+          "Optional 1-2 REFORMULATIONS (each MAX 4 WORDS) run in parallel with the main query — one alternate angle, one date-anchored for a live matter. Distinct angles, not near-duplicates.",
       },
-      categories: {
-        type: "array",
-        items: { type: "string", enum: CATEGORY_TOOLS.map((t) => t.name) },
-        description: "2-3 category tool names to search in parallel.",
+      published_after: {
+        type: "string",
+        description:
+          "Optional YYYY-MM-DD lower bound. DEFAULT when omitted = the LAST 30 DAYS (older results dropped at the source). Set an EARLIER date to WIDEN the window for older/historical material — case law, statutes, a past ruling, background (e.g. '2020-01-01' or the year you need). Applies to EVERY category in the call, so run historical and current searches separately.",
       },
-      limit: { type: "number", description: "Results kept per category (default 4, cap 6)." },
+      limit: { type: "number", description: "Results kept per category (default 6, cap 10)." },
     },
     required: ["query", "categories"],
   },
 };
 
-const CATEGORY_TOOL_DEFS: ToolDef[] = [MULTI_SEARCH_TOOL, ...CATEGORY_TOOLS.map(toToolDef)];
+const CATEGORY_TOOL_DEFS: ToolDef[] = [WEB_SEARCH_TOOL];
 
 
 
@@ -224,7 +181,7 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
   {
     name: "db_find_case",
     description:
-      "START HERE for anything about a specific case, MDL, or matter. Searches the ENTIRE federal+state case index by case NAME (e.g. 'In re Insulin Pricing Litigation') or case NUMBER (e.g. '0:2023-md-03080' or '22-cv-4775'), not just followed matters. Returns each match's DocketBird case_id — which you then pass to db_docket_sheet, db_search_filings, db_get_case, and db_calendar. Do NOT guess a case_id and do NOT pass an MDL number to db_get_case; resolve it here first.",
+      "START HERE for anything about a specific case, MDL, or matter. DocketBird matches on the case CAPTION and the docket NUMBER — NOT party/company names, law-firm names, or descriptive phrases. Query the distinctive CAPTION words (e.g. 'social media adolescent addiction', 'insulin pricing') OR the docket number as YYYY-md-NNNN / YYYY-cv-NNNNN (e.g. '2022-md-03047'). Do NOT pass a party like 'Meta Platforms Inc.' or filler like 'litigation'/'lawsuit' — they are not in the caption and return ZERO; a bare 'MDL 3047' or '3047' will not disambiguate. Searches the ENTIRE federal+state index, not just followed matters. Returns each match's case_id for db_docket_sheet, db_search_filings, db_get_case, and db_calendar. If a name misses, retry with FEWER, more distinctive caption words. Do NOT guess a case_id.",
     input_schema: {
       type: "object",
       properties: {
@@ -238,7 +195,7 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
   {
     name: "db_docket_sheet",
     description:
-      "Get a case's DOCKET SHEET — the chronological list of docket entries (orders, motions, CMOs/PTOs, minute entries) — by case_id (from db_find_case). Use this for procedural posture, the LATEST activity (sort='recent'), and to locate a specific order (e.g. a CMO or scheduling order) before reading it. This is the right tool for 'what's the current posture / bellwether schedule / most recent order' — full-text filing search is NOT. Then read a specific entry with db_read_filing using its document_id.",
+      "Get a case's DOCKET SHEET — the chronological list of docket entries (orders, motions, CMOs/PTOs, minute entries) — by case_id (from db_find_case). Use this for procedural posture, the LATEST activity (sort='recent'), and to locate a specific order (e.g. a CMO or scheduling order) before reading it. This is the right tool for 'what's the current posture / bellwether schedule / most recent order' — full-text filing search is NOT. Then read a specific entry with db_read_filing using its document_id. NOTE: on a very large or old MDL the full sheet can be slow — keep sort='recent' with a modest limit; if it is slow or times out, do NOT stop: fall back to db_search_filings scoped to this case_id with a targeted term ('case management order', 'scheduling order', 'bellwether').",
     input_schema: {
       type: "object",
       properties: {
@@ -252,15 +209,16 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
   {
     name: "db_search_filings",
     description:
-      "Full-text search across federal court filings (PACER dockets, 283M+ documents). ALWAYS scope the search: pass court_id (a slug like 'txwd'/'cand'/'nysd', an abbreviation like 'S.D.N.Y.', or a full court name), a case_id, and/or a date range — never an unscoped nationwide term. Returns matching filings with highlighted snippets, the case, court, filing date, and a permanent DocketBird link.",
+      "Full-text search across federal court filings (PACER dockets, 283M+ documents). ALWAYS scope the search: pass court_id (a slug like 'txwd'/'cand'/'nysd', an abbreviation like 'S.D.N.Y.', or a full court name; comma-separate several), a case_id, and/or a date range — never an unscoped nationwide term. QUERY SYNTAX: words are ANDed by default; use \"exact phrase\" for a phrase, term* for word-stemming, a /s b (same sentence), a /3 b (within 3 words), a /p b (same paragraph), OR for alternatives, and -term to exclude (the word 'not' is unsupported). Set sort='recency' for the most recent filings. Returns matching filings with highlighted snippets, the case, court, filing date, and a permanent DocketBird link.",
     input_schema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "A few distinctive terms — a party, doctrine, motion type, or docket/citation number. Words are ANDed." },
-        court_id: { type: "string", description: "Scope to a court: slug ('txwd','cand','nysd'), abbreviation, or full name." },
+        query: { type: "string", description: "Distinctive terms or a \"quoted phrase\" — a party, doctrine, motion type, or docket/citation number. Words are ANDed; see the syntax in the description." },
+        court_id: { type: "string", description: "Scope to a court: slug ('txwd','cand','nysd'), abbreviation ('S.D.N.Y.'), or full name; comma-separate several." },
         case_id: { type: "string", description: "Scope to one DocketBird case id, e.g. 'txwd-6:2021-cv-00672'." },
         filed_after: { type: "string", description: "YYYY-MM-DD, inclusive." },
         filed_before: { type: "string", description: "YYYY-MM-DD, inclusive." },
+        sort: { type: "string", enum: ["relevance", "recency"], description: "'relevance' (default) or 'recency' (most recently filed first)." },
         limit: { type: "number", description: "Max results (default 8, hard cap 15)." },
       },
       required: ["query"],
@@ -320,9 +278,7 @@ export async function executeTool(
   input: Record<string, unknown>,
   book: SourceBook,
 ): Promise<ToolOutcome> {
-  if (name === MULTI_SEARCH_TOOL.name) return multiCategorySearch(input, book);
-  const cfg = CATEGORY_BY_NAME.get(name);
-  if (cfg) return categorySearch(cfg, input, book);
+  if (name === "web_search") return webSearch(input, book);
 
   if (name === "db_find_case") return dbFindCase(input, book);
   if (name === "db_docket_sheet") return dbDocketSheet(input, book);
@@ -353,15 +309,24 @@ function seenFor(book: SourceBook): Set<string> {
 
 const RECENCY_GATEWAYS = new Set<GatewayKey>([
   "legal_news",
-  "case_law",
-  "regulatory_enforcement",
+  "mdl_class_action",
+  "congressional",
+  "federal_regulations",
+  "state_ag_regulatory",
+  "sec_securities",
+  "fda_drug_device",
+  "agency_enforcement",
+  "company_business",
+  "general_web",
 ]);
 
-/** Over-fetch this many candidates per gateway, then keep the best few. */
-const CANDIDATE_POOL = 10;
+/** Over-fetch this many candidates per gateway variant, then keep the best few.
+ *  Higher = more raw material for the local rerank to choose from (and more to
+ *  survive the dedupe across the parallel variants). */
+const CANDIDATE_POOL = 15;
 
 async function categorySearch(
-  cfg: CategoryTool,
+  cfg: Category,
   input: Record<string, unknown>,
   book: SourceBook,
 ): Promise<ToolOutcome> {
@@ -376,17 +341,28 @@ async function categorySearch(
   if (query.length < 3) return { text: "Query must be at least 3 characters.", hits: 0, refs: [] };
   // Keep, not fetch: we pull a wide candidate pool from the gateway and let
   // the local rerank decide which few reach the prompt.
-  const keep = clamp(input["limit"], 4, 6);
+  const keep = clamp(input["limit"], 6, 10);
+  const publishedAfter = str(input["published_after"]) || undefined;
 
   // Recency anchor: an undated query on a live matter ranks stale top hits
   // first. When the model gave no year/date, append the current month+year for
   // the recency-sensitive gateways (news, case law, enforcement) so the newest
   // orders and coverage surface. Static text (CFR, statutes, science) is left
   // alone — dating those queries only adds noise.
-  const dateSensitive = RECENCY_GATEWAYS.has(cfg.gateway);
+  const dateSensitive = RECENCY_GATEWAYS.has(cfg.key);
   const hasDate = /\b(19|20)\d{2}\b|\b(last|past|recent|latest|today|this (week|month|year))\b/i.test(query);
   const effectiveQuery = dateSensitive && !hasDate ? `${query} ${currentMonthYear()}` : query;
   const recency = dateSensitive || wantsRecency(query);
+  // HARD 30-DAY DEFAULT (both modes): every web_search is limited to the last 30
+  // days unless the MODEL passes an explicit published_after to widen it. This is
+  // the deliberate anti-stale rule — omitting a date yields ONLY fresh results. To
+  // reach older material (case law, statutes, precedent, historical filings,
+  // background) the model MUST pass published_after with an earlier date; the tool
+  // description + prompts say so loudly.
+  const RECENCY_DEFAULT_DAYS = 30;
+  const effectiveAfter =
+    publishedAfter ??
+    new Date(Date.now() - RECENCY_DEFAULT_DAYS * 86_400_000).toISOString().slice(0, 10);
 
   // Query fan-out: the model's own reformulations plus a date-anchored variant
   // run CONCURRENTLY and merge into one candidate pool before ranking. More
@@ -404,26 +380,69 @@ async function categorySearch(
     if (!variants.some((v) => v.toLowerCase() === anchored.toLowerCase())) variants.push(anchored);
   }
 
+  // DETERMINISTIC RECALL GUARD — the reliable fix for a smaller model ANDing 8-9
+  // terms into a 1-2 hit query (the zero-results retry below only fires on a TOTAL
+  // zero, so 1-hit stuffed queries slip through). ALWAYS run TWO short, complementary
+  // variants built from just the most distinctive terms, both IN PARALLEL with the
+  // model's own queries in the same round: combo A keeps identifiers/years for a
+  // precise anchor; combo B drops the bare year for a broader, date-relaxed angle.
+  // Ranking still scores against the full original query, so this only broadens
+  // recall, never loosens precision. Already-lean or duplicate combos are skipped.
+  for (const combo of [distinctiveTerms(query, 4), distinctiveTerms(query, 4, { dropYears: true })]) {
+    const leanQuery = combo.join(" ");
+    if (combo.length >= 3 && !variants.some((v) => v.toLowerCase() === leanQuery.toLowerCase())) {
+      variants.push(leanQuery);
+    }
+  }
+
   const fetchPool = (q: string) =>
     memoTTL(
       // Cache raw gateway hits (not the [S#]-tagged outcome): a repeat of the
       // same category+query within the window reuses one upstream call, and
       // SourceBook still assigns this run's own refs below.
-      toolCacheKey(`ac:${cfg.gateway}`, { query: q, limit: CANDIDATE_POOL }),
+      toolCacheKey(`ac:${cfg.key}`, { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }),
       TOOL_CACHE_TTL_MS,
-      () => agentCoreSearch(cfg.gateway, q, CANDIDATE_POOL),
+      () => agentCoreSearch(cfg.key, q, CANDIDATE_POOL, effectiveAfter ? { publishedAfter: effectiveAfter } : undefined),
     );
 
-  let results;
+  let results: GatewayResult[];
   try {
     const pools = await Promise.all(variants.map((q) => fetchPool(q)));
     results = pools.flat();
   } catch (err) {
     const msg = err instanceof Error ? err.message : "search failed";
-    return { text: `${cfg.name} failed: ${trunc(msg, 220)}`, hits: 0, refs: [] };
+    return { text: `${cfg.key} failed: ${trunc(msg, 220)}`, hits: 0, refs: [] };
   }
 
-  if (!results.length) return { text: `No ${cfg.name} results for "${query}".`, hits: 0, refs: [] };
+  // EMPTY-RESULT ESCALATION LADDER — the fix for the false zero. The category
+  // whitelist + the 30-day window + an AND'd query multiply into frequent empties,
+  // and the fan-out above never relaxes the whitelist or the date floor. So when it
+  // comes back with nothing, RELAX ONE CONSTRAINT AT A TIME (leanest query first),
+  // and stop at the first step that returns anything — never report a false zero
+  // when the open web has the answer. The fresh-first 30-day default is preserved:
+  // it is the FIRST pass; these steps only fire once it has already returned empty.
+  if (!results.length) {
+    const core = distinctiveTerms(query, 3);
+    const leanQ = core.length >= 2 ? core.join(" ") : query;
+    const ladder: Array<() => Promise<GatewayResult[]>> = [
+      // (1) leanest query, SAME whitelist + 30-day window (a stuffed query was the miss)
+      () => fetchPool(leanQ),
+      // (2) SAME whitelist, NO date floor (the 30-day window was the miss)
+      () => agentCoreSearch(cfg.key, leanQ, CANDIDATE_POOL),
+      // (3) OPEN WEB (exclude-only) + NO date floor (the category whitelist was the miss)
+      () => agentCoreSearch(cfg.key, leanQ, CANDIDATE_POOL, { openWeb: true }),
+    ];
+    for (const step of ladder) {
+      try {
+        results = await step();
+      } catch {
+        results = [];
+      }
+      if (results.length) break;
+    }
+  }
+
+  if (!results.length) return { text: `No ${cfg.key} results for "${query}".`, hits: 0, refs: [] };
 
   const seen = seenFor(book);
   let ranked = rankResults(results, {
@@ -432,6 +451,11 @@ async function categorySearch(
     recency,
     sourceType: cfg.sourceType,
     seen,
+    // Tighter than the 0.25 default: a fan-out floods the pool with loosely
+    // related hits (another MDL that merely shares "bellwether trial"), so
+    // require stronger overlap with the matter's distinctive terms. Anchored
+    // queries (party + MDL/JCCP number) clear this easily; topic-only noise does not.
+    minRelevance: 0.32,
   });
 
   // One tightened retry when a recency question came back with nothing from the
@@ -445,6 +469,7 @@ async function categorySearch(
         recency,
         sourceType: cfg.sourceType,
         seen,
+        minRelevance: 0.32,
       });
       if (rankedRetry.length && !allStale(rankedRetry)) ranked = rankedRetry;
       else if (!ranked.length) ranked = rankedRetry;
@@ -455,7 +480,7 @@ async function categorySearch(
 
   if (!ranked.length)
     return {
-      text: `No ${cfg.name} result added new on-point material for "${query}" (already-seen or off-topic hits filtered).`,
+      text: `No ${cfg.key} result added new on-point material for "${query}" (already-seen or off-topic hits filtered).`,
       hits: 0,
       refs: [],
     };
@@ -463,7 +488,7 @@ async function categorySearch(
   const refs: string[] = [];
   const lines = ranked.map(({ result: r, evidence, date, superseded }) => {
     const src = book.add({
-      citation: r.title || r.url || `${cfg.name} result`,
+      citation: r.title || r.url || `${cfg.key} result`,
       authority: "web",
       source_type: cfg.sourceType,
       source_url: r.url,
@@ -482,32 +507,35 @@ async function categorySearch(
   return { text: lines.join("\n\n"), hits: ranked.length, refs };
 }
 
-/** Fan-out: 2-3 gateways in one model turn instead of one turn each. */
-async function multiCategorySearch(
+/** ONE model turn -> 1-4 category domain-sets searched in parallel. */
+async function webSearch(
   input: Record<string, unknown>,
   book: SourceBook,
 ): Promise<ToolOutcome> {
   const query = str(input["query"]);
-  if (query.length < 3) return { text: "Query must be at least 3 characters.", hits: 0, refs: [] };
+  if (query.length < 3) return { text: "query must be at least 3 characters.", hits: 0, refs: [] };
   const raw = Array.isArray(input["categories"]) ? (input["categories"] as unknown[]) : [];
   const cfgs = raw
-    .map((c) => CATEGORY_BY_NAME.get(str(c)))
-    .filter((c): c is CategoryTool => !!c)
-    .slice(0, 3);
+    .map((c) => CATEGORY_BY_KEY.get(str(c) as GatewayKey))
+    .filter((c): c is Category => !!c)
+    .slice(0, 4);
   if (!cfgs.length)
     return {
-      text: `No valid categories. Pick 2-3 of: ${CATEGORY_TOOLS.map((t) => t.name).join(", ")}.`,
+      text: `No valid categories. Pick 1-4 of: ${CATEGORY_KEYS.join(", ")}.`,
       hits: 0,
       refs: [],
     };
 
-  const limit = clamp(input["limit"], 4, 6);
+  const limit = clamp(input["limit"], 6, 10);
   const queries = Array.isArray(input["queries"]) ? input["queries"] : undefined;
+  const publishedAfter = str(input["published_after"]) || undefined;
   const outcomes = await Promise.all(
-    cfgs.map((cfg) => categorySearch(cfg, { query, queries, limit }, book)),
+    cfgs.map((cfg) =>
+      categorySearch(cfg, { query, queries, limit, published_after: publishedAfter }, book),
+    ),
   );
   return {
-    text: outcomes.map((o, i) => `### ${cfgs[i]!.name}\n${o.text}`).join("\n\n"),
+    text: outcomes.map((o, i) => `### ${cfgs[i]!.key}\n${o.text}`).join("\n\n"),
     hits: outcomes.reduce((n, o) => n + o.hits, 0),
     refs: outcomes.flatMap((o) => o.refs),
   };
@@ -530,6 +558,7 @@ async function dbSearchFilings(input: Record<string, unknown>, book: SourceBook)
     courtId: str(input["court_id"]) || undefined,
     filedAfter: str(input["filed_after"]) || undefined,
     filedBefore: str(input["filed_before"]) || undefined,
+    sort: str(input["sort"]) === "recency" ? ("recency" as const) : undefined,
     size: clamp(input["limit"], 4, 8),
   };
   let rows: DbFiling[];
@@ -647,6 +676,43 @@ const DB_NOT_CONFIGURED: ToolOutcome = {
 };
 const dbCaseUrl = (id: string) => `https://www.docketbird.com/cases?case_id=${encodeURIComponent(id)}`;
 
+/** DocketBird's case search is strict-AND on the CAPTION (every token must be in
+ *  the "In re ..." title), not party/firm names. Strip corporate suffixes, "In re",
+ *  and filler so an over-specified query can retry as bare caption words. */
+function cleanCaseQuery(q: string): string {
+  return q
+    .replace(/\bin re:?\b/gi, " ")
+    .replace(/\b(inc|llc|l\.l\.c|corp|corporation|co|ltd|plc|lp|l\.p|n\.a|company|the)\b\.?/gi, " ")
+    .replace(/\b(litigation|lawsuit|matter|et al)\b\.?/gi, " ")
+    .replace(/[.,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Ordered fallback queries for a case-search miss (strict-AND caption match):
+ *  1) cleaned (corp suffix / "In re" / filler stripped); 2) everything AFTER the
+ *  last corporate suffix, cleaned (drops a leading "Party Inc." → the subject);
+ *  3) the cleaned query minus its first two (likely party) tokens. Live-verified:
+ *  "Meta Platforms Inc. social media addiction litigation" -> "social media
+ *  addiction" recovers the MDL, which the raw query returns zero for. */
+function caseQueryCandidates(q: string): string[] {
+  const out: string[] = [];
+  const push = (s: string): void => {
+    const t = s.replace(/\s+/g, " ").trim();
+    if (t.length >= 3 && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+  };
+  const cleaned = cleanCaseQuery(q);
+  push(cleaned);
+  const afterSuffix = q.replace(
+    /^.*\b(?:inc|llc|l\.l\.c|corp|corporation|co|ltd|plc|lp|n\.a|company)\b\.?/i,
+    "",
+  );
+  if (afterSuffix.trim() && afterSuffix.trim().length < q.trim().length) push(cleanCaseQuery(afterSuffix));
+  const toks = cleaned.split(" ");
+  if (toks.length > 3) push(toks.slice(2).join(" "));
+  return out.filter((c) => c.toLowerCase() !== q.toLowerCase());
+}
+
 async function dbFindCase(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
   if (!docketbirdConfigured()) return DB_NOT_CONFIGURED;
   const query = str(input["query"]);
@@ -664,7 +730,30 @@ async function dbFindCase(input: Record<string, unknown>, book: SourceBook): Pro
   } catch (err) {
     return { text: `Case search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
   }
-  if (!hits.length) return { text: `No cases match "${query}"${courtId ? " in that court" : ""}.`, hits: 0, refs: [] };
+  // DocketBird case search is strict-AND on the caption, so any extra token (a
+  // party name, "glyphosate", "litigation") that isn't in the caption zeroes the
+  // result. On a miss, try a few progressively-cleaned caption candidates and
+  // stop at the first that hits.
+  if (!hits.length) {
+    for (const cand of caseQueryCandidates(query)) {
+      try {
+        hits = await memoTTL(
+          toolCacheKey("db_find_case", { q: cand, court: courtId ?? "", size }),
+          TOOL_CACHE_TTL_MS,
+          () => searchCases({ q: cand, courtId, size }),
+        );
+      } catch {
+        /* try the next candidate */
+      }
+      if (hits.length) break;
+    }
+  }
+  if (!hits.length)
+    return {
+      text: `No cases match "${query}"${courtId ? " in that court" : ""}. DocketBird matches the case CAPTION or the docket NUMBER — retry with the distinctive caption words (e.g. "social media adolescent addiction") or the number as YYYY-md-NNNN (e.g. "2022-md-03047"), NOT a party/company name.`,
+      hits: 0,
+      refs: [],
+    };
 
   const refs: string[] = [];
   const lines = hits.map((c) => {
@@ -779,7 +868,22 @@ async function dbCalendar(input: Record<string, unknown>, book: SourceBook): Pro
       refs: [],
     };
 
-  const list = entries.slice(0, 40).map((e) => `- ${trunc(JSON.stringify(e), 300)}`).join("\n");
+  // Format the documented per-case shape (iso8601_datetime + title + document_id),
+  // sorted soonest-first, so a "next hearing / trial" read is clean and chronological.
+  const fmt = (e: Record<string, unknown>): { day: string; line: string } => {
+    const dt = String(e["iso8601_datetime"] ?? e["date"] ?? "").trim();
+    const day = dt.slice(0, 10);
+    const time = dt.length > 10 ? dt.slice(11, 16) : "";
+    const title = String(e["title"] ?? "").trim() || "(untitled entry)";
+    const doc = e["document_id"] ? ` [document_id=${String(e["document_id"])}]` : "";
+    return { day, line: `- ${day || "(no date)"}${time ? ` ${time}` : ""} — ${title}${doc}` };
+  };
+  const list = entries
+    .map((e) => fmt(e as Record<string, unknown>))
+    .sort((a, b) => (a.day && b.day ? a.day.localeCompare(b.day) : a.day ? -1 : 1))
+    .slice(0, 40)
+    .map((x) => x.line)
+    .join("\n");
   const src = book.add({
     citation: `Calendar / deadlines — ${caseId}`,
     authority: "registry",

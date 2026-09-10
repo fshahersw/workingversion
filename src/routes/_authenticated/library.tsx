@@ -45,8 +45,8 @@ import {
 import { discoveryTabFor, stashWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { deleteWorkspaceFn, listWorkspacesFn } from "@/lib/kb/workspace.functions";
 import type { WorkspaceSummary, WorkspaceSurface } from "@/lib/kb/workspace.server";
-import { deleteDraftFn, listDraftsFn } from "@/lib/drafts/drafts.functions";
-import type { DraftSummary } from "@/lib/drafts/types";
+import { deleteWriterDocFn, listWriterDocsFn } from "@/lib/writer/writer.functions";
+import type { WriterDocSummary } from "@/lib/writer/types";
 
 export const Route = createFileRoute("/_authenticated/library")({
   ssr: false,
@@ -115,9 +115,10 @@ function useFolders(category: FolderCategory) {
     /** Items at this level: in the current folder, or unfiled when viewing All. */
     inView: (folderId: string | undefined | null) => folderOf(folderId) === current,
     create: (name: string) =>
-      run(() => createFolderFn({ data: { category, name, parentId: current } }), "Folder created").then(
-        () => undefined,
-      ),
+      run(
+        () => createFolderFn({ data: { category, name, parentId: current } }),
+        "Folder created",
+      ).then(() => undefined),
     rename: (folderId: string, name: string) =>
       run(() => renameFolderFn({ data: { category, folderId, name } })).then(() => undefined),
     remove: async (folderId: string) => {
@@ -258,7 +259,8 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
 
   if (!items) return <Loading />;
   const counts = new Map<string, number>();
-  for (const w of items) counts.set(folderOf(w.folderId), (counts.get(folderOf(w.folderId)) ?? 0) + 1);
+  for (const w of items)
+    counts.set(folderOf(w.folderId), (counts.get(folderOf(w.folderId)) ?? 0) + 1);
   const shown = items.filter((w) => folders.inView(w.folderId));
   const emptyLabel =
     surface === "deposition"
@@ -284,65 +286,64 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
         <EmptyState label="Nothing in this folder yet. Use Move on an item to file it here." />
       ) : null}
       <ul className="space-y-1.5">
-      {shown.map((w) => (
-        <li
-          key={w.itemId}
-          className="flex items-center gap-3 rounded-lg border border-border/70 bg-card px-3 py-2.5"
-        >
-          <FolderOpen className="h-4 w-4 shrink-0 text-brand-navy/50" strokeWidth={1.8} />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[13px] font-medium text-foreground">{w.name}</p>
-            <p className="text-[11px] text-muted-foreground">
-              {w.docCount} doc{w.docCount === 1 ? "" : "s"} · {w.pageCount} pages · {relative(w.createdAt)}
-              {w.status === "saving"
-                ? " · saving"
-                : w.status === "error"
-                  ? " · save incomplete"
-                  : ""}
-            </p>
-            {w.status === "error" && w.errorSummary ? (
-              <p className="mt-0.5 truncate text-[10.5px] text-destructive">
-                {w.errorSummary}
-              </p>
-            ) : null}
-          </div>
-          <MoveToMenu
-            folders={folders.folders}
-            current={folderOf(w.folderId)}
-            onMove={(folderId) => void folders.move(w.itemId, folderId).then(load)}
+        {shown.map((w) => (
+          <li
+            key={w.itemId}
+            className="flex items-center gap-3 rounded-lg border border-border/70 bg-card px-3 py-2.5"
           >
+            <FolderOpen className="h-4 w-4 shrink-0 text-brand-navy/50" strokeWidth={1.8} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13px] font-medium text-foreground">{w.name}</p>
+              <p className="text-[11px] text-muted-foreground">
+                {w.docCount} doc{w.docCount === 1 ? "" : "s"} · {w.pageCount} pages ·{" "}
+                {relative(w.createdAt)}
+                {w.status === "saving"
+                  ? " · saving"
+                  : w.status === "error"
+                    ? " · save incomplete"
+                    : ""}
+              </p>
+              {w.status === "error" && w.errorSummary ? (
+                <p className="mt-0.5 truncate text-[10.5px] text-destructive">{w.errorSummary}</p>
+              ) : null}
+            </div>
+            <MoveToMenu
+              folders={folders.folders}
+              current={folderOf(w.folderId)}
+              onMove={(folderId) => void folders.move(w.itemId, folderId).then(load)}
+            >
+              <button
+                type="button"
+                aria-label="Move to folder"
+                title="Move to folder"
+                className="shrink-0 text-muted-foreground/60 transition hover:text-foreground"
+              >
+                <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+              </button>
+            </MoveToMenu>
             <button
               type="button"
-              aria-label="Move to folder"
-              title="Move to folder"
-              className="shrink-0 text-muted-foreground/60 transition hover:text-foreground"
+              onClick={() => openWorkspace(w.itemId)}
+              disabled={w.status !== "ready"}
+              className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+              Open
             </button>
-          </MoveToMenu>
-          <button
-            type="button"
-            onClick={() => openWorkspace(w.itemId)}
-            disabled={w.status !== "ready"}
-            className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Open
-          </button>
-          <button
-            type="button"
-            onClick={() => void remove(w.itemId)}
-            disabled={busyId === w.itemId}
-            aria-label="Delete workspace"
-            className="shrink-0 text-muted-foreground transition hover:text-destructive disabled:opacity-50"
-          >
-            {busyId === w.itemId ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Trash2 className="h-4 w-4" />
-            )}
-          </button>
-        </li>
-      ))}
+            <button
+              type="button"
+              onClick={() => void remove(w.itemId)}
+              disabled={busyId === w.itemId}
+              aria-label="Delete workspace"
+              className="shrink-0 text-muted-foreground transition hover:text-destructive disabled:opacity-50"
+            >
+              {busyId === w.itemId ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+            </button>
+          </li>
+        ))}
       </ul>
     </div>
   );
@@ -350,13 +351,13 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
 
 function DraftsList() {
   const navigate = useNavigate();
-  const [items, setItems] = useState<DraftSummary[] | null>(null);
+  const [items, setItems] = useState<WriterDocSummary[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const folders = useFolders("draft");
 
   const load = useCallback(async () => {
     try {
-      setItems(await listDraftsFn({ data: {} }));
+      setItems(await listWriterDocsFn());
     } catch {
       setItems([]);
     }
@@ -368,11 +369,11 @@ function DraftsList() {
   const remove = async (id: string) => {
     setBusyId(id);
     try {
-      const result = await deleteDraftFn({ data: { draftId: id } });
+      const result = await deleteWriterDocFn({ data: { draftId: id } });
       await load();
-      toast.success(result.alreadyDeleted ? "Already deleted" : "Draft deleted");
+      toast.success(result.alreadyDeleted ? "Already deleted" : "Document deleted");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not delete draft");
+      toast.error(err instanceof Error ? err.message : "Could not delete document");
     } finally {
       setBusyId(null);
     }
@@ -380,7 +381,8 @@ function DraftsList() {
 
   if (!items) return <Loading />;
   const counts = new Map<string, number>();
-  for (const d of items) counts.set(folderOf(d.folderId), (counts.get(folderOf(d.folderId)) ?? 0) + 1);
+  for (const d of items)
+    counts.set(folderOf(d.folderId), (counts.get(folderOf(d.folderId)) ?? 0) + 1);
   const shown = items.filter((d) => folders.inView(d.folderId));
   return (
     <div className="space-y-3">
@@ -409,9 +411,8 @@ function DraftsList() {
             <div className="min-w-0 flex-1">
               <p className="truncate text-[13px] font-medium text-foreground">{d.title}</p>
               <p className="text-[11px] text-muted-foreground">
-                {d.kind === "pdf" ? "PDF" : "Document"} · {d.wordCount.toLocaleString()} words ·
+                Word document{d.version > 0 ? ` · revision ${d.version}` : " · legacy draft"} ·
                 edited {relative(d.updatedAt)}
-                {d.sourceName ? ` · from ${d.sourceName}` : ""}
               </p>
             </div>
             <MoveToMenu
@@ -430,7 +431,9 @@ function DraftsList() {
             </MoveToMenu>
             <button
               type="button"
-              onClick={() => void navigate({ to: "/drafts/$draftId", params: { draftId: d.draftId } })}
+              onClick={() =>
+                void navigate({ to: "/drafts/$draftId", params: { draftId: d.draftId } })
+              }
               className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
             >
               Open
@@ -494,7 +497,8 @@ function ChatsList() {
 
   if (items === null) return <Loading />;
   const counts = new Map<string, number>();
-  for (const c of items) counts.set(folderOf(c.folderId), (counts.get(folderOf(c.folderId)) ?? 0) + 1);
+  for (const c of items)
+    counts.set(folderOf(c.folderId), (counts.get(folderOf(c.folderId)) ?? 0) + 1);
   const shown = items.filter((c) => folders.inView(c.folderId));
 
   return (
@@ -515,71 +519,77 @@ function ChatsList() {
         <EmptyState label="Nothing in this folder yet. Use Move on a conversation to file it here." />
       ) : null}
       <div className="space-y-1">
-      {shown.map((c) => (
-        <div
-          key={c.id}
-          className="group flex items-center gap-1 rounded-lg px-1 hover:bg-muted/60"
-        >
-          <button
-            type="button"
-            onClick={() => openChat(c.id)}
-            className="min-w-0 flex-1 px-2 py-2.5 text-left"
-          >
-            <div className="truncate text-[13.5px] text-foreground">{c.title}</div>
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
-              {c.saved ? "Kept · " : ""}
-              {relative(c.updatedAt)}
-            </div>
-          </button>
-          <MoveToMenu
-            folders={folders.folders}
-            current={folderOf(c.folderId)}
-            onMove={(folderId) => void folders.move(c.id, folderId).then(refresh)}
+        {shown.map((c) => (
+          <div
+            key={c.id}
+            className="group flex items-center gap-1 rounded-lg px-1 hover:bg-muted/60"
           >
             <button
               type="button"
-              aria-label="Move to folder"
-              title="Move to folder"
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/50 transition-colors hover:bg-background hover:text-foreground"
+              onClick={() => openChat(c.id)}
+              className="min-w-0 flex-1 px-2 py-2.5 text-left"
             >
-              <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+              <div className="truncate text-[13.5px] text-foreground">{c.title}</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                {c.saved ? "Kept · " : ""}
+                {relative(c.updatedAt)}
+              </div>
             </button>
-          </MoveToMenu>
-          <button
-            type="button"
-            title={c.saved ? "Kept — won't expire" : "Keep (save past the 3-day default)"}
-            onClick={async () => {
-              if (c.saved) return;
-              await keepConversation(c.id);
-              setItems((prev) => prev?.map((x) => (x.id === c.id ? { ...x, saved: true } : x)) ?? prev);
-            }}
-            className={`grid h-8 w-8 shrink-0 place-items-center rounded-md transition-colors hover:bg-background hover:text-brand-navy ${
-              c.saved ? "text-brand-navy" : "text-muted-foreground/50"
-            }`}
-          >
-            {c.saved ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
-          </button>
-          <button
-            type="button"
-            title="Delete"
-            disabled={busyId === c.id}
-            onClick={async () => {
-              setBusyId(c.id);
-              const ok = await deleteConversation(c.id);
-              setBusyId(null);
-              if (ok) {
-                setItems((prev) => prev?.filter((x) => x.id !== c.id) ?? prev);
-                toast.success("Conversation deleted");
-              } else {
-                toast.error("Could not delete this conversation");
-              }
-            }}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/40 transition-colors hover:bg-background hover:text-destructive disabled:opacity-50"
-          >
-            {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-          </button>
-        </div>
-      ))}
+            <MoveToMenu
+              folders={folders.folders}
+              current={folderOf(c.folderId)}
+              onMove={(folderId) => void folders.move(c.id, folderId).then(refresh)}
+            >
+              <button
+                type="button"
+                aria-label="Move to folder"
+                title="Move to folder"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/50 transition-colors hover:bg-background hover:text-foreground"
+              >
+                <FolderInput className="h-4 w-4" strokeWidth={1.8} />
+              </button>
+            </MoveToMenu>
+            <button
+              type="button"
+              title={c.saved ? "Kept — won't expire" : "Keep (save past the 3-day default)"}
+              onClick={async () => {
+                if (c.saved) return;
+                await keepConversation(c.id);
+                setItems(
+                  (prev) => prev?.map((x) => (x.id === c.id ? { ...x, saved: true } : x)) ?? prev,
+                );
+              }}
+              className={`grid h-8 w-8 shrink-0 place-items-center rounded-md transition-colors hover:bg-background hover:text-brand-navy ${
+                c.saved ? "text-brand-navy" : "text-muted-foreground/50"
+              }`}
+            >
+              {c.saved ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+            </button>
+            <button
+              type="button"
+              title="Delete"
+              disabled={busyId === c.id}
+              onClick={async () => {
+                setBusyId(c.id);
+                const ok = await deleteConversation(c.id);
+                setBusyId(null);
+                if (ok) {
+                  setItems((prev) => prev?.filter((x) => x.id !== c.id) ?? prev);
+                  toast.success("Conversation deleted");
+                } else {
+                  toast.error("Could not delete this conversation");
+                }
+              }}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground/40 transition-colors hover:bg-background hover:text-destructive disabled:opacity-50"
+            >
+              {busyId === c.id ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+            </button>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -605,20 +615,23 @@ function ItemsList({ kind }: { kind: ItemKind }) {
     void refresh();
   }, [refresh]);
 
-  const view = useCallback(async (id: string) => {
-    if (openId === id) {
-      setOpenId(null);
-      return;
-    }
-    setOpenId(id);
-    setLoadingContent(true);
-    try {
-      const full = await getLibraryItemFn({ data: { itemId: id } });
-      setContent(full?.content ?? "");
-    } finally {
-      setLoadingContent(false);
-    }
-  }, [openId]);
+  const view = useCallback(
+    async (id: string) => {
+      if (openId === id) {
+        setOpenId(null);
+        return;
+      }
+      setOpenId(id);
+      setLoadingContent(true);
+      try {
+        const full = await getLibraryItemFn({ data: { itemId: id } });
+        setContent(full?.content ?? "");
+      } finally {
+        setLoadingContent(false);
+      }
+    },
+    [openId],
+  );
 
   const download = useCallback(async (id: string) => {
     setBusyId(id);
@@ -786,7 +799,9 @@ function ItemsList({ kind }: { kind: ItemKind }) {
                       if (openId === it.itemId) setOpenId(null);
                       toast.success(isFile ? "File deleted" : "Deleted");
                     } catch (err) {
-                      toast.error(err instanceof Error ? err.message : "Could not delete this item");
+                      toast.error(
+                        err instanceof Error ? err.message : "Could not delete this item",
+                      );
                     } finally {
                       setBusyId(null);
                     }

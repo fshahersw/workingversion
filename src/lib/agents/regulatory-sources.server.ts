@@ -10,12 +10,17 @@
 
 const OPENFDA_KEY = process.env["OPENFDA_API_KEY"];
 
-async function getJson(url: string, signal?: AbortSignal, timeoutMs = 20_000): Promise<Record<string, unknown>> {
+async function getJson(
+  url: string,
+  signal?: AbortSignal,
+  timeoutMs = 20_000,
+  extraHeaders: Record<string, string> = {},
+): Promise<Record<string, unknown>> {
   const c = new AbortController();
   const timer = setTimeout(() => c.abort(), timeoutMs);
   if (signal) signal.addEventListener("abort", () => c.abort());
   try {
-    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: c.signal });
+    const res = await fetch(url, { headers: { Accept: "application/json", ...extraHeaders }, signal: c.signal });
     const text = await res.text();
     let json: unknown = null;
     try {
@@ -50,6 +55,7 @@ const s = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : 
 const arr = (v: unknown): Record<string, unknown>[] =>
   Array.isArray(v) ? (v as Record<string, unknown>[]) : [];
 const firstStr = (v: unknown): string => (Array.isArray(v) ? s(v[0]) : s(v));
+const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => s(x)).filter(Boolean) : []);
 
 // --- openFDA ----------------------------------------------------------------
 
@@ -167,6 +173,93 @@ export async function ecfrSearch(
       heading: s(r["hierarchy_headings"] && headings["section"]) || s(r["label"]) || hierarchy || "CFR section",
       excerpt: s(r["full_text_excerpt"]).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 300),
       hierarchy,
+    };
+  });
+}
+
+// --- SEC EDGAR (full-text search of public-company filings) -----------------
+// EDGAR requires a declaring User-Agent (SEC access policy). Override the
+// default identity via SEC_USER_AGENT.
+
+const SEC_USER_AGENT =
+  process.env["SEC_USER_AGENT"] || "SeegerWeiss-LitAI/1.0 (litigation research; contact: legal-tech@seegerweiss.com)";
+
+export type SecHit = { title: string; company: string; form: string; date: string; url: string };
+
+/** Full-text search of SEC EDGAR filings (efts.sec.gov). `forms` is an optional
+ *  form-type filter (e.g. "10-K"); `after` an optional YYYY-MM-DD lower bound. */
+export async function secSearch(
+  query: string,
+  opts?: { forms?: string; after?: string; limit?: number; signal?: AbortSignal },
+): Promise<SecHit[]> {
+  const params = qs({ q: `"${query}"`, forms: opts?.forms, startdt: opts?.after });
+  const data = await getJson(
+    `https://efts.sec.gov/LATEST/search-index?${params}`,
+    opts?.signal,
+    20_000,
+    { "User-Agent": SEC_USER_AGENT },
+  );
+  const hits = arr(((data["hits"] ?? {}) as Record<string, unknown>)["hits"]);
+  const limit = Math.max(1, Math.min(opts?.limit ?? 8, 15));
+  return hits.slice(0, limit).map((h) => {
+    const src = (h["_source"] ?? {}) as Record<string, unknown>;
+    const id = s(h["_id"]); // "accession:filename"
+    const [accession, file] = id.split(":");
+    const cikRaw = strArr(src["ciks"])[0] ?? "";
+    const cik = cikRaw ? String(Number(cikRaw)) : ""; // Archives path drops leading zeros
+    const company = strArr(src["display_names"])[0] ?? "";
+    const form = s(src["root_form"]) || s(src["file_type"]);
+    const date = s(src["file_date"]);
+    const accNo = (accession ?? "").replace(/-/g, "");
+    const url =
+      cik && accNo && file
+        ? `https://www.sec.gov/Archives/edgar/data/${cik}/${accNo}/${file}`
+        : `https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent(query)}`;
+    return { title: `${form || "Filing"} — ${company || "SEC filer"}`, company, form, date, url };
+  });
+}
+
+// --- ClinicalTrials.gov (NIH trial registry, API v2) ------------------------
+
+export type ClinicalTrialHit = {
+  nctId: string;
+  title: string;
+  status: string;
+  phase: string;
+  conditions: string;
+  sponsor: string;
+  date: string;
+  url: string;
+};
+
+export async function clinicalTrialsSearch(
+  query: string,
+  limit = 5,
+  opts?: { signal?: AbortSignal },
+): Promise<ClinicalTrialHit[]> {
+  const data = await getJson(
+    `https://clinicaltrials.gov/api/v2/studies?${qs({ "query.term": query, pageSize: Math.max(1, Math.min(limit, 20)), countTotal: "false" })}`,
+    opts?.signal,
+  );
+  return arr(data["studies"]).map((st) => {
+    const ps = (st["protocolSection"] ?? {}) as Record<string, unknown>;
+    const idm = (ps["identificationModule"] ?? {}) as Record<string, unknown>;
+    const stm = (ps["statusModule"] ?? {}) as Record<string, unknown>;
+    const dm = (ps["designModule"] ?? {}) as Record<string, unknown>;
+    const cm = (ps["conditionsModule"] ?? {}) as Record<string, unknown>;
+    const sm = (ps["sponsorCollaboratorsModule"] ?? {}) as Record<string, unknown>;
+    const start = (stm["startDateStruct"] ?? {}) as Record<string, unknown>;
+    const lead = (sm["leadSponsor"] ?? {}) as Record<string, unknown>;
+    const nctId = s(idm["nctId"]);
+    return {
+      nctId,
+      title: s(idm["briefTitle"]) || s(idm["officialTitle"]) || nctId,
+      status: s(stm["overallStatus"]),
+      phase: strArr(dm["phases"]).join(", "),
+      conditions: strArr(cm["conditions"]).slice(0, 5).join(", "),
+      sponsor: s(lead["name"]),
+      date: s(start["date"]),
+      url: nctId ? `https://clinicaltrials.gov/study/${nctId}` : "https://clinicaltrials.gov",
     };
   });
 }

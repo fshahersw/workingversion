@@ -1,0 +1,1 @@
+{"CORSRules":[{"AllowedHeaders":["*"],"AllowedMethods":["PUT","GET","HEAD"],"AllowedOrigins":["http://localhost:8080","https://testing.seegerweiss.com"],"ExposeHeaders":["ETag"],"MaxAgeSeconds":3000}]}

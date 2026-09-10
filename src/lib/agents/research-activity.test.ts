@@ -23,7 +23,7 @@ const rounds: Round[] = [
         focus: "controlling law",
         status: "done",
         tools: [
-          { id: "a", tool: "search_case_law", hits: 4 },
+          { id: "a", tool: "web_search", hits: 4 },
           { id: "b", tool: "fetch_page", hits: 1 },
         ],
       },

@@ -514,7 +514,7 @@ export async function fetchPage(
           text: "",
           links: [],
           truncated: false,
-          note: "This is a PDF. For a court filing, read it via CourtListener RECAP (recap_read) for extracted text; general PDFs are not yet text-extracted here.",
+          note: "This is a PDF. For a court filing, read its text via db_read_filing (DocketBird); general PDFs are not yet text-extracted here.",
         };
       }
 

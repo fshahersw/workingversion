@@ -1,7 +1,7 @@
 // Exercises the refactored research search module (agentcore-search.server.ts)
 // end to end: category key -> IAM gateway general___WebSearch -> parsed results,
 // SigV4 via the default credential chain (no static SEARCH_AWS_* keys).
-//   AWS_PROFILE=AdministratorAccess-475976462949 AWS_REGION=us-east-1 bun run scripts/test-research-search.ts
+//   AWS_PROFILE=bedrock-sso-session AWS_REGION=us-east-1 bun run scripts/test-research-search.ts
 import { agentCoreSearch, agentCoreConfigured } from "../src/lib/agents/agentcore-search.server";
 
 delete process.env["AWS_BEARER_TOKEN_BEDROCK"];
@@ -9,8 +9,10 @@ delete process.env["SEARCH_AWS_ACCESS_KEY_ID"];
 delete process.env["SEARCH_AWS_SECRET_ACCESS_KEY"];
 
 const probes: [Parameters<typeof agentCoreSearch>[0], string][] = [
-  ["case_law", "AFFF MDL 2873 District of South Carolina recent order"],
-  ["scientific_research", "PFAS exposure kidney cancer epidemiology study"],
+  ["federal_case_law", "AFFF MDL 2873 District of South Carolina recent order"],
+  ["state_case_law", "Roundup JCCP California coordinated proceeding bellwether trial"],
+  ["scientific_medical", "PFAS exposure kidney cancer epidemiology study"],
+  ["sec_securities", "Bayer glyphosate litigation reserve contingency"],
 ];
 
 async function main() {

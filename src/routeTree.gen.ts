@@ -16,12 +16,12 @@ import { Route as AuthLogoutRouteImport } from './routes/auth.logout'
 import { Route as AuthLoginRouteImport } from './routes/auth.login'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
 import { Route as ApiUploadRouteImport } from './routes/api/upload'
+import { Route as ApiTranscribeRouteImport } from './routes/api/transcribe'
 import { Route as ApiTracesRouteImport } from './routes/api/traces'
 import { Route as ApiSummarizeRouteImport } from './routes/api/summarize'
 import { Route as ApiQuickAskRouteImport } from './routes/api/quick-ask'
 import { Route as ApiOrchestrateRouteImport } from './routes/api/orchestrate'
 import { Route as ApiFollowupsRouteImport } from './routes/api/followups'
-import { Route as ApiDraftRouteImport } from './routes/api/draft'
 import { Route as AuthenticatedSummarizeRouteImport } from './routes/_authenticated/summarize'
 import { Route as AuthenticatedResearchRouteImport } from './routes/_authenticated/research'
 import { Route as AuthenticatedLibraryRouteImport } from './routes/_authenticated/library'
@@ -33,6 +33,8 @@ import { Route as AuthenticatedConversationsRouteImport } from './routes/_authen
 import { Route as AuthenticatedCalendarRouteImport } from './routes/_authenticated/calendar'
 import { Route as AuthenticatedMattersIndexRouteImport } from './routes/_authenticated/matters.index'
 import { Route as AuthenticatedDraftsIndexRouteImport } from './routes/_authenticated/drafts.index'
+import { Route as ApiWriterStreamRouteImport } from './routes/api/writer/stream'
+import { Route as ApiWriterDocsRouteImport } from './routes/api/writer/docs'
 import { Route as ApiReviewCellRouteImport } from './routes/api/review/cell'
 import { Route as ApiPileStructureRouteImport } from './routes/api/pile/structure'
 import { Route as ApiPileRerankRouteImport } from './routes/api/pile/rerank'
@@ -51,6 +53,8 @@ import { Route as ApiPublicIntelRunRouteImport } from './routes/api/public/intel
 import { Route as ApiPublicIngestIntelRouteImport } from './routes/api/public/ingest/intel'
 import { Route as ApiPublicIngestBatchesRouteImport } from './routes/api/public/ingest/batches'
 import { Route as ApiPublicCalendarSyncRouteImport } from './routes/api/public/calendar/sync'
+import { Route as ApiWriterDocsDraftIdRecoveryRouteImport } from './routes/api/writer/docs.$draftId.recovery'
+import { Route as ApiWriterDocsDraftIdContentRouteImport } from './routes/api/writer/docs.$draftId.content'
 import { Route as ApiPublicIngestBatchesIdRouteImport } from './routes/api/public/ingest/batches.$id'
 import { Route as ApiPublicIngestBatchesIdValidateRouteImport } from './routes/api/public/ingest/batches.$id.validate'
 import { Route as ApiPublicIngestBatchesIdCommitRouteImport } from './routes/api/public/ingest/batches.$id.commit'
@@ -89,6 +93,11 @@ const ApiUploadRoute = ApiUploadRouteImport.update({
   path: '/api/upload',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiTranscribeRoute = ApiTranscribeRouteImport.update({
+  id: '/api/transcribe',
+  path: '/api/transcribe',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiTracesRoute = ApiTracesRouteImport.update({
   id: '/api/traces',
   path: '/api/traces',
@@ -112,11 +121,6 @@ const ApiOrchestrateRoute = ApiOrchestrateRouteImport.update({
 const ApiFollowupsRoute = ApiFollowupsRouteImport.update({
   id: '/api/followups',
   path: '/api/followups',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiDraftRoute = ApiDraftRouteImport.update({
-  id: '/api/draft',
-  path: '/api/draft',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedSummarizeRoute = AuthenticatedSummarizeRouteImport.update({
@@ -177,6 +181,16 @@ const AuthenticatedDraftsIndexRoute =
     path: '/drafts/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const ApiWriterStreamRoute = ApiWriterStreamRouteImport.update({
+  id: '/api/writer/stream',
+  path: '/api/writer/stream',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiWriterDocsRoute = ApiWriterDocsRouteImport.update({
+  id: '/api/writer/docs',
+  path: '/api/writer/docs',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiReviewCellRoute = ApiReviewCellRouteImport.update({
   id: '/api/review/cell',
   path: '/api/review/cell',
@@ -271,6 +285,18 @@ const ApiPublicCalendarSyncRoute = ApiPublicCalendarSyncRouteImport.update({
   path: '/api/public/calendar/sync',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiWriterDocsDraftIdRecoveryRoute =
+  ApiWriterDocsDraftIdRecoveryRouteImport.update({
+    id: '/$draftId/recovery',
+    path: '/$draftId/recovery',
+    getParentRoute: () => ApiWriterDocsRoute,
+  } as any)
+const ApiWriterDocsDraftIdContentRoute =
+  ApiWriterDocsDraftIdContentRouteImport.update({
+    id: '/$draftId/content',
+    path: '/$draftId/content',
+    getParentRoute: () => ApiWriterDocsRoute,
+  } as any)
 const ApiPublicIngestBatchesIdRoute =
   ApiPublicIngestBatchesIdRouteImport.update({
     id: '/$id',
@@ -302,12 +328,12 @@ export interface FileRoutesByFullPath {
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
-  '/api/draft': typeof ApiDraftRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
   '/api/traces': typeof ApiTracesRoute
+  '/api/transcribe': typeof ApiTranscribeRoute
   '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
@@ -324,6 +350,8 @@ export interface FileRoutesByFullPath {
   '/api/pile/rerank': typeof ApiPileRerankRoute
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
+  '/api/writer/docs': typeof ApiWriterDocsRouteWithChildren
+  '/api/writer/stream': typeof ApiWriterStreamRoute
   '/drafts/': typeof AuthenticatedDraftsIndexRoute
   '/matters/': typeof AuthenticatedMattersIndexRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
@@ -333,6 +361,8 @@ export interface FileRoutesByFullPath {
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
+  '/api/writer/docs/$draftId/content': typeof ApiWriterDocsDraftIdContentRoute
+  '/api/writer/docs/$draftId/recovery': typeof ApiWriterDocsDraftIdRecoveryRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
 }
@@ -347,12 +377,12 @@ export interface FileRoutesByTo {
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
-  '/api/draft': typeof ApiDraftRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
   '/api/traces': typeof ApiTracesRoute
+  '/api/transcribe': typeof ApiTranscribeRoute
   '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
@@ -370,6 +400,8 @@ export interface FileRoutesByTo {
   '/api/pile/rerank': typeof ApiPileRerankRoute
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
+  '/api/writer/docs': typeof ApiWriterDocsRouteWithChildren
+  '/api/writer/stream': typeof ApiWriterStreamRoute
   '/drafts': typeof AuthenticatedDraftsIndexRoute
   '/matters': typeof AuthenticatedMattersIndexRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
@@ -379,6 +411,8 @@ export interface FileRoutesByTo {
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
+  '/api/writer/docs/$draftId/content': typeof ApiWriterDocsDraftIdContentRoute
+  '/api/writer/docs/$draftId/recovery': typeof ApiWriterDocsDraftIdRecoveryRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
 }
@@ -395,12 +429,12 @@ export interface FileRoutesById {
   '/_authenticated/library': typeof AuthenticatedLibraryRoute
   '/_authenticated/research': typeof AuthenticatedResearchRoute
   '/_authenticated/summarize': typeof AuthenticatedSummarizeRoute
-  '/api/draft': typeof ApiDraftRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
   '/api/summarize': typeof ApiSummarizeRoute
   '/api/traces': typeof ApiTracesRoute
+  '/api/transcribe': typeof ApiTranscribeRoute
   '/api/upload': typeof ApiUploadRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
@@ -418,6 +452,8 @@ export interface FileRoutesById {
   '/api/pile/rerank': typeof ApiPileRerankRoute
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
+  '/api/writer/docs': typeof ApiWriterDocsRouteWithChildren
+  '/api/writer/stream': typeof ApiWriterStreamRoute
   '/_authenticated/drafts/': typeof AuthenticatedDraftsIndexRoute
   '/_authenticated/matters/': typeof AuthenticatedMattersIndexRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
@@ -427,6 +463,8 @@ export interface FileRoutesById {
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
   '/api/public/ingest/batches/$id': typeof ApiPublicIngestBatchesIdRouteWithChildren
+  '/api/writer/docs/$draftId/content': typeof ApiWriterDocsDraftIdContentRoute
+  '/api/writer/docs/$draftId/recovery': typeof ApiWriterDocsDraftIdRecoveryRoute
   '/api/public/ingest/batches/$id/commit': typeof ApiPublicIngestBatchesIdCommitRoute
   '/api/public/ingest/batches/$id/validate': typeof ApiPublicIngestBatchesIdValidateRoute
 }
@@ -444,12 +482,12 @@ export interface FileRouteTypes {
     | '/library'
     | '/research'
     | '/summarize'
-    | '/api/draft'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
     | '/api/traces'
+    | '/api/transcribe'
     | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
@@ -466,6 +504,8 @@ export interface FileRouteTypes {
     | '/api/pile/rerank'
     | '/api/pile/structure'
     | '/api/review/cell'
+    | '/api/writer/docs'
+    | '/api/writer/stream'
     | '/drafts/'
     | '/matters/'
     | '/api/public/calendar/sync'
@@ -475,6 +515,8 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
     | '/api/public/ingest/batches/$id'
+    | '/api/writer/docs/$draftId/content'
+    | '/api/writer/docs/$draftId/recovery'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
   fileRoutesByTo: FileRoutesByTo
@@ -489,12 +531,12 @@ export interface FileRouteTypes {
     | '/library'
     | '/research'
     | '/summarize'
-    | '/api/draft'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
     | '/api/traces'
+    | '/api/transcribe'
     | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
@@ -512,6 +554,8 @@ export interface FileRouteTypes {
     | '/api/pile/rerank'
     | '/api/pile/structure'
     | '/api/review/cell'
+    | '/api/writer/docs'
+    | '/api/writer/stream'
     | '/drafts'
     | '/matters'
     | '/api/public/calendar/sync'
@@ -521,6 +565,8 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
     | '/api/public/ingest/batches/$id'
+    | '/api/writer/docs/$draftId/content'
+    | '/api/writer/docs/$draftId/recovery'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
   id:
@@ -536,12 +582,12 @@ export interface FileRouteTypes {
     | '/_authenticated/library'
     | '/_authenticated/research'
     | '/_authenticated/summarize'
-    | '/api/draft'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
     | '/api/summarize'
     | '/api/traces'
+    | '/api/transcribe'
     | '/api/upload'
     | '/auth/callback'
     | '/auth/login'
@@ -559,6 +605,8 @@ export interface FileRouteTypes {
     | '/api/pile/rerank'
     | '/api/pile/structure'
     | '/api/review/cell'
+    | '/api/writer/docs'
+    | '/api/writer/stream'
     | '/_authenticated/drafts/'
     | '/_authenticated/matters/'
     | '/api/public/calendar/sync'
@@ -568,6 +616,8 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
     | '/api/public/ingest/batches/$id'
+    | '/api/writer/docs/$draftId/content'
+    | '/api/writer/docs/$draftId/recovery'
     | '/api/public/ingest/batches/$id/commit'
     | '/api/public/ingest/batches/$id/validate'
   fileRoutesById: FileRoutesById
@@ -575,12 +625,12 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRouteWithChildren
-  ApiDraftRoute: typeof ApiDraftRoute
   ApiFollowupsRoute: typeof ApiFollowupsRoute
   ApiOrchestrateRoute: typeof ApiOrchestrateRoute
   ApiQuickAskRoute: typeof ApiQuickAskRoute
   ApiSummarizeRoute: typeof ApiSummarizeRoute
   ApiTracesRoute: typeof ApiTracesRoute
+  ApiTranscribeRoute: typeof ApiTranscribeRoute
   ApiUploadRoute: typeof ApiUploadRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
   ApiKbAskRoute: typeof ApiKbAskRoute
@@ -592,6 +642,8 @@ export interface RootRouteChildren {
   ApiPileRerankRoute: typeof ApiPileRerankRoute
   ApiPileStructureRoute: typeof ApiPileStructureRoute
   ApiReviewCellRoute: typeof ApiReviewCellRoute
+  ApiWriterDocsRoute: typeof ApiWriterDocsRouteWithChildren
+  ApiWriterStreamRoute: typeof ApiWriterStreamRoute
   ApiPublicCalendarSyncRoute: typeof ApiPublicCalendarSyncRoute
   ApiPublicIngestBatchesRoute: typeof ApiPublicIngestBatchesRouteWithChildren
   ApiPublicIngestIntelRoute: typeof ApiPublicIngestIntelRoute
@@ -651,6 +703,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiUploadRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/transcribe': {
+      id: '/api/transcribe'
+      path: '/api/transcribe'
+      fullPath: '/api/transcribe'
+      preLoaderRoute: typeof ApiTranscribeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/traces': {
       id: '/api/traces'
       path: '/api/traces'
@@ -684,13 +743,6 @@ declare module '@tanstack/react-router' {
       path: '/api/followups'
       fullPath: '/api/followups'
       preLoaderRoute: typeof ApiFollowupsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/draft': {
-      id: '/api/draft'
-      path: '/api/draft'
-      fullPath: '/api/draft'
-      preLoaderRoute: typeof ApiDraftRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/summarize': {
@@ -769,6 +821,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/drafts/'
       preLoaderRoute: typeof AuthenticatedDraftsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/api/writer/stream': {
+      id: '/api/writer/stream'
+      path: '/api/writer/stream'
+      fullPath: '/api/writer/stream'
+      preLoaderRoute: typeof ApiWriterStreamRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/writer/docs': {
+      id: '/api/writer/docs'
+      path: '/api/writer/docs'
+      fullPath: '/api/writer/docs'
+      preLoaderRoute: typeof ApiWriterDocsRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/api/review/cell': {
       id: '/api/review/cell'
@@ -896,6 +962,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCalendarSyncRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/writer/docs/$draftId/recovery': {
+      id: '/api/writer/docs/$draftId/recovery'
+      path: '/$draftId/recovery'
+      fullPath: '/api/writer/docs/$draftId/recovery'
+      preLoaderRoute: typeof ApiWriterDocsDraftIdRecoveryRouteImport
+      parentRoute: typeof ApiWriterDocsRoute
+    }
+    '/api/writer/docs/$draftId/content': {
+      id: '/api/writer/docs/$draftId/content'
+      path: '/$draftId/content'
+      fullPath: '/api/writer/docs/$draftId/content'
+      preLoaderRoute: typeof ApiWriterDocsDraftIdContentRouteImport
+      parentRoute: typeof ApiWriterDocsRoute
+    }
     '/api/public/ingest/batches/$id': {
       id: '/api/public/ingest/batches/$id'
       path: '/$id'
@@ -971,6 +1051,20 @@ const AuthRouteChildren: AuthRouteChildren = {
 
 const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)
 
+interface ApiWriterDocsRouteChildren {
+  ApiWriterDocsDraftIdContentRoute: typeof ApiWriterDocsDraftIdContentRoute
+  ApiWriterDocsDraftIdRecoveryRoute: typeof ApiWriterDocsDraftIdRecoveryRoute
+}
+
+const ApiWriterDocsRouteChildren: ApiWriterDocsRouteChildren = {
+  ApiWriterDocsDraftIdContentRoute: ApiWriterDocsDraftIdContentRoute,
+  ApiWriterDocsDraftIdRecoveryRoute: ApiWriterDocsDraftIdRecoveryRoute,
+}
+
+const ApiWriterDocsRouteWithChildren = ApiWriterDocsRoute._addFileChildren(
+  ApiWriterDocsRouteChildren,
+)
+
 interface ApiPublicIngestBatchesIdRouteChildren {
   ApiPublicIngestBatchesIdCommitRoute: typeof ApiPublicIngestBatchesIdCommitRoute
   ApiPublicIngestBatchesIdValidateRoute: typeof ApiPublicIngestBatchesIdValidateRoute
@@ -1005,12 +1099,12 @@ const ApiPublicIngestBatchesRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRouteWithChildren,
-  ApiDraftRoute: ApiDraftRoute,
   ApiFollowupsRoute: ApiFollowupsRoute,
   ApiOrchestrateRoute: ApiOrchestrateRoute,
   ApiQuickAskRoute: ApiQuickAskRoute,
   ApiSummarizeRoute: ApiSummarizeRoute,
   ApiTracesRoute: ApiTracesRoute,
+  ApiTranscribeRoute: ApiTranscribeRoute,
   ApiUploadRoute: ApiUploadRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
   ApiKbAskRoute: ApiKbAskRoute,
@@ -1022,6 +1116,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPileRerankRoute: ApiPileRerankRoute,
   ApiPileStructureRoute: ApiPileStructureRoute,
   ApiReviewCellRoute: ApiReviewCellRoute,
+  ApiWriterDocsRoute: ApiWriterDocsRouteWithChildren,
+  ApiWriterStreamRoute: ApiWriterStreamRoute,
   ApiPublicCalendarSyncRoute: ApiPublicCalendarSyncRoute,
   ApiPublicIngestBatchesRoute: ApiPublicIngestBatchesRouteWithChildren,
   ApiPublicIngestIntelRoute: ApiPublicIngestIntelRoute,

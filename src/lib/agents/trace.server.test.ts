@@ -13,7 +13,7 @@ test("collector is enabled outside production", () => {
 test("reconstructs a completed think run from agentLog events", () => {
   const run = `test-run-${Math.random().toString(36).slice(2)}`;
   recordTrace("run_start", { run, engine: "single_agent", mode: "think", q: "How do Lone Pine orders work?" }, "log");
-  recordTrace("agent_step", { run, step: 1, ms: 3200, stop: "tool_use", in: 14814, out: 220, cache_read: 0, cache_write: 14814, calls: "search_authorities" }, "log");
+  recordTrace("agent_step", { run, step: 1, ms: 3200, stop: "tool_use", in: 14814, out: 220, cache_read: 0, cache_write: 14814, calls: "web_search" }, "log");
   recordTrace("agent_step", { run, step: 2, ms: 4100, stop: "end_turn", in: 2100, out: 1800, cache_read: 14814, cache_write: 2100, calls: "-" }, "log");
   recordTrace("coverage_check", { run, consulted: true, covered: false, missing: 2, sources: 16 }, "log");
   recordTrace("research_loop", { run, ms: 60000, mode: "think", steps: 4, tool_calls: 5, hits: 22, sources: 22, answer_chars: 6000, gate_requeried: true, tokens_in: 61000, tokens_out: 4200, tokens_total: 65200, cache_read: 90000, cache_write: 20000 }, "log");

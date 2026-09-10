@@ -15,6 +15,7 @@ import {
   BEDROCK_MAX_RETRIES,
 } from "./bedrock-sign.server";
 import type { BedrockToolDef, BedrockToolCall, BedrockMsg } from "./bedrock.server";
+import { isClaudeModel } from "./research-models";
 
 const REGION = process.env["BEDROCK_REGION"] ?? "us-east-1";
 
@@ -103,13 +104,37 @@ function withMessageCache(messages: BedrockMsg[]): unknown[] {
   return out;
 }
 
-/** Stream ONE ConverseStream turn: emit text deltas live, accumulate tool_use. */
-async function streamOneTurn(
+/** Drop reasoningContent blocks from assistant turns. Used only when the writer
+ *  (synthesis) model differs from the loop model: a reasoning block signed by the
+ *  loop model is invalid for a different writer, so the writer sees just text,
+ *  toolUse, and the toolResult turns. */
+function stripReasoningBlocks(messages: BedrockMsg[]): BedrockMsg[] {
+  return messages.map((m) => {
+    if (m.role !== "assistant" || !Array.isArray(m.content)) return m;
+    const content = (m.content as unknown[]).filter(
+      (b) => !(b && typeof b === "object" && "reasoningContent" in (b as Record<string, unknown>)),
+    );
+    return { role: m.role, content } as BedrockMsg;
+  });
+}
+
+/** Some loop models (Haiku 4.5, Nemotron) emit chain-of-thought as literal
+ *  <think>...</think> in the TEXT channel instead of proper reasoningContent, so
+ *  the tags leak into the narration/answer UI. Strip whole blocks AND any orphan
+ *  open/close tag (streaming can split a block across turns, leaving a lone tag). */
+function stripThinkTags(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<\/?think>/gi, "");
+}
+
+/** Stream ONE ConverseStream turn: emit text deltas live, accumulate tool_use.
+ *  `tools` is optional — omit it for a tool-less turn (e.g. the frontier writer),
+ *  in which case no toolConfig is sent. */
+export async function streamOneTurn(
   req: {
     model: string;
     system: string;
     messages: BedrockMsg[];
-    tools: BedrockToolDef[];
+    tools?: BedrockToolDef[];
     maxTokens: number;
     cache?: boolean;
     temperature?: number;
@@ -128,15 +153,21 @@ async function streamOneTurn(
       maxTokens: req.maxTokens,
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     },
-    toolConfig: {
-      tools: [
-        ...req.tools.map((t) => ({
-          toolSpec: { name: t.name, description: t.description, inputSchema: { json: t.input_schema } },
-        })),
-        ...(req.cache ? [{ cachePoint: { type: "default" } }] : []),
-      ],
-      toolChoice: { auto: {} },
-    },
+    // Tool-less turns (the frontier writer) send no toolConfig at all — Bedrock
+    // rejects an empty tools array.
+    ...(req.tools && req.tools.length
+      ? {
+          toolConfig: {
+            tools: [
+              ...req.tools.map((t) => ({
+                toolSpec: { name: t.name, description: t.description, inputSchema: { json: t.input_schema } },
+              })),
+              ...(req.cache ? [{ cachePoint: { type: "default" } }] : []),
+            ],
+            toolChoice: { auto: {} },
+          },
+        }
+      : {}),
     // Control Sonnet 5's always-on adaptive thinking. effort goes in output_config
     // (NOT inside thinking — Bedrock rejects thinking.adaptive.effort). Unset =
     // Bedrock default (~high). See scripts/probe-thinking.ts for the resolved shape.
@@ -324,6 +355,13 @@ export async function streamConverseToolLoop(
     /** Instruction appended as the final user turn to trigger the written answer. */
     synthesisUser: string;
     synthesisMaxTokens?: number;
+    /** Optional writer model for the final synthesis turn (defaults to `model`).
+     *  Lets a fast tool-caller loop hand the final prose to a stronger writer. */
+    synthesisModel?: string;
+    /** Optional system prompt for the final synthesis turn (defaults to `system`).
+     *  Lets the tool-driver loop and the writer run on SEPARATE prompts: a lean
+     *  gather-only prompt drives the loop, a writer prompt composes the answer. */
+    synthesisSystem?: string;
     cache?: boolean;
     temperature?: number;
     signal?: AbortSignal;
@@ -441,9 +479,11 @@ export async function streamConverseToolLoop(
         messages,
         tools: opts.tools,
         maxTokens: opts.maxTokens,
-        ...(opts.cache ? { cache: true } : {}),
+        // cache + adaptive-thinking effort are Claude-only; a non-Claude loop
+        // model (e.g. Nemotron) 400s on cachePoint / thinking.adaptive.
+        ...(opts.cache && isClaudeModel(opts.model) ? { cache: true } : {}),
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-        ...(opts.researchEffort ? { effort: opts.researchEffort } : {}),
+        ...(opts.researchEffort && isClaudeModel(opts.model) ? { effort: opts.researchEffort } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
       },
       (delta) => {
@@ -501,7 +541,7 @@ export async function streamConverseToolLoop(
           continue;
         }
       }
-      const draft = turnText.trim();
+      const draft = stripThinkTags(turnText).trim();
       // First turn, no tools, complete reply, gate satisfied: this IS the answer.
       if (
         opts.directAnswer &&
@@ -532,7 +572,7 @@ export async function streamConverseToolLoop(
     }
 
     // Confirmed research turn: surface its short narration as one reasoning line.
-    const narration = turnText.trim();
+    const narration = stripThinkTags(turnText).trim();
     if (narration) handlers.onText?.((steps > 0 ? "\n" : "") + narration);
 
     // Replay the assistant turn's content blocks VERBATIM (text, toolUse, and any
@@ -586,22 +626,29 @@ export async function streamConverseToolLoop(
   }
 
   // --- Final synthesis turn: no new tools, stream the answer -----------------
+  // FAST hands the write to a stronger writer model (Sonnet) while the loop ran
+  // on a quick caller (Nemotron), and gives that writer its OWN system prompt
+  // (synthesisSystem) so the loop prompt can stay gather-only. When the writer
+  // differs from the loop model, strip loop-model-signed reasoning blocks so the
+  // writer accepts the history.
   handlers.onSynthesisStart?.();
   messages.push({ role: "user", content: [{ text: opts.synthesisUser }] } as BedrockMsg);
+  const writer = opts.synthesisModel ?? opts.model;
+  const synthMessages = writer === opts.model ? messages : stripReasoningBlocks(messages);
   const synthStart = Date.now();
   const synth = await streamOneTurn(
     {
-      model: opts.model,
-      system: opts.system,
-      messages,
+      model: writer,
+      system: opts.synthesisSystem ?? opts.system,
+      messages: synthMessages,
       tools: opts.tools, // kept on the wire (Bedrock requires it with toolUse history)
       // Floor the synthesis budget: Sonnet 5's always-on adaptive thinking shares
       // maxTokens with the answer, so too small a budget yields an EMPTY answer
       // (thinking hits the cap before any text). See research-agent's synthesisMaxTokens.
       maxTokens: Math.max(opts.synthesisMaxTokens ?? 12_000, 8_000),
-      ...(opts.cache ? { cache: true } : {}),
+      ...(opts.cache && isClaudeModel(writer) ? { cache: true } : {}),
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      ...(opts.synthesisEffort ? { effort: opts.synthesisEffort } : {}),
+      ...(opts.synthesisEffort && isClaudeModel(writer) ? { effort: opts.synthesisEffort } : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
     },
     handlers.onAnswer ?? (() => {}),
