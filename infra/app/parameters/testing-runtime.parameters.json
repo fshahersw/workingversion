@@ -21,11 +21,11 @@
   },
   {
     "ParameterKey": "ArtifactObjectKey",
-    "ParameterValue": "releases/0b8cf55aa5826b2dcf0308ac1977a84629c0a1c1658be75164fa2559e2ca1f7d/app-runtime.zip"
+    "ParameterValue": "releases/d93cbf5385c328ae074ed2dae247d9d81abb1a26fc7f567833f268673a644e38/app-runtime.zip"
   },
   {
     "ParameterKey": "ArtifactObjectVersion",
-    "ParameterValue": "oYaq8bhpIR5o6nRhQ1ynIZEC50mXd6t8"
+    "ParameterValue": "uK1XYX3idEUxUm909MOYzQTvJKj5uA8t"
   },
   {
     "ParameterKey": "Architecture",
@@ -69,11 +69,11 @@
   },
   {
     "ParameterKey": "CognitoRedirectUri",
-    "ParameterValue": "https://testing.seegerweiss.com/auth/callback"
+    "ParameterValue": "https://d1f0twgeed7iq3.cloudfront.net/auth/callback"
   },
   {
     "ParameterKey": "CognitoLogoutUri",
-    "ParameterValue": "https://testing.seegerweiss.com/"
+    "ParameterValue": "https://d1f0twgeed7iq3.cloudfront.net/"
   },
   {
     "ParameterKey": "KbAccessPolicyArn",
@@ -141,11 +141,11 @@
   },
   {
     "ParameterKey": "AppAliasDomain",
-    "ParameterValue": "testing.seegerweiss.com"
+    "ParameterValue": ""
   },
   {
     "ParameterKey": "AcmCertificateArn",
-    "ParameterValue": "arn:aws:acm:us-east-1:475976462949:certificate/a6a6af35-de96-436d-b17e-3298929724fb"
+    "ParameterValue": ""
   },
   {
     "ParameterKey": "ApiDeploymentSlot",
