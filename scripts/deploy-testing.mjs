@@ -192,8 +192,38 @@ function assertCertIssued() {
   }
 }
 
-function applyStackUpdate() {
+/**
+ * CloudFormation accepts at most 51,200 bytes inline; the runtime template is
+ * larger. Upload it (KMS-encrypted, content-addressed) next to the release
+ * artifacts and hand CloudFormation the S3 URL instead.
+ */
+function uploadTemplate(params) {
+  const body = readFileSync(resolve(repoRoot, templatePath));
+  const sha256 = createHash("sha256").update(body).digest("hex").slice(0, 16);
+  const bucket = parameterValue(params, "ArtifactBucketName");
+  const key = `templates/app-runtime-${sha256}.cfn.yaml`;
+  aws([
+    "s3api",
+    "put-object",
+    "--bucket",
+    bucket,
+    "--key",
+    key,
+    "--body",
+    templatePath,
+    "--server-side-encryption",
+    "aws:kms",
+    "--ssekms-key-id",
+    parameterValue(params, "AppKmsKeyArn"),
+    "--output",
+    "json",
+  ]);
+  return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+}
+
+function applyStackUpdate(params) {
   const changeSetName = `litai-testing-${Date.now()}`;
+  const templateUrl = uploadTemplate(params);
   try {
     aws([
       "cloudformation",
@@ -204,8 +234,8 @@ function applyStackUpdate() {
       changeSetName,
       "--change-set-type",
       "UPDATE",
-      "--template-body",
-      `file://${templatePath}`,
+      "--template-url",
+      templateUrl,
       "--parameters",
       `file://infra/app/parameters/testing-runtime.parameters.json`,
       "--capabilities",
@@ -337,7 +367,7 @@ async function main() {
   }
 
   saveParams(params);
-  const updated = applyStackUpdate();
+  const updated = applyStackUpdate(params);
   if (updated) console.log(`Updated ${stackName}`);
   printLiveUrl();
 }

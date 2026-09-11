@@ -1,0 +1,24 @@
+[
+  { "ParameterKey": "NamePrefix", "ParameterValue": "litai" },
+  { "ParameterKey": "Environment", "ParameterValue": "testing" },
+  { "ParameterKey": "VpcId", "ParameterValue": "vpc-0e4fdf8f634d3c0b7" },
+  {
+    "ParameterKey": "PrivateSubnetIds",
+    "ParameterValue": "subnet-01a53ddb45fd94297,subnet-0db0543689528e0f2,subnet-02e2e972a5986ceda,subnet-0bef8d60279ce26e3"
+  },
+  {
+    "ParameterKey": "PublicSubnetIds",
+    "ParameterValue": "subnet-01a53ddb45fd94297,subnet-0db0543689528e0f2,subnet-02e2e972a5986ceda,subnet-0bef8d60279ce26e3"
+  },
+  { "ParameterKey": "AssignPublicIp", "ParameterValue": "ENABLED" },
+  { "ParameterKey": "AlbCertificateArn", "ParameterValue": "" },
+  { "ParameterKey": "CloudFrontPrefixListId", "ParameterValue": "pl-3b927c52" },
+  { "ParameterKey": "PlatformUrl", "ParameterValue": "https://d1f0twgeed7iq3.cloudfront.net" },
+  {
+    "ParameterKey": "ImageUri",
+    "ParameterValue": "475976462949.dkr.ecr.us-east-1.amazonaws.com/litai-testing-office-engine:v1"
+  },
+  { "ParameterKey": "DesiredCount", "ParameterValue": "1" },
+  { "ParameterKey": "TaskCpu", "ParameterValue": "2048" },
+  { "ParameterKey": "TaskMemory", "ParameterValue": "4096" }
+]

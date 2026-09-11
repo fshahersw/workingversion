@@ -38,25 +38,50 @@ Parameters:
   PublicSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: Subnets for the ALB. Public when CloudFront is the caller; private when fronted differently.
+  AssignPublicIp:
+    Type: String
+    Default: DISABLED
+    AllowedValues: [ENABLED, DISABLED]
+    Description: >
+      ENABLED when the task subnets have no NAT gateway (a default VPC): the
+      tasks need a public address for egress to S3 and the platform. Ingress is
+      still limited to the ALB by the task security group.
   AlbCertificateArn:
     Type: String
-    AllowedPattern: "^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/.+$"
-    Description: ACM certificate for the ALB HTTPS listener (the CloudFront origin domain).
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/.+$"
+    Description: >
+      ACM certificate for the ALB HTTPS listener (the CloudFront origin domain).
+      Leave empty to expose an HTTP listener on port 80 instead, reachable only
+      from CloudFront's origin-facing address ranges (CloudFrontPrefixListId)
+      and only with the origin key header; CloudFront then uses http-only to
+      this origin. Attach a certificate as soon as a validated domain exists.
+  CloudFrontPrefixListId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^pl-[0-9a-f]+$"
+    Description: >
+      The com.amazonaws.global.cloudfront.origin-facing managed prefix list in
+      this Region. Required when AlbCertificateArn is empty; when set together
+      with a certificate it also restricts 443 to CloudFront.
   AlbAllowedCidr:
     Type: String
     Default: 0.0.0.0/0
     Description: >
-      CIDR allowed to reach the ALB on 443. Keep 0.0.0.0/0 only when the listener
-      also requires the CloudFront origin header (see OriginKeyHeaderValue) or
-      when using the CloudFront managed prefix list in a follow-up change.
+      CIDR allowed to reach the ALB on 443 when no CloudFront prefix list is
+      given. Keep 0.0.0.0/0 only when the listener also requires the CloudFront
+      origin header (see OriginKeyHeaderValue).
   OriginKeyHeaderValue:
     Type: String
     NoEcho: true
-    Default: ""
+    MinLength: 16
+    MaxLength: 128
+    AllowedPattern: "^[A-Za-z0-9_-]+$"
     Description: >
-      Optional shared secret CloudFront adds as the X-Office-Origin-Key header.
-      When set, the listener returns 403 for requests without it, so the ALB
-      cannot be called directly around CloudFront and its WAF.
+      Shared secret CloudFront adds as the X-Office-Origin-Key header. The
+      listener returns 403 for requests without it, so the ALB cannot be called
+      directly around CloudFront and its WAF. Store the same value in the
+      platform's origin secret so the distribution can send it.
   PlatformUrl:
     Type: String
     AllowedPattern: "^https://[^/]+$"
@@ -95,6 +120,20 @@ Parameters:
 
 Conditions:
   HasOriginKey: !Not [!Equals [!Ref OriginKeyHeaderValue, ""]]
+  HasCertificate: !Not [!Equals [!Ref AlbCertificateArn, ""]]
+  NoCertificate: !Equals [!Ref AlbCertificateArn, ""]
+  HasPrefixList: !Not [!Equals [!Ref CloudFrontPrefixListId, ""]]
+  HttpsFromPrefixList: !And [!Condition HasCertificate, !Condition HasPrefixList]
+  HttpsFromCidr: !And [!Condition HasCertificate, !Not [!Condition HasPrefixList]]
+
+Rules:
+  HttpListenerNeedsPrefixList:
+    RuleCondition: !Equals [!Ref AlbCertificateArn, ""]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref CloudFrontPrefixListId, ""]]
+        AssertDescription: Without an ALB certificate, CloudFrontPrefixListId is required so the HTTP listener is reachable only from CloudFront.
+      - Assert: !Not [!Equals [!Ref OriginKeyHeaderValue, ""]]
+        AssertDescription: Without an ALB certificate, OriginKeyHeaderValue is required so only the platform distribution can use the HTTP listener.
 
 Resources:
   Cluster:
@@ -139,13 +178,41 @@ Resources:
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Office engine ALB
+      GroupDescription: Office engine ALB (CloudFront origin only)
       VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: !Ref AlbAllowedCidr
+
+  # Ingress rules are separate resources so each variant can be conditional:
+  # 443 from CloudFront (certificate + prefix list), 443 from a CIDR
+  # (certificate only), or 80 from CloudFront (no certificate).
+  AlbIngressHttpsFromCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HttpsFromPrefixList
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourcePrefixListId: !Ref CloudFrontPrefixListId
+
+  AlbIngressHttpsFromCidr:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HttpsFromCidr
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: !Ref AlbAllowedCidr
+
+  AlbIngressHttpFromCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: NoCertificate
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourcePrefixListId: !Ref CloudFrontPrefixListId
 
   ServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -197,6 +264,7 @@ Resources:
 
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Port: 443
@@ -211,11 +279,25 @@ Resources:
           - Type: forward
             TargetGroupArn: !Ref TargetGroup
 
+  # No certificate yet: plain HTTP on 80, reachable only from CloudFront's
+  # origin-facing ranges (security group) and only with the origin key
+  # (listener rule). Replace with the HTTPS listener once a certificate exists.
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: NoCertificate
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "403", ContentType: application/json, MessageBody: '{"error":"forbidden"}' }
+
   OriginKeyRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Condition: HasOriginKey
     Properties:
-      ListenerArn: !Ref HttpsListener
+      ListenerArn: !If [HasCertificate, !Ref HttpsListener, !Ref HttpListener]
       Priority: 10
       Conditions:
         - Field: http-header
@@ -254,6 +336,9 @@ Resources:
             - { Name: OFFICE_ENGINE_SCRATCH, Value: /scratch }
             - { Name: OFFICE_ENGINE_MAX_SESSIONS, Value: !Ref MaxSessionsPerTask }
             - { Name: OFFICE_ENGINE_MAX_PER_USER, Value: !Ref MaxSessionsPerUser }
+            # Browsers reach the engine through the platform distribution's
+            # /engine/* behavior, so the platform origin is the only CORS origin.
+            - { Name: OFFICE_ENGINE_ALLOWED_ORIGINS, Value: !Ref PlatformUrl }
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -269,7 +354,8 @@ Resources:
 
   Service:
     Type: AWS::ECS::Service
-    DependsOn: HttpsListener
+    # The listener rule is the last piece of the ALB path; it depends on whichever listener exists.
+    DependsOn: OriginKeyRule
     Properties:
       ServiceName: !Sub "${NamePrefix}-${Environment}-office-engine"
       Cluster: !Ref Cluster
@@ -283,7 +369,7 @@ Resources:
         DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: DISABLED
+          AssignPublicIp: !Ref AssignPublicIp
           Subnets: !Ref PrivateSubnetIds
           SecurityGroups: [!Ref ServiceSecurityGroup]
       LoadBalancers:
@@ -327,6 +413,9 @@ Outputs:
   LoadBalancerDnsName:
     Description: ALB DNS name; use as the CloudFront origin for the /engine/* behavior.
     Value: !GetAtt LoadBalancer.DNSName
+  OriginProtocol:
+    Description: CloudFront origin protocol policy matching the listener that exists.
+    Value: !If [HasCertificate, https-only, http-only]
   ClusterName:
     Value: !Ref Cluster
   ServiceName:

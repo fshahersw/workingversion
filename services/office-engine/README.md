@@ -85,26 +85,38 @@ docker run --rm -p 8790:8790 -e OFFICE_PLATFORM_URL=https://<app-domain> office-
 The Rust stage compiles the sidecar's bzip2/zstd C sources with the image's
 gcc; no prebuilt binary is checked in.
 
-## AWS deployment
+## AWS deployment (as deployed for testing)
 
-1. Push the image to ECR and deploy `infra/office-engine/office-engine.cfn.yaml`
-   (VPC, subnets, an ACM certificate for the ALB, the platform origin URL).
-2. Add a CloudFront behavior to the platform distribution: path pattern
-   `/engine/*`, origin = the stack's `LoadBalancerDnsName` (HTTPS only),
-   forward all headers and query strings, no caching, and (recommended) an
-   origin custom header `X-Office-Origin-Key` matching the stack's
-   `OriginKeyHeaderValue` so the ALB rejects direct calls.
-3. Platform runtime environment (Lambda):
-   - `OFFICE_ENGINE_URL` and `OFFICE_ENGINE_PUBLIC_URL` = the platform origin
-     (the browser reaches the engine through the `/engine/*` behavior).
-   - `OFFICE_ENGINE_JWT_PRIVATE_KEY` = PKCS#8 PEM from Secrets Manager
-     (`{{resolve:secretsmanager:...}}`), `OFFICE_ENGINE_JWT_KID` = a stable key id.
-   - `OFFICE_ENGINE_JWT_ISSUER` = the platform origin (must equal what the
-     engine receives as `OFFICE_PLATFORM_URL`).
-4. Generate the key pair once per environment:
-   `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out office-engine.pem`
-   and store the PEM as the secret. Only the platform holds it; the engine
-   reads the public half through JWKS.
+1. **Image**: `infra/office-engine/office-engine-build.cfn.yaml` creates the ECR
+   repository and a CodeBuild project. Zip this directory (honoring
+   `.dockerignore`) to `s3://<artifact bucket>/office-engine/source.zip`, deploy
+   the stack, then `aws codebuild start-build --project-name
+   <prefix>-<env>-office-engine --environment-variables-override
+   name=IMAGE_TAG,value=<tag>`. The Dockerfile's Rust stage and the fidelity
+   gate run inside the build (about 5 minutes on BUILD_GENERAL1_LARGE).
+2. **Service**: deploy `infra/office-engine/office-engine.cfn.yaml` with
+   `infra/office-engine/parameters/<env>.parameters.json` plus
+   `OriginKeyHeaderValue` (a random shared secret, passed at deploy time, never
+   committed). With no ALB certificate the stack exposes an HTTP listener on
+   port 80 reachable only from CloudFront's origin-facing prefix list and only
+   with the origin key header; CloudFront then uses `http-only` to this origin.
+   Attach an ACM certificate (`AlbCertificateArn`) as soon as a validated domain
+   exists and switch the platform's `OfficeEngineOriginProtocol` to
+   `https-only`. In a default VPC without NAT set `AssignPublicIp=ENABLED`.
+3. **Secrets**: an RS256 PKCS#8 key as `{"privateKeyPem": ..., "kid": ...}` in
+   Secrets Manager (`litai/<env>/office-engine-jwt`); the same origin key stored
+   as `officeEngineOriginKey` in the platform's CloudFront origin secret.
+4. **Platform** (`infra/app/app-runtime.cfn.yaml` parameters):
+   `OfficeEngineOriginDomain` = the stack's `LoadBalancerDnsName`,
+   `OfficeEngineOriginProtocol`, `OfficeEnginePublicUrl` = the platform origin
+   (browsers reach the engine through its `/engine/*` behavior; it is also the
+   token issuer), `OfficeEngineJwtSecretArn`. The Lambda reads the signing key
+   from Secrets Manager at runtime (`OFFICE_ENGINE_JWT_SECRET_ARN`), never from
+   an environment variable (4 KB cap).
+
+Limits to know: API Gateway REST caps request bodies at 10 MB, so packages
+above that cannot be uploaded or saved back through the platform until the
+origin is fronted differently.
 
 ## Limits
 

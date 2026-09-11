@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Build infrastructure for the Seeger Weiss Office engine image: an ECR
+  repository and a CodeBuild project that builds services/office-engine/Dockerfile
+  (Rust sidecar stage + Node runtime stage, including the package-fidelity
+  gate) from a source zip in the artifact bucket and pushes the image. Used
+  when no workstation Docker is available; the image URI feeds
+  office-engine.cfn.yaml.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    MinLength: 3
+    MaxLength: 16
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+  Environment:
+    Type: String
+    AllowedValues: [testing, staging, prod]
+  ArtifactBucketName:
+    Type: String
+    Description: Existing versioned artifact bucket (app-foundation / testing-hosting output).
+  SourceObjectKey:
+    Type: String
+    Default: office-engine/source.zip
+    Description: Object key of the services/office-engine source zip inside the artifact bucket.
+  ArtifactKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: KMS key the artifact bucket objects are encrypted with (grants decrypt to the build role).
+
+Conditions:
+  HasKms: !Not [!Equals [!Ref ArtifactKmsKeyArn, ""]]
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${NamePrefix}-${Environment}-office-engine"
+      ImageScanningConfiguration: { ScanOnPush: true }
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep the last 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/codebuild/${NamePrefix}-${Environment}-office-engine"
+      RetentionInDays: 30
+
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-office-engine-build"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${BuildLogGroup.Arn}:*"
+              - Sid: SourceRead
+                Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub "arn:aws:s3:::${ArtifactBucketName}/${SourceObjectKey}"
+              - !If
+                - HasKms
+                - Sid: SourceDecrypt
+                  Effect: Allow
+                  Action: [kms:Decrypt, kms:DescribeKey]
+                  Resource: !Ref ArtifactKmsKeyArn
+                - !Ref AWS::NoValue
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !GetAtt Repository.Arn
+
+  Project:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-office-engine"
+      Description: Builds and pushes the Office engine container image.
+      ServiceRole: !GetAtt BuildRole.Arn
+      TimeoutInMinutes: 60
+      Source:
+        Type: S3
+        Location: !Sub "${ArtifactBucketName}/${SourceObjectKey}"
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$REPOSITORY_URI"
+                - export IMAGE_TAG="${IMAGE_TAG:-$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-12)}"
+                - echo "Building $REPOSITORY_URI:$IMAGE_TAG"
+            build:
+              commands:
+                - DOCKER_BUILDKIT=1 docker build --progress=plain -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:latest" .
+            post_build:
+              commands:
+                - docker push "$REPOSITORY_URI:$IMAGE_TAG"
+                - docker push "$REPOSITORY_URI:latest"
+                - echo "$REPOSITORY_URI:$IMAGE_TAG" > image-uri.txt
+          artifacts:
+            files: [image-uri.txt]
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: REPOSITORY_URI
+            Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repository}"
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref BuildLogGroup
+
+Outputs:
+  RepositoryUri:
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repository}"
+  ProjectName:
+    Value: !Ref Project

@@ -477,6 +477,44 @@ Parameters:
     MaxValue: 2000000000
     Description: Five-minute per-IP request limit enforced at CloudFront.
 
+  OfficeEngineOriginDomain:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[A-Za-z0-9.-]+$"
+    Description: >
+      Optional ALB DNS name of the Office engine service (office-engine.cfn.yaml
+      LoadBalancerDnsName). When set, CloudFront routes /engine/* to it with
+      the X-Office-Origin-Key header and the Lambda receives the OFFICE_ENGINE_*
+      settings that turn on Sheets and Slides.
+
+  OfficeEngineOriginProtocol:
+    Type: String
+    Default: https-only
+    AllowedValues: [https-only, http-only]
+    Description: >
+      Protocol CloudFront uses to the engine ALB. http-only only while the ALB
+      has no certificate; the listener is then reachable solely from CloudFront's
+      origin-facing ranges and requires the origin key.
+
+  OfficeEnginePublicUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://[^/]+$"
+    Description: >
+      The platform origin browsers use (the CloudFront URL or alias). Browsers
+      reach the engine through this origin's /engine/* behavior, and the engine
+      verifies tokens whose issuer is this URL. Required with OfficeEngineOriginDomain.
+
+  OfficeEngineJwtSecretArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
+    Description: >
+      Secrets Manager secret holding {"privateKeyPem": PKCS#8 RSA key, "kid": key id}
+      the platform signs engine tokens with. Read at runtime (never placed in
+      the environment: Lambda variables are capped at 4 KB). Required with
+      OfficeEngineOriginDomain.
+
   AlarmTopicArn:
     Type: String
     Default: ""
@@ -517,6 +555,19 @@ Conditions:
     - !Equals
       - !Ref AlarmTopicArn
       - ""
+  HasOfficeEngine: !And
+    - !Not
+      - !Equals
+        - !Ref OfficeEngineOriginDomain
+        - ""
+    - !Not
+      - !Equals
+        - !Ref OfficeEnginePublicUrl
+        - ""
+    - !Not
+      - !Equals
+        - !Ref OfficeEngineJwtSecretArn
+        - ""
   HasCustomDomain: !And
     - !Not
       - !Equals
@@ -645,6 +696,14 @@ Resources:
                   - xray:PutTelemetryRecords
                   - xray:PutTraceSegments
                 Resource: "*"
+              - !If
+                - HasOfficeEngine
+                - Sid: OfficeEngineSigningKey
+                  Effect: Allow
+                  Action:
+                    - secretsmanager:GetSecretValue
+                  Resource: !Ref OfficeEngineJwtSecretArn
+                - !Ref AWS::NoValue
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -746,6 +805,13 @@ Resources:
           TAVILY_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:TAVILY_API_KEY}}"
           COURTLISTENER_API_TOKEN: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:COURTLISTENER_API_TOKEN}}"
           DOCKETBIRD_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:DOCKETBIRD_API_KEY}}"
+          # Office engine (Sheets and Slides). Browsers and the Lambda both reach
+          # it through this distribution's /engine/* behavior; the signing key is
+          # read from Secrets Manager at runtime.
+          OFFICE_ENGINE_URL: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
+          OFFICE_ENGINE_PUBLIC_URL: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
+          OFFICE_ENGINE_JWT_ISSUER: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
+          OFFICE_ENGINE_JWT_SECRET_ARN: !If [HasOfficeEngine, !Ref OfficeEngineJwtSecretArn, !Ref AWS::NoValue]
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -1139,6 +1205,24 @@ Resources:
             OriginCustomHeaders:
               - HeaderName: x-api-key
                 HeaderValue: !Sub "{{resolve:secretsmanager:${OriginAccessSecretArn}:SecretString:originKey}}"
+          - !If
+            - HasOfficeEngine
+            - Id: OfficeEngineAlb
+              DomainName: !Ref OfficeEngineOriginDomain
+              ConnectionAttempts: 3
+              ConnectionTimeout: 10
+              CustomOriginConfig:
+                HTTPPort: 80
+                HTTPSPort: 443
+                OriginKeepaliveTimeout: 60
+                OriginProtocolPolicy: !Ref OfficeEngineOriginProtocol
+                OriginReadTimeout: 60
+                OriginSSLProtocols:
+                  - TLSv1.2
+              OriginCustomHeaders:
+                - HeaderName: X-Office-Origin-Key
+                  HeaderValue: !Sub "{{resolve:secretsmanager:${OriginAccessSecretArn}:SecretString:officeEngineOriginKey}}"
+            - !Ref AWS::NoValue
         DefaultCacheBehavior:
           TargetOriginId: RegionalRestApi
           ViewerProtocolPolicy: redirect-to-https
@@ -1173,6 +1257,31 @@ Resources:
             Compress: true
             CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
             ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+          - !If
+            - HasOfficeEngine
+            # Office engine RPC: authenticated with platform-minted tokens
+            # (Authorization header forwarded by AllViewerExceptHostHeader),
+            # never cached, stickiness cookie forwarded so a session stays on
+            # the task that owns it.
+            - PathPattern: /engine/*
+              TargetOriginId: OfficeEngineAlb
+              ViewerProtocolPolicy: https-only
+              AllowedMethods:
+                - DELETE
+                - GET
+                - HEAD
+                - OPTIONS
+                - PATCH
+                - POST
+                - PUT
+              CachedMethods:
+                - GET
+                - HEAD
+              Compress: false
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+            - !Ref AWS::NoValue
         ViewerCertificate: !If
           - HasCustomDomain
           - AcmCertificateArn: !Ref AcmCertificateArn

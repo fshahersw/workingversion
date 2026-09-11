@@ -6,14 +6,19 @@
 // tenant claim and required scope. No Cognito secret or bucket credential
 // ever reaches the engine.
 //
-// Key material: OFFICE_ENGINE_JWT_PRIVATE_KEY (PKCS#8 PEM) + OFFICE_ENGINE_JWT_KID
-// in every deployed environment. Local development without those variables
-// generates an ephemeral key pair per process, which is fine for one dev
-// server and one local engine but never for Lambda (each instance would sign
-// with a different key).
+// Key material, in order of precedence:
+//   1. OFFICE_ENGINE_JWT_SECRET_ARN: a Secrets Manager secret holding
+//      {"privateKeyPem": PKCS#8 PEM, "kid": key id}, read once per process
+//      with SigV4 (Lambda environment variables are capped at 4 KB, so the
+//      PEM never travels as a variable).
+//   2. OFFICE_ENGINE_JWT_PRIVATE_KEY (PKCS#8 PEM) + OFFICE_ENGINE_JWT_KID.
+//   3. Local development only: an ephemeral key pair per process, fine for one
+//      dev server and one local engine, refused in production (each Lambda
+//      instance would otherwise sign with a different key).
 // ============================================================================
 import { exportJWK, generateKeyPair, importPKCS8, SignJWT, type JWK, type KeyLike } from "jose";
 
+import { signedAwsFetch } from "@/lib/agents/bedrock-sign.server";
 import type { SwUser } from "@/lib/auth/cognito.server";
 
 export const ENGINE_AUDIENCE =
@@ -36,11 +41,38 @@ export function engineConfigured(): boolean {
   return Boolean(process.env["OFFICE_ENGINE_URL"]);
 }
 
+/** Read {privateKeyPem, kid} from Secrets Manager with the runtime role (SigV4, no SDK client needed). */
+async function loadSigningSecret(arn: string): Promise<{ pem: string; kid: string }> {
+  const region = arn.split(":")[3] || "us-east-1";
+  const res = await signedAwsFetch(
+    "secretsmanager",
+    `https://secretsmanager.${region}.amazonaws.com/`,
+    {
+      body: JSON.stringify({ SecretId: arn }),
+      headers: {
+        "content-type": "application/x-amz-json-1.1",
+        "x-amz-target": "secretsmanager.GetSecretValue",
+      },
+      region,
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Office engine signing key could not be read [${res.status}]: ${detail.slice(0, 200)}`);
+  }
+  const { SecretString } = (await res.json()) as { SecretString?: string };
+  const parsed = JSON.parse(SecretString ?? "{}") as { privateKeyPem?: string; kid?: string };
+  if (!parsed.privateKeyPem) throw new Error("Office engine signing secret has no privateKeyPem.");
+  return { pem: parsed.privateKeyPem, kid: parsed.kid || "office-engine-1" };
+}
+
 async function signer(): Promise<Signer> {
   if (!signerPromise) {
     signerPromise = (async () => {
-      const pem = process.env["OFFICE_ENGINE_JWT_PRIVATE_KEY"];
-      const kid = process.env["OFFICE_ENGINE_JWT_KID"] || "office-engine-1";
+      let pem = process.env["OFFICE_ENGINE_JWT_PRIVATE_KEY"];
+      let kid = process.env["OFFICE_ENGINE_JWT_KID"] || "office-engine-1";
+      const secretArn = process.env["OFFICE_ENGINE_JWT_SECRET_ARN"];
+      if (secretArn) ({ pem, kid } = await loadSigningSecret(secretArn));
       if (pem) {
         const key = await importPKCS8(pem.replace(/\\n/g, "\n"), "RS256");
         const publicJwk = await exportJWK(key);
@@ -57,7 +89,9 @@ async function signer(): Promise<Signer> {
         return { key, kid, publicJwk: { ...pub, kid, use: "sig", alg: "RS256" } as JWK };
       }
       if (process.env["NODE_ENV"] === "production") {
-        throw new Error("OFFICE_ENGINE_JWT_PRIVATE_KEY is required in production.");
+        throw new Error(
+          "OFFICE_ENGINE_JWT_SECRET_ARN or OFFICE_ENGINE_JWT_PRIVATE_KEY is required in production.",
+        );
       }
       const pair = await generateKeyPair("RS256", { modulusLength: 2048 });
       const publicJwk = await exportJWK(pair.publicKey);
@@ -67,6 +101,11 @@ async function signer(): Promise<Signer> {
         publicJwk: { ...publicJwk, kid: `dev-${Date.now()}`, use: "sig", alg: "RS256" },
       };
     })();
+    // A transient failure (secret read, throttling) must not poison the
+    // process: drop the cached rejection so the next request retries.
+    signerPromise.catch(() => {
+      signerPromise = undefined;
+    });
   }
   return signerPromise;
 }
