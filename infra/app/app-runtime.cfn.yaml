@@ -387,9 +387,11 @@ Parameters:
     AllowedPattern: "^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$"
     ConstraintDescription: Supply an existing Secrets Manager secret ARN.
     Description: >
-      Existing secret containing a JSON key named CORPUS_SERVICE_KEY.
-      CloudFormation resolves that key without accepting the credential as a
-      plaintext stack parameter.
+      Existing secret containing the runtime's third-party credentials as JSON
+      keys: CORPUS_SERVICE_KEY, BRAVE_API_KEY, TAVILY_API_KEY,
+      COURTLISTENER_API_TOKEN, DOCKETBIRD_API_KEY (FIRECRAWL_API_KEY,
+      NCBI_API_KEY and OPENFDA_API_KEY may be present and empty). CloudFormation
+      resolves each key without accepting credentials as plaintext parameters.
 
   ApiStageName:
     Type: String
@@ -686,7 +688,11 @@ Resources:
       TracingConfig:
         Mode: Active
       LoggingConfig:
-        ApplicationLogLevel: WARN
+        # INFO: under Lambda Web Adapter the Nitro process writes plain-text
+        # console.error lines, which JSON logging classifies as INFO; at WARN
+        # every application error was dropped and only adapter warnings reached
+        # CloudWatch.
+        ApplicationLogLevel: INFO
         LogFormat: JSON
         LogGroup: !Ref LambdaLogGroup
         SystemLogLevel: WARN
@@ -730,6 +736,16 @@ Resources:
           CORPUS_URL: !Ref CorpusUrl
           CORPUS_KEY: !Ref CorpusPublishableKey
           CORPUS_SERVICE_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:CORPUS_SERVICE_KEY}}"
+          # Research and Office assistant integrations. Brave + Tavily are the
+          # primary web-search providers (the AgentCore gateway is the curated
+          # anchor); CourtListener verifies citations; DocketBird reads dockets.
+          # Absent keys disable their feature; they are never read from a
+          # plaintext parameter. FIRECRAWL_API_KEY, NCBI_API_KEY and
+          # OPENFDA_API_KEY are optional rate-limit keys, unset until needed.
+          BRAVE_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:BRAVE_API_KEY}}"
+          TAVILY_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:TAVILY_API_KEY}}"
+          COURTLISTENER_API_TOKEN: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:COURTLISTENER_API_TOKEN}}"
+          DOCKETBIRD_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:DOCKETBIRD_API_KEY}}"
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -1009,8 +1025,12 @@ Resources:
             Override: true
         CustomHeadersConfig:
           Items:
+            # microphone=(self): the assistant composers dictate through the
+            # browser microphone (audio goes to Bedrock Voxtral in-account via
+            # /api/transcribe); an empty allowlist made getUserMedia fail on
+            # every deployed page. Camera and geolocation stay denied.
             - Header: Permissions-Policy
-              Value: "camera=(), geolocation=(), microphone=()"
+              Value: "camera=(), geolocation=(), microphone=(self)"
               Override: true
 
   WebAcl:

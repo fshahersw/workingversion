@@ -11,7 +11,10 @@ const templatePath = "infra/app/app-runtime.cfn.yaml";
 const zipRel = "infra/app/artifacts/app-runtime.zip";
 const zipPath = resolve(repoRoot, zipRel);
 const stackName = process.env.LITAI_TESTING_STACK || "litai-testing-runtime";
-const region = process.env.AWS_REGION || "us-east-1";
+// The testing stacks live in us-east-1 (the CloudFront WAF rule requires it).
+// A machine-level AWS_REGION pointing elsewhere used to make every stack call
+// fail with "Stack does not exist"; only an explicit override changes this.
+const region = process.env.LITAI_AWS_REGION || "us-east-1";
 const defaultProfile = "AdministratorAccess-475976462949";
 const testingDomain = "testing.seegerweiss.com";
 const testingCertArn =
