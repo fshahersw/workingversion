@@ -24,8 +24,15 @@ if (parsedUrl.protocol !== "https:") {
 process.env.LITAI_LAMBDA_BUILD = "true";
 process.env.NODE_ENV = "production";
 
-const { build } = await import("vite");
-await build();
+// Vite 8: the argless programmatic build() builds only the CLIENT environment.
+// The Lambda artifact needs the full app — client + the SSR/server environment
+// and the nitro node-server output (.output/server) that TanStack Start + the
+// nitro preset emit. createBuilder().buildApp() drives every declared
+// environment, exactly like the `vite build` CLI does. createBuilder() with no
+// inline config loads vite.config.ts from cwd, so the env set above still applies.
+const { createBuilder } = await import("vite");
+const builder = await createBuilder();
+await builder.buildApp();
 
 const metadata = {
   schema: 1,

@@ -78,6 +78,17 @@ const writerAliases = [
   },
   { find: /^@genoffice\/ui$/, replacement: writerPkg("ui/src/index.ts") },
   { find: /^@genoffice\/ui\/(.+)$/, replacement: `${writerPkg("ui/src")}/$1` },
+  // Force konva to its DOM/browser build in EVERY environment. konva has no
+  // "exports" map, so the SSR/node condition otherwise resolves main =
+  // ./lib/index-node.js, whose first line is require("canvas") (a native addon
+  // that is not installed) and the server build fails to resolve it. konva only
+  // reaches the SSR graph through the client-only Slides/Sheets renderers
+  // (routes are ssr:false, mounted via dynamic import); nothing server-side ever
+  // executes konva. The client already resolves konva via its "browser" field
+  // (lib/index.js), so this alias is byte-identical client-side and simply keeps
+  // canvas out of the server bundle. react-konva's bare `import "konva"` /
+  // require("konva") is caught by this same alias.
+  { find: /^konva$/, replacement: resolve(process.cwd(), "node_modules/konva/lib/index.js") },
 ];
 
 // The vendored Sheets and Slides code (src/office/<app>) was written against

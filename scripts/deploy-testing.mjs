@@ -101,7 +101,11 @@ function run(command, args, options = {}) {
     cwd: repoRoot,
     env: options.env || awsEnv(),
     encoding: "utf8",
-    shell: process.platform === "win32",
+    // shell:true is needed on Windows for `aws` (resolves to aws.cmd via PATHEXT),
+    // but it does NOT quote argv, so an absolute command path containing a space
+    // (process.execPath = "C:\Program Files\nodejs\node.exe") breaks under cmd.exe.
+    // Keep the shell for aws; drop it for our own node self-invocations.
+    shell: options.shell ?? (process.platform === "win32" && command !== process.execPath),
     stdio: options.stdio || ["ignore", "pipe", "pipe"],
     maxBuffer: 20 * 1024 * 1024,
   });
