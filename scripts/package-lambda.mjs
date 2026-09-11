@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -41,18 +42,41 @@ async function collectFiles(root, prefix) {
   }
 
   const files = [];
+  // Nitro's dependency tracer stores traced packages under node_modules/.nf3
+  // and links the package name to them (a junction on Windows, a symlink
+  // elsewhere). Lambda needs real files, so links are dereferenced: the zip
+  // receives the target's contents at the link's path. Cycles are refused.
+  const linkChain = new Set();
   async function visit(directory, archiveDirectory) {
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name, "en"));
     for (const entry of entries) {
-      const source = resolve(directory, entry.name);
+      let source = resolve(directory, entry.name);
       const target = posix.join(archiveDirectory, archivePath(entry.name));
+      let isDirectory = entry.isDirectory();
+      let isFile = entry.isFile();
       if (entry.isSymbolicLink()) {
-        throw new Error(`Symbolic links are not supported: ${relative(repoRoot, source)}`);
+        const real = await realpath(source);
+        if (linkChain.has(real)) {
+          throw new Error(`Symbolic link cycle: ${relative(repoRoot, source)}`);
+        }
+        const realStat = await stat(real);
+        source = real;
+        isDirectory = realStat.isDirectory();
+        isFile = realStat.isFile();
+        if (isDirectory) {
+          linkChain.add(real);
+          try {
+            await visit(source, target);
+          } finally {
+            linkChain.delete(real);
+          }
+          continue;
+        }
       }
-      if (entry.isDirectory()) {
+      if (isDirectory) {
         await visit(source, target);
-      } else if (entry.isFile()) {
+      } else if (isFile) {
         files.push({ source, target });
       }
     }

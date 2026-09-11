@@ -37,7 +37,11 @@ applyLocalEnv();
 // specifiers. Resolve them here explicitly (regexes, most specific first) so
 // dev and build do not depend on the tsconfig-paths plugin having read the
 // matching `paths` entries.
-const writerPkg = (p: string) => resolve(process.cwd(), "src/writer/packages", p);
+// Forward slashes only: alias targets feed Rollup module ids and the CSS url()
+// rewriter; Windows backslashes (or a mixed path from a regex replacement) made
+// the production build emit unresolvable font URLs and duplicate modules.
+const writerPkg = (p: string) =>
+  resolve(process.cwd(), "src/writer/packages", p).replaceAll("\\", "/");
 const writerAliases = [
   { find: /^@genoffice\/agent-core$/, replacement: writerPkg("agent-core/src/index.ts") },
   { find: /^@genoffice\/ai-provider$/, replacement: writerPkg("ai-provider/src/index.ts") },
@@ -88,7 +92,10 @@ const writerAliases = [
   // (lib/index.js), so this alias is byte-identical client-side and simply keeps
   // canvas out of the server bundle. react-konva's bare `import "konva"` /
   // require("konva") is caught by this same alias.
-  { find: /^konva$/, replacement: resolve(process.cwd(), "node_modules/konva/lib/index.js") },
+  {
+    find: /^konva$/,
+    replacement: resolve(process.cwd(), "node_modules/konva/lib/index.js").replaceAll("\\", "/"),
+  },
 ];
 
 // The vendored Sheets and Slides code (src/office/<app>) was written against
@@ -113,8 +120,14 @@ const officeScopedResolver = {
     const tree = OFFICE_TREES.find((t) => from.startsWith(t + "/"));
     if (!tree) return null;
     if (id === "zod") return this.resolve("zod4", importer, { skipSelf: true });
-    if (id === "electron") return resolve(tree, "web/host/electron.ts");
-    if (id === "@genoffice/electron-utils/drop-open") return resolve(tree, "web/host/drop-open.ts");
+    // Module ids must be forward-slash paths: the host imports the same shim
+    // as `./electron`, and Rollup keys modules by the exact id string. A
+    // backslash path here produced a second copy of the shim in the production
+    // bundle, so the preload's ipcRenderer never saw the host installed
+    // ("The document connection is not ready.").
+    if (id === "electron") return resolve(tree, "web/host/electron.ts").replaceAll("\\", "/");
+    if (id === "@genoffice/electron-utils/drop-open")
+      return resolve(tree, "web/host/drop-open.ts").replaceAll("\\", "/");
     return null;
   },
 };
