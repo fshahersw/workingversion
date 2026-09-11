@@ -60,3 +60,8 @@ scripts/pipeline/downloads/
 
 # Local reference/scratch dump (not part of the app)
 /officestuff-main/
+/officeintegrations/
+/package-lock.json
+/quickstart.py
+/AGENT-HANDOFF.md
+/.bedrock-pol-*.json
