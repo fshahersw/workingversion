@@ -87,10 +87,29 @@ export function useDictation(onText: (text: string) => void): {
     const sampleRate = ctxRef.current?.sampleRate ?? 16000
     const chunks = chunksRef.current
     teardown()
-    if (!chunks.length) {
+
+    // Gate on real audio energy before calling the model. Voxtral ignores
+    // "output nothing" and CONFABULATES on silence — and the legal priming makes
+    // that confabulation long and plausible — so an empty / too-short / near-silent
+    // capture must never reach transcription. Peak amplitude separates speech
+    // (>=~0.1 with AGC) from suppressed room tone (~0) without rejecting a
+    // soft-spoken user; the duration floor drops accidental taps. Mirrors the
+    // composer MicButton gate; the review-before-insert step is the backstop.
+    let samples = 0
+    let peak = 0
+    for (const c of chunks) {
+      samples += c.length
+      for (let i = 0; i < c.length; i++) {
+        const a = Math.abs(c[i]!)
+        if (a > peak) peak = a
+      }
+    }
+    if (samples / sampleRate < 0.25 || peak < 0.02) {
+      setError('No speech detected')
       setState('idle')
       return
     }
+
     setState('transcribing')
     try {
       const wavB64 = encodeWavBase64(chunks, sampleRate)
