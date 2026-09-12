@@ -316,6 +316,21 @@ const FIRM_TEMPLATES: TemplateDetail[] = [
 <h2>Other Authorities</h2><table><thead><tr><th>Authority</th><th>Page(s)</th></tr></thead><tbody><tr><td>[Treatise / article]</td><td>[x]</td></tr></tbody></table>`,
     },
   },
+  {
+    id: "pleading-caption",
+    kind: "docx",
+    name: "Pleading caption",
+    category: "Court filings",
+    source: "firm",
+    description: "Court caption block: court, parties, case number, judge and document title, ready to fill.",
+    payload: {
+      format: "html",
+      html: `<p style="text-align:center"><strong>[COURT]<br/>[DISTRICT / DIVISION]</strong></p>
+<table><tbody>
+<tr><td>[PLAINTIFF],<br/><br/>Plaintiff,<br/><br/>v.<br/><br/>[DEFENDANT],<br/><br/>Defendant.</td><td>Case No. [x:xx-cv-xxxxx]<br/><br/>[Hon. Judge Name]<br/><br/>[DOCUMENT TITLE]</td></tr>
+</tbody></table>`,
+    },
+  },
 
   // ---------------------------------------------------------------- Sheets (xlsx)
   {
@@ -356,6 +371,34 @@ const FIRM_TEMPLATES: TemplateDetail[] = [
         { op: "format_range", sheetId: S, range: "A9:E9", format: { bold: true, fillColor: BAND_FILL } },
         { op: "format_range", sheetId: S, range: "A13:E13", format: { bold: true, fillColor: BAND_FILL } },
         { op: "format_range", sheetId: S, range: "A17:E17", format: { bold: true, fillColor: HEADER_FILL, fontColor: "#FFFFFF" } },
+      ],
+    },
+  },
+  {
+    id: "client-billing",
+    kind: "xlsx",
+    name: "Client billing",
+    category: "Finance",
+    source: "firm",
+    description: "Time entries with timekeeper, rate, hours, a computed amount per line and a running total.",
+    payload: {
+      format: "ops",
+      operations: [
+        ...sheetFrame(["Date", "Timekeeper", "Task code", "Narrative", "Hours", "Rate", "Amount"], [110, 150, 100, 360, 80, 90, 120], "[Matter] – Billing"),
+        {
+          op: "set_range",
+          sheetId: S,
+          start: "A4",
+          values: [
+            ["", "", "", "", 0, 0, "=E4*F4"],
+            ["", "", "", "", 0, 0, "=E5*F5"],
+            ["", "", "", "", 0, 0, "=E6*F6"],
+            ["", "", "", "Total", "=SUM(E4:E6)", "", "=SUM(G4:G6)"],
+          ],
+        },
+        { op: "format_range", sheetId: S, range: "E4:E7", format: { numberFormat: "0.00" } },
+        { op: "format_range", sheetId: S, range: "F4:G7", format: { numberFormat: "$#,##0.00" } },
+        { op: "format_range", sheetId: S, range: "A7:G7", format: { bold: true, fillColor: BAND_FILL } },
       ],
     },
   },

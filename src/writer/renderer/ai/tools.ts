@@ -1,6 +1,8 @@
 import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import type { ChartDisplay, CommentInfo, NewChart } from '@genoffice/docx-engine'
+import type { ChartDisplay, CommentInfo, NewChart, TableCell } from '@genoffice/docx-engine'
+import { TABLE_HEADER_FILL } from '@genoffice/docx-engine'
+import { tableModelToPmNode } from '../editor/convert'
 import type { AgentToolCall, AgentToolDef, CreateDocumentType } from '../../shared/ipc'
 import type { AgentImage, ToolDisplay } from '@genoffice/agent-core'
 import { createPlatformSkill } from '@/office/shared/platform-skill'
@@ -31,7 +33,7 @@ import {
  * into three safe primitives plus the deterministic command engine.
  */
 
-const READ_MAX_CHARS = 60_000
+const READ_MAX_CHARS = 120_000
 
 export const AGENT_TOOLS: AgentToolDef[] = [
   {
@@ -300,6 +302,43 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     },
   },
   {
+    name: 'insert_table',
+    description:
+      'Insert a native table with an optional header row, body rows, optional relative column widths and a firm style preset. Cells hold plain text (use \\n for line breaks). Prefer this over an HTML <table> whenever you want column widths or a banded / header style.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        headers: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'header (first) row cell texts; omit or pass [] for a table with no header row',
+        },
+        rows: {
+          type: 'array',
+          items: { type: 'array', items: { type: 'string' } },
+          description: 'body rows, each an array of plain-text cell values',
+        },
+        colWidths: {
+          type: 'array',
+          items: { type: 'number' },
+          description:
+            'optional relative column widths (any units; normalized to percentages); length must equal the column count',
+        },
+        stylePreset: {
+          type: 'string',
+          enum: ['none', 'lightGrid', 'zebraBlue', 'zebraGray', 'headerDarkBlue', 'headerOrange', 'noBorder', 'fullBorder'],
+          description: 'optional visual style (default: plain single-border grid)',
+        },
+        afterBlockIndex: {
+          type: 'integer',
+          description:
+            'insert after this block index; -1 = start of document; omitted = after the block containing the cursor',
+        },
+      },
+      required: ['rows'],
+    },
+  },
+  {
     name: 'set_header_footer',
     description:
       'Set the page header or footer text (the current contents are listed in the message context). Plain text; \\n separates lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields; an empty string clears the text. ' +
@@ -506,6 +545,7 @@ const INDEX_WRITE_SUMMARIES: Record<string, () => string> = {
   apply_commands: () => t('aiSumApplyCommands'),
   insert_chart: () => t('aiSumInsertChart'),
   edit_chart: () => t('aiSumEditChart'),
+  insert_table: () => t('aiSumInsertContent'),
 }
 
 const STALE_DOC_ERROR =
@@ -514,6 +554,42 @@ const STALE_DOC_ERROR =
 
 function rangeError(editor: Editor): string {
   return `block index invalid or out of range (the document has ${editor.state.doc.childCount} blocks); call get_document_context for fresh indexes`
+}
+
+/** Self-contained table style presets (fills/text/border baked into the model at
+ *  build time, so no styles.xml dependency and no post-insert selection needed).
+ *  Hexes are without '#', matching TableCell.fill/color; shared naming with Slides. */
+type TablePresetSpec = {
+  headerFill: string | null
+  headerText: string | null
+  band1Fill: string | null
+  band2Fill: string | null
+  borderColor: string
+  border: boolean
+}
+const TABLE_PRESETS: Record<string, TablePresetSpec> = {
+  none: { headerFill: TABLE_HEADER_FILL, headerText: null, band1Fill: null, band2Fill: null, borderColor: 'auto', border: true },
+  lightGrid: { headerFill: 'F2F2F2', headerText: null, band1Fill: null, band2Fill: null, borderColor: 'BFBFBF', border: true },
+  zebraBlue: { headerFill: '4472C4', headerText: 'FFFFFF', band1Fill: 'D6E4F0', band2Fill: 'FFFFFF', borderColor: 'C9D8EA', border: true },
+  zebraGray: { headerFill: '595959', headerText: 'FFFFFF', band1Fill: 'EDEDED', band2Fill: 'FFFFFF', borderColor: 'BFBFBF', border: true },
+  headerDarkBlue: { headerFill: '1F3864', headerText: 'FFFFFF', band1Fill: 'E9EDF5', band2Fill: 'FFFFFF', borderColor: 'D9D9D9', border: true },
+  headerOrange: { headerFill: 'ED7D31', headerText: 'FFFFFF', band1Fill: 'FBE5D6', band2Fill: 'FFFFFF', borderColor: 'D9D9D9', border: true },
+  noBorder: { headerFill: 'F2F2F2', headerText: null, band1Fill: 'F2F2F2', band2Fill: null, borderColor: 'auto', border: false },
+  fullBorder: { headerFill: TABLE_HEADER_FILL, headerText: null, band1Fill: null, band2Fill: null, borderColor: '000000', border: true },
+}
+
+/** Build one table row's cells, baking the preset's fill/text/bold per row index (0 = header). */
+function tableRowCells(cells: string[], cols: number, rowIndex: number, isHeader: boolean, p: TablePresetSpec): TableCell[] {
+  const fill = isHeader ? p.headerFill : rowIndex % 2 === 0 ? p.band2Fill : p.band1Fill
+  const out: TableCell[] = []
+  for (let c = 0; c < cols; c++) {
+    const cell: TableCell = { paras: [cells[c] ?? ''] }
+    if (isHeader) cell.bold = true
+    if (fill) cell.fill = fill
+    if (isHeader && p.headerText) cell.color = p.headerText
+    out.push(cell)
+  }
+  return out
 }
 
 function validRange(
@@ -1090,6 +1166,56 @@ function executeSyncTool(
         output: `Updated the data of chart "${next.title ?? ''}" (changes are written back to the chart on save).`,
         mutated: true,
         summary: t('aiSumEditedChart', { index: idx }),
+      }
+    }
+
+    case 'insert_table': {
+      const headers = Array.isArray(call.input.headers)
+        ? (call.input.headers as unknown[]).map((h) => String(h ?? ''))
+        : []
+      const bodyRows: string[][] = Array.isArray(call.input.rows)
+        ? (call.input.rows as unknown[]).map((r) =>
+            Array.isArray(r) ? (r as unknown[]).map((c) => String(c ?? '')) : [String(r ?? '')],
+          )
+        : []
+      if (!bodyRows.length && !headers.length)
+        return fail(t('aiSumInsertContent'), 'rows must not be empty')
+      const cols = Math.max(headers.length, ...bodyRows.map((r) => r.length), 1)
+      const preset = TABLE_PRESETS[String(call.input.stylePreset ?? 'none')] ?? TABLE_PRESETS['none']!
+      const widthsIn = Array.isArray(call.input.colWidths)
+        ? (call.input.colWidths as unknown[]).map((w) => Number(w))
+        : []
+      const validWidths =
+        widthsIn.length === cols && widthsIn.every((n) => Number.isFinite(n) && n > 0)
+      const widthSum = validWidths ? widthsIn.reduce((a, b) => a + b, 0) : 0
+      const colWidthsPct = validWidths
+        ? widthsIn.map((w) => (w / widthSum) * 100)
+        : Array.from({ length: cols }, () => 100 / cols)
+      const hasHeader = headers.length > 0
+      const modelRows: TableCell[][] = []
+      if (hasHeader) modelRows.push(tableRowCells(headers, cols, 0, true, preset))
+      bodyRows.forEach((r, i) =>
+        modelRows.push(tableRowCells(r, cols, hasHeader ? i + 1 : i, false, preset)),
+      )
+      const line = { style: 'single', szEighths: 4, color: preset.border ? preset.borderColor : 'auto' }
+      const table = {
+        rows: modelRows,
+        colWidthsPct,
+        ...(preset.border
+          ? { borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line } }
+          : {}),
+      }
+      const count = editor.state.doc.childCount
+      const after =
+        call.input.afterBlockIndex === undefined
+          ? getCursorBlockIndex(editor, scope)
+          : Math.min(Math.max(Number(call.input.afterBlockIndex), -1), count - 1)
+      if (!Number.isInteger(after)) return fail(t('aiSumInsertContent'), 'invalid afterBlockIndex')
+      insertBlocksAfter(editor, after, [tableModelToPmNode(table)], track)
+      return {
+        output: `Inserted a ${modelRows.length}×${cols} table${hasHeader ? ' with a header row' : ''} after block ${after}. Subsequent block indexes shifted; call get_document_context if needed.`,
+        mutated: true,
+        summary: t('aiSumInsertContent'),
       }
     }
 

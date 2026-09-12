@@ -89,7 +89,7 @@ const SUMMARIZE_TIMEOUT_MS = 45_000
 const STALE_TOOL_KEEP_RECENT = 4
 const STALE_TOOL_OUTPUT_MAX = 8_000
 /** Default history cap in messages (trimmed at user-turn boundaries) */
-const DEFAULT_MAX_HISTORY = 200
+const DEFAULT_MAX_HISTORY = 500
 
 /** Unified turn budget across the suite's chat panels (apps may still override per loop) */
 export const DEFAULT_MAX_TURNS = 100

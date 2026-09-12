@@ -1341,7 +1341,7 @@ export function AiPanel({
     loopRef.current = new AgentLoop({
       transport: createElectronTransport(() => settingsRef.current),
       systemSuffix: aiLangDirective,
-      maxTurns: 36,
+      maxTurns: 120,
       skill: createCompanionSkill(composeSkills('slides+files', '', [
         createSlidesSkill(access),
         createFilesSkill(availableAttachments, (path) => readAttachmentPathsRef.current.add(path)),

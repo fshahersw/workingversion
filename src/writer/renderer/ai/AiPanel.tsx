@@ -651,7 +651,7 @@ export function AiPanel({
     loopRef.current = new AgentLoop<PmNode>({
       transport: createElectronTransport(() => settingsRef.current),
       systemSuffix: aiLangDirective,
-      get maxTurns() { return writerProfileRef.current==='thorough'?48:24 },
+      get maxTurns() { return writerProfileRef.current==='thorough'?200:100 },
       skill: writerSkill(composeSkills('docs+files', '', [
         createDocsSkill(
           () => editorRef.current,

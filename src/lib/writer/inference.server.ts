@@ -377,9 +377,9 @@ export type ConversationBody = {
  * the wire limit, not a context policy; images are bounded per item below.
  */
 const MAX_PAYLOAD_CHARS = 9_500_000;
-const MAX_SYSTEM_CHARS = 600_000;
-const MAX_MESSAGES = 600;
-const MAX_TOOL_RESULTS = 64;
+const MAX_SYSTEM_CHARS = envInt("OFFICE_MAX_SYSTEM_CHARS", 600_000);
+const MAX_MESSAGES = envInt("OFFICE_MAX_MESSAGES", 600);
+const MAX_TOOL_RESULTS = envInt("OFFICE_MAX_TOOL_RESULTS", 128);
 const MAX_TOOLS = 96;
 /** Bedrock's per-image ceiling is 3.75 MB of bytes (~5 MB base64). */
 const MAX_IMAGE_BASE64 = 5_000_000;

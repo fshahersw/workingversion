@@ -1136,7 +1136,7 @@ export function App(): React.JSX.Element {
     agentLoopRef.current = new AgentLoop({
       transport: createElectronTransport(() => aiSettingsRef.current!),
       systemSuffix: aiLangDirective,
-      maxTurns: 40,
+      maxTurns: 120,
       skill: sheetsSkill(composeSkills('sheets+files', '', [
         workbookSkill,
         createViewSkill(sheetsSkillDeps()),

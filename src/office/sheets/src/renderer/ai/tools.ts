@@ -247,9 +247,9 @@ export interface SheetsSkillDeps {
   createDocument?(request: CreateDocumentToolRequest): Promise<CreateDocumentToolOutcome>
 }
 
-const MAX_READ_ADDRESSES = 400
+const MAX_READ_ADDRESSES = 1000
 /** Max cells per streamed block; the App's ensureRangeLoaded enforces it too. */
-export const MAX_READ_RANGE_CELLS = 8000
+export const MAX_READ_RANGE_CELLS = 20000
 const MAX_AGGREGATE_CELLS = 1_000_000
 const MAX_AGGREGATE_TOP_VALUES = 50
 const DEFAULT_AGGREGATE_TOP_VALUES = 10
@@ -257,9 +257,9 @@ const DEFAULT_AGGREGATE_TOP_VALUES = 10
 const MAX_READBACK_FORMULAS = 10
 /** Read-back after write: wait time (ms) for Univer's async formula recalc */
 const FORMULA_RECALC_DELAY_MS = 300
-const MAX_READ_FORMAT_CELLS = 800
-const MAX_FIND_RESULTS = 500
-const DEFAULT_FIND_RESULTS = 50
+const MAX_READ_FORMAT_CELLS = 2000
+const MAX_FIND_RESULTS = 2000
+const DEFAULT_FIND_RESULTS = 100
 
 export const WORKBOOK_TOOLS: AgentToolDef[] = [
   {
@@ -276,7 +276,7 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
     description:
       'Read current values/formulas by rectangular range, returning a grid with row numbers and column letters. ' +
       'The requested range is not the worksheet data extent: never infer total row or record count from its ending row; use get_workbook_context. ' +
-      'This is the preferred way to read data; max 2000 cells — read larger regions in multiple calls.',
+      'This is the preferred way to read data; max 20000 cells — read larger regions in multiple calls.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -344,7 +344,7 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
     readOnly: true,
     description:
       'Read explicit cell formats in a range (bold/italic/underline/colors/number format/alignment/borders); only formatted cells are returned. ' +
-      'Use when you need to "reuse the format from somewhere" or inspect current formatting; max 200 cells.',
+      'Use when you need to "reuse the format from somewhere" or inspect current formatting; max 2000 cells.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -387,7 +387,7 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
         addresses: {
           type: 'array',
           items: { type: 'string' },
-          description: 'List of cell addresses, e.g. ["A1","B2"], max 100',
+          description: 'List of cell addresses, e.g. ["A1","B2"], max 1000',
         },
         sheetId: {
           type: 'string',

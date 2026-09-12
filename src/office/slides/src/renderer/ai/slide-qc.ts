@@ -243,8 +243,8 @@ export function qcSlidePage(opts: QcPageOptions): Promise<QcPageResult> {
     const loop = new AgentLoop({
       transport,
       skill: createSlideFixSkill(access, screenshot !== null),
-      // audit feedback inside execute_slide_script output drives at most a couple of fix rounds
-      maxTurns: 6,
+      // audit feedback inside execute_slide_script output drives a few fix rounds
+      maxTurns: 12,
       ...(systemSuffix ? { systemSuffix } : {}),
       events: {
         onToolExecuted: ({ execution }) => {

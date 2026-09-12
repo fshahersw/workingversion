@@ -23,10 +23,10 @@ import { countWords } from '../word-count'
 
 // ---- context budgets (characters, ≈4 chars/token) ----
 
-const SELECTION_MAX_CHARS = 24_000
-const DOC_CONTEXT_MAX_CHARS = 8_000
-const PREVIEW_MAX_CHARS = 60
-const PREVIEW_TIGHT_CHARS = 20
+const SELECTION_MAX_CHARS = 48_000
+const DOC_CONTEXT_MAX_CHARS = 24_000
+const PREVIEW_MAX_CHARS = 120
+const PREVIEW_TIGHT_CHARS = 40
 
 /**
  * Guide for the apply_commands tool: format,
@@ -87,7 +87,7 @@ export const COMMANDS_GUIDE = [
 const HTML_RULES = [
   'The html tool input is a restricted HTML fragment. Rules:',
   '- Only these tags are allowed: h1 h2 h3 h4 h5 h6 p ul ol li strong em u s a br table thead tbody tr th td pre code blockquote',
-  '- Tables: use <th> for the first (header) row; cells contain plain text only (<br> may split lines); nested tables / merged cells are not supported; once inserted the table is protected as a whole, only cell text remains editable',
+  '- Tables: use <th> for the first (header) row; cells contain plain text only (<br> may split lines); nested tables / merged cells are not supported; once inserted the table is protected as a whole, only cell text remains editable. For a table with specific column widths or a banded / header style, use the insert_table tool instead of HTML',
   '- Use <pre> for code samples (monospace font + shading, line breaks preserved); use <blockquote> for quotations (indent + left bar)',
   '- Use <formula>LaTeX</formula> for math (produces native Word equations): as a top-level block it becomes its own centered paragraph; placed inside <p>/<li>/<h*> text it is an inline formula flowing with the text, e.g. <p>From <formula>E = mc^2</formula> we know…</p>; supports the common subset of \\frac \\sqrt super/subscripts \\sum \\int \\lim matrix environments Greek letters etc., the align environment is not supported; invalid LaTeX fails the whole call — fix and retry',
   '- Do not include <html>/<body>, markdown code fences, or explanatory text',
@@ -122,6 +122,7 @@ export const AGENT_SYSTEM_PROMPT = [
   '- Firm knowledge: when the user refers to case facts, prior work or "our documents", search_firm_knowledge before drafting and cite the document and page in the text;',
   '- Tracked deletions (struck-through revision text) are not part of the current content and are hidden from the block list/read_blocks/stats; when a [tracked deletion] tag or a skipped-deletion notice appears, that text is already deleted — never try to delete or rewrite it again (the user accepts/rejects revisions in the Review tab);',
   '- Charts: use insert_chart for data visualization (bar/line/pie; saved as native Word charts); use edit_chart to change the data of an existing chart block in the block list; data must be real, from the document or search results;',
+  '- Tables: use insert_table to create a table with an optional header row, body rows, optional column widths and a style preset (none/lightGrid/zebraBlue/zebraGray/headerDarkBlue/headerOrange/noBorder/fullBorder); cells hold plain text; for a simple inline table an HTML <table> via insert_content is also fine;',
   '- New standalone document: when the user asks to put results into a NEW/separate document (a summary, a report, an extraction) instead of this one, use create_document with the full content — do not insert that content into the current document and do not claim you cannot create files;',
   '- One reply may chain multiple tools; after everything is done, always finish with a short plain-text summary.',
   '',
