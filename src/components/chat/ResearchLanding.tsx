@@ -41,6 +41,64 @@ function publishedLabel(raw?: string): string | null {
   return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** One headline card. Falls the thumbnail back to the site favicon on error
+ *  (news images are frequently hotlink-blocked / 404), and shows the real story
+ *  summary rather than a boilerplate line. */
+function HeadlineCard({
+  h,
+  onSend,
+}: {
+  h: ResearchHeadline;
+  onSend: (text: string) => void;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const showImg = !!h.imageUrl && !imgFailed;
+  return (
+    <article className="flex gap-3 rounded-lg border border-border bg-card p-2.5">
+      {showImg ? (
+        <img
+          src={h.imageUrl}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          className="h-16 w-16 shrink-0 rounded-md object-cover bg-muted"
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        <span className="grid h-16 w-16 shrink-0 place-items-center rounded-md bg-muted">
+          <Favicon host={hostOf(h.url)} size={22} />
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <a
+          href={h.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="line-clamp-2 text-[12.5px] font-medium leading-snug text-brand-navy hover:underline"
+        >
+          {h.title}
+        </a>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          {h.source}
+          {publishedLabel(h.published) ? ` · ${publishedLabel(h.published)}` : ""}
+          {h.topic ? ` · ${h.topic}` : ""}
+        </p>
+        <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-muted-foreground">
+          {h.snippet || h.why}
+        </p>
+        <button
+          type="button"
+          onClick={() => onSend(h.question || h.prompt)}
+          className="mt-1.5 flex items-start gap-1 text-left text-[11.5px] font-medium text-brand-navy hover:underline"
+        >
+          <span className="line-clamp-2">{h.question || h.prompt}</span>
+          <ArrowRight className="mt-0.5 h-3 w-3 shrink-0" strokeWidth={2} />
+        </button>
+      </div>
+    </article>
+  );
+}
+
 export function ResearchLanding({
   onSend,
   onPrefill,
@@ -146,52 +204,7 @@ export function ResearchLanding({
           </p>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {headlines.map((h) => (
-              <article
-                key={h.id}
-                className="flex gap-3 rounded-lg border border-border bg-card p-2.5"
-              >
-                {h.imageUrl ? (
-                  <img
-                    src={h.imageUrl}
-                    alt=""
-                    loading="lazy"
-                    referrerPolicy="no-referrer"
-                    className="h-16 w-16 shrink-0 rounded-md object-cover bg-muted"
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).style.display = "none";
-                    }}
-                  />
-                ) : (
-                  <span className="grid h-16 w-16 shrink-0 place-items-center rounded-md bg-muted">
-                    <Favicon host={hostOf(h.url)} size={20} />
-                  </span>
-                )}
-                <div className="min-w-0 flex-1">
-                  <a
-                    href={h.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="line-clamp-2 text-[12.5px] font-medium leading-snug text-brand-navy hover:underline"
-                  >
-                    {h.title}
-                  </a>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    {h.source}
-                    {publishedLabel(h.published) ? ` · ${publishedLabel(h.published)}` : ""}
-                  </p>
-                  <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-muted-foreground">
-                    {h.why}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => onSend(h.prompt)}
-                    className="mt-1.5 inline-flex items-center gap-1 text-[11.5px] font-medium text-brand-navy hover:underline"
-                  >
-                    Ask about this
-                    <ArrowRight className="h-3 w-3" strokeWidth={2} />
-                  </button>
-                </div>
-              </article>
+              <HeadlineCard key={h.id} h={h} onSend={onSend} />
             ))}
           </div>
         </section>

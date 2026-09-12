@@ -21,6 +21,7 @@ import {
   type HeadlineCandidate,
   type ResearchHeadline,
 } from "./research-brief.ts";
+import { enrichQuestions, verifyImages } from "./research-brief-enrich.server.ts";
 
 const CACHE_MS = 6 * 60 * 60 * 1000;
 /** An empty result is usually a slow backend, not "no news": caching it for six
@@ -107,6 +108,9 @@ export async function loadResearchBrief(principal: string): Promise<ResearchHead
       }
       if (out.length >= 4) break;
     }
+    // Enrich once per cached build (never per page render), both fail-safe:
+    // sharp per-headline litigator questions + a vision image-quality gate.
+    await Promise.all([enrichQuestions(out).catch(() => {}), verifyImages(out).catch(() => {})]);
     cache.set(principal, { at: Date.now(), key, items: out });
     return out;
   } catch {

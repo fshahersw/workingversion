@@ -16,6 +16,9 @@ export type ResearchHeadline = {
   snippet: string;
   imageUrl?: string;
   why: string;
+  /** Sharp, matter-specific litigator question generated for the card CTA
+   *  (server enrichment); falls back to `prompt` when generation is off/fails. */
+  question?: string;
   prompt: string;
   /** Which news backend produced the item. */
   backend?: HeadlineBackend;
@@ -88,10 +91,21 @@ const MDL_NUMBER_RE = /\bMDL\s*[- ]?\d{3,4}\b/gi;
 const PROPER_SPAN_RE = /\b[A-Z][A-Za-z0-9]+(?:[-][A-Z][A-Za-z0-9]+)*(?:\s+[A-Z][A-Za-z0-9]+)+\b/g;
 const PROPER_WORD_RE = /\b[A-Z][A-Za-z0-9]{2,}(?:[-][A-Z][A-Za-z0-9]+)*\b/g;
 
+/** Bare single proper words that are almost never THIS firm's mass-tort matter
+ *  (mega-cap tech / consumer brands). They produced generic company-news cards
+ *  ("META" -> Meta-the-company trial coverage). A real matter that happens to be
+ *  one of these still anchors via a multi-word span (e.g. "Tesla Autopilot"). */
+const NON_MATTER = new Set([
+  "meta", "facebook", "instagram", "whatsapp", "google", "alphabet", "apple",
+  "amazon", "microsoft", "nvidia", "tesla", "openai", "twitter", "tiktok",
+  "netflix", "uber", "lyft", "reddit", "snapchat", "youtube", "spacex", "x",
+]);
+
 const usableWord = (word: string): boolean =>
   !TITLE_STOP.has(word) &&
   !US_STATE_NAMES.has(word.toLowerCase()) &&
-  !STATE_WORDS.has(word.toLowerCase());
+  !STATE_WORDS.has(word.toLowerCase()) &&
+  !NON_MATTER.has(word.toLowerCase());
 
 /** Drop leading/trailing non-name words from a proper span ("Bard PowerPort
  *  MDL" -> "Bard PowerPort"), and reject what is left of a state name. */
