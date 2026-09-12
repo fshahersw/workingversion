@@ -93,6 +93,8 @@ export type WorkspaceDocumentProgress = {
 
 export type WorkspaceDetailWithProgress = WorkspaceDetail & {
   documentProgress: WorkspaceDocumentProgress[];
+  /** Stored transcript pages are usable even if the search index failed. */
+  recoverableDocs?: { docId: string; fileName: string; pageCount: number }[];
 };
 
 type PageText = { page: number; text: string };
@@ -884,6 +886,11 @@ export async function getWorkspace(
   const checkpoints = await listWorkspaceDocumentCheckpoints(principal, itemId);
   return {
     ...state.detail,
+    recoverableDocs: checkpoints.flatMap((c) =>
+      c.docId && c.pagesKey
+        ? [{ docId: c.docId, fileName: c.fileName, pageCount: c.pageCount ?? 0 }]
+        : [],
+    ),
     documentProgress: checkpoints.length
       ? checkpoints.map(toDocumentProgress)
       : legacyReadyProgress(state.detail.docs),
@@ -974,9 +981,14 @@ export async function getWorkspacePages(
   docId: string,
 ): Promise<PageText[]> {
   const ws = await getWorkspace(principal, itemId);
-  const doc = ws?.docs.find((d) => d.docId === docId);
+  if (!ws) throw new Error("workspace not found");
+  const doc =
+    ws.docs.find((d) => d.docId === docId) ??
+    (await listWorkspaceDocumentCheckpoints(principal, itemId)).find(
+      (d) => d.docId === docId && d.pagesKey,
+    );
   if (!doc) throw new Error("document not found in workspace");
-  if (!doc.pagesKey.startsWith(`kb/pages/${principal}/`)) {
+  if (!doc.pagesKey?.startsWith(`kb/pages/${principal}/`)) {
     throw new Error("invalid pages key");
   }
   const r = await s3().send(new GetObjectCommand({ Bucket: bucketName(), Key: doc.pagesKey }));
@@ -1003,7 +1015,9 @@ export async function putWorkspaceAnalysis(
   if (Buffer.byteLength(body, "utf8") > DEPOSITION_RECORD_MAX_BYTES) {
     throw new Error("deposition analysis exceeds the stored record limit");
   }
-  const first = await withRetry(() => getItem(userPK(principal), itemSK(itemId), { consistent: true }));
+  const first = await withRetry(() =>
+    getItem(userPK(principal), itemSK(itemId), { consistent: true }),
+  );
   if (!first || first.type !== "workspace" || first.owner !== principal) {
     throw new Error("workspace was not found");
   }

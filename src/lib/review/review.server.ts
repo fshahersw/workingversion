@@ -17,7 +17,14 @@
 // ============================================================================
 import { ulid } from "ulid";
 
-import { putItem, getItem, queryPrefix, deleteItem, batchDelete } from "@/lib/data/dynamo.server";
+import {
+  putItem,
+  putItemConditionally,
+  getItem,
+  queryPrefix,
+  deleteItem,
+  batchDelete,
+} from "@/lib/data/dynamo.server";
 import { deleteWorkspace, getWorkspace } from "@/lib/kb/workspace.server";
 import type { WorkspaceSurface } from "@/lib/kb/workspace.server";
 import { upsertSource } from "./review-sources";
@@ -47,7 +54,7 @@ const cellId = (rowId: string, columnId: string) => `${rowId}~${columnId}`;
 type Item = Record<string, unknown>;
 const s = (v: unknown, d = ""): string => (typeof v === "string" ? v : d);
 const n = (v: unknown, d = 0): number => (typeof v === "number" ? v : Number(v ?? d) || d);
-const list = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+const list = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
 
 // --- mappers -----------------------------------------------------------------
 
@@ -180,11 +187,13 @@ const MAX_QUESTION = 2_000;
 const MAX_OPTIONS = 40;
 
 function cleanText(value: unknown, max: number): string {
-  return String(value ?? "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]+/g, " ")
-    .trim()
-    .slice(0, max);
+  return (
+    String(value ?? "")
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u0008\u000B-\u001F\u007F]+/g, " ")
+      .trim()
+      .slice(0, max)
+  );
 }
 
 function cleanOptions(options: unknown): string[] {
@@ -194,7 +203,12 @@ function cleanOptions(options: unknown): string[] {
 
 export async function createReviewTable(
   principal: string,
-  input: { name: string; matterId?: string | null; matterLabel?: string | null; instructions?: string | null },
+  input: {
+    name: string;
+    matterId?: string | null;
+    matterLabel?: string | null;
+    instructions?: string | null;
+  },
 ): Promise<ReviewTable> {
   const id = ulid();
   const now = new Date().toISOString();
@@ -313,7 +327,11 @@ async function touchTable(principal: string, tableId: string): Promise<void> {
   await putItem({ ...t, updatedAt: new Date().toISOString() });
 }
 
-export async function renameReviewTable(principal: string, id: string, name: string): Promise<void> {
+export async function renameReviewTable(
+  principal: string,
+  id: string,
+  name: string,
+): Promise<void> {
   const t = await getItem(pk(principal), tblSK(id));
   if (!t) return;
   await putItem({
@@ -356,7 +374,14 @@ export async function listColumns(principal: string, tableId: string): Promise<R
 
 export async function createColumn(
   principal: string,
-  input: { tableId: string; name: string; kind: ColumnKind; question: string; options: string[]; position: number },
+  input: {
+    tableId: string;
+    name: string;
+    kind: ColumnKind;
+    question: string;
+    options: string[];
+    position: number;
+  },
 ): Promise<ReviewColumn> {
   const id = `${input.tableId}#${ulid()}`;
   const col: ReviewColumn = {
@@ -369,7 +394,14 @@ export async function createColumn(
     version: 1,
     position: input.position,
   };
-  await putItem({ PK: pk(principal), SK: colSK(id), entity: "rcolumn", owner: principal, ...col, createdAt: new Date().toISOString() });
+  await putItem({
+    PK: pk(principal),
+    SK: colSK(id),
+    entity: "rcolumn",
+    owner: principal,
+    ...col,
+    createdAt: new Date().toISOString(),
+  });
   return col;
 }
 
@@ -383,7 +415,8 @@ export async function updateColumn(
   const current = mapColumn(item);
   // A prompt / type / options change bumps the version, invalidating this
   // column's cell cache keys so only this column recomputes on the next run.
-  const nextQuestion = patch.question !== undefined ? cleanText(patch.question, MAX_QUESTION) : undefined;
+  const nextQuestion =
+    patch.question !== undefined ? cleanText(patch.question, MAX_QUESTION) : undefined;
   const nextOptions = patch.options !== undefined ? cleanOptions(patch.options) : undefined;
   const semantic =
     (nextQuestion !== undefined && nextQuestion !== current.question) ||
@@ -464,7 +497,14 @@ export async function upsertRows(
       docId: bound ? r.docId! : null,
       workspaceItemId: bound ? r.workspaceItemId! : null,
     };
-    await putItem({ PK: pk(principal), SK: rowSK(id), entity: "rrow", owner: principal, ...row, createdAt: now });
+    await putItem({
+      PK: pk(principal),
+      SK: rowSK(id),
+      entity: "rrow",
+      owner: principal,
+      ...row,
+      createdAt: now,
+    });
     out.push(row);
   }
   return out;
@@ -478,7 +518,11 @@ export async function deleteRow(principal: string, rowId: string): Promise<void>
   await deleteItem(p, rowSK(rowId));
 }
 
-export async function relinkRow(principal: string, rowId: string, fileIds: string[]): Promise<void> {
+export async function relinkRow(
+  principal: string,
+  rowId: string,
+  fileIds: string[],
+): Promise<void> {
   const item = await getItem(pk(principal), rowSK(rowId));
   if (!item) return;
   await putItem({ ...item, fileIds });
@@ -528,16 +572,32 @@ export async function saveCells(principal: string, cells: CellWrite[]): Promise<
       verifiedAt: null,
       cacheKey: c.cacheKey,
     };
-    await putItem({
-      PK: pk(principal),
-      SK: cellSK(id),
-      entity: "rcell",
-      owner: principal,
-      ...cell,
-      runId: c.runId ?? null,
-      updatedAt: new Date().toISOString(),
-    });
-    out.push(cell);
+    const written = await putItemConditionally(
+      {
+        PK: pk(principal),
+        SK: cellSK(id),
+        entity: "rcell",
+        owner: principal,
+        ...cell,
+        runId: c.runId ?? null,
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        expression:
+          "(attribute_not_exists(#overridden) OR #overridden = :no) AND (attribute_not_exists(#verified) OR #verified = :none)",
+        names: { "#overridden": "overridden", "#verified": "verifiedAt" },
+        values: { ":no": false, ":none": null },
+      },
+    );
+    if (written) out.push(cell);
+    else {
+      const current = await getItem(pk(principal), cellSK(id), { consistent: true });
+      if (!current)
+        throw new Error(
+          "The reviewed cell changed during saving. Retry to reload its current value.",
+        );
+      out.push(mapCell(current));
+    }
   }
   return out;
 }
@@ -635,7 +695,10 @@ export async function setCellVerified(
   actorEmail: string | null,
 ): Promise<ReviewCell> {
   const current = await ownedCell(principal, cell);
-  const updated: ReviewCell = { ...current, verifiedAt: verified ? new Date().toISOString() : null };
+  const updated: ReviewCell = {
+    ...current,
+    verifiedAt: verified ? new Date().toISOString() : null,
+  };
   await putItem({
     PK: pk(principal),
     SK: cellSK(current.id),
@@ -666,8 +729,14 @@ export type CellHistoryEntry = {
   createdAt: string;
 };
 
-export async function listCellHistory(principal: string, cellId2: string): Promise<CellHistoryEntry[]> {
-  const rows = await queryPrefix(pk(principal), `RHIST#${cellId2}#`, { scanForward: false, limit: 20 });
+export async function listCellHistory(
+  principal: string,
+  cellId2: string,
+): Promise<CellHistoryEntry[]> {
+  const rows = await queryPrefix(pk(principal), `RHIST#${cellId2}#`, {
+    scanForward: false,
+    limit: 20,
+  });
   return rows.map((r) => ({
     id: s(r.id),
     action: s(r.action),
@@ -682,7 +751,12 @@ export async function listCellHistory(principal: string, cellId2: string): Promi
 
 export async function startRun(
   principal: string,
-  input: { tableId: string; columnIds: string[]; snapshot: Record<string, unknown>; cellsTotal: number },
+  input: {
+    tableId: string;
+    columnIds: string[];
+    snapshot: Record<string, unknown>;
+    cellsTotal: number;
+  },
 ): Promise<string | null> {
   try {
     const id = `${input.tableId}#${ulid()}`;
@@ -738,7 +812,10 @@ export type RunSummary = {
 };
 
 export async function latestRun(principal: string, tableId: string): Promise<RunSummary | null> {
-  const rows = await queryPrefix(pk(principal), `RRUN#${tableId}#`, { scanForward: false, limit: 1 });
+  const rows = await queryPrefix(pk(principal), `RRUN#${tableId}#`, {
+    scanForward: false,
+    limit: 1,
+  });
   const r = rows[0];
   if (!r) return null;
   return {

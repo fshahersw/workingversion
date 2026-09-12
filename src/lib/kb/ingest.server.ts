@@ -175,6 +175,7 @@ export async function ingestCanonicalDoc(
     doc: CanonicalDoc;
     byteSize?: number;
     converter?: string;
+    onRegistered?: (docId: string) => Promise<void>;
   },
 ): Promise<IngestResult> {
   const { workspaceId, surface, doc } = args;
@@ -189,6 +190,7 @@ export async function ingestCanonicalDoc(
     converter: args.converter ?? "client-text",
     status: "embedding",
   });
+  await args.onRegistered?.(docId);
   return processExistingCanonicalDoc(sub, {
     docId,
     workspaceId,
@@ -208,6 +210,7 @@ export async function ingestPages(
     sha256?: string;
     byteSize?: number;
     pages: PageText[];
+    onRegistered?: (docId: string) => Promise<void>;
   },
 ): Promise<IngestResult> {
   const doc = pagesToCanonical(args.pages, {
@@ -221,5 +224,6 @@ export async function ingestPages(
     doc,
     ...(args.byteSize !== undefined ? { byteSize: args.byteSize } : {}),
     converter: "client-text",
+    onRegistered: args.onRegistered,
   });
 }

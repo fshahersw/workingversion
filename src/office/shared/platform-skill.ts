@@ -10,10 +10,23 @@
 // the produced image is also attached to the tool result so a vision model can
 // look at what it made.
 // ============================================================================
-import type { AgentImage, AgentSkill, AgentToolCall, AgentToolDef, ToolExecution } from "@genoffice/agent-core";
+import type {
+  AgentImage,
+  AgentSkill,
+  AgentToolCall,
+  AgentToolDef,
+  ToolExecution,
+} from "@genoffice/agent-core";
 
 import { askClarification, type ClarifyQuestion } from "./clarify-card";
-import { dataUrlOf, describeImage, getPlatformImage, isPlatformImage, putPlatformImage, type StoredImage } from "./image-store";
+import {
+  dataUrlOf,
+  describeImage,
+  getPlatformImage,
+  isPlatformImage,
+  putPlatformImage,
+  type StoredImage,
+} from "./image-store";
 
 export type PlatformApp = "writer" | "sheets" | "slides";
 
@@ -25,26 +38,37 @@ export type TemplatePayload =
 
 export type TemplateHooks = {
   /** Apply a template payload to the open document. Return the tool execution the model reads. */
-  apply: (payload: TemplatePayload, template: { id: string; name: string; description: string }, input: Record<string, unknown>) => Promise<ToolExecution>;
+  apply: (
+    payload: TemplatePayload,
+    template: { id: string; name: string; description: string },
+    input: Record<string, unknown>,
+  ) => Promise<ToolExecution>;
   /** Capture the open document (or the part the model names) as a reusable template payload. */
   capture?: (input: Record<string, unknown>) => Promise<TemplatePayload>;
 };
 
 export type PlatformSkillOptions = {
   app: PlatformApp;
+  taskScope?: () => string;
   /** Tool names to leave out (the editor has its own tool under that name). */
   exclude?: readonly string[];
   /** Template application wired by the editor; when absent the template tools are omitted. */
   templates?: TemplateHooks;
 };
 
-const KIND: Record<PlatformApp, "docx" | "xlsx" | "pptx"> = { writer: "docx", sheets: "xlsx", slides: "pptx" };
+const KIND: Record<PlatformApp, "docx" | "xlsx" | "pptx"> = {
+  writer: "docx",
+  sheets: "xlsx",
+  slides: "pptx",
+};
 
 /** How the model gets a produced image into the document, per editor. */
 const PLACEMENT: Record<PlatformApp, string> = {
   writer: "Place it with insert_image, passing this handle as `url`.",
-  slides: "Place it with insert_web_image (slideIndex, this handle as `url`, and a pixel frame), or swap an existing picture with replace_image.",
-  sheets: "Place it with propose_operations using {op:'add_image', sheetId, path: <this handle>, anchorCell}.",
+  slides:
+    "Place it with insert_web_image (slideIndex, this handle as `url`, and a pixel frame), or swap an existing picture with replace_image.",
+  sheets:
+    "Place it with propose_operations using {op:'add_image', sheetId, path: <this handle>, anchorCell}.",
 };
 
 /** Attach an image to the tool result only when it is small enough to be worth the context. */
@@ -59,8 +83,22 @@ function attach(images: StoredImage[]): { images?: AgentImage[] } {
   return small.length ? { images: small.map((i) => ({ base64: i.base64, mime: i.mime })) } : {};
 }
 
-function imageResult(image: StoredImage, summary: string, app: PlatformApp, extra = ""): ToolExecution {
-  const output = [`Image ready: ${describeImage(image)}.`, PLACEMENT[app], extra].filter(Boolean).join(" ");
+function imageResult(
+  image: StoredImage,
+  summary: string,
+  app: PlatformApp,
+  extra = "",
+): ToolExecution {
+  const output = [
+    `Image ready: ${describeImage(image)}.`,
+    PLACEMENT[app],
+    image.diagram
+      ? "Editable source is available with get_diagram_source using this handle during this page session."
+      : "",
+    extra,
+  ]
+    .filter(Boolean)
+    .join(" ");
   return {
     output,
     mutated: false,
@@ -92,6 +130,27 @@ async function imageBase64(ref: string): Promise<{ base64: string; mime: string 
 function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
   const defs: AgentToolDef[] = [
     {
+      name: "load_attachment_for_python",
+      description:
+        "Load an original Office/PDF attachment into this task's Python workspace. Pass the source handle returned by read_attachment. The result contains the exact filename to use with pandas/openpyxl/python-docx/pdfplumber. Call once per needed file per task. Plain-text inputs read locally can instead be supplied directly to Python.",
+      inputSchema: {
+        type: "object",
+        properties: { handle: { type: "string" } },
+        required: ["handle"],
+      },
+    },
+    {
+      name: "get_diagram_source",
+      readOnly: true,
+      description:
+        "Read the editable source and rendering settings of a diagram created during this page session. Use before revising its labels, relationships or layout, then render_diagram again and replace the original image using the editor tools. Source handles expire when the page is closed.",
+      inputSchema: {
+        type: "object",
+        properties: { handle: { type: "string" } },
+        required: ["handle"],
+      },
+    },
+    {
       name: "run_python",
       description:
         "Run Python in a secure sandbox (pandas, numpy, matplotlib, openpyxl, python-docx, graphviz preinstalled; no network) for exact calculations, date math, statistics, data reshaping or a matplotlib figure. Print what you need to read back. Figures saved as PNG (plt.savefig) or shown (plt.show) come back as images. Prefer the editor's native chart tools for charts that must stay editable; use a figure only when a native chart cannot express it." +
@@ -101,8 +160,14 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
       inputSchema: {
         type: "object",
         properties: {
-          code: { type: "string", description: "Python 3 source. Keep it self-contained; print results." },
-          purpose: { type: "string", description: "One line on what this computes (shown to the user)." },
+          code: {
+            type: "string",
+            description: "Python 3 source. Keep it self-contained; print results.",
+          },
+          purpose: {
+            type: "string",
+            description: "One line on what this computes (shown to the user).",
+          },
         },
         required: ["code"],
       },
@@ -114,7 +179,9 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
         "Check reporter citations (509 U.S. 579, 2023 WL 12345, 43 F.4th 1) against CourtListener's opinion database. Returns CONFIRMED with the case name, AMBIGUOUS, or NOT FOUND per cite. Run this before relying on or inserting any case citation; never present a NOT FOUND cite as authority.",
       inputSchema: {
         type: "object",
-        properties: { text: { type: "string", description: "Text containing one or more citations." } },
+        properties: {
+          text: { type: "string", description: "Text containing one or more citations." },
+        },
         required: ["text"],
       },
     },
@@ -141,7 +208,10 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
         type: "object",
         properties: {
           query: { type: "string", description: "Natural-language question or key facts to find." },
-          workspace: { type: "string", description: "Optional workspace name or id to restrict the search." },
+          workspace: {
+            type: "string",
+            description: "Optional workspace name or id to restrict the search.",
+          },
           topK: { type: "integer", description: "Passages to return, default 8, max 24." },
         },
         required: ["query"],
@@ -155,8 +225,15 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
       inputSchema: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Words from the document name; omit to list recent documents." },
-          kind: { type: "string", enum: ["docx", "xlsx", "pptx"], description: "Restrict to one kind." },
+          query: {
+            type: "string",
+            description: "Words from the document name; omit to list recent documents.",
+          },
+          kind: {
+            type: "string",
+            enum: ["docx", "xlsx", "pptx"],
+            description: "Restrict to one kind.",
+          },
           limit: { type: "integer", description: "Default 20, max 50." },
         },
         required: [],
@@ -169,7 +246,9 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
         "Load a Seeger Weiss playbook: firm conventions for a kind of deliverable (citation form, table of authorities, deposition summary, damages tables, MDL status deck, case timeline, firm style). Call with no name to list the guides. Load the relevant guide before drafting or reformatting firm work product.",
       inputSchema: {
         type: "object",
-        properties: { name: { type: "string", description: "Guide id from the list, e.g. bluebook-citations" } },
+        properties: {
+          name: { type: "string", description: "Guide id from the list, e.g. bluebook-citations" },
+        },
         required: [],
       },
     },
@@ -210,9 +289,14 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
           title: { type: "string" },
           content: {
             type: "string",
-            description: "Markdown: #/## headings, - bullets, 1. lists, pipe tables (| a | b |), ```dot blocks for Graphviz diagrams (docx/pdf).",
+            description:
+              "Markdown: #/## headings, - bullets, 1. lists, pipe tables (| a | b |), ```dot blocks for Graphviz diagrams (docx/pdf).",
           },
-          style: { type: "string", enum: ["legal", "modern", "minimal"], description: "docx/pdf style, default legal" },
+          style: {
+            type: "string",
+            enum: ["legal", "modern", "minimal"],
+            description: "docx/pdf style, default legal",
+          },
         },
         required: ["kind", "title", "content"],
       },
@@ -224,9 +308,19 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
       inputSchema: {
         type: "object",
         properties: {
-          prompt: { type: "string", description: "Detailed description: subject, style, composition, palette (English)." },
-          aspectRatio: { type: "string", enum: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"], description: "Default 1:1" },
-          negativePrompt: { type: "string", description: "What to avoid (text, watermarks, clutter)." },
+          prompt: {
+            type: "string",
+            description: "Detailed description: subject, style, composition, palette (English).",
+          },
+          aspectRatio: {
+            type: "string",
+            enum: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+            description: "Default 1:1",
+          },
+          negativePrompt: {
+            type: "string",
+            description: "What to avoid (text, watermarks, clutter).",
+          },
         },
         required: ["prompt"],
       },
@@ -256,18 +350,42 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
               "upscale_creative",
             ],
           },
-          image: { type: "string", description: "platform-image:<id> handle or http(s) URL of the image to edit" },
-          prompt: { type: "string", description: "What to produce (replacement, new color, expansion content, style target)." },
-          searchPrompt: { type: "string", description: "What to find in the image (search_replace, recolor, erase)." },
+          image: {
+            type: "string",
+            description: "platform-image:<id> handle or http(s) URL of the image to edit",
+          },
+          prompt: {
+            type: "string",
+            description:
+              "What to produce (replacement, new color, expansion content, style target).",
+          },
+          searchPrompt: {
+            type: "string",
+            description: "What to find in the image (search_replace, recolor, erase).",
+          },
           negativePrompt: { type: "string" },
-          mask: { type: "string", description: "Optional mask image handle (white = edit) for erase/inpaint." },
-          styleImage: { type: "string", description: "Style reference image handle (style_guide, style_transfer)." },
+          mask: {
+            type: "string",
+            description: "Optional mask image handle (white = edit) for erase/inpaint.",
+          },
+          styleImage: {
+            type: "string",
+            description: "Style reference image handle (style_guide, style_transfer).",
+          },
           expand: {
             type: "object",
-            properties: { left: { type: "integer" }, right: { type: "integer" }, up: { type: "integer" }, down: { type: "integer" } },
+            properties: {
+              left: { type: "integer" },
+              right: { type: "integer" },
+              up: { type: "integer" },
+              down: { type: "integer" },
+            },
             description: "Pixels to add per side (outpaint).",
           },
-          strength: { type: "number", description: "0-1 guidance strength (sketch, structure, style_transfer)." },
+          strength: {
+            type: "number",
+            description: "0-1 guidance strength (sketch, structure, style_transfer).",
+          },
           label: { type: "string", description: "Short label for the resulting image." },
         },
         required: ["operation", "image"],
@@ -283,8 +401,16 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
           kind: { type: "string", enum: ["mermaid", "graphviz"] },
           source: { type: "string", description: "Mermaid or DOT source" },
           title: { type: "string", description: "Short caption used as the image label" },
-          engine: { type: "string", enum: ["dot", "neato", "fdp", "sfdp", "circo", "twopi"], description: "Graphviz layout engine, default dot" },
-          theme: { type: "string", enum: ["default", "neutral", "forest", "dark", "base"], description: "Mermaid theme, default neutral" },
+          engine: {
+            type: "string",
+            enum: ["dot", "neato", "fdp", "sfdp", "circo", "twopi"],
+            description: "Graphviz layout engine, default dot",
+          },
+          theme: {
+            type: "string",
+            enum: ["default", "neutral", "forest", "dark", "base"],
+            description: "Mermaid theme, default neutral",
+          },
         },
         required: ["kind", "source"],
       },
@@ -312,8 +438,14 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
           type: "object",
           properties: {
             id: { type: "string", description: "Template id from list_templates" },
-            replace: { type: "boolean", description: "Replace the current content instead of adding to it (writer, slides)." },
-            newSheetName: { type: "string", description: "Sheets: build the template on a new sheet with this name." },
+            replace: {
+              type: "boolean",
+              description: "Replace the current content instead of adding to it (writer, slides).",
+            },
+            newSheetName: {
+              type: "string",
+              description: "Sheets: build the template on a new sheet with this name.",
+            },
           },
           required: ["id"],
         },
@@ -351,31 +483,65 @@ const SYSTEM_PROMPT = `## Platform tools
 export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
   const exclude = new Set(options.exclude ?? []);
   const tools = toolDefs(options.app, !!options.templates).filter((t) => !exclude.has(t.name));
+  let taskScope = crypto.randomUUID() as string;
   const app = options.app;
   const kind = KIND[app];
 
   const execute = async (call: AgentToolCall, signal?: AbortSignal): Promise<ToolExecution> => {
+    const taskId = options.taskScope?.() ?? taskScope;
     const input = call.input;
     switch (call.name) {
+      case "load_attachment_for_python": {
+        const { officeStageAttachmentFn } = await import("@/lib/office/tools.functions");
+        const r = await officeStageAttachmentFn({
+          data: { handle: String(input["handle"] ?? ""), taskId },
+        });
+        return { output: JSON.stringify(r), mutated: false, summary: "Attachment ready in Python" };
+      }
+      case "get_diagram_source": {
+        const image = getPlatformImage(String(input["handle"] ?? ""));
+        if (!image?.diagram)
+          return fail(
+            "Diagram source",
+            "This handle has no saved diagram source in this page session.",
+          );
+        const { svg: _svg, ...settings } = image.diagram;
+        return {
+          output: JSON.stringify({ title: image.label, ...settings }),
+          mutated: false,
+          summary: "Read editable diagram source",
+        };
+      }
       case "run_python": {
         const code = String(input["code"] ?? "");
         if (!code.trim()) return fail("Python", "code must not be empty");
         const purpose = String(input["purpose"] ?? "").trim();
         const { officeRunPythonFn } = await import("@/lib/office/tools.functions");
-        const r = await officeRunPythonFn({ data: { code } });
+        const r = await officeRunPythonFn({ data: { code, taskId } });
         if (signal?.aborted) return fail("Python", "stopped by the user");
         const images: StoredImage[] = [];
-        for (const img of r.images) images.push(await putPlatformImage({ ...img, label: purpose || "Python figure" }));
+        for (const img of r.images)
+          images.push(await putPlatformImage({ ...img, label: purpose || "Python figure" }));
         const lines = [r.text.trim() || "(no output)"];
-        if (images.length) lines.push(`Figures produced: ${images.map(describeImage).join("; ")}.`, PLACEMENT[app]);
-        if (r.files.length) lines.push(`Other files written (not embeddable here): ${r.files.map((f) => `${f.name} (${f.size} bytes)`).join(", ")}.`);
+        if (images.length)
+          lines.push(`Figures produced: ${images.map(describeImage).join("; ")}.`, PLACEMENT[app]);
+        if (r.files.length)
+          lines.push(
+            `Other files written (not embeddable here): ${r.files.map((f) => `${f.name} (${f.size} bytes)`).join(", ")}.`,
+          );
         return {
           output: lines.join("\n"),
           isError: r.isError,
           mutated: false,
           summary: purpose ? `Python: ${purpose}` : "Python run",
           ...(images.length
-            ? { display: { kind: "images", items: images.map((i) => ({ url: dataUrlOf(i), title: i.label })) }, ...attach(images) }
+            ? {
+                display: {
+                  kind: "images",
+                  items: images.map((i) => ({ url: dataUrlOf(i), title: i.label })),
+                },
+                ...attach(images),
+              }
             : {}),
         };
       }
@@ -391,10 +557,15 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         if (!/^https?:\/\//i.test(url)) return fail("Read page", "url must be an http(s) URL");
         const { officeFetchPageFn } = await import("@/lib/office/tools.functions");
         try {
-          const r = await officeFetchPageFn({ data: { url, maxChars: Number(input["maxChars"]) || 12_000 } });
+          const r = await officeFetchPageFn({
+            data: { url, maxChars: Number(input["maxChars"]) || 12_000 },
+          });
           return { output: r.text, mutated: false, summary: `Read ${new URL(url).hostname}` };
         } catch (error) {
-          return fail("Read page", `fetch_page failed: ${error instanceof Error ? error.message : String(error)}`);
+          return fail(
+            "Read page",
+            `fetch_page failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       }
       case "search_firm_knowledge": {
@@ -406,11 +577,18 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
             data: {
               query,
               ...(input["workspace"] ? { workspace: String(input["workspace"]) } : {}),
-              ...(Number.isFinite(Number(input["topK"])) && input["topK"] ? { topK: Number(input["topK"]) } : {}),
+              ...(Number.isFinite(Number(input["topK"])) && input["topK"]
+                ? { topK: Number(input["topK"]) }
+                : {}),
             },
           });
           if (!r.available.length) {
-            return { output: "The user has no knowledge base workspaces yet. Suggest uploading matter documents to the Knowledge page.", mutated: false, summary: "No workspaces" };
+            return {
+              output:
+                "The user has no knowledge base workspaces yet. Suggest uploading matter documents to the Knowledge page.",
+              mutated: false,
+              summary: "No workspaces",
+            };
           }
           if (!r.hits.length) {
             return {
@@ -420,7 +598,8 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
             };
           }
           const lines = r.hits.map(
-            (h, i) => `[${i + 1}] ${h.workspace} / ${h.document}${h.pages ? ` (p. ${h.pages})` : ""} (score ${h.score.toFixed(2)})\n${h.snippet}`,
+            (h, i) =>
+              `[${i + 1}] ${h.workspace} / ${h.document}${h.pages ? ` (p. ${h.pages})` : ""} (score ${h.score.toFixed(2)})\n${h.snippet}`,
           );
           return {
             output: `Searched: ${r.searched.join(", ")}.\n\n${lines.join("\n\n")}`,
@@ -441,9 +620,17 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
               ...(input["limit"] ? { limit: Number(input["limit"]) } : {}),
             },
           });
-          if (!r.docs.length) return { output: "No matching documents in the Library.", mutated: false, summary: "Library: none" };
+          if (!r.docs.length)
+            return {
+              output: "No matching documents in the Library.",
+              mutated: false,
+              summary: "Library: none",
+            };
           const items = r.docs.map((d) => ({ url: `${location.origin}${d.url}`, title: d.name }));
-          const lines = r.docs.map((d) => `- ${d.name} (${d.kind}, updated ${d.updatedAt.slice(0, 10)}): ${location.origin}${d.url}`);
+          const lines = r.docs.map(
+            (d) =>
+              `- ${d.name} (${d.kind}, updated ${d.updatedAt.slice(0, 10)}): ${location.origin}${d.url}`,
+          );
           return {
             output: lines.join("\n"),
             mutated: false,
@@ -458,41 +645,65 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         const name = String(input["name"] ?? "").trim();
         const { officeGuideFn } = await import("@/lib/office/tools.functions");
         const r = await officeGuideFn({ data: { name } });
-        if ("guide" in r && r.guide) return { output: r.guide.body, mutated: false, summary: `Guide: ${r.guide.title}` };
+        if ("guide" in r && r.guide)
+          return { output: r.guide.body, mutated: false, summary: `Guide: ${r.guide.title}` };
         const list = (r.guides ?? [])
           .filter((g) => g.apps.includes(app))
           .map((g) => `- ${g.id}: ${g.title}. ${g.summary}`)
           .join("\n");
         const prefix = "error" in r && r.error ? `${r.error}\n` : "";
-        return { output: `${prefix}Available guides:\n${list}`, mutated: false, summary: "Guides listed" };
+        return {
+          output: `${prefix}Available guides:\n${list}`,
+          mutated: false,
+          summary: "Guides listed",
+        };
       }
       case "list_templates": {
         const { officeListTemplatesFn } = await import("@/lib/office/tools.functions");
         try {
           const r = await officeListTemplatesFn({ data: { kind } });
-          if (!r.templates.length) return { output: "No templates available.", mutated: false, summary: "Templates: none" };
-          const lines = r.templates.map((t) => `- ${t.id} [${t.source === "mine" ? "saved" : "firm"} | ${t.category}] ${t.name}: ${t.description}`);
-          return { output: lines.join("\n"), mutated: false, summary: `${r.templates.length} templates` };
+          if (!r.templates.length)
+            return {
+              output: "No templates available.",
+              mutated: false,
+              summary: "Templates: none",
+            };
+          const lines = r.templates.map(
+            (t) =>
+              `- ${t.id} [${t.source === "mine" ? "saved" : "firm"} | ${t.category}] ${t.name}: ${t.description}`,
+          );
+          return {
+            output: lines.join("\n"),
+            mutated: false,
+            summary: `${r.templates.length} templates`,
+          };
         } catch (error) {
           return fail("Templates", error instanceof Error ? error.message : String(error));
         }
       }
       case "apply_template": {
-        if (!options.templates) return fail("Apply template", "Templates are not available in this editor.");
+        if (!options.templates)
+          return fail("Apply template", "Templates are not available in this editor.");
         const id = String(input["id"] ?? "").trim();
         if (!id) return fail("Apply template", "id is required; call list_templates first");
         const { officeGetTemplateFn } = await import("@/lib/office/tools.functions");
         try {
           const t = await officeGetTemplateFn({ data: { kind, id } });
           const payload = t.payload as TemplatePayload;
-          if (!payload || typeof payload !== "object" || !("format" in payload)) return fail("Apply template", "The template payload is unreadable.");
-          return await options.templates.apply(payload, { id: t.id, name: t.name, description: t.description }, input);
+          if (!payload || typeof payload !== "object" || !("format" in payload))
+            return fail("Apply template", "The template payload is unreadable.");
+          return await options.templates.apply(
+            payload,
+            { id: t.id, name: t.name, description: t.description },
+            input,
+          );
         } catch (error) {
           return fail("Apply template", error instanceof Error ? error.message : String(error));
         }
       }
       case "save_template": {
-        if (!options.templates?.capture) return fail("Save template", "Saving templates is not available in this editor.");
+        if (!options.templates?.capture)
+          return fail("Save template", "Saving templates is not available in this editor.");
         const name = String(input["name"] ?? "").trim();
         if (!name) return fail("Save template", "name is required");
         try {
@@ -507,33 +718,50 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
               payload,
             },
           });
-          return { output: `Saved template "${r.name}" (id ${r.id}). It will appear in list_templates under "${r.category}".`, mutated: false, summary: `Template saved: ${r.name}` };
+          return {
+            output: `Saved template "${r.name}" (id ${r.id}). It will appear in list_templates under "${r.category}".`,
+            mutated: false,
+            summary: `Template saved: ${r.name}`,
+          };
         } catch (error) {
           return fail("Save template", error instanceof Error ? error.message : String(error));
         }
       }
       case "ask_clarification": {
-        const raw = Array.isArray(input["questions"]) ? (input["questions"] as Record<string, unknown>[]) : [];
+        const raw = Array.isArray(input["questions"])
+          ? (input["questions"] as Record<string, unknown>[])
+          : [];
         const questions: ClarifyQuestion[] = raw
           .slice(0, 4)
           .map((q, i) => ({
             id: String(q["id"] ?? `q${i + 1}`),
             label: String(q["label"] ?? "").trim(),
             ...(q["description"] ? { description: String(q["description"]) } : {}),
-            options: Array.isArray(q["options"]) ? q["options"].map((o) => String(o)).filter(Boolean).slice(0, 5) : [],
+            options: Array.isArray(q["options"])
+              ? q["options"]
+                  .map((o) => String(o))
+                  .filter(Boolean)
+                  .slice(0, 5)
+              : [],
             multi: !!q["multi"],
           }))
           .filter((q) => q.label && q.options.length >= 1);
-        if (!questions.length) return fail("Ask the user", "questions must be non-empty and each needs options");
+        if (!questions.length)
+          return fail("Ask the user", "questions must be non-empty and each needs options");
         const answer = await askClarification(questions, signal);
         if (answer.cancelled) {
           return {
-            output: "The user skipped the questions. Proceed with your best professional judgment and state the assumptions you made.",
+            output:
+              "The user skipped the questions. Proceed with your best professional judgment and state the assumptions you made.",
             mutated: false,
             summary: "Question skipped",
           };
         }
-        return { output: `User answers:\n${answer.answers}\nProceed accordingly.`, mutated: false, summary: "User answered" };
+        return {
+          output: `User answers:\n${answer.answers}\nProceed accordingly.`,
+          mutated: false,
+          summary: "User answered",
+        };
       }
       case "create_document": {
         const docKind = String(input["kind"] ?? "docx");
@@ -544,7 +772,13 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         const { officeCreateDocumentFn } = await import("@/lib/office/tools.functions");
         try {
           const r = await officeCreateDocumentFn({
-            data: { kind: docKind, title, markdown: content, ...(input["style"] ? { style: String(input["style"]) } : {}) },
+            data: {
+              taskId,
+              kind: docKind,
+              title,
+              markdown: content,
+              ...(input["style"] ? { style: String(input["style"]) } : {}),
+            },
           });
           if (r.kind === "pdf") {
             const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
@@ -554,7 +788,11 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
             a.download = r.name;
             a.click();
             setTimeout(() => URL.revokeObjectURL(url), 30_000);
-            return { output: `Created ${r.name} (${r.size} bytes); the browser downloaded it.`, mutated: false, summary: `Created ${r.name}` };
+            return {
+              output: `Created ${r.name} (${r.size} bytes); the browser downloaded it.`,
+              mutated: false,
+              summary: `Created ${r.name}`,
+            };
           }
           const href = `${location.origin}${r.url}`;
           return {
@@ -576,11 +814,19 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
             data: {
               prompt,
               ...(input["aspectRatio"] ? { aspectRatio: String(input["aspectRatio"]) } : {}),
-              ...(input["negativePrompt"] ? { negativePrompt: String(input["negativePrompt"]) } : {}),
+              ...(input["negativePrompt"]
+                ? { negativePrompt: String(input["negativePrompt"]) }
+                : {}),
             },
           });
           if (signal?.aborted) return fail("Generate image", "stopped by the user");
-          const image = await putPlatformImage({ mime: r.mime, base64: r.base64, width: r.width, height: r.height, label: prompt.slice(0, 80) });
+          const image = await putPlatformImage({
+            mime: r.mime,
+            base64: r.base64,
+            width: r.width,
+            height: r.height,
+            label: prompt.slice(0, 80),
+          });
           return imageResult(image, "Image generated", app);
         } catch (error) {
           return fail("Generate image", error instanceof Error ? error.message : String(error));
@@ -590,12 +836,19 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         const operation = String(input["operation"] ?? "").trim();
         const ref = String(input["image"] ?? "").trim();
         if (!operation) return fail("Edit image", "operation is required");
-        if (!ref) return fail("Edit image", "image is required (platform-image handle or http(s) URL)");
+        if (!ref)
+          return fail("Edit image", "image is required (platform-image handle or http(s) URL)");
         try {
           const source = await imageBase64(ref);
-          if (!source) return fail("Edit image", `Unknown image reference ${ref}. Use a platform-image:<id> handle from an earlier tool result or an http(s) URL.`);
+          if (!source)
+            return fail(
+              "Edit image",
+              `Unknown image reference ${ref}. Use a platform-image:<id> handle from an earlier tool result or an http(s) URL.`,
+            );
           const mask = input["mask"] ? await imageBase64(String(input["mask"])) : null;
-          const styleImage = input["styleImage"] ? await imageBase64(String(input["styleImage"])) : null;
+          const styleImage = input["styleImage"]
+            ? await imageBase64(String(input["styleImage"]))
+            : null;
           const { officeEditImageFn } = await import("@/lib/office/tools.functions");
           const r = await officeEditImageFn({
             data: {
@@ -603,16 +856,29 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
               image: source.base64,
               ...(input["prompt"] ? { prompt: String(input["prompt"]) } : {}),
               ...(input["searchPrompt"] ? { searchPrompt: String(input["searchPrompt"]) } : {}),
-              ...(input["negativePrompt"] ? { negativePrompt: String(input["negativePrompt"]) } : {}),
+              ...(input["negativePrompt"]
+                ? { negativePrompt: String(input["negativePrompt"]) }
+                : {}),
               ...(mask ? { mask: mask.base64 } : {}),
               ...(styleImage ? { styleImage: styleImage.base64 } : {}),
-              ...(input["expand"] && typeof input["expand"] === "object" ? { expand: input["expand"] as Record<string, number> } : {}),
-              ...(Number.isFinite(Number(input["strength"])) && input["strength"] !== undefined ? { strength: Number(input["strength"]) } : {}),
+              ...(input["expand"] && typeof input["expand"] === "object"
+                ? { expand: input["expand"] as Record<string, number> }
+                : {}),
+              ...(Number.isFinite(Number(input["strength"])) && input["strength"] !== undefined
+                ? { strength: Number(input["strength"]) }
+                : {}),
             },
           });
           if (signal?.aborted) return fail("Edit image", "stopped by the user");
-          const label = String(input["label"] ?? "").trim() || `${operation.replace(/_/g, " ")} result`;
-          const image = await putPlatformImage({ mime: r.mime, base64: r.base64, width: r.width, height: r.height, label });
+          const label =
+            String(input["label"] ?? "").trim() || `${operation.replace(/_/g, " ")} result`;
+          const image = await putPlatformImage({
+            mime: r.mime,
+            base64: r.base64,
+            width: r.width,
+            height: r.height,
+            label,
+          });
           return imageResult(image, `Image edited: ${operation.replace(/_/g, " ")}`, app);
         } catch (error) {
           return fail("Edit image", error instanceof Error ? error.message : String(error));
@@ -626,17 +892,41 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         try {
           if (diagramKind === "graphviz") {
             const { officeRenderGraphvizFn } = await import("@/lib/office/tools.functions");
-            const r = await officeRenderGraphvizFn({ data: { source, engine: String(input["engine"] ?? "dot") } });
-            const image = await putPlatformImage({ mime: r.mime, base64: r.base64, label: title });
+            const r = await officeRenderGraphvizFn({
+              data: { source, taskId, engine: String(input["engine"] ?? "dot") },
+            });
+            const image = await putPlatformImage({
+              mime: r.mime,
+              base64: r.base64,
+              label: title,
+              diagram: { kind: "graphviz", source, engine: String(input["engine"] ?? "dot") },
+            });
             return imageResult(image, `Diagram: ${title}`, app);
           }
           const { renderMermaidPng } = await import("./mermaid-render");
-          const r = await renderMermaidPng(source, { theme: input["theme"] ? String(input["theme"]) : undefined });
-          const image = await putPlatformImage({ mime: "image/png", base64: r.base64, width: r.width, height: r.height, label: title });
+          const r = await renderMermaidPng(source, {
+            theme: input["theme"] ? String(input["theme"]) : undefined,
+          });
+          const image = await putPlatformImage({
+            mime: "image/png",
+            base64: r.base64,
+            width: r.width,
+            height: r.height,
+            label: title,
+            diagram: {
+              kind: "mermaid",
+              source,
+              theme: String(input["theme"] ?? "neutral"),
+              svg: r.svg,
+            },
+          });
           return imageResult(image, `Diagram: ${title}`, app);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          return fail("Render diagram", `${diagramKind} render failed: ${message}. Fix the source syntax and call again.`);
+          return fail(
+            "Render diagram",
+            `${diagramKind} render failed: ${message}. Fix the source syntax and call again.`,
+          );
         }
       }
       default:
@@ -646,6 +936,10 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
 
   return {
     id: "platform",
+    buildContext: () => {
+      taskScope = crypto.randomUUID();
+      return "Python uses a fresh workspace for this task. Files and variables persist across tool calls in this task only; do not assume earlier tasks left files behind.";
+    },
     systemPrompt: SYSTEM_PROMPT,
     tools,
     executeTool: (call, signal) => execute(call, signal),

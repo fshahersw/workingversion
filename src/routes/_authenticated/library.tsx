@@ -324,7 +324,7 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
             <button
               type="button"
               onClick={() => openWorkspace(w.itemId)}
-              disabled={w.status !== "ready"}
+              disabled={w.status !== "ready" && !(w.surface === "deposition" && w.analysis)}
               className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Open

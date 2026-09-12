@@ -36,6 +36,14 @@ Q. Where do you work?
 A. Acme Corp.
 `;
 
+test("the first page number is not part of the witness name", () => {
+  const transcript = parseTranscript(
+    "DEPOSITION OF JANE SMITH\n1\n1 Q. Who are you?\n2 A. Jane Smith.\n3 Q. Do you work here?\n4 A. Yes, I work here.",
+    "Smith.txt",
+  );
+  assert.equal(transcript.witness, "JANE SMITH");
+});
+
 const MOTION = `
 UNITED STATES DISTRICT COURT
 Plaintiff moves to exclude the expert under Daubert.
@@ -52,7 +60,9 @@ test("ASCII parse keeps printed page and line, not a reflowed chunk", () => {
   const parsed = parseTranscript(ASCII, "smith.txt");
   assert.equal(parsed.citeReady, true);
   assert.equal(parsed.witness, "JANE SMITH");
-  assert.ok(parsed.lines.some((l) => l.page === 1 && l.line === 1 && /state your name/i.test(l.text)));
+  assert.ok(
+    parsed.lines.some((l) => l.page === 1 && l.line === 1 && /state your name/i.test(l.text)),
+  );
   assert.ok(parsed.lines.some((l) => l.page === 2 && l.line === 2 && /2019/.test(l.text)));
 });
 
@@ -89,7 +99,8 @@ test("blocksToPages keeps one pile page per printed page for search", () => {
 });
 
 test("normalizeTranscriptText recovers glued and spaced Q&A from dirty PDFs", () => {
-  const dirty = "CONFIDENTIAL\n1Q. Please state your name.\n2 A . Jane Smith.\nPage 1 of 44\n3 Q: Where do you work?";
+  const dirty =
+    "CONFIDENTIAL\n1Q. Please state your name.\n2 A . Jane Smith.\nPage 1 of 44\n3 Q: Where do you work?";
   const clean = normalizeTranscriptText(dirty);
   assert.match(clean, /1 Q\. Please state your name/);
   assert.match(clean, /2 A\. Jane Smith/);
@@ -118,7 +129,9 @@ test("pageNeedsDepOcr flags empty and garbled pages, not lined Q&A or captions",
   assert.equal(pageNeedsDepOcr("asdf %% ~~ 12 34"), true);
   assert.equal(pageNeedsDepOcr(ASCII), false);
   assert.equal(
-    pageNeedsDepOcr("CONFIDENTIAL — Deposition of Jane Smith\nTaken January 15, 2024\nAppearances: MR. JONES"),
+    pageNeedsDepOcr(
+      "CONFIDENTIAL — Deposition of Jane Smith\nTaken January 15, 2024\nAppearances: MR. JONES",
+    ),
     false,
   );
 });
@@ -137,7 +150,10 @@ test("transcriptFromPages keeps a scanned PDF with no Q&A instead of rejecting i
 });
 
 test("a lone page number after a full 25-line page starts a new page", () => {
-  const page1 = Array.from({ length: 25 }, (_, i) => `     ${i + 1}         Q.    Line ${i + 1} of testimony.`).join("\n");
+  const page1 = Array.from(
+    { length: 25 },
+    (_, i) => `     ${i + 1}         Q.    Line ${i + 1} of testimony.`,
+  ).join("\n");
   const text = `${page1}\n                    2\n     1         Q.    Next page question.\n     2         A.    Next page answer.\n`;
   const parsed = parseTranscript(text, "dense.txt");
   const p2 = parsed.lines.filter((l) => l.page === 2);

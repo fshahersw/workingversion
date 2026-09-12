@@ -12,6 +12,7 @@ import {
   parseGraphView,
   visibleGraph,
   zoomAt,
+  personNodeMatchesName,
 } from "./graph-view.ts";
 
 const nodes: DepGraphNode[] = [
@@ -29,8 +30,24 @@ const edges: DepGraphEdge[] = [
 const analysis: DepAnalysis = {
   ...EMPTY_ANALYSIS,
   witnesses: [
-    { id: "w1", name: "Jane Smith", role: "deponent", fileName: "Smith.pdf", summary: "", quote: "", cite: "1:1" },
-    { id: "w2", name: "Robert Jones", role: "deponent", fileName: "Jones.pdf", summary: "", quote: "", cite: "1:1" },
+    {
+      id: "w1",
+      name: "Jane Smith",
+      role: "deponent",
+      fileName: "Smith.pdf",
+      summary: "",
+      quote: "",
+      cite: "1:1",
+    },
+    {
+      id: "w2",
+      name: "Robert Jones",
+      role: "deponent",
+      fileName: "Jones.pdf",
+      summary: "",
+      quote: "",
+      cite: "1:1",
+    },
   ],
   contradictions: [
     {
@@ -44,6 +61,29 @@ const analysis: DepAnalysis = {
   ],
   graph: { nodes, edges },
 };
+
+test("different people with a shared surname are never merged", () => {
+  assert.equal(personNodeMatchesName("Jane Smith", "John Smith"), false);
+  assert.equal(personNodeMatchesName("Jane Smith", "Smith"), false);
+  assert.equal(personNodeMatchesName("Dr. Jane Smith", "Jane Smith"), true);
+});
+
+test("unknown confidence is not treated as 100 percent confidence", () => {
+  const graph = visibleGraph(analysis, [], { ...DEFAULT_GRAPH_VIEW, minConfidence: 90 });
+  assert.equal(graph.edges.length, 0);
+});
+
+test("legacy edges stay in needs-review view and retain their filters", () => {
+  assert.equal(
+    visibleGraph(analysis, [], { ...DEFAULT_GRAPH_VIEW, evidence: "source_matched" }).edges.length,
+    0,
+  );
+  assert.equal(
+    visibleGraph(analysis, [], { ...DEFAULT_GRAPH_VIEW, evidence: "needs_review" }).edges.length,
+    3,
+  );
+  assert.equal(parseGraphView({ evidence: "needs_review" }).evidence, "needs_review");
+});
 
 test("zoomAt keeps the graph point under the cursor fixed", () => {
   const before = { x: 20, y: 40, k: 1 };
@@ -63,11 +103,11 @@ test("visibleGraph hides unchecked kinds and isolated nodes", () => {
     hideIsolated: true,
   });
   const visible = visibleGraph(analysis, [], view);
-  assert.deepEqual(
-    visible.nodes.map((node) => node.id).sort(),
-    ["d1", "p1", "p2"],
+  assert.deepEqual(visible.nodes.map((node) => node.id).sort(), ["d1", "p1", "p2"]);
+  assert.equal(
+    visible.nodes.some((node) => node.id === "o1"),
+    false,
   );
-  assert.equal(visible.nodes.some((node) => node.id === "o1"), false);
 });
 
 test("visibleGraph can drop factual edges and keep synthetic contradictions", () => {
@@ -79,11 +119,11 @@ test("visibleGraph can drop factual edges and keep synthetic contradictions", ()
     hideIsolated: true,
   });
   const visible = visibleGraph(analysis, synthetic, view);
-  assert.equal(visible.edges.every((edge) => edge.class === "contradicts"), true);
-  assert.deepEqual(
-    visible.nodes.map((node) => node.id).sort(),
-    ["p1", "p2"],
+  assert.equal(
+    visible.edges.every((edge) => edge.class === "contradicts"),
+    true,
   );
+  assert.deepEqual(visible.nodes.map((node) => node.id).sort(), ["p1", "p2"]);
 });
 
 test("edge labels classify on whole words only", () => {
@@ -108,10 +148,36 @@ test("conflict edges carry the contradiction title and source file", () => {
   assert.deepEqual([edge?.from, edge?.to].sort(), ["p1", "p2"]);
 });
 
+test("cluster layout keeps entity cards from overlapping within and across groups", () => {
+  const nodes = Array.from({ length: 24 }, (_, i) => ({
+    id: `node-${i}`,
+    label: `Entity ${i}`,
+    kind: "person" as const,
+  }));
+  const clusters = [
+    { id: "a", nodeIds: nodes.slice(0, 4).map((n) => n.id) },
+    { id: "b", nodeIds: nodes.slice(4).map((n) => n.id) },
+  ];
+  const { items } = layoutGraph(nodes, [], "cluster", clusters);
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const a = items[i]!,
+        b = items[j]!;
+      assert.ok(
+        Math.abs(a.x - b.x) >= 208 || Math.abs(a.y - b.y) >= 82,
+        `${a.id} overlaps ${b.id}`,
+      );
+    }
+  }
+});
+
 test("every layout places every node inside its canvas and is deterministic", () => {
   const view = parseGraphView(DEFAULT_GRAPH_VIEW);
   const visible = visibleGraph(analysis, conflictEdgesFromAnalysis(analysis), view);
-  const clusters = [{ id: "c-a", nodeIds: ["p1", "d1"] }, { id: "c-b", nodeIds: ["p2", "o1"] }];
+  const clusters = [
+    { id: "c-a", nodeIds: ["p1", "d1"] },
+    { id: "c-b", nodeIds: ["p2", "o1"] },
+  ];
   for (const layout of ["kind", "cluster", "witness", "force"] as const) {
     const first = layoutGraph(visible.nodes, visible.edges, layout, clusters, visible.files);
     const second = layoutGraph(visible.nodes, visible.edges, layout, clusters, visible.files);

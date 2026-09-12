@@ -111,7 +111,14 @@ export class PileClient {
       return { hits: packed.hits, pages: packed.pages, texts: pile.textsFor(packed.hits) };
     }
     if (op === "textsFor") {
-      return { texts: pile.textsFor(payload["hits"] as { fileId: string; page: number }[]) };
+      const hits = payload["hits"] as { fileId: string; page: number }[];
+      return {
+        texts: pile.textsFor(hits),
+        ocrKeys: pile
+          .pagesFor(hits)
+          .filter((p) => p.ocr)
+          .map((p) => `${p.fileId}:${p.page}`),
+      };
     }
     if (op === "structureSample") {
       return { pages: pile.structureSample(payload["maxPerFile"] as number) };
@@ -155,7 +162,9 @@ export class PileClient {
     return this.call({ op: "packAskByFile", query, structure, perFileCap });
   }
 
-  textsFor(hits: { fileId: string; page: number }[]): Promise<{ texts: Record<string, string> }> {
+  textsFor(
+    hits: { fileId: string; page: number }[],
+  ): Promise<{ texts: Record<string, string>; ocrKeys?: string[] }> {
     return this.call({ op: "textsFor", hits });
   }
 

@@ -1,3 +1,4 @@
+import { OfficeTaskControls } from '@/office/shared/OfficeTaskControls'
 import {settleRunMessages} from '@genoffice/ui'
 import { SwSheetControls } from './ai/SwSheetControls'
 import { sheetsSkill } from './ai/sw-skill'
@@ -1220,6 +1221,15 @@ export function App(): React.JSX.Element {
               ],
             }
           })
+        },
+        onTurnEnd: (directions) => {
+          if (!directions?.length) return
+          persistChatMessage('assistant', 'Received updated directions; earlier task activity remains in this run.')
+          persistChatMessage('user', directions.join('\n\n'))
+          setChat(previous => [...settleRunMessages(previous),
+            { role: 'user', text: directions.join('\n\n'), tools: [] },
+            { role: 'assistant', text: '', tools: [], streaming: true },
+          ])
         },
         onDone: ({ text, cancelled, turnLimit, truncated }) => {
           setChat(previous => settleRunMessages(previous))
@@ -5372,6 +5382,11 @@ export function App(): React.JSX.Element {
         />
       )}
       <ExcelShell
+        taskControls={<OfficeTaskControls
+          app="sheets" document={workbookFile?.sessionId ?? 'untitled'}
+          mode={publicPreferences(aiSettings).swMode} loop={agentLoopRef.current}
+          busy={aiBusy} onSend={handleSend} onStop={handleStopAgent}
+        />}
         swMode={publicPreferences(aiSettings).swMode}
         swControls={<SwSheetControls preferences={publicPreferences(aiSettings)} busy={aiBusy} onChange={changeSwPreferences} />}
         prompt={prompt}

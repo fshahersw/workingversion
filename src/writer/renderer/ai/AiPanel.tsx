@@ -1,3 +1,4 @@
+import { OfficeTaskControls } from '@/office/shared/OfficeTaskControls'
 import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
 /* Modified for the Seeger Weiss Writer desktop preview from GenOffice commit 69b4ce0. See the retained LICENSE, NOTICE, and source-change list. */
@@ -712,9 +713,13 @@ export function AiPanel({
             }
           })
         },
-        onTurnEnd: () => {
+        onTurnEnd: (directions) => {
+          if (directions?.length) {
+            persistMessage('assistant', 'Received updated directions; earlier task activity remains in this run.')
+            persistMessage('user', directions.join('\n\n'))
+          }
           patchLastAssistant({ streaming: false })
-          setChat((prev) => [...prev, { role: 'assistant', text: '', streaming: true }])
+          setChat((prev) => [...prev, ...(directions?.length ? [{ role: 'user' as const, text: directions.join('\n\n') }] : []), { role: 'assistant', text: '', streaming: true }])
         },
         onDone: ({ text, cancelled, turnLimit, truncated }) => {
           setChat(previous => settleRunMessages(previous))
@@ -1298,6 +1303,10 @@ ${notes}`);inputRef.current?.focus()}}>Use in writing</button>}
 
       <JumpToLatest targetRef={logRef} followRef={stickToBottomRef}/>
       <div className="ai-composer">
+        <OfficeTaskControls
+          app="writer" document={filePath ?? 'untitled'} mode={writerMode}
+          loop={loopRef.current} busy={busy} onSend={runWith} onStop={cancel}
+        />
         {!(hasScopeSelection) && <AssistantContext label={scopeLabel('docs',{})} busy={busy}/>}
         {attachNotice && <div className="ai-attach-notice">{attachNotice}</div>}
         {writerMode==='write' && <EditQueueCard

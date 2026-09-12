@@ -1,4 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { DiscoveryCoverage, DiscoveryScopeControl } from "@/components/docs/DiscoveryCoverage";
+import type { DiscoveryScope } from "@/lib/pile/discovery-scan";
 import {
   AlertCircle,
   Check,
@@ -14,6 +16,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DepositionAnalysisPane, type AnalysisTab } from "./DepositionAnalysisPane";
 import { DepositionDropPanel } from "./DepositionDropPanel";
+import { DepositionExportDialog } from "./DepositionExportDialog";
+import { DepositionIntakeSummary } from "./DepositionIntakeSummary";
 import { TranscriptPane } from "./TranscriptPane";
 import {
   AlertDialog,
@@ -45,12 +49,17 @@ const EASE = [0.22, 0.61, 0.36, 1] as const;
  */
 function SavedStatus({ saved, onRetry }: { saved: DepSaved; onRetry: () => void }) {
   if (saved.status === "idle") return null;
-  const base = "hidden items-center gap-1.5 pr-2 text-[12px] sm:inline-flex";
+  const base = "inline-flex items-center gap-1.5 pr-2 text-[12px]";
   if (saved.status === "saving" || saved.status === "queued" || saved.status === "embedding") {
     return (
       <span className={`${base} text-muted-foreground`} aria-live="polite">
         <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" />
         {saved.status === "saving" ? "Saving to Library…" : "Indexing…"}
+        {saved.status === "queued" ? (
+          <button type="button" className="font-medium underline" onClick={onRetry}>
+            Check status
+          </button>
+        ) : null}
       </span>
     );
   }
@@ -58,10 +67,16 @@ function SavedStatus({ saved, onRetry }: { saved: DepSaved; onRetry: () => void 
     return (
       <span className={`${base} text-destructive`} title={saved.message ?? undefined}>
         <AlertCircle className="h-3.5 w-3.5" />
-        Not saved
-        <button type="button" onClick={onRetry} className="font-medium underline-offset-2 hover:underline">
-          Retry
-        </button>
+        {saved.analysis === "saved" ? "Analysis saved · index failed" : "Save needs attention"}
+        {(!saved.loaded || saved.analysis === "error") && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="font-medium underline-offset-2 hover:underline"
+          >
+            Retry
+          </button>
+        )}
       </span>
     );
   }
@@ -73,14 +88,24 @@ function SavedStatus({ saved, onRetry }: { saved: DepSaved; onRetry: () => void 
         : saved.analysis === "saved" && saved.analysisSavedAt
           ? `analysis ${new Date(saved.analysisSavedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
           : null;
-  const title = [saved.name, saved.message].filter(Boolean).join(" · ");
+  const title = [saved.name, saved.message, saved.analysisError].filter(Boolean).join(" · ");
   return (
     <span
       className={`${base} ${saved.analysis === "error" ? "text-destructive" : "text-muted-foreground"}`}
       title={title || undefined}
     >
-      <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2.5} />
-      Saved{analysisNote ? ` · ${analysisNote}` : ""}
+      {saved.analysis === "error" ? (
+        <AlertCircle className="h-3.5 w-3.5" />
+      ) : (
+        <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2.5} />
+      )}
+      {saved.analysis === "error" ? "Transcripts saved" : "Saved"}
+      {analysisNote ? ` · ${analysisNote}` : ""}
+      {saved.analysis === "error" ? (
+        <button type="button" className="font-medium underline" onClick={onRetry}>
+          Retry analysis save
+        </button>
+      ) : null}
     </span>
   );
 }
@@ -92,6 +117,8 @@ export function DepositionView() {
     start,
     analyze,
     ask,
+    cancelAsk,
+    retryQueryScan,
     reset,
     exportMemo,
     setSearch,
@@ -111,6 +138,9 @@ export function DepositionView() {
     if (id) void reloadWorkspace(id);
   }, [reloadWorkspace]);
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("summary");
+  const [scope, setScope] = useState<DiscoveryScope>("full");
+  const [askSelectedOnly, setAskSelectedOnly] = useState(false);
+  const queryOptions = { scope, fileIds: askSelectedOnly && active ? [active.fileId] : undefined };
   const [mobilePane, setMobilePane] = useState<"transcript" | "analysis">("analysis");
   const [transcriptOpen, setTranscriptOpen] = useState(() =>
     readLayoutPreference(DEPOSITION_TRANSCRIPT_KEY, true),
@@ -183,7 +213,7 @@ export function DepositionView() {
       onAsk={(question) => {
         setQuery(question);
         setMobilePane("analysis");
-        void ask(question);
+        void ask(question, queryOptions);
       }}
     />
   ) : null;
@@ -197,14 +227,46 @@ export function DepositionView() {
             <p className="text-[12.5px] text-foreground">{state.error}</p>
             <button
               type="button"
-              onClick={reset}
+              onClick={() => void analyze()}
+              disabled={analyzing || ingesting || Boolean(state.ocr) || !state.transcripts.length}
               className="mt-1 text-[11.5px] font-medium text-brand-orange hover:underline"
             >
-              Start over
+              Retry analysis
             </button>
           </div>
         </div>
       )}
+
+      {(state.saved.message || state.saved.analysisError) &&
+      (state.saved.status === "error" ||
+        state.saved.status === "ready" ||
+        state.saved.analysis === "error") ? (
+        <div
+          role="status"
+          className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950"
+        >
+          <AlertCircle className="size-4 shrink-0" />
+          <p className="min-w-48 flex-1">
+            {[state.saved.message, state.saved.analysisError].filter(Boolean).join(" ")}
+          </p>
+          {(state.saved.analysis === "error" ||
+            (state.saved.status === "error" && !state.saved.loaded)) && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 bg-white text-xs"
+              onClick={() => void saveWorkspace()}
+            >
+              Retry save
+            </Button>
+          )}
+          {state.analysis ? (
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={exportMemo}>
+              Download analysis
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
 
       {workbench ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-sm border border-border bg-card">
@@ -261,30 +323,30 @@ export function DepositionView() {
                   variant="ghost"
                   size="sm"
                   className="h-8 rounded-sm"
-                  onClick={() => void analyze()}
+                  disabled={ingesting || Boolean(state.ocr)}
+                  onClick={() => void analyze(true)}
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
                   Re-run
                 </Button>
               )}
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-8 rounded-sm"
-                disabled={!state.analysis?.summary && !state.analysis?.admissions.length}
-                onClick={exportMemo}
-              >
-                <Download className="h-3.5 w-3.5" />
-                Export
-              </Button>
+              <DepositionExportDialog
+                analysis={state.analysis}
+                label={fileLabel}
+                activeTab={analysisTab}
+                complete={Object.values(state.passes).every((pass) => pass === "done")}
+              />
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 className="h-8 rounded-sm"
                 onClick={reset}
-                title={state.saved.itemId ? "Close this set. The saved copy stays in your Library." : undefined}
+                title={
+                  state.saved.itemId
+                    ? "Close this set. The saved copy stays in your Library."
+                    : undefined
+                }
               >
                 Clear
               </Button>
@@ -326,6 +388,11 @@ export function DepositionView() {
             </AlertDialogContent>
           </AlertDialog>
 
+          <DepositionIntakeSummary
+            transcripts={state.transcripts}
+            files={state.files}
+            ocr={state.ocr}
+          />
           {desktopLayout && transcriptOpen ? (
             <ResizablePanelGroup
               id="deposition-workbench"
@@ -402,12 +469,36 @@ export function DepositionView() {
             </div>
           )}
 
+          <DiscoveryCoverage
+            coverage={state.scanCoverage}
+            onCancel={cancelAsk}
+            onRetry={retryQueryScan}
+          />
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-t border-slate-200 bg-white px-3 py-2">
+            <DiscoveryScopeControl
+              scope={scope}
+              onChange={setScope}
+              disabled={state.asking || analyzing}
+              count={askSelectedOnly ? 1 : state.transcripts.length}
+            />
+            {state.transcripts.length > 1 && (
+              <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={askSelectedOnly}
+                  disabled={state.asking}
+                  onChange={(e) => setAskSelectedOnly(e.target.checked)}
+                />
+                Selected transcript only
+              </label>
+            )}
+          </div>
           <form
             className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border bg-surface px-3 py-1.5 sm:flex-nowrap sm:gap-3"
             onSubmit={(event) => {
               event.preventDefault();
               setMobilePane("analysis");
-              void ask(state.query);
+              void ask(state.query, queryOptions);
             }}
           >
             <label
@@ -430,7 +521,9 @@ export function DepositionView() {
             <Button
               type="submit"
               className="h-8 rounded-sm px-3"
-              disabled={!state.query.trim() || state.asking}
+              disabled={
+                !state.query.trim() || state.asking || analyzing || ingesting || Boolean(state.ocr)
+              }
             >
               {state.asking ? "Asking…" : "Ask"}
             </Button>
@@ -439,38 +532,38 @@ export function DepositionView() {
       ) : ingesting ? (
         <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto py-1 sm:py-4">
           <div className="mx-auto w-full max-w-[820px] rounded-sm border border-border bg-card p-4 sm:p-5">
-          <p className="mb-2 text-[13px] font-semibold text-foreground">Reading transcripts</p>
-          <DepositionDropPanel
-            onStart={() => {}}
-            busy
-            files={state.files.map((f) => ({
-              name: f.name,
-              pages: f.pages,
-              done: f.done,
-              status: f.status,
-            }))}
-          />
-          {state.steps.length ? (
-            <ul className="mt-4 space-y-1.5 border-t border-border/70 pt-3">
-              {state.steps.map((s) => (
-                <li key={s.id} className="flex items-start gap-2 text-[12.5px]">
-                  {s.status === "running" ? (
-                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand-navy motion-safe:animate-spin" />
-                  ) : s.status === "error" ? (
-                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
-                  ) : (
-                    <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-                  )}
-                  <span>
-                    <span className="text-foreground">{s.label}</span>
-                    {s.detail ? (
-                      <span className="ml-1.5 text-muted-foreground">{s.detail}</span>
-                    ) : null}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+            <p className="mb-2 text-[13px] font-semibold text-foreground">Reading transcripts</p>
+            <DepositionDropPanel
+              onStart={() => {}}
+              busy
+              files={state.files.map((f) => ({
+                name: f.name,
+                pages: f.pages,
+                done: f.done,
+                status: f.status,
+              }))}
+            />
+            {state.steps.length ? (
+              <ul className="mt-4 space-y-1.5 border-t border-border/70 pt-3">
+                {state.steps.map((s) => (
+                  <li key={s.id} className="flex items-start gap-2 text-[12.5px]">
+                    {s.status === "running" ? (
+                      <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand-navy motion-safe:animate-spin" />
+                    ) : s.status === "error" ? (
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+                    ) : (
+                      <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
+                    )}
+                    <span>
+                      <span className="text-foreground">{s.label}</span>
+                      {s.detail ? (
+                        <span className="ml-1.5 text-muted-foreground">{s.detail}</span>
+                      ) : null}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
         </div>
       ) : (

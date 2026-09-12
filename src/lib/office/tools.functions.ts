@@ -10,6 +10,22 @@ function principalOf(context: unknown): string {
   return (context as { user: SwUser }).user.sub;
 }
 
+function taskId(value: unknown): string {
+  if (value === undefined) return crypto.randomUUID();
+  if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(value))
+    throw new Error("Invalid task ID");
+  return value;
+}
+async function inOfficeTask<T>(id: string, work: () => Promise<T>, ephemeral = false) {
+  const { withInterpreterScope, closeInterpreterScope } =
+    await import("@/lib/agents/interpreter-context.server");
+  try {
+    return await withInterpreterScope(`office:${id}`, work);
+  } finally {
+    if (ephemeral) await closeInterpreterScope(`office:${id}`);
+  }
+}
+
 const str = (v: unknown, max: number, field: string): string => {
   if (typeof v !== "string") throw new Error(`${field} required`);
   if (v.length > max) throw new Error(`${field} too long`);
@@ -18,21 +34,25 @@ const str = (v: unknown, max: number, field: string): string => {
 
 export const officeRunPythonFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { code: string }) => ({ code: str(d?.code, 40_000, "code") }))
+  .inputValidator((d: { code: string; taskId?: string }) => ({
+    code: str(d?.code, 40_000, "code"),
+    taskId: taskId(d?.taskId),
+  }))
   .handler(async ({ data }) => {
     const { runOfficePython } = await import("./tools.server");
-    return runOfficePython(data.code);
+    return inOfficeTask(data.taskId, () => runOfficePython(data.code));
   });
 
 export const officeRenderGraphvizFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { source: string; engine?: string }) => ({
+  .inputValidator((d: { source: string; engine?: string; taskId?: string }) => ({
+    taskId: taskId(d?.taskId),
     source: str(d?.source, 60_000, "source"),
     engine: typeof d?.engine === "string" ? d.engine.slice(0, 16) : "dot",
   }))
   .handler(async ({ data }) => {
     const { renderGraphviz } = await import("./tools.server");
-    return renderGraphviz(data.source, data.engine);
+    return inOfficeTask(data.taskId, () => renderGraphviz(data.source, data.engine));
   });
 
 export const officeGenerateImageFn = createServerFn({ method: "POST" })
@@ -40,7 +60,9 @@ export const officeGenerateImageFn = createServerFn({ method: "POST" })
   .inputValidator((d: { prompt: string; aspectRatio?: string; negativePrompt?: string }) => ({
     prompt: str(d?.prompt, 1024, "prompt"),
     ...(typeof d?.aspectRatio === "string" ? { aspectRatio: d.aspectRatio.slice(0, 8) } : {}),
-    ...(typeof d?.negativePrompt === "string" ? { negativePrompt: d.negativePrompt.slice(0, 1024) } : {}),
+    ...(typeof d?.negativePrompt === "string"
+      ? { negativePrompt: d.negativePrompt.slice(0, 1024) }
+      : {}),
   }))
   .handler(async ({ data }) => {
     const { generateOfficeImage } = await import("./tools.server");
@@ -80,15 +102,20 @@ export const officeEditImageFn = createServerFn({ method: "POST" })
       expand?: { left?: number; right?: number; up?: number; down?: number };
       strength?: number;
     }) => {
-      if (!IMAGE_OPS.has(String(d?.operation))) throw new Error("operation is not a supported image edit");
+      if (!IMAGE_OPS.has(String(d?.operation)))
+        throw new Error("operation is not a supported image edit");
       return {
         operation: d.operation as import("./tools.server").ImageEditOperation,
         image: str(d?.image, 14_000_000, "image"),
         ...(optStr(d?.prompt, 1024) ? { prompt: optStr(d?.prompt, 1024) } : {}),
         ...(optStr(d?.searchPrompt, 512) ? { searchPrompt: optStr(d?.searchPrompt, 512) } : {}),
-        ...(optStr(d?.negativePrompt, 1024) ? { negativePrompt: optStr(d?.negativePrompt, 1024) } : {}),
+        ...(optStr(d?.negativePrompt, 1024)
+          ? { negativePrompt: optStr(d?.negativePrompt, 1024) }
+          : {}),
         ...(optStr(d?.mask, 14_000_000) ? { mask: optStr(d?.mask, 14_000_000) } : {}),
-        ...(optStr(d?.styleImage, 14_000_000) ? { styleImage: optStr(d?.styleImage, 14_000_000) } : {}),
+        ...(optStr(d?.styleImage, 14_000_000)
+          ? { styleImage: optStr(d?.styleImage, 14_000_000) }
+          : {}),
         ...(d?.expand && typeof d.expand === "object" ? { expand: d.expand } : {}),
         ...(Number.isFinite(d?.strength) ? { strength: Number(d.strength) } : {}),
       };
@@ -112,12 +139,19 @@ export const officeImageSearchFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((d: { query: string; maxResults?: number }) => ({
     query: str(d?.query, 400, "query"),
-    maxResults: Number.isFinite(d?.maxResults) ? Math.max(1, Math.min(20, Number(d.maxResults))) : 8,
+    maxResults: Number.isFinite(d?.maxResults)
+      ? Math.max(1, Math.min(20, Number(d.maxResults)))
+      : 8,
   }))
   .handler(async ({ data }) => {
-    const { tavilyConfigured, tavilyImageSearch } = await import("@/lib/agents/tavily-search.server");
+    const { tavilyConfigured, tavilyImageSearch } =
+      await import("@/lib/agents/tavily-search.server");
     if (!tavilyConfigured()) {
-      return { images: [] as Array<{ imageUrl: string; title: string }>, method: "error" as const, error: "Image search is not configured on this platform (TAVILY_API_KEY)." };
+      return {
+        images: [] as Array<{ imageUrl: string; title: string }>,
+        method: "error" as const,
+        error: "Image search is not configured on this platform (TAVILY_API_KEY).",
+      };
     }
     const images = await tavilyImageSearch(data.query, data.maxResults);
     return { images, method: "tavily" as const };
@@ -168,13 +202,21 @@ export const officeGetTemplateFn = createServerFn({ method: "POST" })
 
 export const officeSaveTemplateFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { kind: string; name: string; description?: string; category?: string; payload: unknown }) => ({
-    kind: str(d?.kind, 8, "kind"),
-    name: str(d?.name, 120, "name"),
-    ...(optStr(d?.description, 400) ? { description: optStr(d?.description, 400) } : {}),
-    ...(optStr(d?.category, 60) ? { category: optStr(d?.category, 60) } : {}),
-    payload: d?.payload,
-  }))
+  .inputValidator(
+    (d: {
+      kind: string;
+      name: string;
+      description?: string;
+      category?: string;
+      payload: unknown;
+    }) => ({
+      kind: str(d?.kind, 8, "kind"),
+      name: str(d?.name, 120, "name"),
+      ...(optStr(d?.description, 400) ? { description: optStr(d?.description, 400) } : {}),
+      ...(optStr(d?.category, 60) ? { category: optStr(d?.category, 60) } : {}),
+      payload: d?.payload,
+    }),
+  )
   .handler(async ({ context, data }) => {
     const { saveTemplate } = await import("./templates.server");
     return saveTemplate(principalOf(context), data);
@@ -190,17 +232,19 @@ export const officeExtractAttachmentFn = createServerFn({ method: "POST" })
   }))
   .handler(async ({ data }) => {
     const { startAttachmentExtract } = await import("./attachments.server");
-    return startAttachmentExtract(data);
+    return inOfficeTask(crypto.randomUUID(), () => startAttachmentExtract(data), true);
   });
 
 export const officePollAttachmentFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { invocationArn: string; cacheKey: string; name: string; kind: "pdf" | "image" }) => ({
-    invocationArn: str(d?.invocationArn, 512, "invocationArn"),
-    cacheKey: str(d?.cacheKey, 200, "cacheKey"),
-    name: str(d?.name, 200, "name"),
-    kind: d?.kind === "image" ? ("image" as const) : ("pdf" as const),
-  }))
+  .inputValidator(
+    (d: { invocationArn: string; cacheKey: string; name: string; kind: "pdf" | "image" }) => ({
+      invocationArn: str(d?.invocationArn, 512, "invocationArn"),
+      cacheKey: str(d?.cacheKey, 200, "cacheKey"),
+      name: str(d?.name, 200, "name"),
+      kind: d?.kind === "image" ? ("image" as const) : ("pdf" as const),
+    }),
+  )
   .handler(async ({ data }) => {
     const { pollAttachmentExtract } = await import("./attachments.server");
     return pollAttachmentExtract(data);
@@ -228,7 +272,15 @@ export const officeFetchPageFn = createServerFn({ method: "POST" })
 export const officeCreateDocumentFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator(
-    (d: { kind: string; title: string; markdown: string; style?: string; format?: "markdown" | "html" }) => ({
+    (d: {
+      kind: string;
+      title: string;
+      markdown: string;
+      style?: string;
+      format?: "markdown" | "html";
+      taskId?: string;
+    }) => ({
+      taskId: taskId(d?.taskId),
       kind: str(d?.kind, 8, "kind"),
       title: str(d?.title, 200, "title"),
       markdown: str(d?.markdown, 200_000, "content"),
@@ -238,7 +290,9 @@ export const officeCreateDocumentFn = createServerFn({ method: "POST" })
   )
   .handler(async ({ context, data }) => {
     const { createOfficeDocumentFromMarkdown } = await import("./tools.server");
-    return createOfficeDocumentFromMarkdown(principalOf(context), data);
+    return inOfficeTask(data.taskId, () =>
+      createOfficeDocumentFromMarkdown(principalOf(context), data),
+    );
   });
 
 export const officeGuideFn = createServerFn({ method: "POST" })
@@ -252,4 +306,46 @@ export const officeGuideFn = createServerFn({ method: "POST" })
     const guide = getFirmGuide(data.name);
     if (!guide) return { error: `Unknown guide "${data.name}".`, guides: listFirmGuides() };
     return { guide };
+  });
+
+// Complete attachment text is returned in bounded, authenticated pages.
+export const officeReadAttachmentPageFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { cacheKey: string; index: number }) => ({
+    cacheKey: str(d?.cacheKey, 240, "cacheKey"),
+    index: d?.index,
+  }))
+  .handler(async ({ data }) => {
+    const { readAttachmentPage } = await import("./attachments.server");
+    return readAttachmentPage(data.cacheKey, data.index);
+  });
+export const officePrepareAttachmentUploadFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { name: string; mime?: string; size: number; sha256: string }) => ({
+    name: str(d?.name, 200, "name"),
+    mime: optStr(d?.mime, 100),
+    size: d?.size,
+    sha256: str(d?.sha256, 64, "sha256"),
+  }))
+  .handler(async ({ data }) => {
+    const { prepareAttachmentUpload } = await import("./attachments.server");
+    return prepareAttachmentUpload(data);
+  });
+export const officeFinishAttachmentUploadFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { key: string }) => ({ key: str(d?.key, 240, "key") }))
+  .handler(async ({ data }) => {
+    const { finishAttachmentUpload } = await import("./attachments.server");
+    return inOfficeTask(crypto.randomUUID(), () => finishAttachmentUpload(data.key), true);
+  });
+
+export const officeStageAttachmentFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { handle: string; taskId?: string }) => ({
+    handle: str(d?.handle, 240, "handle"),
+    taskId: taskId(d?.taskId),
+  }))
+  .handler(async ({ data }) => {
+    const { stageAttachmentInPython } = await import("./attachments.server");
+    return inOfficeTask(data.taskId, () => stageAttachmentInPython(data.handle));
   });

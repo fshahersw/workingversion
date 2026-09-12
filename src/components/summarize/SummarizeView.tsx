@@ -1,4 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
+import { DiscoveryCoverage, DiscoveryScopeControl } from "@/components/docs/DiscoveryCoverage";
+import type { DiscoveryScope } from "@/lib/pile/discovery-scan";
 import {
   AlertCircle,
   ChevronDown,
@@ -57,6 +59,8 @@ export function SummarizeView() {
     addFiles,
     search,
     ask,
+    cancelAsk,
+    retryScan,
     reset,
     loadPage,
     saveWorkspace,
@@ -87,6 +91,7 @@ export function SummarizeView() {
   const [formats, setFormats] = useState<Set<string>>(new Set());
   const [restrictIds, setRestrictIds] = useState<Set<string>>(new Set());
   const [followUp, setFollowUp] = useState(false);
+  const [scope, setScope] = useState<DiscoveryScope>("full");
   const [refineOpen, setRefineOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
@@ -147,7 +152,17 @@ export function SummarizeView() {
   const selectedIdx = state.citePages.findIndex((p) => `${p.fileId}:${p.page}` === state.selected);
   const selectedRef = selectedIdx >= 0 ? state.citePages[selectedIdx]!.ref : null;
 
-  const fileIds = restrictIds.size ? [...restrictIds] : undefined;
+  const fileIds =
+    restrictIds.size || types.size || formats.size
+      ? files
+          .filter(
+            (file) =>
+              (!restrictIds.size || restrictIds.has(file.id)) &&
+              (!types.size || types.has(docTypeOf(file.name, state.structure))) &&
+              (!formats.size || formats.has(fileFormat(file.name))),
+          )
+          .map((file) => file.id)
+      : undefined;
 
   const [readerFile, readerPageRaw] = (state.selected ?? "").split(":");
   const selectedFile = files.find((f) => f.id === readerFile);
@@ -186,14 +201,14 @@ export function SummarizeView() {
   const submit = () => {
     const q = state.query.trim();
     if (!q || busy) return;
-    if (mode === "ask") void ask(q, { followUp, fileIds });
+    if (mode === "ask") void ask(q, { followUp: scope === "relevant" && followUp, fileIds, scope });
     else void search(q, { fileIds });
   };
 
   const runSuggestion = (question: string) => {
     setMode("ask");
     setQuery(question);
-    void ask(question, { followUp, fileIds });
+    void ask(question, { followUp: scope === "relevant" && followUp, fileIds, scope });
   };
 
   const runJob = (id: PileJobId) => {
@@ -201,7 +216,7 @@ export function SummarizeView() {
     if (!job || busy) return;
     setMode("ask");
     setQuery(job.query);
-    void ask(job.query, { job: id, followUp: false, fileIds });
+    void ask(job.query, { job: id, followUp: false, fileIds, scope });
   };
 
   const clearSession = () => {
@@ -466,132 +481,147 @@ export function SummarizeView() {
               minSize={desktopLayout ? "360px" : "0px"}
             >
               <div className="flex h-full min-h-0 min-w-0 flex-col bg-card">
-            <div className="shrink-0 border-b border-border bg-surface px-4 py-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <div
-                  className="inline-flex border border-border bg-surface-strong p-px"
-                  role="group"
-                  aria-label="Working set mode"
-                >
-                  {(["ask", "search"] as Mode[]).map((m) => (
+                <div className="shrink-0 border-b border-border bg-surface px-4 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div
+                      className="inline-flex border border-border bg-surface-strong p-px"
+                      role="group"
+                      aria-label="Working set mode"
+                    >
+                      {(["ask", "search"] as Mode[]).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setMode(m)}
+                          aria-pressed={mode === m}
+                          className={`px-3 py-1 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                            mode === m
+                              ? "bg-card text-foreground"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          {m === "ask" ? "Ask" : "Find passages"}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-[11.5px] text-muted-foreground">
+                      {mode === "ask"
+                        ? "Source-linked answers from your selected documents"
+                        : "Exact phrase, then every significant term"}
+                    </span>
+                    {mode === "ask" && scope === "relevant" && state.hasPack ? (
+                      <label className="inline-flex items-center gap-1.5 text-[11.5px] text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={followUp}
+                          onChange={(e) => setFollowUp(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-border accent-[hsl(var(--brand-navy,0_0%_20%))]"
+                        />
+                        Follow up on these pages
+                      </label>
+                    ) : null}
                     <button
-                      key={m}
                       type="button"
-                      onClick={() => setMode(m)}
-                      aria-pressed={mode === m}
-                      className={`px-3 py-1 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                        mode === m
-                          ? "bg-card text-foreground"
-                          : "text-muted-foreground hover:text-foreground"
+                      onClick={() => {
+                        if (desktopLayout) setFilesOpen(true);
+                        else setRefineOpen(true);
+                      }}
+                      className={`ml-auto items-center gap-1.5 border border-border bg-card px-2.5 py-1.5 text-[11.5px] font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                        desktopLayout && filesOpen ? "hidden" : "inline-flex"
                       }`}
                     >
-                      {m === "ask" ? "Ask" : "Find passages"}
+                      {desktopLayout ? (
+                        <PanelLeftOpen className="h-3 w-3" strokeWidth={1.75} />
+                      ) : (
+                        <SlidersHorizontal className="h-3 w-3" strokeWidth={1.75} />
+                      )}
+                      Working set
                     </button>
-                  ))}
-                </div>
-                <span className="text-[11.5px] text-muted-foreground">
-                  {mode === "ask"
-                    ? "Answered only from your indexed documents"
-                    : "Exact phrase, then every significant term"}
-                </span>
-                {mode === "ask" && state.hasPack ? (
-                  <label className="inline-flex items-center gap-1.5 text-[11.5px] text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={followUp}
-                      onChange={(e) => setFollowUp(e.target.checked)}
-                      className="h-3.5 w-3.5 rounded border-border accent-[hsl(var(--brand-navy,0_0%_20%))]"
-                    />
-                    Follow up on these pages
-                  </label>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (desktopLayout) setFilesOpen(true);
-                    else setRefineOpen(true);
-                  }}
-                  className={`ml-auto items-center gap-1.5 border border-border bg-card px-2.5 py-1.5 text-[11.5px] font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                    desktopLayout && filesOpen ? "hidden" : "inline-flex"
-                  }`}
-                >
-                  {desktopLayout ? (
-                    <PanelLeftOpen className="h-3 w-3" strokeWidth={1.75} />
-                  ) : (
-                    <SlidersHorizontal className="h-3 w-3" strokeWidth={1.75} />
+                  </div>
+
+                  {mode === "ask" && (
+                    <div className="mt-2">
+                      <DiscoveryScopeControl
+                        scope={scope}
+                        onChange={setScope}
+                        disabled={busy}
+                        count={fileIds?.length ?? files.length}
+                      />
+                    </div>
                   )}
-                  Working set
-                </button>
-              </div>
-
-              <form
-                className="mt-2.5"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  submit();
-                }}
-              >
-                <div className="flex min-h-11 items-center gap-1 rounded-sm border border-border/80 bg-card py-1 pl-3.5 pr-1 transition-[border-color,box-shadow] focus-within:border-brand-navy/40 focus-within:ring-2 focus-within:ring-brand-navy/[0.06]">
-                  <Search
-                    className="h-4 w-4 shrink-0 text-muted-foreground/70"
-                    strokeWidth={1.75}
-                  />
-                  <input
-                    value={state.query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder={
-                      mode === "ask"
-                        ? "Ask a question about these documents…"
-                        : "Search this set — docket numbers, experts, holdings…"
-                    }
-                    className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[13px] outline-none placeholder:text-muted-foreground/60"
-                  />
-                  <Button
-                    type="submit"
-                    disabled={!state.query.trim() || busy}
-                    className="h-8 shrink-0 rounded-sm bg-brand-navy px-4 text-[12.5px] font-semibold text-primary-foreground transition-colors hover:bg-brand-navy/90 disabled:pointer-events-none disabled:opacity-50"
+                  <form
+                    className="mt-2.5"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      submit();
+                    }}
                   >
-                    {state.phase === "asking"
-                      ? "Reading…"
-                      : state.searching
-                        ? "Searching…"
-                        : mode === "ask"
-                          ? "Ask"
-                          : "Search"}
-                  </Button>
+                    <div className="flex min-h-11 items-center gap-1 rounded-sm border border-border/80 bg-card py-1 pl-3.5 pr-1 transition-[border-color,box-shadow] focus-within:border-brand-navy/40 focus-within:ring-2 focus-within:ring-brand-navy/[0.06]">
+                      <Search
+                        className="h-4 w-4 shrink-0 text-muted-foreground/70"
+                        strokeWidth={1.75}
+                      />
+                      <input
+                        value={state.query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder={
+                          mode === "ask"
+                            ? "Ask a question about these documents…"
+                            : "Search this set — docket numbers, experts, holdings…"
+                        }
+                        className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[13px] outline-none placeholder:text-muted-foreground/60"
+                      />
+                      <Button
+                        type="submit"
+                        disabled={!state.query.trim() || busy || fileIds?.length === 0}
+                        className="h-8 shrink-0 rounded-sm bg-brand-navy px-4 text-[12.5px] font-semibold text-primary-foreground transition-colors hover:bg-brand-navy/90 disabled:pointer-events-none disabled:opacity-50"
+                      >
+                        {state.phase === "asking"
+                          ? "Reading…"
+                          : state.searching
+                            ? "Searching…"
+                            : mode === "ask"
+                              ? "Ask"
+                              : "Search"}
+                      </Button>
+                    </div>
+                  </form>
                 </div>
-              </form>
-            </div>
 
-            <ResultsPane
-              mode={mode}
-              query={state.query}
-              answer={state.answer}
-              streaming={state.phase === "asking"}
-              groups={visibleGroups}
-              hits={state.hits}
-              structure={state.structure}
-              selected={state.selected}
-              selectedRef={selectedRef}
-              searching={state.searching}
-              turns={state.turns}
-              suggestions={suggestions}
-              citePages={state.citePages}
-              citeReport={state.citeReport}
-              onOpen={openPage}
-              onCite={(ref) => {
-                const page = state.citePages.find((p) => p.ref === ref);
-                if (page) {
-                  openPage(page.fileId, page.page);
-                  return;
-                }
-                const n = Number(String(ref).replace(/^S/i, ""));
-                const hit = state.hits[n - 1];
-                if (hit) openPage(hit.fileId, hit.page);
-              }}
-              onSuggest={runSuggestion}
-              onJob={runJob}
-            />
+                <DiscoveryCoverage
+                  coverage={state.scanCoverage}
+                  onCancel={cancelAsk}
+                  onRetry={retryScan}
+                />
+                <ResultsPane
+                  mode={mode}
+                  query={state.query}
+                  answer={state.answer}
+                  streaming={state.phase === "asking"}
+                  groups={visibleGroups}
+                  hits={state.hits}
+                  structure={state.structure}
+                  selected={state.selected}
+                  selectedRef={selectedRef}
+                  searching={state.searching}
+                  turns={state.turns}
+                  suggestions={suggestions}
+                  citePages={state.citePages}
+                  citeReport={state.citeReport}
+                  onOpen={openPage}
+                  onCite={(ref) => {
+                    const page = state.citePages.find((p) => p.ref === ref);
+                    if (page) {
+                      openPage(page.fileId, page.page);
+                      return;
+                    }
+                    const n = Number(String(ref).replace(/^S/i, ""));
+                    const hit = state.hits[n - 1];
+                    if (hit) openPage(hit.fileId, hit.page);
+                  }}
+                  onSuggest={runSuggestion}
+                  onJob={runJob}
+                />
               </div>
             </ResizablePanel>
             {wideLayout && readerOpen && readerGroup ? (

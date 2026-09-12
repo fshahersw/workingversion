@@ -23,7 +23,7 @@ export function fileFormat(name: string): string {
 }
 
 export function docTypeOf(fileName: string, structure: PileStructure | null): string {
-  const row = structure?.inventory.find((r) => r.file === fileName);
+  const row = structure?.inventory?.find((r) => r.file === fileName);
   const t = (row?.docType ?? "").trim();
   return t ? t.charAt(0).toUpperCase() + t.slice(1) : "Unclassified";
 }
@@ -123,7 +123,9 @@ export function RefineRail({
         <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
           Working set
         </span>
-        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">{files.length}</span>
+        <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+          {files.length}
+        </span>
         {onAddFiles ? (
           <>
             <input
@@ -143,7 +145,11 @@ export function RefineRail({
               disabled={adding}
               className="ml-auto inline-flex items-center gap-1 rounded-sm text-[11px] font-medium text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
             >
-              {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" strokeWidth={2} />}
+              {adding ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Plus className="h-3 w-3" strokeWidth={2} />
+              )}
               Add
             </button>
           </>
@@ -199,7 +205,10 @@ export function RefineRail({
                       </span>
                     </span>
                     {unreadable ? (
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" strokeWidth={1.75} />
+                      <AlertTriangle
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600"
+                        strokeWidth={1.75}
+                      />
                     ) : null}
                   </button>
                 </li>

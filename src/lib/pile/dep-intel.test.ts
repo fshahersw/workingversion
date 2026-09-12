@@ -106,11 +106,46 @@ const twoWitness: DepAnalysis = {
       { id: "orphan", label: "Unrelated LLC", kind: "org" },
     ],
     edges: [
-      { from: "smith", to: "acme", label: "worked at", cite: "3:1" },
-      { from: "jones", to: "acme", label: "managed", cite: "5:2" },
-      { from: "smith", to: "memo", label: "authored", cite: "6:1" },
-      { from: "jones", to: "audit", label: "attended", cite: "9:4" },
-      { from: "smith", to: "jones", label: "corroborates on recall timing", cite: "12:4" },
+      {
+        from: "smith",
+        to: "acme",
+        label: "worked at",
+        cite: "3:1",
+        fileName: "Smith.pdf",
+        evidenceStatus: "source_matched",
+      },
+      {
+        from: "jones",
+        to: "acme",
+        label: "managed",
+        cite: "5:2",
+        fileName: "Jones.pdf",
+        evidenceStatus: "source_matched",
+      },
+      {
+        from: "smith",
+        to: "memo",
+        label: "authored",
+        cite: "6:1",
+        fileName: "Smith.pdf",
+        evidenceStatus: "source_matched",
+      },
+      {
+        from: "jones",
+        to: "audit",
+        label: "attended",
+        cite: "9:4",
+        fileName: "Jones.pdf",
+        evidenceStatus: "source_matched",
+      },
+      {
+        from: "smith",
+        to: "jones",
+        label: "corroborates on recall timing",
+        cite: "12:4",
+        fileName: "Smith.pdf",
+        evidenceStatus: "source_matched",
+      },
     ],
   },
 };
@@ -162,14 +197,14 @@ test("intelSummary counts witnesses and conflicts from the record", () => {
   assert.equal(summary.high, 1);
 });
 
-test("nodeFileMap attributes a node to the witnesses one edge away", () => {
+test("nodeFileMap attributes entities only to explicit source evidence", () => {
   const files = nodeFileMap(twoWitness, twoCols);
   assert.deepEqual(files.get("acme"), ["Smith.pdf", "Jones.pdf"]);
   assert.deepEqual(files.get("memo"), ["Smith.pdf"]);
   assert.deepEqual(files.get("audit"), ["Jones.pdf"]);
   assert.deepEqual(files.get("orphan"), []);
-  // The witnesses corroborate each other directly, so each reaches the other.
-  assert.deepEqual(files.get("smith"), ["Smith.pdf", "Jones.pdf"]);
+  // A relationship mentioned in Smith's file does not imply Jones discussed Smith.
+  assert.deepEqual(files.get("smith"), ["Smith.pdf"]);
 });
 
 test("sharedEntities keeps only multi-transcript nodes and ranks conflicted witnesses first", () => {
@@ -201,7 +236,7 @@ test("compareWitnesses splits shared and exclusive entities and finds the pair's
   const cmp = compareWitnesses(twoWitness, "Smith.pdf", "Jones.pdf", twoCols);
   assert.deepEqual(
     cmp.onlyA.map((node) => node.id),
-    ["memo"],
+    ["smith", "memo"],
   );
   assert.deepEqual(
     cmp.onlyB.map((node) => node.id),

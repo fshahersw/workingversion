@@ -209,8 +209,8 @@ export function DropPanel({
             <div className="min-w-0">
               <p className="text-[13px] font-semibold text-foreground">Document intake</p>
               <p className="mt-1 max-w-xl text-[11.5px] leading-[1.55] text-muted-foreground">
-                PDF, Word, Excel, PowerPoint, and text. Up to {MAX_FILES} files,{" "}
-                {bytes(MAX_BYTES)} total. Answers cite the source page.
+                PDF, Word, Excel, PowerPoint, and text. Up to {MAX_FILES} files, {bytes(MAX_BYTES)}{" "}
+                total. Answers cite the source page.
               </p>
             </div>
           </div>
@@ -356,8 +356,8 @@ export function DropPanel({
       <div className="flex flex-col items-stretch justify-between gap-3 border-t border-border bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:px-5">
         <span className="min-w-0 truncate text-[11.5px] text-muted-foreground">
           {usable.length
-            ? `${usable.length} file${usable.length === 1 ? "" : "s"} · kept on this device, never uploaded`
-            : "Nothing is uploaded to the server"}
+            ? `${usable.length} file${usable.length === 1 ? "" : "s"} · document text is sent for AI analysis when you ask`
+            : "Open documents, then ask or save the set to your Library"}
         </span>
         <Button
           disabled={!usable.length || busy}

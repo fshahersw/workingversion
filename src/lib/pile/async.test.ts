@@ -3,6 +3,19 @@ import { test } from "node:test";
 
 import { AdaptiveLimiter, mapPool, mapPoolAdaptive, withRetry } from "./async.ts";
 
+test("mapPool drains started workers before rejecting and stops new work", async () => {
+  const completed: number[] = [];
+  await assert.rejects(
+    mapPool([0, 1, 2, 3], 2, async (n) => {
+      if (n === 0) throw new Error("window failed");
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      completed.push(n);
+    }),
+    /window failed/,
+  );
+  assert.deepEqual(completed, [1]);
+});
+
 test("mapPool preserves order with bounded concurrency", async () => {
   const seen: number[] = [];
   const out = await mapPool([1, 2, 3, 4], 2, async (n) => {
@@ -16,11 +29,14 @@ test("mapPool preserves order with bounded concurrency", async () => {
 
 test("withRetry succeeds after a failure", async () => {
   let n = 0;
-  const v = await withRetry(async () => {
-    n += 1;
-    if (n < 2) throw new Error("boom");
-    return 7;
-  }, { tries: 3, baseMs: 1 });
+  const v = await withRetry(
+    async () => {
+      n += 1;
+      if (n < 2) throw new Error("boom");
+      return 7;
+    },
+    { tries: 3, baseMs: 1 },
+  );
   assert.equal(v, 7);
   assert.equal(n, 2);
 });

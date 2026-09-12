@@ -23,13 +23,23 @@ import {
   getWorkspaceStatusFn,
   saveWorkspaceFn,
 } from "@/lib/kb/workspace.functions";
-import { mapPool, sleep, withRetry } from "@/lib/pile/async";
+import { HttpStatusError, mapPool, parseRetryAfterMs, sleep, withRetry } from "@/lib/pile/async";
+import {
+  discoveryRequest,
+  retryScan,
+  scanCacheKey,
+  type DiscoveryScope,
+} from "@/lib/pile/discovery-scan";
+import { scanReviewCell } from "./full-scan";
+import { sampleReviewDocuments, validateColumnSuggestions } from "./column-suggestions";
 import { MAX_FILES, MAX_PAGES } from "@/lib/pile/limits";
 import { PileClient } from "@/lib/pile/pile-client";
 import type { PileFile, PilePage, SavedWorkspaceBinding } from "@/lib/pile/types";
 import { forEachRenderedPdfPage } from "@/lib/pile-render";
 
 import { harmonizeValues } from "./canonical";
+import { retainedWrites } from "./pending-writes";
+import { evidenceDigest, sameReviewDocument } from "./document-identity";
 import { recoverScannedPages } from "./ocr-pages";
 import { fusePageRanks, withNeighbours } from "./retrieval-fusion";
 import * as db from "./review-db";
@@ -124,23 +134,16 @@ const key = (rowId: string, columnId: string): CellKey => `${rowId}:${columnId}`
 
 function findDocumentRow(
   rows: readonly ReviewRow[],
-  name: string,
-  pageCount: number,
+  fingerprint: string,
+  docId?: string | null,
 ): ReviewRow | undefined {
-  const fingerprint = documentRowFingerprint(name, pageCount);
-  const legacyUploadPrefix = `${fingerprint}|`;
-  return (
-    rows.find((row) => row.fingerprint === fingerprint) ??
-    rows.find((row) => row.fingerprint?.startsWith(legacyUploadPrefix)) ??
-    rows.find(
-      (row) => documentRowFingerprint(row.label, row.pageCount) === fingerprint,
-    )
-  );
+  return rows.find((row) => sameReviewDocument(row, fingerprint, docId));
 }
 
 type CellPages = { page: number; text: string; ocr?: boolean }[];
 
 async function requestCell(input: {
+  documentContext?: string;
   column: { name: string; question: string; kind: ColumnKind; options: string[] };
   instructions: string | null;
   fileName: string;
@@ -149,6 +152,7 @@ async function requestCell(input: {
   signal?: AbortSignal;
 }): Promise<CellAnswer> {
   const payload = {
+    documentContext: input.documentContext,
     columnName: input.column.name,
     question: input.column.question,
     kind: input.column.kind,
@@ -159,31 +163,21 @@ async function requestCell(input: {
     ...(input.images?.length ? { images: input.images } : {}),
   };
 
-  let last: Error | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (input.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    try {
-      const res = await fetch("/api/review/cell", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        ...(input.signal ? { signal: input.signal } : {}),
-      });
-      const body = (await res.json().catch(() => ({}))) as CellAnswer & { error?: string };
-      if (res.ok) return body;
-      const retryable = res.status === 429 || res.status >= 500;
-      last = new Error(body.error || `Cell failed (HTTP ${res.status})`);
-      if (!retryable || attempt === 2) throw last;
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
-      last = err instanceof Error ? err : new Error(String(err));
-      const msg = last.message;
-      const retryable = /HTTP 429|HTTP 5\d\d|Failed to fetch|network|fetch/i.test(msg);
-      if (!retryable || attempt === 2) throw last;
-    }
-    await sleep(400 * 2 ** attempt, input.signal);
-  }
-  throw last ?? new Error("Cell failed");
+  return retryScan(async () => {
+    const res = await fetch("/api/review/cell", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    const body = (await res.json().catch(() => ({}))) as CellAnswer & { error?: string };
+    if (res.ok) return body;
+    throw new HttpStatusError(
+      res.status,
+      body.error || `Cell failed (HTTP ${res.status})`,
+      parseRetryAfterMs(res.headers.get("Retry-After")),
+    );
+  }, input.signal);
 }
 
 export type SharedPileBridge = {
@@ -200,6 +194,11 @@ export function useReviewTable(
 ) {
   const pileRef = useRef<PileClient | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const sectionCache = useRef(new Map<string, CellAnswer>());
+  const [queryScope, setQueryScope] = useState<DiscoveryScope>("full");
+  useEffect(() => {
+    sectionCache.current.clear();
+  }, [owner]);
   const sharedRef = useRef(shared);
   sharedRef.current = shared;
   /** Original PDFs dropped this session, by pile file id, for page-image re-reads. */
@@ -219,10 +218,54 @@ export function useReviewTable(
   const [error, setError] = useState<string | null>(null);
   const [docSave, setDocSave] = useState<DocSaveState>({ status: "idle", message: null });
   const [hydrating, setHydrating] = useState(false);
+  const unsavedWrites = useRef<db.CellWrite[]>([]);
+  const [unsavedCount, setUnsavedCount] = useState(0);
+  const [retryingSave, setRetryingSave] = useState(false);
+  const saveRetryInFlight = useRef(false);
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!unsavedWrites.current.length) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, []);
 
   // Background save/bind tasks read the latest table and rows, not a snapshot.
   const tableRef = useRef<ReviewTable | null>(null);
   tableRef.current = table;
+  const retryCellSave = useCallback(async () => {
+    if (abortRef.current || saveRetryInFlight.current) return;
+    saveRetryInFlight.current = true;
+    setRetryingSave(true);
+    const queue = retainedWrites(
+      unsavedWrites.current,
+      (batch) => withRetry(() => db.saveCells(batch), { tries: 3 }),
+      (saved) => {
+        setCells((prev) => {
+          const next = { ...prev };
+          for (const cell of saved)
+            if (cell.tableId === tableRef.current?.id) next[key(cell.rowId, cell.columnId)] = cell;
+          return next;
+        });
+        setUnsavedCount(unsavedWrites.current.length);
+      },
+    );
+    try {
+      await queue.flush();
+      setError(null);
+    } catch (error) {
+      setError(
+        `Results remain in this tab. Could not save: ${error instanceof Error ? error.message : "storage unavailable"}`,
+      );
+    } finally {
+      setUnsavedCount(unsavedWrites.current.length);
+      setRetryingSave(false);
+      saveRetryInFlight.current = false;
+    }
+  }, []);
   const rowsRef = useRef<ReviewRow[]>([]);
   rowsRef.current = rows;
   /** In-flight document saves, keyed by table id; aborted when the table closes. */
@@ -287,7 +330,8 @@ export function useReviewTable(
           );
           if (!ws || ws.status !== "ready") continue;
           const docIdByFileId: Record<string, string> = {};
-          for (const doc of ws.docs) if (doc.sourceFileId) docIdByFileId[doc.sourceFileId] = doc.docId;
+          for (const doc of ws.docs)
+            if (doc.sourceFileId) docIdByFileId[doc.sourceFileId] = doc.docId;
           const bindings = bindingsFromSave(working, source.workspaceItemId, docIdByFileId);
           if (!bindings.length) continue;
           const bound = await db.bindRowDocuments(tableId, source.workspaceItemId, bindings);
@@ -420,9 +464,7 @@ export function useReviewTable(
           setRows(hydrated);
           if (hydrated.some((row) => row.docId)) {
             setDocSave((prev) =>
-              prev.status === "error"
-                ? prev
-                : { status: "saved", message: null },
+              prev.status === "error" ? prev : { status: "saved", message: null },
             );
           }
         }
@@ -440,7 +482,11 @@ export function useReviewTable(
       if (!owner) return null;
       setBusy(true);
       try {
-        const created = await db.createReviewTable({ owner, name, instructions: instructions ?? null });
+        const created = await db.createReviewTable({
+          owner,
+          name,
+          instructions: instructions ?? null,
+        });
         setTable(created);
         setColumns([]);
         setRows([]);
@@ -489,6 +535,7 @@ export function useReviewTable(
   );
 
   const closeTable = useCallback(async () => {
+    sectionCache.current.clear();
     abortRef.current?.abort();
     fileBlobs.current.clear();
     // Document saves keep running: the server binds rows when ingest lands and
@@ -545,7 +592,10 @@ export function useReviewTable(
       const forThisTable = () => tableRef.current?.id === target.id;
       const plural = docs.length === 1 ? "" : "s";
       if (forThisTable()) {
-        setDocSave({ status: "saving", message: `Saving ${docs.length} document${plural} to your account…` });
+        setDocSave({
+          status: "saving",
+          message: `Saving ${docs.length} document${plural} to your account…`,
+        });
       }
       let itemId: string | null = null;
       let attached = false;
@@ -584,12 +634,17 @@ export function useReviewTable(
         const submitted = files.filter((file): file is NonNullable<typeof file> => file !== null);
         const skipped = docs.length - submitted.length;
         if (!submitted.length) {
-          throw new Error("no readable text was extracted and the original files could not be uploaded");
+          throw new Error(
+            "no readable text was extracted and the original files could not be uploaded",
+          );
         }
         const res = await saveWorkspaceFn({
           data: {
             requestId,
-            name: reviewBatchName(target.name, docs.map((d) => d.name)),
+            name: reviewBatchName(
+              target.name,
+              docs.map((d) => d.name),
+            ),
             surface: "review",
             files: submitted,
           },
@@ -604,11 +659,14 @@ export function useReviewTable(
             });
           }
           await abortableDelay(SAVE_POLL_MS, signal);
-          const polled = await withRetry(() => getWorkspaceStatusFn({ data: { itemId: res.itemId } }), {
-            tries: 3,
-            baseMs: 500,
-            signal,
-          });
+          const polled = await withRetry(
+            () => getWorkspaceStatusFn({ data: { itemId: res.itemId } }),
+            {
+              tries: 3,
+              baseMs: 500,
+              signal,
+            },
+          );
           if (!polled) throw new Error("Saved document status is unavailable.");
           status = polled;
         }
@@ -657,7 +715,8 @@ export function useReviewTable(
           } else if (status.status === "saving") {
             setDocSave({
               status: "indexing",
-              message: "Large documents are still indexing; they finish binding when you reopen this table.",
+              message:
+                "Large documents are still indexing; they finish binding when you reopen this table.",
             });
           } else if (skipped) {
             setDocSave({
@@ -762,7 +821,11 @@ export function useReviewTable(
               name: res.name,
               file,
               pages,
-              fingerprint: documentRowFingerprint(res.name, pages.length),
+              fingerprint: documentRowFingerprint(
+                res.name,
+                pages.length,
+                await evidenceDigest(pages),
+              ),
             });
             setFiles((prev) =>
               prev.map((f) =>
@@ -788,7 +851,11 @@ export function useReviewTable(
             name: res.name,
             file,
             pages,
-            fingerprint: documentRowFingerprint(res.name, pages.length),
+            fingerprint: documentRowFingerprint(
+              res.name,
+              pages.length,
+              await evidenceDigest(pages),
+            ),
           });
           setFiles((prev) =>
             prev.map((f) =>
@@ -837,7 +904,7 @@ export function useReviewTable(
         /** Documents whose row is already bound to a saved copy need no new save. */
         const toSave: typeof fresh = [];
         for (const f of fresh) {
-          const match = findDocumentRow(rows, f.name, f.pages.length);
+          const match = findDocumentRow(rows, f.fingerprint);
           if (match) {
             await db.relinkRow(match.id, [f.fileId]);
             const relinked = { ...match, fileIds: [f.fileId] };
@@ -900,14 +967,30 @@ export function useReviewTable(
         const toInsert: db.RowInsert[] = [];
         const toBind: { rowId: string; docId: string }[] = [];
         for (const f of files) {
-          const fingerprint = documentRowFingerprint(f.name, f.pageCount);
+          const requested = Array.from({ length: f.pageCount }, (_, i) => ({
+            fileId: f.id,
+            page: i + 1,
+          }));
+          const { texts } = await pile().textsFor(requested);
+          if (requested.some((p) => typeof texts[`${f.id}:${p.page}`] !== "string")) {
+            throw new Error(
+              `“${f.name}” is still missing page text. Finish loading the working set before importing it into a review table.`,
+            );
+          }
+          const evidence = requested.map((p) => ({
+            page: p.page,
+            text: texts[`${f.id}:${p.page}`] ?? "",
+          }));
+          const fingerprint = documentRowFingerprint(
+            f.name,
+            f.pageCount,
+            await evidenceDigest(evidence),
+          );
           const docId = binding?.docIdByFileId[f.id] ?? null;
-          const match = findDocumentRow(rows, f.name, f.pageCount);
+          const match = findDocumentRow(rows, fingerprint, docId);
           if (match) {
             await db.relinkRow(match.id, [f.id]);
-            setRows((prev) =>
-              prev.map((r) => (r.id === match.id ? { ...r, fileIds: [f.id] } : r)),
-            );
+            setRows((prev) => prev.map((r) => (r.id === match.id ? { ...r, fileIds: [f.id] } : r)));
             if (docId && !match.docId) toBind.push({ rowId: match.id, docId });
           } else {
             toInsert.push({
@@ -915,9 +998,7 @@ export function useReviewTable(
               fileIds: [f.id],
               fingerprint,
               pageCount: f.pageCount,
-              ...(docId && binding
-                ? { docId, workspaceItemId: binding.itemId }
-                : {}),
+              ...(docId && binding ? { docId, workspaceItemId: binding.itemId } : {}),
             });
           }
         }
@@ -958,7 +1039,7 @@ export function useReviewTable(
         setBusy(false);
       }
     },
-    [owner, rows, table],
+    [owner, pile, rows, table],
   );
 
   const removeRow = useCallback(async (rowId: string) => {
@@ -995,6 +1076,7 @@ export function useReviewTable(
       const taken = new Set(columns.map((c) => c.name.trim().toLowerCase()));
       let position = columns.length;
       const created: ReviewColumn[] = [];
+      let failure: unknown = null;
       for (const draft of drafts) {
         const nameKey = draft.name.trim().toLowerCase();
         if (!nameKey || taken.has(nameKey)) continue;
@@ -1014,10 +1096,15 @@ export function useReviewTable(
           position++;
         } catch (err) {
           setError(err instanceof Error ? err.message : "Could not add a column");
+          failure = err;
           break;
         }
       }
       if (created.length) setColumns((prev) => [...prev, ...created]);
+      if (failure)
+        throw new Error(
+          `${created.length} columns added; remaining columns were not saved. ${failure instanceof Error ? failure.message : "Storage unavailable"}. Retry to add the remaining names.`,
+        );
       return created;
     },
     [columns, owner, table],
@@ -1049,6 +1136,72 @@ export function useReviewTable(
 
   type EvidencePack = { pages: CellPages; semantic: boolean };
 
+  const fullPagesFor = useCallback(
+    async (row: ReviewRow): Promise<CellPages> => {
+      const fileId = row.fileIds[0];
+      if (!fileId) return [];
+      const { texts, ocrKeys } = await pile().textsFor(
+        Array.from({ length: row.pageCount }, (_, i) => ({ fileId, page: i + 1 })),
+      );
+      setPageTexts((prev) => ({ ...prev, ...texts }));
+      return Array.from({ length: row.pageCount }, (_, i) => ({
+        page: i + 1,
+        text: texts[`${fileId}:${i + 1}`] ?? "",
+        ocr: ocrKeys?.includes(`${fileId}:${i + 1}`) ?? false,
+      }));
+    },
+    [pile],
+  );
+
+  const suggestColumns = useCallback(
+    async (objective: string, signal: AbortSignal) => {
+      const currentTableId = tableRef.current?.id;
+      const pages = (
+        await mapPool(
+          rows,
+          3,
+          async (row) =>
+            (await fullPagesFor(row)).map((p) => ({
+              ...p,
+              fileId: row.fileIds[0]!,
+              fileName: row.label,
+              ocr: false,
+            })),
+          signal,
+        )
+      ).flat();
+      signal.throwIfAborted();
+      const sample = sampleReviewDocuments(
+        rows.map((row) => ({ id: row.fileIds[0]!, name: row.label, pageCount: row.pageCount })),
+        pages,
+      );
+      const raw = await retryScan(
+        () =>
+          discoveryRequest(
+            {
+              action: "columns",
+              query: objective,
+              context: sample.context,
+              existing: columns.map((c) => c.name),
+            },
+            signal,
+          ),
+        signal,
+      );
+      signal.throwIfAborted();
+      if (tableRef.current?.id !== currentTableId)
+        throw new Error("The review table changed. Generate suggestions for the current table.");
+      return {
+        suggestions: validateColumnSuggestions(
+          raw,
+          columns.map((c) => c.name),
+        ),
+        sample,
+      };
+    },
+    [rows, columns, fullPagesFor],
+  );
+
   /**
    * Per-document evidence packs for one question, keyed by file id. The
    * in-tab BM25 pack is fused with the saved index's semantic ranking for every
@@ -1073,27 +1226,29 @@ export function useReviewTable(
       }
       const semantic = new Map<string, number[]>();
       let semanticUnavailable = false;
-      await Promise.all(
-        [...byWorkspace].map(async ([itemId, entries]) => {
-          try {
-            const ranked = await searchWorkspaceDocumentsFn({
-              data: {
-                itemId,
-                query: question,
-                docIds: entries.map((e) => e.docId),
-                perDocPages: REVIEW_CELL_PAGES,
-              },
-            });
-            const fileByDoc = new Map(entries.map((e) => [e.docId, e.fileId]));
-            for (const r of ranked) {
-              const fileId = fileByDoc.get(r.docId);
-              if (fileId) semantic.set(fileId, r.pages.map((p) => p.page));
-            }
-          } catch {
-            semanticUnavailable = true;
+      await mapPool([...byWorkspace], 4, async ([itemId, entries]) => {
+        try {
+          const ranked = await searchWorkspaceDocumentsFn({
+            data: {
+              itemId,
+              query: question,
+              docIds: entries.map((e) => e.docId),
+              perDocPages: REVIEW_CELL_PAGES,
+            },
+          });
+          const fileByDoc = new Map(entries.map((e) => [e.docId, e.fileId]));
+          for (const r of ranked) {
+            const fileId = fileByDoc.get(r.docId);
+            if (fileId)
+              semantic.set(
+                fileId,
+                r.pages.map((p) => p.page),
+              );
           }
-        }),
-      );
+        } catch {
+          semanticUnavailable = true;
+        }
+      });
 
       // Fuse per file and fetch text for pages the lexical pack did not carry.
       const fusedPages = new Map<string, number[]>();
@@ -1105,11 +1260,17 @@ export function useReviewTable(
         const fused = fusePageRanks(lex, sem, REVIEW_CELL_PAGES);
         fusedPages.set(
           fileId,
-          withNeighbours(fused, pageCountByFile.get(fileId) ?? Number.MAX_SAFE_INTEGER, REVIEW_CELL_PAGES),
+          withNeighbours(
+            fused,
+            pageCountByFile.get(fileId) ?? Number.MAX_SAFE_INTEGER,
+            REVIEW_CELL_PAGES,
+          ),
         );
       }
       const need = [...fusedPages].flatMap(([fileId, pages]) =>
-        pages.filter((page) => texts[`${fileId}:${page}`] === undefined).map((page) => ({ fileId, page })),
+        pages
+          .filter((page) => texts[`${fileId}:${page}`] === undefined)
+          .map((page) => ({ fileId, page })),
       );
       const extra = need.length ? (await pile().textsFor(need)).texts : {};
       const allTexts = { ...texts, ...extra };
@@ -1159,7 +1320,9 @@ export function useReviewTable(
   const visionReread = useCallback(
     async (input: {
       fileId: string;
-      column: ReviewColumn | { name: string; question: string; kind: ColumnKind; options: string[] };
+      column:
+        | ReviewColumn
+        | { name: string; question: string; kind: ColumnKind; options: string[] };
       instructions: string | null;
       fileName: string;
       pages: CellPages;
@@ -1206,13 +1369,23 @@ export function useReviewTable(
    * cache key still matches are skipped unless `force` is set.
    */
   const runCells = useCallback(
-    async (opts: {
-      columnIds?: string[];
-      rowIds?: string[];
-      force?: boolean;
-      onlyFailed?: boolean;
-    } = {}) => {
+    async (
+      opts: {
+        columnIds?: string[];
+        rowIds?: string[];
+        force?: boolean;
+        onlyFailed?: boolean;
+        scope?: DiscoveryScope;
+      } = {},
+    ) => {
       if (!owner || !table) return;
+      if (abortRef.current || saveRetryInFlight.current) return;
+      if (unsavedWrites.current.length) {
+        setError(
+          "Save the pending results before starting another analysis. Use Retry saving results; no AI rerun is needed.",
+        );
+        return;
+      }
       const targetColumns = columns.filter(
         (c) => (!opts.columnIds || opts.columnIds.includes(c.id)) && c.question.trim(),
       );
@@ -1224,7 +1397,8 @@ export function useReviewTable(
 
       const controller = new AbortController();
       abortRef.current = controller;
-      const model = REVIEW_PIPELINE_ENABLED ? REVIEW_PIPELINE_VERSION : "review-cell";
+      const scope = opts.scope ?? queryScope;
+      const model = `${REVIEW_PIPELINE_ENABLED ? REVIEW_PIPELINE_VERSION : "review-cell"}:${scope}`;
 
       type Job = {
         row: ReviewRow;
@@ -1234,13 +1408,20 @@ export function useReviewTable(
       const jobs: Job[] = [];
       let skipped = 0;
       for (const column of targetColumns) {
+        const contextHash = await scanCacheKey([
+          table.instructions,
+          column.name,
+          column.question,
+          column.kind,
+          column.options,
+        ]);
         for (const row of targetRows) {
           const existing = cells[key(row.id, column.id)];
           const ck = cellCacheKey({
             rowFingerprint: row.fingerprint,
             columnId: column.id,
             columnVersion: column.version,
-            model,
+            model: `${model}:${contextHash}`,
           });
           if (existing && (existing.verifiedAt || existing.overridden)) {
             skipped++;
@@ -1259,6 +1440,7 @@ export function useReviewTable(
       }
 
       if (!jobs.length) {
+        abortRef.current = null;
         setRun({ ...IDLE_RUN, skipped, label: "Everything is already up to date" });
         return;
       }
@@ -1273,44 +1455,80 @@ export function useReviewTable(
         label: "Retrieving evidence",
       });
 
-      const runId = await db.startRun({
-        owner,
-        tableId: table.id,
-        columnIds: targetColumns.map((c) => c.id),
-        snapshot: {
-          columns: targetColumns.map((c) => ({
-            id: c.id,
-            name: c.name,
-            kind: c.kind,
-            version: c.version,
-            question: c.question,
-          })),
-          pagesPerCell: REVIEW_CELL_PAGES,
-          startedAt: new Date().toISOString(),
-        },
-        cellsTotal: jobs.length,
-      });
+      let runId: string | null;
+      try {
+        runId = await db.startRun({
+          owner,
+          tableId: table.id,
+          columnIds: targetColumns.map((c) => c.id),
+          snapshot: {
+            columns: targetColumns.map((c) => ({
+              id: c.id,
+              name: c.name,
+              kind: c.kind,
+              version: c.version,
+              question: c.question,
+            })),
+            pagesPerCell: REVIEW_CELL_PAGES,
+            scope,
+            startedAt: new Date().toISOString(),
+          },
+          cellsTotal: jobs.length,
+        });
+      } catch (error) {
+        abortRef.current = null;
+        setPending(new Set());
+        setRun({ ...IDLE_RUN, label: "Run could not start" });
+        setError(error instanceof Error ? error.message : "Could not create the run record");
+        return;
+      }
 
       let done = 0;
       let failed = 0;
       let semanticGap = false;
+      const fullPageCache = new Map<string, Promise<CellPages>>();
+      const readWhole = (row: ReviewRow) => {
+        if (!fullPageCache.has(row.id)) fullPageCache.set(row.id, fullPagesFor(row));
+        return fullPageCache.get(row.id)!;
+      };
 
       /** Persist finished cells in small batches so a closed tab loses at most a few. */
-      const flushQueue: db.CellWrite[] = [];
+      const flushQueue = unsavedWrites.current;
+      let runError: string | null = null;
+      const savedKeys = new Set<string>();
+      const queue = retainedWrites(
+        flushQueue,
+        (batch) => withRetry(() => db.saveCells(batch), { tries: 3, baseMs: 500 }),
+        (saved) => {
+          for (const cell of saved)
+            if (cell.status !== "error") savedKeys.add(key(cell.rowId, cell.columnId));
+          done = savedKeys.size;
+          if (tableRef.current?.id === table.id) {
+            setCells((prev) => {
+              const next = { ...prev };
+              for (const c of saved) next[key(c.rowId, c.columnId)] = c;
+              return next;
+            });
+            setRun((prev) => ({ ...prev, done }));
+          }
+          setUnsavedCount(flushQueue.length);
+        },
+      );
       const flush = async (force = false) => {
         if (!flushQueue.length || (!force && flushQueue.length < CELL_FLUSH_EVERY)) return;
-        const batch = flushQueue.splice(0, flushQueue.length);
-        const saved = await db.saveCells(batch);
-        setCells((prev) => {
-          const next = { ...prev };
-          for (const c of saved) next[key(c.rowId, c.columnId)] = c;
-          return next;
-        });
+        await queue.flush();
       };
       let flushing: Promise<void> = Promise.resolve();
       const enqueue = (write: db.CellWrite, force = false) => {
-        flushQueue.push(write);
-        flushing = flushing.then(() => flush(force)).catch(() => undefined);
+        queue.add(write);
+        setUnsavedCount(flushQueue.length);
+        flushing = flushing
+          .then(() => flush(force))
+          .catch((error) => {
+            runError = `Results could not be saved: ${error instanceof Error ? error.message : "storage unavailable"}. Use Retry saving results.`;
+            controller.abort(); // Stop new AI work while retaining all computed writes.
+            setError(runError);
+          });
         return flushing;
       };
 
@@ -1321,35 +1539,134 @@ export function useReviewTable(
           if (!columnJobs.length) continue;
 
           setRun((r) => ({ ...r, label: `Reading for “${column.name}”` }));
-          const { packs, semanticUnavailable } = await packsFor(
-            column.question,
-            columnJobs.map((j) => j.row),
-          );
+          const { packs, semanticUnavailable } =
+            scope === "full"
+              ? {
+                  packs: new Map(
+                    await mapPool(
+                      columnJobs,
+                      3,
+                      async (j) =>
+                        [
+                          j.row.fileIds[0] ?? "",
+                          { pages: await readWhole(j.row), semantic: false },
+                        ] as const,
+                      controller.signal,
+                    ),
+                  ),
+                  semanticUnavailable: false,
+                }
+              : await packsFor(
+                  column.question,
+                  columnJobs.map((j) => j.row),
+                );
           semanticGap = semanticGap || semanticUnavailable;
 
           const columnWrites: db.CellWrite[] = [];
           /** Cells that failed for a transient reason and get one cooled-down retry. */
           const retryable: { job: Job; pages: CellPages; fileId: string }[] = [];
 
-          const attemptCell = async (job: Job, fileId: string, pages: CellPages): Promise<db.CellWrite> => {
-            let answer = await requestCell({
-              column,
-              instructions: table.instructions,
-              fileName: job.row.label,
-              pages,
-              signal: controller.signal,
-            });
-            const second = await visionReread({
-              fileId,
-              column,
-              instructions: table.instructions,
-              fileName: job.row.label,
-              pages,
-              answer,
-              signal: controller.signal,
-            }).catch(() => null);
+          const attemptCell = async (
+            job: Job,
+            fileId: string,
+            pages: CellPages,
+          ): Promise<db.CellWrite> => {
+            let searched = pages.map((p) => p.page);
+            const scanFull = async (fullPages: CellPages) => {
+              const result = await scanReviewCell({
+                input: {
+                  columnName: column.name,
+                  question: column.question,
+                  kind: column.kind,
+                  options: column.options,
+                  instructions: table.instructions,
+                  fileName: job.row.label,
+                  pages: fullPages,
+                },
+                totalPages: job.row.pageCount,
+                fileId,
+                signal: controller.signal,
+                cache: sectionCache.current,
+                request: async (input) => {
+                  const extracted = await requestCell({
+                    documentContext: input.documentContext,
+                    column,
+                    instructions: table.instructions,
+                    fileName: input.fileName,
+                    pages: input.pages,
+                    signal: controller.signal,
+                  });
+                  const visual = await visionReread({
+                    fileId,
+                    column,
+                    instructions: table.instructions,
+                    fileName: input.fileName,
+                    pages: input.pages,
+                    answer: extracted,
+                    signal: controller.signal,
+                  }).catch((error) => {
+                    if (controller.signal.aborted) throw error;
+                    return null;
+                  });
+                  return visual && (visual.status === "answered" || extracted.status !== "answered")
+                    ? {
+                        ...visual,
+                        status: "needs_review",
+                        confidence: "low",
+                        rationale: `${extracted.rationale}\nImage reread of selected scanned pages: ${visual.rationale}`,
+                      }
+                    : extracted;
+                },
+              });
+              searched = result.pagesSearched;
+              return result.answer;
+            };
+            let usedFullScan =
+              scope === "full" ||
+              pages.some((p) => p.text.length > 32_000) ||
+              pages.reduce((n, p) => n + p.text.length, 0) > 120_000;
+            let answer = usedFullScan
+              ? await scanFull(scope === "full" ? pages : await readWhole(job.row))
+              : await requestCell({
+                  column,
+                  instructions: table.instructions,
+                  fileName: job.row.label,
+                  pages,
+                  signal: controller.signal,
+                });
+            // A weak retrieval result automatically widens before reporting absence.
+            if (
+              !usedFullScan &&
+              (answer.status === "not_found" ||
+                answer.status === "needs_review" ||
+                answer.confidence === "low") &&
+              new Set(pages.map((p) => p.page)).size < job.row.pageCount
+            ) {
+              usedFullScan = true;
+              answer = await scanFull(await readWhole(job.row));
+            } else if (!usedFullScan)
+              answer = {
+                ...answer,
+                rationale: `[Relevant passages: ${new Set(searched).size}/${job.row.pageCount} pages. This is not an exhaustive scan.] ${answer.rationale}`,
+              };
+            const second = usedFullScan
+              ? null
+              : await visionReread({
+                  fileId,
+                  column,
+                  instructions: table.instructions,
+                  fileName: job.row.label,
+                  pages,
+                  answer,
+                  signal: controller.signal,
+                }).catch(() => null);
             if (second && (second.status === "answered" || answer.status !== "answered")) {
-              answer = second;
+              answer = {
+                ...second,
+                status: "needs_review",
+                confidence: "low",
+                rationale: `${answer.rationale}\nImage reread (selected pages only): ${second.rationale}`,
+              };
             }
             return {
               owner,
@@ -1364,8 +1681,8 @@ export function useReviewTable(
               confidence: answer.confidence,
               citations: answer.citations ?? [],
               rationale: answer.rationale ?? null,
-              pagesSearched: pages.map((p) => p.page),
-              error: null,
+              pagesSearched: searched,
+              error: answer.status === "error" ? answer.rationale : null,
             };
           };
           const errorWrite = (job: Job, pages: CellPages, message: string): db.CellWrite => ({
@@ -1385,7 +1702,7 @@ export function useReviewTable(
             error: message,
           });
 
-          await mapPool(columnJobs, REVIEW_CELL_CONCURRENCY, async (job) => {
+          await mapPool(columnJobs, scope === "full" ? 3 : REVIEW_CELL_CONCURRENCY, async (job) => {
             const settle = () =>
               setPending((prev) => {
                 const next = new Set(prev);
@@ -1413,12 +1730,21 @@ export function useReviewTable(
             }
             try {
               const write = await attemptCell(job, fileId, pages);
+              if (write.status === "error") {
+                failed++;
+                setRun((r) => ({ ...r, failed }));
+              }
               columnWrites.push(write);
               void enqueue(write);
-              done++;
-              setRun((r) => ({ ...r, done }));
             } catch (err) {
               if (controller.signal.aborted) return settle();
+              if (err instanceof HttpStatusError && (err.status === 401 || err.status === 403)) {
+                runError =
+                  "Your session no longer permits this review. Sign in again; completed sections remain available in this tab.";
+                setError(runError);
+                controller.abort();
+                return settle();
+              }
               const message = err instanceof Error ? err.message : "Cell failed";
               if (isTransientCellError(message)) {
                 retryable.push({ job, pages, fileId });
@@ -1446,34 +1772,36 @@ export function useReviewTable(
               return next;
             });
             await sleep(RETRY_COOLDOWN_MS, controller.signal).catch(() => undefined);
-            await mapPool(retryable, Math.max(2, Math.floor(REVIEW_CELL_CONCURRENCY / 3)), async (r) => {
-              const settle = () =>
-                setPending((prev) => {
-                  const next = new Set(prev);
-                  next.delete(key(r.job.row.id, column.id));
-                  return next;
-                });
-              if (controller.signal.aborted) return settle();
-              try {
-                const write = await attemptCell(r.job, r.fileId, r.pages);
-                columnWrites.push(write);
-                void enqueue(write);
-                done++;
-                setRun((s) => ({ ...s, done }));
-              } catch (err) {
+            await mapPool(
+              retryable,
+              Math.max(2, Math.floor(REVIEW_CELL_CONCURRENCY / 3)),
+              async (r) => {
+                const settle = () =>
+                  setPending((prev) => {
+                    const next = new Set(prev);
+                    next.delete(key(r.job.row.id, column.id));
+                    return next;
+                  });
                 if (controller.signal.aborted) return settle();
-                const write = errorWrite(
-                  r.job,
-                  r.pages,
-                  `${err instanceof Error ? err.message : "Cell failed"} (retried once)`,
-                );
-                columnWrites.push(write);
-                void enqueue(write);
-                failed++;
-                setRun((s) => ({ ...s, failed }));
-              }
-              settle();
-            });
+                try {
+                  const write = await attemptCell(r.job, r.fileId, r.pages);
+                  columnWrites.push(write);
+                  void enqueue(write);
+                } catch (err) {
+                  if (controller.signal.aborted) return settle();
+                  const write = errorWrite(
+                    r.job,
+                    r.pages,
+                    `${err instanceof Error ? err.message : "Cell failed"} (retried once)`,
+                  );
+                  columnWrites.push(write);
+                  void enqueue(write);
+                  failed++;
+                  setRun((s) => ({ ...s, failed }));
+                }
+                settle();
+              },
+            );
           }
           await flushing;
           await flush(true);
@@ -1495,30 +1823,46 @@ export function useReviewTable(
                     ...w,
                     value: canonical,
                     display: canonical,
-                    rationale: `${w.rationale ?? ""} [spelling harmonized from "${w.value as string}"]`.trim(),
+                    rationale:
+                      `${w.rationale ?? ""} [spelling harmonized from "${w.value as string}"]`.trim(),
                   };
                 });
-              const saved = await db.saveCells(rewrites);
-              setCells((prev) => {
-                const next = { ...prev };
-                for (const c of saved) next[key(c.rowId, c.columnId)] = c;
-                return next;
-              });
+              for (const write of rewrites) queue.add(write);
+              setUnsavedCount(flushQueue.length);
+              await queue.flush();
             }
           }
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "The run stopped early");
+        runError = err instanceof Error ? err.message : "The run stopped early";
+        setError(runError);
       }
-      await flushing.catch(() => undefined);
-      await flush(true).catch(() => undefined);
+      await flushing;
+      try {
+        await flush(true);
+      } catch (error) {
+        runError = `Computed results are waiting to save: ${error instanceof Error ? error.message : "storage unavailable"}`;
+        setError(runError);
+      }
 
       const cancelled = controller.signal.aborted;
-      await db.finishRun(runId, {
-        done,
-        failed,
-        status: cancelled ? "cancelled" : failed && !done ? "failed" : "complete",
-      });
+      try {
+        await db.finishRun(runId, {
+          done,
+          failed,
+          status:
+            runError || flushQueue.length
+              ? "failed"
+              : cancelled
+                ? "cancelled"
+                : failed && !done
+                  ? "failed"
+                  : "complete",
+        });
+      } catch (error) {
+        runError = `The run status could not be saved: ${error instanceof Error ? error.message : "storage unavailable"}`;
+        setError(runError);
+      }
       abortRef.current = null;
       setPending(new Set());
       setRun({
@@ -1528,14 +1872,22 @@ export function useReviewTable(
         failed,
         skipped,
         label: [
-          cancelled ? "Cancelled" : failed ? `${failed} cell(s) failed` : "Run complete",
+          flushQueue.length
+            ? `${flushQueue.length} results waiting to save`
+            : runError
+              ? "Run stopped early"
+              : cancelled
+                ? "Cancelled"
+                : failed
+                  ? `${failed} cell(s) failed`
+                  : "Run complete",
           semanticGap ? "saved index unreachable, lexical retrieval only" : "",
         ]
           .filter(Boolean)
           .join(" · "),
       });
     },
-    [cells, columns, owner, packsFor, rows, table, visionReread],
+    [cells, columns, owner, packsFor, rows, table, visionReread, fullPagesFor, queryScope],
   );
 
   /**
@@ -1635,6 +1987,9 @@ export function useReviewTable(
 
   return {
     tables,
+    queryScope,
+    setQueryScope,
+    suggestColumns,
     table,
     columns,
     rows,
@@ -1669,6 +2024,9 @@ export function useReviewTable(
     cellAt,
     pageText,
     pending,
+    unsavedCount,
+    retryingSave,
+    retryCellSave,
   };
 }
 

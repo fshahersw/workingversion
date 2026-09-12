@@ -1,4 +1,5 @@
-import type { AgentSkill, ExecutedToolCall } from './skill'
+import { mapConcurrent } from "./parallel";
+import type { AgentSkill, ExecutedToolCall } from "./skill";
 import type {
   AgentImage,
   AgentMessage,
@@ -8,70 +9,70 @@ import type {
   AgentToolResult,
   AgentTransport,
   ToolExecution,
-} from './types'
+} from "./types";
 
 export interface ToolExecutedEvent<TSnapshot> {
-  call: AgentToolCall
-  execution: ToolExecution
+  call: AgentToolCall;
+  execution: ToolExecution;
   /**
    * Snapshot captured just before this tool ran; present only on the first
    * mutating tool of a run (hook for one-click rollback UIs).
    */
-  snapshotBefore?: TSnapshot | undefined
+  snapshotBefore?: TSnapshot | undefined;
 }
 
 export interface AgentRunResult {
   /** final assistant text of the run ('' when cut off) */
-  text: string
-  cancelled: boolean
+  text: string;
+  cancelled: boolean;
   /** true when maxTurns was reached; text is the partial answer from the no-tools finalizing turn */
-  turnLimit: boolean
+  turnLimit: boolean;
   /** the final turn hit the token limit (stop_reason max_tokens): text is incomplete; set only when true */
-  truncated?: boolean
+  truncated?: boolean;
 }
 
 export interface AgentLoopEvents<TSnapshot> {
   /** cumulative assistant text of the current turn (call per delta) */
-  onText?(text: string): void
+  onText?(text: string): void;
   /** a tool is about to execute (UI shows a live "running" indicator; onToolExecuted always follows) */
-  onToolStart?(call: AgentToolCall): void
-  onToolExecuted?(event: ToolExecutedEvent<TSnapshot>): void
+  onToolStart?(call: AgentToolCall): void;
+  onToolExecuted?(event: ToolExecutedEvent<TSnapshot>): void;
   /** a turn requested tools and they ran; the loop is going back to the model */
-  onTurnEnd?(): void
-  onDone?(result: AgentRunResult): void
-  onError?(error: string): void
+  onTurnEnd?(directions?: readonly string[]): void;
+  onDone?(result: AgentRunResult): void;
+  onError?(error: string): void;
   /** cumulative model reasoning of the current turn (call per delta); UIs render it as a collapsible "thinking" strip */
-  onReasoning?(text: string): void
+  onReasoning?(text: string): void;
   /** server status line for the current turn (model tier chosen, planning, ...) */
-  onStatus?(status: AgentStatus): void
+  onStatus?(status: AgentStatus): void;
 }
 
 /** Context compaction config (budget tracked in UTF-8 bytes rather than message count) */
 export interface CompactionOptions {
   /** History size that triggers compaction (UTF-8 bytes, default 256KB) */
-  maxBytes?: number
+  maxBytes?: number;
   /** Size of recent messages kept after compaction (bytes, default 96KB, cut at a user boundary) */
-  keepRecentBytes?: number
+  keepRecentBytes?: number;
   /** Disable LLM summarization and use only the mechanical digest (for tests/offline) */
-  disableLlmSummary?: boolean
+  disableLlmSummary?: boolean;
 }
 
 export interface AgentLoopOptions<TSnapshot = unknown> {
-  transport: AgentTransport
-  skill: AgentSkill
-  events?: AgentLoopEvents<TSnapshot>
+  transport: AgentTransport;
+  skill: AgentSkill;
+  events?: AgentLoopEvents<TSnapshot>;
   /** hard cap on model round-trips per run (default DEFAULT_MAX_TURNS) */
-  maxTurns?: number
+  maxTurns?: number;
   /** history cap in messages, trimmed at user-turn boundaries (default 40) */
-  maxHistory?: number
+  maxHistory?: number;
   /** Context compaction; false disables it (enabled by default with default thresholds) */
-  compaction?: CompactionOptions | false
+  compaction?: CompactionOptions | false;
   /** capture rollback state; invoked right before tools run (see snapshotBefore) */
-  captureSnapshot?(): TSnapshot
+  captureSnapshot?(): TSnapshot;
   /** wrap instruction + skill context into the user message text */
-  formatUserMessage?(instruction: string, context: string): string
+  formatUserMessage?(instruction: string, context: string): string;
   /** appended to the system prompt each turn (e.g. reply-language directive following the UI language) */
-  systemSuffix?(): string
+  systemSuffix?(): string;
 }
 
 /**
@@ -80,19 +81,19 @@ export interface AgentLoopOptions<TSnapshot = unknown> {
  * trimming early costs more in re-reads than it saves in tokens. Compaction
  * kicks in only when a session's history nears the provider payload limit.
  */
-const COMPACT_MAX_BYTES = 1536 * 1024
-const COMPACT_KEEP_RECENT_BYTES = 640 * 1024
+const COMPACT_MAX_BYTES = 1536 * 1024;
+const COMPACT_KEEP_RECENT_BYTES = 640 * 1024;
 /** Pre-truncation of each tool output in the summary request (the compaction request itself must not blow up on huge outputs) */
-const SUMMARIZE_TOOL_OUTPUT_MAX = 8_000
-const SUMMARIZE_TIMEOUT_MS = 45_000
+const SUMMARIZE_TOOL_OUTPUT_MAX = 8_000;
+const SUMMARIZE_TIMEOUT_MS = 45_000;
 /** When over budget mid-run, keep the last N tool messages verbatim and truncate earlier outputs to this length */
-const STALE_TOOL_KEEP_RECENT = 4
-const STALE_TOOL_OUTPUT_MAX = 8_000
+const STALE_TOOL_KEEP_RECENT = 4;
+const STALE_TOOL_OUTPUT_MAX = 8_000;
 /** Default history cap in messages (trimmed at user-turn boundaries) */
-const DEFAULT_MAX_HISTORY = 500
+const DEFAULT_MAX_HISTORY = 500;
 
 /** Unified turn budget across the suite's chat panels (apps may still override per loop) */
-export const DEFAULT_MAX_TURNS = 100
+export const DEFAULT_MAX_TURNS = 100;
 
 /**
  * Prefix of reasoning deltas that carry an opaque, provider-signed blob rather
@@ -100,18 +101,18 @@ export const DEFAULT_MAX_TURNS = 100
  * they can be echoed back verbatim). Shared contract with the platform's
  * inference layer; UIs never display these.
  */
-export const OPAQUE_REASONING_PREFIX = 'sw-opaque-reasoning:'
+export const OPAQUE_REASONING_PREFIX = "sw-opaque-reasoning:";
 
 /** Cap on consecutive tool-input parse failures (a successful parse resets it); abort beyond it (keeps the model from burning turns on bad JSON) */
-const MAX_INPUT_PARSE_RETRIES = 3
+const MAX_INPUT_PARSE_RETRIES = 3;
 
 /**
  * Degenerate-loop guards. Weak models (BYOK/local endpoints especially) can
  * repeat the exact same turn forever or keep issuing failing tool calls; with
  * a large turn budget these must abort early instead of burning it.
  */
-const MAX_IDENTICAL_TURNS = 3
-const MAX_ALL_ERROR_TURNS = 8
+const MAX_IDENTICAL_TURNS = 3;
+const MAX_ALL_ERROR_TURNS = 8;
 
 /**
  * Backoff schedule for in-place same-turn retries on empty-stream errors.
@@ -121,11 +122,11 @@ const MAX_ALL_ERROR_TURNS = 8
  * history is untouched, so re-sending the identical request is idempotent;
  * retrying here keeps one gateway hiccup from killing a long multi-tool run.
  */
-const EMPTY_STREAM_RETRY_DELAYS_MS = [1_000, 3_000]
+const EMPTY_STREAM_RETRY_DELAYS_MS = [1_000, 3_000];
 
 const TURN_LIMIT_NOTE =
-  '[System] The tool-call turn limit for this request has been reached; no more tools may be called this turn. ' +
-  'Answer directly from the information already gathered; if the task is unfinished, briefly state what is done and what remains.'
+  "[System] The tool-call turn limit for this request has been reached; no more tools may be called this turn. " +
+  "Answer directly from the information already gathered; if the task is unfinished, briefly state what is done and what remains.";
 
 /**
  * Terminal assistant text when tools mutated the artifact (or an edits-only
@@ -134,7 +135,7 @@ const TURN_LIMIT_NOTE =
  * multi-turn follow-ups (see finishTurn / restore).
  * Exported so apps can substitute a localized / tool-derived summary in the UI.
  */
-export const COMPLETED_VIA_TOOLS_TEXT = '(completed tool actions; no text reply)'
+export const COMPLETED_VIA_TOOLS_TEXT = "(completed tool actions; no text reply)";
 
 /**
  * Models default to their training-cutoff year without this (e.g. web searches
@@ -143,72 +144,72 @@ export const COMPLETED_VIA_TOOLS_TEXT = '(completed tool actions; no text reply)
  * still produced cutoff-year searches in 6/6 runs; naming the year fixed all.
  */
 export function runtimePreamble(now = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-  return `Today's date is ${date}; the current year is ${now.getFullYear()}.\n\n`
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  return `Today's date is ${date}; the current year is ${now.getFullYear()}.\n\n`;
 }
 
 const SUMMARIZE_SYSTEM =
-  'You are a conversation compressor. Compress this editing session between the user and the AI assistant into a concise summary so later turns can continue with context. ' +
+  "You are a conversation compressor. Compress this editing session between the user and the AI assistant into a concise summary so later turns can continue with context. " +
   "Keep: the user's goals and key instructions, completed changes (which files/pages/elements were modified), important facts and data, and outstanding items. " +
   'For specific figures/statistics, mark their provenance: figures from the user or from tool results (e.g. web_search) keep their source; figures the assistant produced without a source must be marked "(unverified)" so later turns do not treat them as established facts. ' +
-  'Omit: pleasantries, tool-call details, and intermediate trial and error. Use a bullet list of at most 400 words. Write the summary in the same language as the conversation. Output only the summary body, with no preamble.'
+  "Omit: pleasantries, tool-call details, and intermediate trial and error. Use a bullet list of at most 400 words. Write the summary in the same language as the conversation. Output only the summary body, with no preamble.";
 
 /** Prefix of the synthetic user message that carries the compacted-history summary */
-const COMPACT_SUMMARY_PREFIX = '[Summary of earlier conversation'
-const COMPACT_SUMMARY_HEADER = '[Summary of earlier conversation (auto-compacted)]'
-const COMPACT_SUMMARY_ACK = 'Understood, continuing from the progress so far.'
+const COMPACT_SUMMARY_PREFIX = "[Summary of earlier conversation";
+const COMPACT_SUMMARY_HEADER = "[Summary of earlier conversation (auto-compacted)]";
+const COMPACT_SUMMARY_ACK = "Understood, continuing from the progress so far.";
 
 /** Approximate UTF-8 byte count (ASCII 1 byte, CJK etc. 3; surrogate pairs count as 6 — slight overestimate is harmless) */
 function utf8Size(s: string): number {
-  let n = 0
+  let n = 0;
   for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i)
-    n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3
+    const c = s.charCodeAt(i);
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
   }
-  return n
+  return n;
 }
 
 /** Approximate byte cost of one message (text + tool inputs/outputs + image base64) */
 function messageSize(m: AgentMessage): number {
-  if (m.role === 'tool') {
+  if (m.role === "tool") {
     return m.results.reduce(
       (n, r) =>
         n + utf8Size(r.output) + 40 + (r.images?.reduce((s, img) => s + img.base64.length, 0) ?? 0),
       0,
-    )
+    );
   }
-  let n = utf8Size(m.text)
-  if (m.role === 'user' && m.images) {
-    n += m.images.reduce((s, img) => s + img.base64.length, 0)
+  let n = utf8Size(m.text);
+  if (m.role === "user" && m.images) {
+    n += m.images.reduce((s, img) => s + img.base64.length, 0);
   }
-  if (m.role === 'assistant' && m.toolCalls) {
+  if (m.role === "assistant" && m.toolCalls) {
     for (const c of m.toolCalls) {
       try {
-        n += utf8Size(JSON.stringify(c.input)) + 40
+        n += utf8Size(JSON.stringify(c.input)) + 40;
       } catch {
-        n += 40
+        n += 40;
       }
     }
   }
-  return n
+  return n;
 }
 
 function historySize(messages: readonly AgentMessage[]): number {
-  return messages.reduce((n, m) => n + messageSize(m), 0)
+  return messages.reduce((n, m) => n + messageSize(m), 0);
 }
 
 /** Mechanical digest when LLM summarization is unavailable: bullet list of user instructions + final replies */
 function mechanicalDigest(dropped: readonly AgentMessage[]): string {
-  const lines: string[] = []
+  const lines: string[] = [];
   for (const m of dropped) {
-    if (m.role === 'user' && !m.text.startsWith(COMPACT_SUMMARY_PREFIX)) {
-      lines.push(`- User: ${m.text.slice(0, 200)}`)
-    } else if (m.role === 'assistant' && m.text && !m.toolCalls?.length) {
-      lines.push(`  Reply: ${m.text.slice(0, 200)}`)
+    if (m.role === "user" && !m.text.startsWith(COMPACT_SUMMARY_PREFIX)) {
+      lines.push(`- User: ${m.text.slice(0, 200)}`);
+    } else if (m.role === "assistant" && m.text && !m.toolCalls?.length) {
+      lines.push(`  Reply: ${m.text.slice(0, 200)}`);
     }
   }
-  return lines.join('\n').slice(0, 4_000) || '(earlier conversation omitted)'
+  return lines.join("\n").slice(0, 4_000) || "(earlier conversation omitted)";
 }
 
 /**
@@ -217,48 +218,126 @@ function mechanicalDigest(dropped: readonly AgentMessage[]): string {
  * plain text. History persists across runs, so follow-up questions work.
  */
 export class AgentLoop<TSnapshot = unknown> {
-  private readonly options: AgentLoopOptions<TSnapshot>
-  private history: AgentMessage[] = []
-  private handle: AgentStreamHandle | null = null
-  private running = false
-  private cancelled = false
-  private turns = 0
+  private readonly options: AgentLoopOptions<TSnapshot>;
+  private history: AgentMessage[] = [];
+  private directions: readonly string[] = [];
+  private directionListeners = new Set<() => void>();
+  readonly subscribeDirections = (listener: () => void): (() => void) => {
+    this.directionListeners.add(listener);
+    return () => {
+      this.directionListeners.delete(listener);
+    };
+  };
+  readonly getDirections = (): readonly string[] => this.directions;
+  private setDirections(value: readonly string[]): void {
+    this.directions = value;
+    this.directionListeners.forEach((listener) => listener());
+  }
+  /** Steer only at a model/tool boundary. Never interrupt or replay an in-flight edit. */
+  steer(instruction: string): { accepted: boolean; reason?: string } {
+    const text = instruction.trim();
+    if (!this.running || this.cancelled || this.finalizing)
+      return {
+        accepted: false,
+        reason: "This task is finishing. Send a new request when it stops.",
+      };
+    if (!text || text.length > 2000)
+      return { accepted: false, reason: "Use between 1 and 2,000 characters." };
+    if (this.directions.length >= 4)
+      return {
+        accepted: false,
+        reason: "Four directions are already queued. Wait for them to apply.",
+      };
+    this.setDirections([...this.directions, sanitizeAgentPayload(text)]);
+    return { accepted: true };
+  }
+  clearDirections(): void {
+    this.setDirections([]);
+  }
+  private applyDirections(): readonly string[] {
+    const directions = this.directions;
+    if (!directions.length) return directions;
+    this.history.push({
+      role: "user",
+      text:
+        "Updated directions from the user (apply these to the current task; inspect current state before editing):\n" +
+        directions.join("\n\n"),
+    });
+    this.setDirections([]);
+    // New directions are progress, but do not reset the run's total turn budget.
+    this.allErrorTurns = 0;
+    this.identicalTurns = 0;
+    this.lastTurnSig = "";
+    return directions;
+  }
+  /** A bounded status snapshot, never chain-of-thought or hidden reasoning. */
+  taskStatus(): {
+    busy: boolean;
+    stopping: boolean;
+    turn: number;
+    pending: number;
+    response: string;
+    state: string;
+    error?: string;
+  } {
+    const reply = [...this.history].reverse().find((m) => m.role === "assistant" && m.text);
+    return {
+      state: this.running ? (this.cancelled ? "stopping" : "running") : this.outcome,
+      ...(this.lastFailure ? { error: this.lastFailure } : {}),
+      busy: this.running,
+      stopping: this.cancelled && this.running,
+      turn: this.turns + 1,
+      pending: this.directions.length,
+      response: (this.turnText || (reply?.role === "assistant" ? reply.text : "")).slice(-12000),
+    };
+  }
+
+  private handle: AgentStreamHandle | null = null;
+  private running = false;
+  private outcome: "idle" | "running" | "completed" | "partial" | "stopped" | "failed" = "idle";
+  private lastFailure = "";
+  private cancelled = false;
+  private turns = 0;
   /** Finalizing turn after hitting the turn limit: no tools, let the model answer from what it has read */
-  private finalizing = false
-  private mutationSeen = false
-  private inputParseFails = 0
+  private finalizing = false;
+  private mutationSeen = false;
+  private inputParseFails = 0;
   /** signature (text + tool calls) of the previous turn, for the identical-turn guard */
-  private lastTurnSig = ''
-  private identicalTurns = 0
-  private allErrorTurns = 0
-  private turnStopReason: string | null = null
-  private turnText = ''
+  private lastTurnSig = "";
+  private identicalTurns = 0;
+  private allErrorTurns = 0;
+  private turnStopReason: string | null = null;
+  private turnText = "";
   /** opaque provider-signed reasoning of the current turn, echoed back verbatim */
-  private turnReasoningOpaque = ''
+  private turnReasoningOpaque = "";
   /** human-readable reasoning of the current turn (shown in UIs; echoed only when no opaque blob exists) */
-  private turnReasoningText = ''
-  private toolCalls: AgentToolCall[] = []
+  private turnReasoningText = "";
+  private toolCalls: AgentToolCall[] = [];
   /** tools actually executed during this run, fed to skill.verifyResponse */
-  private executedCalls: ExecutedToolCall[] = []
+  private executedCalls: ExecutedToolCall[] = [];
   /** verifyResponse may force one extra corrective turn per run — never more */
-  private verifyRetryUsed = false
+  private verifyRetryUsed = false;
   /** user message of the in-flight run; a failed run rolls it (and everything after) back out of history */
-  private runUserMsg: AgentMessage | null = null
+  private runUserMsg: AgentMessage | null = null;
   /** invalidates stale transport callbacks after cancel/reset */
-  private generation = 0
+  private generation = 0;
+  /** Changes whenever the document conversation is reset. Voice must drop old scope. */
+  get conversationVersion(): number {
+    return this.generation;
+  }
   /** per-run abort: aborted on cancel(); long tools (e.g. generate_deck) use it to break internal loops */
-  private abortController: AbortController | null = null
+  private abortController: AbortController | null = null;
 
   constructor(options: AgentLoopOptions<TSnapshot>) {
-    this.options = options
+    this.options = options;
   }
 
   get busy(): boolean {
-    return this.running
+    return this.running;
   }
 
   get messages(): readonly AgentMessage[] {
-    return this.history
+    return this.history;
   }
 
   /**
@@ -269,122 +348,133 @@ export class AgentLoop<TSnapshot = unknown> {
    * (no LLM request on restore, guaranteeing zero latency).
    */
   restore(messages: readonly AgentMessage[]): void {
-    if (this.running || this.history.length > 0 || messages.length === 0) return
+    if (this.running || this.history.length > 0 || messages.length === 0) return;
     // Edits-only runs persist an assistant message with no text; give it a placeholder
     // so the turn stays paired and providers never see an empty assistant content block.
     // Turn-limit notes persisted by older builds are stripped: they are stale
     // directives ("no more tools may be called") that poison every later run.
     const normalized = messages
-      .filter((m) => !(m.role === 'user' && m.text === TURN_LIMIT_NOTE))
+      .filter((m) => !(m.role === "user" && m.text === TURN_LIMIT_NOTE))
       .map((m) =>
-        m.role === 'assistant' && !m.text ? { ...m, text: COMPLETED_VIA_TOOLS_TEXT } : m,
-      )
+        m.role === "assistant" && !m.text ? { ...m, text: COMPLETED_VIA_TOOLS_TEXT } : m,
+      );
     // Unanswered user messages (a failed or interrupted run persisted them without a
     // reply) must not re-enter the model context: trailing ones would pair with the
     // next instruction as one turn, adjacent ones read as a combined instruction
     this.history = normalized.filter(
-      (m, i) => m.role !== 'user' || (normalized[i + 1] && normalized[i + 1]!.role !== 'user'),
-    )
-    if (this.history.length === 0) return
+      (m, i) => m.role !== "user" || (normalized[i + 1] && normalized[i + 1]!.role !== "user"),
+    );
+    if (this.history.length === 0) return;
     if (this.compactionEnabled()) {
-      const { maxBytes, keepRecentBytes } = this.compactBudget()
+      const { maxBytes, keepRecentBytes } = this.compactBudget();
       if (historySize(this.history) > maxBytes) {
-        const cut = this.findCompactCut(keepRecentBytes)
+        const cut = this.findCompactCut(keepRecentBytes);
         if (cut > 0) {
-          const digest = mechanicalDigest(this.history.slice(0, cut))
+          const digest = mechanicalDigest(this.history.slice(0, cut));
           this.history = [
-            { role: 'user', text: `${COMPACT_SUMMARY_HEADER}\n${digest}` },
-            { role: 'assistant', text: COMPACT_SUMMARY_ACK },
+            { role: "user", text: `${COMPACT_SUMMARY_HEADER}\n${digest}` },
+            { role: "assistant", text: COMPACT_SUMMARY_ACK },
             ...this.history.slice(cut),
-          ]
+          ];
         }
       }
     }
-    this.trimHistory()
+    this.trimHistory();
   }
 
   /** images: inline attachments for this user turn (vision input; see AgentImage) */
   run(instruction: string, images?: AgentImage[]): void {
-    if (this.running || !instruction) return
-    this.running = true
-    this.cancelled = false
-    this.turns = 0
-    this.finalizing = false
-    this.mutationSeen = false
-    this.inputParseFails = 0
-    this.lastTurnSig = ''
-    this.identicalTurns = 0
-    this.allErrorTurns = 0
-    this.executedCalls = []
-    this.verifyRetryUsed = false
-    this.abortController = new AbortController()
-    const context = this.options.skill.buildContext?.() ?? ''
+    if (this.running || !instruction) return;
+    this.setDirections([]);
+    this.running = true;
+    this.outcome = "running";
+    this.lastFailure = "";
+    this.cancelled = false;
+    this.turns = 0;
+    this.finalizing = false;
+    this.mutationSeen = false;
+    this.inputParseFails = 0;
+    this.lastTurnSig = "";
+    this.identicalTurns = 0;
+    this.allErrorTurns = 0;
+    this.executedCalls = [];
+    this.verifyRetryUsed = false;
+    this.abortController = new AbortController();
+    const context = this.options.skill.buildContext?.() ?? "";
     const format =
       this.options.formatUserMessage ??
-      ((instr: string, ctx: string) => (ctx ? `${instr}\n\n${ctx}` : instr))
+      ((instr: string, ctx: string) => (ctx ? `${instr}\n\n${ctx}` : instr));
     const userMsg: AgentMessage = {
-      role: 'user',
+      role: "user",
       text: format(instruction, context),
       ...(images?.length ? { images } : {}),
-    }
-    void this.beginRun(userMsg)
+    };
+    void this.beginRun(userMsg);
   }
 
   /** Compact (if needed), push the user message, then start the turn. Compaction failure doesn't block the run. */
   private async beginRun(userMsg: AgentMessage): Promise<void> {
-    const generation = this.generation
+    const generation = this.generation;
     try {
-      await this.maybeCompact()
+      await this.maybeCompact();
     } catch {
       // Proceed with the run even if compaction fails (an over-budget history only costs more, it's still correct)
     }
-    if (generation !== this.generation) return // reset during compaction
+    if (generation !== this.generation) return; // reset during compaction
     if (this.cancelled) {
-      this.running = false
-      this.options.events?.onDone?.({ text: '', cancelled: true, turnLimit: false })
-      return
+      this.running = false;
+      this.outcome = "stopped";
+      this.options.events?.onDone?.({ text: "", cancelled: true, turnLimit: false });
+      return;
     }
     // Leftover unanswered user message (a previous run failed before replying):
     // drop it so the model never sees two adjacent user turns as one combined instruction
-    while (this.history.at(-1)?.role === 'user') this.history.pop()
-    this.trimHistory()
+    while (this.history.at(-1)?.role === "user") this.history.pop();
+    this.trimHistory();
     // Reasoning echo only matters inside a run's own tool loop; drop it from
     // finished runs so it stops costing tokens on every later request.
     this.history = this.history.map((m) =>
-      m.role === 'assistant' && m.reasoning ? { ...m, reasoning: undefined } : m,
-    )
-    if (userMsg.role === 'user') {
-      userMsg = { ...userMsg, text: sanitizeAgentPayload(userMsg.text) }
+      m.role === "assistant" && m.reasoning ? { ...m, reasoning: undefined } : m,
+    );
+    if (userMsg.role === "user") {
+      userMsg = { ...userMsg, text: sanitizeAgentPayload(userMsg.text) };
     }
-    this.runUserMsg = userMsg
-    this.history.push(userMsg)
-    this.startTurn()
+    this.runUserMsg = userMsg;
+    this.history.push(userMsg);
+    this.startTurn();
   }
 
   /**
    * A run failed: remove its user message and every message after it, so the
    * failed instruction can't be silently re-executed by the next run.
    */
+  private reportFailure(error: string): void {
+    this.outcome = "failed";
+    this.lastFailure = error;
+    this.options.events?.onError?.(error);
+  }
+
   private rollbackFailedRun(): void {
-    const msg = this.runUserMsg
-    this.runUserMsg = null
-    if (!msg) return
-    const i = this.history.lastIndexOf(msg)
-    if (i >= 0) this.history.splice(i)
+    this.setDirections([]);
+    const msg = this.runUserMsg;
+    this.runUserMsg = null;
+    if (!msg) return;
+    const i = this.history.lastIndexOf(msg);
+    if (i >= 0) this.history.splice(i);
   }
 
   // ── Context compaction: fold old conversation into a summary, keep recent messages verbatim ──
 
   private compactionEnabled(): boolean {
-    return this.options.compaction !== false
+    return this.options.compaction !== false;
   }
 
   private compactBudget(): { maxBytes: number; keepRecentBytes: number } {
-    const opt = this.options.compaction === false ? undefined : this.options.compaction
+    const opt = this.options.compaction === false ? undefined : this.options.compaction;
     return {
       maxBytes: opt?.maxBytes ?? COMPACT_MAX_BYTES,
       keepRecentBytes: opt?.keepRecentBytes ?? COMPACT_KEEP_RECENT_BYTES,
-    }
+    };
   }
 
   /**
@@ -393,71 +483,71 @@ export class AgentLoop<TSnapshot = unknown> {
    * fall back to keeping the last user turn.
    */
   private findCompactCut(keepRecentBytes: number): number {
-    let kept = 0
-    let cut = -1
+    let kept = 0;
+    let cut = -1;
     for (let i = this.history.length - 1; i >= 0; i--) {
-      kept += messageSize(this.history[i]!)
-      if (kept > keepRecentBytes && cut >= 0) break
-      if (this.history[i]!.role === 'user') cut = i
+      kept += messageSize(this.history[i]!);
+      if (kept > keepRecentBytes && cut >= 0) break;
+      if (this.history[i]!.role === "user") cut = i;
     }
     if (cut < 0) {
       for (let i = this.history.length - 1; i >= 0; i--) {
-        if (this.history[i]!.role === 'user') return i
+        if (this.history[i]!.role === "user") return i;
       }
     }
-    return cut
+    return cut;
   }
 
   private async maybeCompact(): Promise<void> {
-    if (!this.compactionEnabled()) return
-    const { maxBytes, keepRecentBytes } = this.compactBudget()
-    if (historySize(this.history) <= maxBytes) return
-    const cut = this.findCompactCut(keepRecentBytes)
-    if (cut <= 0) return // no foldable prefix
-    const generation = this.generation
-    const dropped = this.history.slice(0, cut)
-    const opt = this.options.compaction === false ? undefined : this.options.compaction
-    let summary: string | null = null
-    if (!opt?.disableLlmSummary) summary = await this.summarizeViaLlm(dropped)
+    if (!this.compactionEnabled()) return;
+    const { maxBytes, keepRecentBytes } = this.compactBudget();
+    if (historySize(this.history) <= maxBytes) return;
+    const cut = this.findCompactCut(keepRecentBytes);
+    if (cut <= 0) return; // no foldable prefix
+    const generation = this.generation;
+    const dropped = this.history.slice(0, cut);
+    const opt = this.options.compaction === false ? undefined : this.options.compaction;
+    let summary: string | null = null;
+    if (!opt?.disableLlmSummary) summary = await this.summarizeViaLlm(dropped);
     // A reset may have cleared history or started a new conversation while
     // the summary was pending. Discard its result before touching that history.
-    if (generation !== this.generation) return
-    if (!summary) summary = mechanicalDigest(dropped)
+    if (generation !== this.generation) return;
+    if (!summary) summary = mechanicalDigest(dropped);
     this.history = [
-      { role: 'user', text: `${COMPACT_SUMMARY_HEADER}\n${summary}` },
-      { role: 'assistant', text: COMPACT_SUMMARY_ACK },
+      { role: "user", text: `${COMPACT_SUMMARY_HEADER}\n${summary}` },
+      { role: "assistant", text: COMPACT_SUMMARY_ACK },
       ...this.history.slice(cut),
-    ]
+    ];
   }
 
   /** Hand the folded conversation to the model for a summary; returns null on failure/timeout (falls back to the mechanical digest). */
   private summarizeViaLlm(dropped: readonly AgentMessage[]): Promise<string | null> {
     // Slim down the summary request itself: pre-truncate tool outputs, strip images
     const slim: AgentMessage[] = dropped.map((m) => {
-      if (m.role === 'tool') {
+      if (m.role === "tool") {
         return {
-          role: 'tool' as const,
+          role: "tool" as const,
           results: m.results.map((r) => ({
             id: r.id,
             name: r.name,
             isError: r.isError,
             output: r.output.slice(0, SUMMARIZE_TOOL_OUTPUT_MAX),
           })),
-        }
+        };
       }
-      if (m.role === 'user' && m.images?.length) return { role: 'user' as const, text: m.text }
-      return m
-    })
+      if (m.role === "user" && m.images?.length) return { role: "user" as const, text: m.text };
+      return m;
+    });
     return new Promise((resolve) => {
-      let text = ''
-      let settled = false
+      let text = "";
+      let settled = false;
       const finish = (v: string | null) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve(v)
-      }
-      const timer = setTimeout(() => finish(null), SUMMARIZE_TIMEOUT_MS)
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish(null), SUMMARIZE_TIMEOUT_MS);
       try {
         // Attach to this.handle so cancel() can abort the summary request when the user clicks stop
         this.handle = this.options.transport.stream(
@@ -465,13 +555,13 @@ export class AgentLoop<TSnapshot = unknown> {
             system: SUMMARIZE_SYSTEM,
             messages: [
               ...slim,
-              { role: 'user', text: 'Compress the conversation above as instructed.' },
+              { role: "user", text: "Compress the conversation above as instructed." },
             ],
             tools: [],
           },
           {
             onDelta: (t) => {
-              text += t
+              text += t;
             },
             onToolCall: () => {
               /* the summary turn gets no tools */
@@ -479,11 +569,11 @@ export class AgentLoop<TSnapshot = unknown> {
             onDone: () => finish(text.trim() || null),
             onError: () => finish(null),
           },
-        )
+        );
       } catch {
-        finish(null)
+        finish(null);
       }
-    })
+    });
   }
 
   /**
@@ -492,177 +582,199 @@ export class AgentLoop<TSnapshot = unknown> {
    * and keep the most recent N verbatim.
    */
   private squashStaleToolOutputs(): void {
-    if (!this.compactionEnabled()) return
-    const { maxBytes } = this.compactBudget()
-    if (historySize(this.history) <= maxBytes) return
-    let recent = 0
+    if (!this.compactionEnabled()) return;
+    const { maxBytes } = this.compactBudget();
+    if (historySize(this.history) <= maxBytes) return;
+    let recent = 0;
     for (let i = this.history.length - 1; i >= 0; i--) {
-      const m = this.history[i]!
-      if (m.role !== 'tool') continue
-      recent++
-      if (recent <= STALE_TOOL_KEEP_RECENT) continue
+      const m = this.history[i]!;
+      if (m.role !== "tool") continue;
+      recent++;
+      if (recent <= STALE_TOOL_KEEP_RECENT) continue;
       m.results = m.results.map((r) => {
         // Stale captures (rendered pages/slides) are the heaviest payload and
         // the least useful once the model has acted on them: drop the pixels,
         // keep a note that a capture existed.
-        const { images, ...rest } = r
+        const { images, ...rest } = r;
         const withoutImages: AgentToolResult = images?.length
           ? { ...rest, output: `${rest.output}\n…(${images.length} earlier capture(s) omitted)` }
-          : rest
+          : rest;
         return withoutImages.output.length > STALE_TOOL_OUTPUT_MAX
           ? {
               ...withoutImages,
               output: `${withoutImages.output.slice(0, STALE_TOOL_OUTPUT_MAX)}\n…(output truncated: too long)`,
             }
-          : withoutImages
-      })
+          : withoutImages;
+      });
     }
   }
 
   cancel(): void {
-    if (!this.running) return
-    this.cancelled = true
+    if (!this.running) return;
+    this.cancelled = true;
+    this.setDirections([]);
     // abort lets long tools mid-execution (internal LLM loops etc.) stop promptly
-    this.abortController?.abort()
+    this.abortController?.abort();
     // the transport emits onDone after aborting, which finalizes the run
-    this.handle?.cancel()
+    this.handle?.cancel();
   }
 
   /** drop the conversation (e.g. when a different document is opened) */
   reset(): void {
-    this.generation++
-    this.abortController?.abort()
-    this.handle?.cancel()
-    this.handle = null
-    this.running = false
-    this.cancelled = false
-    this.history = []
-    this.runUserMsg = null
+    this.setDirections([]);
+    this.generation++;
+    this.abortController?.abort();
+    this.handle?.cancel();
+    this.handle = null;
+    this.running = false;
+    this.cancelled = false;
+    this.history = [];
+    this.outcome = "idle";
+    this.lastFailure = "";
+    this.turnText = "";
+    this.turns = 0;
+    this.toolCalls = [];
+    this.runUserMsg = null;
   }
 
   /** Runs at run boundaries only (restore / before a new user message): a long run's tail is all assistant/tool messages, and cutting mid-run would empty the request. */
   private trimHistory(): void {
-    const max = this.options.maxHistory ?? DEFAULT_MAX_HISTORY
-    if (this.history.length <= max) return
+    const max = this.options.maxHistory ?? DEFAULT_MAX_HISTORY;
+    if (this.history.length <= max) return;
     // cut only at a user message so tool_use/tool_result pairs stay intact
-    let i = this.history.length - max
-    while (i < this.history.length && this.history[i]!.role !== 'user') i++
-    if (i >= this.history.length) return // no user boundary in the window: keep history over budget
-    const next = this.history.slice(i)
-    if (this.runUserMsg && !next.includes(this.runUserMsg)) return
-    this.history = next
+    let i = this.history.length - max;
+    while (i < this.history.length && this.history[i]!.role !== "user") i++;
+    if (i >= this.history.length) return; // no user boundary in the window: keep history over budget
+    const next = this.history.slice(i);
+    if (this.runUserMsg && !next.includes(this.runUserMsg)) return;
+    this.history = next;
   }
 
   private startTurn(retriesUsed = 0): void {
-    const generation = this.generation
-    this.turnText = ''
-    this.turnReasoningOpaque = ''
-    this.turnReasoningText = ''
-    this.toolCalls = []
-    this.turnStopReason = null
+    const generation = this.generation;
+    this.turnText = "";
+    this.turnReasoningOpaque = "";
+    this.turnReasoningText = "";
+    this.toolCalls = [];
+    this.turnStopReason = null;
     // Some transports emit an extra onDone after cancel — this turn may finalize only once
-    let settled = false
+    let settled = false;
     this.handle = this.options.transport.stream(
       {
         system:
           runtimePreamble() +
           this.options.skill.systemPrompt +
-          (this.options.systemSuffix?.() ?? ''),
+          (this.options.systemSuffix?.() ?? ""),
         messages: [...this.history],
         tools: this.finalizing ? [] : this.options.skill.tools,
       },
       {
         onDelta: (text) => {
-          if (generation !== this.generation || settled) return
-          this.turnText += text
-          this.options.events?.onText?.(this.turnText)
+          if (generation !== this.generation || settled) return;
+          this.turnText += text;
+          this.options.events?.onText?.(this.turnText);
         },
         onReasoning: (text) => {
-          if (generation !== this.generation || settled) return
+          if (generation !== this.generation || settled) return;
           // Opaque provider blobs (signed thinking blocks) are echoed back to
           // the model only; readable deltas go to the UI. When a transport
           // sends both, the opaque blob wins for the echo.
           if (text.startsWith(OPAQUE_REASONING_PREFIX)) {
-            this.turnReasoningOpaque += text
-            return
+            this.turnReasoningOpaque += text;
+            return;
           }
-          this.turnReasoningText += text
-          this.options.events?.onReasoning?.(this.turnReasoningText)
+          this.turnReasoningText += text;
+          this.options.events?.onReasoning?.(this.turnReasoningText);
         },
         onStatus: (status) => {
-          if (generation !== this.generation || settled) return
-          this.options.events?.onStatus?.(status)
+          if (generation !== this.generation || settled) return;
+          this.options.events?.onStatus?.(status);
         },
         onToolCall: (call) => {
-          if (generation !== this.generation || settled) return
-          this.toolCalls.push(call)
+          if (generation !== this.generation || settled) return;
+          this.toolCalls.push(call);
         },
         onStopReason: (reason) => {
-          if (generation !== this.generation || settled) return
-          this.turnStopReason = reason
+          if (generation !== this.generation || settled) return;
+          this.turnStopReason = reason;
         },
         onDone: () => {
-          if (generation !== this.generation || settled) return
-          settled = true
-          void this.finishTurn()
+          if (generation !== this.generation || settled) return;
+          settled = true;
+          void this.finishTurn();
         },
         onError: (error) => {
-          if (generation !== this.generation || settled) return
-          settled = true
-          const delay = EMPTY_STREAM_RETRY_DELAYS_MS[retriesUsed]
+          if (generation !== this.generation || settled) return;
+          settled = true;
+          const delay = EMPTY_STREAM_RETRY_DELAYS_MS[retriesUsed];
           // The no-partial-output guard keeps the retry idempotent (an empty
           // stream never emits deltas, but a mislabeled error must not replay
           // a turn whose text/tool calls the UI already saw)
           if (
             delay !== undefined &&
-            error.includes('(empty stream)') &&
+            error.includes("(empty stream)") &&
             !this.cancelled &&
             !this.turnText &&
             this.toolCalls.length === 0
           ) {
             setTimeout(() => {
-              if (generation !== this.generation) return
+              if (generation !== this.generation) return;
               // Stopped during the backoff window: finalize like a normal cancel
               if (this.cancelled) {
-                void this.finishTurn()
-                return
+                void this.finishTurn();
+                return;
               }
-              this.startTurn(retriesUsed + 1)
-            }, delay)
-            return
+              this.startTurn(retriesUsed + 1);
+            }, delay);
+            return;
           }
-          this.running = false
-          this.rollbackFailedRun()
-          this.options.events?.onError?.(error)
+          this.running = false;
+          this.rollbackFailedRun();
+          this.reportFailure(error);
         },
       },
-    )
+    );
   }
 
   private async finishTurn(): Promise<void> {
-    const { events, skill, captureSnapshot } = this.options
-    const toolCalls = this.toolCalls
+    const { events, skill, captureSnapshot } = this.options;
+    const toolCalls = this.toolCalls;
 
     // Claimed-action guard: before accepting a final text turn, let the skill
     // check the claims in it against the tools that actually ran this run.
     // A returned correction forces one more model turn (tools stay available,
     // so the model can perform the missing action or reword its claim).
+    if (toolCalls.length === 0 && !this.cancelled && !this.finalizing && this.directions.length) {
+      this.history.push({
+        role: "assistant",
+        text: this.turnText || "I received your updated directions.",
+      });
+      const directions = this.applyDirections();
+      this.turns++;
+      if (this.turns >= (this.options.maxTurns ?? DEFAULT_MAX_TURNS)) {
+        this.finalizing = true;
+        this.history.push({ role: "user", text: TURN_LIMIT_NOTE });
+      }
+      events?.onTurnEnd?.(directions);
+      this.startTurn();
+      return;
+    }
     if (toolCalls.length === 0 && !this.cancelled && !this.finalizing) {
       // snapshot copy: the live array keeps growing if the corrective turn
       // runs more tools, and the hook must see the state at check time
       const correction =
         !this.verifyRetryUsed && this.turnText && skill.verifyResponse
           ? skill.verifyResponse(this.turnText, [...this.executedCalls])
-          : null
+          : null;
       if (correction) {
-        this.verifyRetryUsed = true
-        this.history.push({ role: 'assistant', text: this.turnText })
-        this.history.push({ role: 'user', text: correction })
+        this.verifyRetryUsed = true;
+        this.history.push({ role: "assistant", text: this.turnText });
+        this.history.push({ role: "user", text: correction });
         // No onTurnEnd here: UIs use it to seal the current assistant bubble,
         // which would keep the rejected claim visible. Without it, the
         // corrective turn's cumulative onText overwrites the bubble in place.
-        this.startTurn()
-        return
+        this.startTurn();
+        return;
       }
     }
 
@@ -676,10 +788,10 @@ export class AgentLoop<TSnapshot = unknown> {
       // over and over; see public issue about BYOK models repeating it).
       if (this.finalizing) {
         for (let i = this.history.length - 1; i >= 0; i--) {
-          const m = this.history[i]!
-          if (m.role === 'user' && m.text === TURN_LIMIT_NOTE) {
-            this.history.splice(i, 1)
-            break
+          const m = this.history[i]!;
+          if (m.role === "user" && m.text === TURN_LIMIT_NOTE) {
+            this.history.splice(i, 1);
+            break;
           }
         }
       }
@@ -693,17 +805,23 @@ export class AgentLoop<TSnapshot = unknown> {
       // read-only empty turns poison follow-ups just the same. onDone still
       // reports the raw turn text so app UIs keep their localized fallbacks
       // instead of surfacing this English placeholder.
-      this.history.push({ role: 'assistant', text: this.turnText || COMPLETED_VIA_TOOLS_TEXT })
-      this.running = false
-      this.runUserMsg = null
+      this.history.push({ role: "assistant", text: this.turnText || COMPLETED_VIA_TOOLS_TEXT });
+      this.setDirections([]);
+      this.running = false;
+      this.runUserMsg = null;
+      this.outcome = this.cancelled
+        ? "stopped"
+        : this.finalizing || this.turnStopReason === "max_tokens"
+          ? "partial"
+          : "completed";
       events?.onDone?.({
         text: this.turnText,
         cancelled: this.cancelled,
         turnLimit: this.finalizing,
         // set only when true so exact-shape consumers/tests stay unaffected
-        ...(this.turnStopReason === 'max_tokens' && !this.cancelled ? { truncated: true } : {}),
-      })
-      return
+        ...(this.turnStopReason === "max_tokens" && !this.cancelled ? { truncated: true } : {}),
+      });
+      return;
     }
 
     // Strip turn-local execution hints (inputError/truncated) from the stored
@@ -712,30 +830,43 @@ export class AgentLoop<TSnapshot = unknown> {
     // history is echoed back on the next turn. The OpenAI-compatible stream
     // paths attach `inputError: undefined` on every parsed call, so without
     // this the second turn of any custom-provider agent run fails validation.
-    const reasoningEcho = this.turnReasoningOpaque || this.turnReasoningText
+    const reasoningEcho = this.turnReasoningOpaque || this.turnReasoningText;
     this.history.push({
-      role: 'assistant',
+      role: "assistant",
       text: this.turnText,
       toolCalls: toolCalls.map(({ id, name, input }) => ({ id, name, input })),
       // interleaved-thinking models degrade in tool loops unless their reasoning is echoed back
       ...(reasoningEcho ? { reasoning: reasoningEcho } : {}),
-    })
-    const generation = this.generation
-    const results: AgentToolResult[] = []
-    let turnMutated = false
+    });
+    const generation = this.generation;
+    const results: AgentToolResult[] = [];
+    let turnMutated = false;
     // Run one executed tool call: raises the execution error into a result so
     // a failing tool never aborts the turn.
     const execute = async (call: AgentToolCall): Promise<ToolExecution> => {
+      if (generation !== this.generation || this.abortController?.signal.aborted)
+        return {
+          output: "Task stopped before this tool started.",
+          isError: true,
+          summary: call.name,
+        };
+      if (this.directions.length)
+        return {
+          output:
+            "Not executed: the user supplied updated directions. Re-plan with those directions and inspect current state before editing.",
+          isError: true,
+          summary: "Skipped after updated directions",
+        };
       try {
-        return await skill.executeTool(call, this.abortController?.signal)
+        return await skill.executeTool(call, this.abortController?.signal);
       } catch (e) {
         return {
           output: e instanceof Error ? e.message : String(e),
           isError: true,
           summary: call.name,
-        }
+        };
       }
-    }
+    };
     // Book-keeping after a call finished, in call order (results must pair
     // with tool_use blocks in the order the model emitted them).
     const record = (
@@ -743,11 +874,11 @@ export class AgentLoop<TSnapshot = unknown> {
       execution: ToolExecution,
       snapshot: TSnapshot | undefined,
     ): void => {
-      this.executedCalls.push({ name: call.name, ok: !execution.isError })
-      const firstMutation = !!execution.mutated && !this.mutationSeen
+      this.executedCalls.push({ name: call.name, ok: !execution.isError });
+      const firstMutation = !!execution.mutated && !this.mutationSeen;
       if (execution.mutated) {
-        this.mutationSeen = true
-        turnMutated = true
+        this.mutationSeen = true;
+        turnMutated = true;
       }
       results.push({
         id: call.id,
@@ -755,16 +886,14 @@ export class AgentLoop<TSnapshot = unknown> {
         output: execution.output,
         isError: execution.isError,
         ...(execution.images?.length ? { images: execution.images } : {}),
-      })
+      });
       events?.onToolExecuted?.({
         call,
         execution,
         snapshotBefore: firstMutation ? snapshot : undefined,
-      })
-    }
-    const readOnlyNames = new Set(
-      skill.tools.filter((t) => t.readOnly).map((t) => t.name),
-    )
+      });
+    };
+    const readOnlyNames = new Set(skill.tools.filter((t) => t.readOnly).map((t) => t.name));
     // Returns true when the call was consumed without executing (stop pressed
     // or unusable input); the paired error result is already recorded.
     const consumedWithoutRun = (call: AgentToolCall): boolean => {
@@ -774,102 +903,109 @@ export class AgentLoop<TSnapshot = unknown> {
         results.push({
           id: call.id,
           name: call.name,
-          output: '(the user stopped the run; this tool was not executed)',
+          output: "(the user stopped the run; this tool was not executed)",
           isError: true,
-        })
-        return true
+        });
+        return true;
       }
       // Unusable input (truncated by the token limit, or JSON that failed to parse):
       // don't execute; feed a targeted error back so the model retries correctly
       if (call.truncated || call.inputError) {
-        this.inputParseFails++
+        this.inputParseFails++;
         const output = call.truncated
-          ? 'Tool arguments were cut off by the output length limit; the tool was not executed. Split this operation into several smaller tool calls (less content per call) and try again.'
-          : `Tool input JSON failed to parse; the tool was not executed: ${call.inputError}\nFix the arguments (make sure quotes inside strings are escaped) and call again.`
-        results.push({ id: call.id, name: call.name, output, isError: true })
+          ? "Tool arguments were cut off by the output length limit; the tool was not executed. Split this operation into several smaller tool calls (less content per call) and try again."
+          : `Tool input JSON failed to parse; the tool was not executed: ${call.inputError}\nFix the arguments (make sure quotes inside strings are escaped) and call again.`;
+        results.push({ id: call.id, name: call.name, output, isError: true });
         events?.onToolExecuted?.({
           call,
           execution: { output, isError: true, summary: call.name },
-        })
-        return true
+        });
+        return true;
       }
-      return false
-    }
+      return false;
+    };
 
-    let i = 0
+    let i = 0;
     while (i < toolCalls.length) {
-      const call = toolCalls[i]!
+      const call = toolCalls[i]!;
       if (consumedWithoutRun(call)) {
-        i++
-        continue
+        i++;
+        continue;
       }
-      this.inputParseFails = 0
+      this.inputParseFails = 0;
 
       // A run of consecutive read-only calls (reads, searches, lookups)
       // executes concurrently: none of them changes the artifact, so their
       // relative order cannot matter, and the model usually asks for several
       // at once. Everything else keeps strict order.
       if (readOnlyNames.has(call.name)) {
-        const batch: AgentToolCall[] = [call]
-        let j = i + 1
+        const batch: AgentToolCall[] = [call];
+        let j = i + 1;
         while (
           j < toolCalls.length &&
           readOnlyNames.has(toolCalls[j]!.name) &&
           !toolCalls[j]!.truncated &&
           !toolCalls[j]!.inputError
         ) {
-          batch.push(toolCalls[j]!)
-          j++
+          batch.push(toolCalls[j]!);
+          j++;
         }
-        for (const b of batch) events?.onToolStart?.(b)
+        for (const b of batch) events?.onToolStart?.(b);
         // Read-only tools should never mutate; keep the pre-state anyway so a
         // mis-flagged tool still gets a roll-back point.
-        const batchSnapshot = !this.mutationSeen ? captureSnapshot?.() : undefined
-        const executions = await Promise.all(batch.map((b) => execute(b)))
-        if (generation !== this.generation) return // reset while tools were running
-        executions.forEach((execution, k) => record(batch[k]!, execution, batchSnapshot))
-        i = j
-        continue
+        const batchSnapshot = !this.mutationSeen ? captureSnapshot?.() : undefined;
+        const executions = await mapConcurrent(batch, execute, 4);
+        if (generation !== this.generation) return; // reset while tools were running
+        executions.forEach((execution, k) => record(batch[k]!, execution, batchSnapshot));
+        i = j;
+        continue;
       }
 
-      events?.onToolStart?.(call)
-      const snapshot = !this.mutationSeen ? captureSnapshot?.() : undefined
-      const execution = await execute(call)
-      if (generation !== this.generation) return // reset while a tool was running
-      record(call, execution, snapshot)
-      i++
+      events?.onToolStart?.(call);
+      const snapshot = !this.mutationSeen ? captureSnapshot?.() : undefined;
+      const execution = await execute(call);
+      if (generation !== this.generation) return; // reset while a tool was running
+      record(call, execution, snapshot);
+      i++;
     }
-    this.history.push({ role: 'tool', results })
+    this.history.push({ role: "tool", results });
 
     // Cancelled while tools were executing: finish immediately, no further model request
     if (this.cancelled) {
-      this.running = false
-      this.runUserMsg = null
-      events?.onDone?.({ text: this.turnText, cancelled: true, turnLimit: false })
-      return
+      this.setDirections([]);
+      this.running = false;
+      this.runUserMsg = null;
+      this.outcome = "stopped";
+      events?.onDone?.({ text: this.turnText, cancelled: true, turnLimit: false });
+      return;
     }
 
+    // Pair every tool result before adding a new user message. Pending operations
+    // were skipped; any operation already in flight was allowed to settle once.
+    const directions = this.applyDirections();
+
     // Bad-input retries hit the cap: abort instead of burning more turns
-    if (this.inputParseFails >= MAX_INPUT_PARSE_RETRIES) {
-      this.running = false
-      this.rollbackFailedRun()
-      events?.onError?.(
+    if (!directions.length && this.inputParseFails >= MAX_INPUT_PARSE_RETRIES) {
+      this.running = false;
+      this.rollbackFailedRun();
+      this.reportFailure(
         `Tool input was unusable (unparseable or truncated) ${MAX_INPUT_PARSE_RETRIES} times in a row; retries stopped, please send the request again`,
-      )
-      return
+      );
+      return;
     }
 
     // A turn where every tool call failed makes no progress; a long streak
     // (unknown-tool loops from malformed BYOK streams, hallucinated tools)
     // would otherwise burn the whole turn budget re-erroring.
-    this.allErrorTurns = results.every((r) => r.isError) ? this.allErrorTurns + 1 : 0
+    this.allErrorTurns =
+      !directions.length && results.every((r) => r.isError) ? this.allErrorTurns + 1 : 0;
     if (this.allErrorTurns >= MAX_ALL_ERROR_TURNS) {
-      this.running = false
-      this.rollbackFailedRun()
-      events?.onError?.(
+      this.running = false;
+      this.rollbackFailedRun();
+      this.reportFailure(
         `Every tool call failed for ${MAX_ALL_ERROR_TURNS} turns in a row; the run was stopped. Please send the request again`,
-      )
-      return
+      );
+      return;
     }
 
     // Identical-turn guard: a model (typically a weak BYOK/local endpoint)
@@ -881,31 +1017,31 @@ export class AgentLoop<TSnapshot = unknown> {
       this.turnText,
       toolCalls.map(({ name, input }) => [name, input]),
       results.map((r) => r.output),
-    ])
+    ]);
     if (turnSig === this.lastTurnSig && !turnMutated) {
       if (++this.identicalTurns >= MAX_IDENTICAL_TURNS) {
-        this.running = false
-        this.rollbackFailedRun()
-        events?.onError?.(
-          'The model kept repeating the exact same turn without making progress; the run was stopped. Please send the request again',
-        )
-        return
+        this.running = false;
+        this.rollbackFailedRun();
+        this.reportFailure(
+          "The model kept repeating the exact same turn without making progress; the run was stopped. Please send the request again",
+        );
+        return;
       }
     } else {
-      this.lastTurnSig = turnSig
-      this.identicalTurns = 0
+      this.lastTurnSig = turnSig;
+      this.identicalTurns = 0;
     }
 
-    this.turns++
+    this.turns++;
     if (this.turns >= (this.options.maxTurns ?? DEFAULT_MAX_TURNS)) {
       // Don't throw away the context already gathered: append one no-tools turn for a partial answer
-      this.finalizing = true
-      this.history.push({ role: 'user', text: TURN_LIMIT_NOTE })
+      this.finalizing = true;
+      this.history.push({ role: "user", text: TURN_LIMIT_NOTE });
     }
     // Long runs (e.g. page-by-page generation) over budget mid-way: truncate stale tool outputs so each turn doesn't resend a huge payload
-    this.squashStaleToolOutputs()
-    events?.onTurnEnd?.()
-    this.startTurn()
+    this.squashStaleToolOutputs();
+    events?.onTurnEnd?.(directions);
+    this.startTurn();
   }
 }
 
@@ -920,10 +1056,10 @@ export class AgentLoop<TSnapshot = unknown> {
  */
 export function sanitizeAgentPayload(payload: string): string {
   return payload
-    .replace(/\b(?:sk-|AIza|ghp_|secret_)[A-Za-z0-9_-]{16,}/g, '[REDACTED_API_KEY]')
-    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:@/]+):[^\s@/]+@/gi, '$1:[REDACTED_CREDENTIALS]@')
+    .replace(/\b(?:sk-|AIza|ghp_|secret_)[A-Za-z0-9_-]{16,}/g, "[REDACTED_API_KEY]")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:@/]+):[^\s@/]+@/gi, "$1:[REDACTED_CREDENTIALS]@")
     .replace(
       /(password|passwd|secret_key|private_key)(\s*[:=]\s*)["'][^"']+["']/gi,
       '$1$2"[REDACTED_SECURE_TOKEN]"',
-    )
+    );
 }

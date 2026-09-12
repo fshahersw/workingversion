@@ -1,3 +1,4 @@
+import { OfficeTaskControls } from '@/office/shared/OfficeTaskControls'
 import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
 import {SwControls} from './SwControls'
@@ -1460,10 +1461,14 @@ export function AiPanel({
             return { tools: [...tools, activity] }
           })
         },
-        onTurnEnd: () => {
+        onTurnEnd: (directions) => {
+          if (directions?.length) {
+            persistMessage('assistant', 'Received updated directions; earlier task activity remains in this run.')
+            persistMessage('user', directions.join('\n\n'))
+          }
           lastTurnToolsRef.current = []
           patchLastAssistant({ streaming: false })
-          setChat((prev) => [...prev, { role: 'assistant', text: '', streaming: true }])
+          setChat((prev) => [...prev, ...(directions?.length ? [{ role: 'user' as const, text: directions.join('\n\n') }] : []), { role: 'assistant', text: '', streaming: true }])
         },
         onDone: ({ text, cancelled, turnLimit, truncated }) => {
           setChat(previous => settleRunMessages(previous))
@@ -2278,6 +2283,10 @@ export function AiPanel({
       {activeClarify ? (
         /* Docked in the composer slot with the composer's own outer spacing */
         <div className="ai-composer">
+        <OfficeTaskControls
+          app="slides" document={currentFilePath ?? 'untitled'} mode={swPrefs.swMode}
+          loop={loopRef.current} busy={busy} onSend={runWith} onStop={cancel}
+        />
           <ClarifyCard
             questions={activeClarify}
             onSubmit={(answers, qa) => {

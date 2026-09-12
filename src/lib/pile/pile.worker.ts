@@ -8,8 +8,20 @@ export type PileWorkerRequest =
   | { id: number; op: "updatePageText"; fileId: string; page: number; text: string }
   | { id: number; op: "search"; query: string; k: number; structure: PileStructure | null }
   | { id: number; op: "packAsk"; query: string; structure: PileStructure | null }
-  | { id: number; op: "searchByFile"; query: string; perFileK: number; structure: PileStructure | null }
-  | { id: number; op: "packAskByFile"; query: string; structure: PileStructure | null; perFileCap?: number }
+  | {
+      id: number;
+      op: "searchByFile";
+      query: string;
+      perFileK: number;
+      structure: PileStructure | null;
+    }
+  | {
+      id: number;
+      op: "packAskByFile";
+      query: string;
+      structure: PileStructure | null;
+      perFileCap?: number;
+    }
   | { id: number; op: "textsFor"; hits: { fileId: string; page: number }[] }
   | { id: number; op: "structureSample"; maxPerFile: number };
 
@@ -49,7 +61,13 @@ export function handlePileRequest(req: PileWorkerRequest): unknown {
       return { groups, texts: pile.textsFor(groups.flatMap((g) => g.hits)) };
     }
     case "textsFor":
-      return { texts: pile.textsFor(req.hits) };
+      return {
+        texts: pile.textsFor(req.hits),
+        ocrKeys: pile
+          .pagesFor(req.hits)
+          .filter((p) => p.ocr)
+          .map((p) => `${p.fileId}:${p.page}`),
+      };
     case "structureSample":
       return { pages: pile.structureSample(req.maxPerFile) };
     default:

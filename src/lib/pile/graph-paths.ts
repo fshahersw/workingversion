@@ -8,72 +8,78 @@ export type GraphPath = {
   cites: string[];
 };
 
-function neighbors(
-  id: string,
-  edges: ClassifiedGraphEdge[],
-): { node: string; edge: ClassifiedGraphEdge }[] {
-  const out: { node: string; edge: ClassifiedGraphEdge }[] = [];
-  for (const edge of edges) {
-    if (edge.from === id) out.push({ node: edge.to, edge });
-    else if (edge.to === id) out.push({ node: edge.from, edge });
-  }
-  return out;
-}
-
+/** Bounded breadth-first search: short routes first, no exponential dense-graph walk. */
 export function enumeratePaths(
   edges: ClassifiedGraphEdge[],
   seeds: string[],
   shared: string[] = [],
   maxLen = ASK_GRAPH_PATH_LEN,
 ): GraphPath[] {
-  const seedSet = [...new Set(seeds.filter(Boolean))];
-  const sharedSet = new Set(shared);
+  const seedSet = [...new Set(seeds.filter(Boolean))].sort();
+  const adjacency = new Map<string, { node: string; edge: ClassifiedGraphEdge }[]>();
+  for (const edge of edges) {
+    if (edge.from === edge.to) continue;
+    for (const [id, node] of [
+      [edge.from, edge.to],
+      [edge.to, edge.from],
+    ]) {
+      const list = adjacency.get(id!) ?? [];
+      list.push({ node: node!, edge });
+      adjacency.set(id!, list);
+    }
+  }
+  for (const list of adjacency.values())
+    list.sort(
+      (a, b) =>
+        a.node.localeCompare(b.node) ||
+        (a.edge.fileName ?? "").localeCompare(b.edge.fileName ?? "") ||
+        a.edge.cite.localeCompare(b.edge.cite),
+    );
   const found: GraphPath[] = [];
   const seen = new Set<string>();
-
-  const walk = (start: string, goal: Set<string> | null) => {
-    const stack: { node: string; path: string[]; used: ClassifiedGraphEdge[] }[] = [
+  let budget = 12000;
+  const depth = Math.max(1, Math.min(4, Math.floor(maxLen) || ASK_GRAPH_PATH_LEN));
+  for (
+    let seedIndex = 0;
+    seedIndex < seedSet.length && budget > 0 && found.length < 256;
+    seedIndex++
+  ) {
+    const start = seedSet[seedIndex]!;
+    const goals = new Set([...seedSet.slice(seedIndex + 1), ...shared]);
+    if (!goals.size) continue;
+    const queue: { node: string; path: string[]; used: ClassifiedGraphEdge[] }[] = [
       { node: start, path: [start], used: [] },
     ];
-    while (stack.length) {
-      const current = stack.pop()!;
-      if (current.path.length > 1) {
-        const last = current.path[current.path.length - 1]!;
-        const hitGoal = goal ? goal.has(last) && last !== start : current.path.length > 1;
-        if (hitGoal) {
-          const key = current.path.join(">");
-          if (!seen.has(key)) {
-            seen.add(key);
-            const cites = current.used.map((edge) => edge.cite).filter(Boolean);
-            const named = current.used.map((edge) => edge.fileName ?? "").filter(Boolean);
-            found.push({
-              nodes: current.path,
-              edges: current.used,
-              // Distinct transcripts when edges carry one; otherwise distinct
-              // cites stand in so ranking still prefers better-evidenced paths.
-              files: [...new Set(named.length ? named : cites)],
-              cites,
-            });
-          }
+    for (let i = 0; i < queue.length && budget > 0 && found.length < 256; i++) {
+      const current = queue[i]!;
+      if (current.used.length && goals.has(current.node) && current.node !== start) {
+        const key = JSON.stringify([
+          current.path,
+          current.used.map((e) => [e.from, e.to, e.label, e.fileName, e.cite, e.quote]),
+        ]);
+        if (!seen.has(key)) {
+          seen.add(key);
+          found.push({
+            nodes: current.path,
+            edges: current.used,
+            files: [
+              ...new Set(current.used.map((e) => e.fileName).filter((f): f is string => !!f)),
+            ],
+            cites: [...new Set(current.used.map((e) => e.cite).filter(Boolean))],
+          });
         }
       }
-      if (current.path.length > maxLen) continue;
-      for (const next of neighbors(current.node, edges)) {
-        if (current.path.includes(next.node)) continue;
-        stack.push({
-          node: next.node,
-          path: [...current.path, next.node],
-          used: [...current.used, next.edge],
-        });
+      if (current.used.length >= depth) continue;
+      for (const next of adjacency.get(current.node) ?? []) {
+        if (--budget <= 0) break;
+        if (!current.path.includes(next.node))
+          queue.push({
+            node: next.node,
+            path: [...current.path, next.node],
+            used: [...current.used, next.edge],
+          });
       }
     }
-  };
-
-  for (let i = 0; i < seedSet.length; i += 1) {
-    for (let j = i + 1; j < seedSet.length; j += 1) {
-      walk(seedSet[i]!, new Set([seedSet[j]!]));
-    }
-    if (sharedSet.size) walk(seedSet[i]!, sharedSet);
   }
   return found;
 }
@@ -96,9 +102,10 @@ export function serialisePath(path: GraphPath, labelOf: (id: string) => string):
     .map((node, index) => {
       const edge = path.edges[index];
       const verb = edge?.label ?? "related";
+      const arrow = edge?.from === path.nodes[index] ? "→" : "←";
       return index === 0
-        ? `${labelOf(path.nodes[0]!)} → ${verb} → ${labelOf(node)}`
-        : `→ ${verb} → ${labelOf(node)}`;
+        ? `${labelOf(path.nodes[0]!)} ${arrow} ${verb} ${arrow} ${labelOf(node)}`
+        : `${arrow} ${verb} ${arrow} ${labelOf(node)}`;
     })
     .join(" ");
   const cites = path.cites.filter(Boolean);

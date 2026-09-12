@@ -7,17 +7,41 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { Loader2, LocateFixed, Minus, Plus, Search } from "lucide-react";
+import {
+  Loader2,
+  LocateFixed,
+  Minus,
+  Plus,
+  Search,
+  List,
+  Network,
+  SlidersHorizontal,
+  RotateCcw,
+  ScanSearch,
+} from "lucide-react";
+import { GraphEvidencePanel, GraphRelationshipList, EvidenceBadge } from "./GraphEvidence";
+import {
+  GraphMappedInsights,
+  GraphMappedSelection,
+  type GraphMapSelection,
+} from "./GraphMappedInsights";
+import { useGraphCamera } from "./useGraphCamera";
 
 import { AnswerMarkdown } from "@/components/chat/AnswerMarkdown";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { useMediaQuery } from "@/hooks/use-media-query";
+import { Close as PopoverClose } from "@radix-ui/react-popover";
 import { nodeFileMap, witnessColumns } from "@/lib/pile/dep-intel";
 import { displayCite, type DepAnalysis, type DepGraphNode } from "@/lib/pile/deposition-analysis";
 import { CLUSTER_PALETTE, clusterGraph } from "@/lib/pile/graph-cluster";
 import { enumeratePaths, rankPaths, serialisePath } from "@/lib/pile/graph-paths";
 import { graphQuestion, type GraphAskKind } from "@/lib/pile/graph-questions";
+import {
+  graphEdgeKey,
+  hasMatchedGraphEvidence,
+  mappedGraphInsights,
+  type GraphInsight,
+} from "@/lib/pile/graph-insights";
 import type { PileHit } from "@/lib/pile/types";
 import {
   conflictEdgesFromAnalysis,
@@ -30,11 +54,11 @@ import {
   shouldShowEdgeLabel,
   shouldShowNodeLabel,
   visibleGraph,
-  zoomAt,
-  type GraphView,
+  DEFAULT_GRAPH_VIEW,
+  type ClassifiedGraphEdge,
   type GraphViewSettings,
 } from "@/lib/pile/graph-view";
-import { fitGraphView, wrapGraphLabel } from "@/lib/pile/knowledge-graph-view";
+import { wrapGraphLabel } from "@/lib/pile/knowledge-graph-view";
 
 export type GraphFocus = { id: string; n: number };
 
@@ -47,9 +71,22 @@ type Lens = "connections" | "paths" | "conflicts" | "relationships" | "witnesses
 const LENSES: { id: Lens; label: string; hint: string; multiOnly?: boolean }[] = [
   { id: "connections", label: "Connections", hint: "Everything one step away" },
   { id: "paths", label: "Paths", hint: "Two steps out, with the routes to shared entities" },
-  { id: "relationships", label: "Relationships", hint: "Every link labelled with what the witness said" },
-  { id: "conflicts", label: "Conflicts", hint: "Only contradictions and corroboration around this node" },
-  { id: "witnesses", label: "Across witnesses", hint: "Who else mentions this, coloured by witness", multiOnly: true },
+  {
+    id: "relationships",
+    label: "Relationships",
+    hint: "Every link labelled with what the witness said",
+  },
+  {
+    id: "conflicts",
+    label: "Conflicts",
+    hint: "Only contradictions and corroboration around this node",
+  },
+  {
+    id: "witnesses",
+    label: "Across witnesses",
+    hint: "Who else mentions this, coloured by witness",
+    multiOnly: true,
+  },
 ];
 
 const LENS_ASK: Record<Lens, GraphAskKind> = {
@@ -61,7 +98,7 @@ const LENS_ASK: Record<Lens, GraphAskKind> = {
 };
 
 /** Below this many CSS px of component width the dossier docks under the canvas. */
-const DOSSIER_SIDE_MIN_WIDTH = 960;
+const DOSSIER_SIDE_MIN_WIDTH = 800;
 
 function useElementWidth(ref: React.RefObject<HTMLElement | null>): number {
   const [width, setWidth] = useState(0);
@@ -133,7 +170,6 @@ export function KnowledgeGraph({
   hits?: PileHit[];
   focus?: GraphFocus | null;
 }) {
-  const wideToolbar = useMediaQuery("(min-width: 900px)");
   const rootRef = useRef<HTMLDivElement>(null);
   const rootWidth = useElementWidth(rootRef);
   const dossierAside = rootWidth === 0 || rootWidth >= DOSSIER_SIDE_MIN_WIDTH;
@@ -141,21 +177,42 @@ export function KnowledgeGraph({
   const [active, setActive] = useState<string | null>(focusReq?.id ?? null);
   const [hover, setHover] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [camera, setCamera] = useState<GraphView>({ x: 0, y: 0, k: 1 });
+  const [mode, setMode] = useState<"graph" | "list">("graph");
+  const [selectedEdge, setSelectedEdge] = useState<ClassifiedGraphEdge | null>(null);
   const [view, setView] = useState<GraphViewSettings>(() => loadGraphView());
-  const [dragging, setDragging] = useState<{ x: number; y: number; cam: GraphView } | null>(null);
+  const [dragging, setDragging] = useState<{ x: number; y: number } | null>(null);
+  const [mapped, setMapped] = useState<GraphMapSelection | null>(null);
+  const [insightsOpen, setInsightsOpen] = useState(true);
   const [lens, setLens] = useState<Lens>("connections");
   /** The question this graph last sent to Ask; the inline answer belongs to it. */
   const [askedHere, setAskedHere] = useState<{ nodeId: string; question: string } | null>(null);
-  const fittedKey = useRef("");
+  const filterKey = JSON.stringify([
+    view.kinds,
+    view.files,
+    view.sharedOnly,
+    view.edges,
+    view.hideIsolated,
+    view.minDegree,
+    view.minConfidence,
+    view.evidence,
+  ]);
 
   useEffect(() => {
     saveGraphView(view);
   }, [view]);
 
   useEffect(() => {
+    setSelectedEdge(null);
+    setMapped(null);
+  }, [analysis, filterKey]);
+
+  useEffect(() => {
     if (!focusReq) return;
     setActive(focusReq.id);
+    setMapped(null);
+    setSelectedEdge(null);
+    setInsightsOpen(false);
+    setMode("graph");
     setView((current) => ({ ...current, minDegree: 0, sharedOnly: false }));
   }, [focusReq]);
 
@@ -165,7 +222,12 @@ export function KnowledgeGraph({
     setView((current) => ({
       ...current,
       hops: lens === "paths" ? 2 : 1,
-      colorBy: lens === "witnesses" ? "witness" : current.colorBy === "witness" ? "cluster" : current.colorBy,
+      colorBy:
+        lens === "witnesses"
+          ? "witness"
+          : current.colorBy === "witness"
+            ? "cluster"
+            : current.colorBy,
     }));
   }, [lens]);
 
@@ -173,9 +235,7 @@ export function KnowledgeGraph({
     () => [...conflictEdgesFromAnalysis(analysis), ...corroborationEdgesFromAnalysis(analysis)],
     [analysis],
   );
-  // Same attribution the Intelligence tab uses: a node belongs to a witness's
-  // transcript when it is that witness or one edge away, so "shared" and the
-  // witness layout agree across both views.
+  // Attribute named witnesses and directly source-matched relationships only.
   const fileMap = useMemo(() => {
     const cols = witnessColumns(
       analysis,
@@ -216,11 +276,84 @@ export function KnowledgeGraph({
     () => new Map(visible.nodes.map((node) => [node.id, node])),
     [visible.nodes],
   );
+  const insights = useMemo(
+    () => mappedGraphInsights(visible.nodes, visible.edges),
+    [visible.nodes, visible.edges],
+  );
+  const selectNode = (id: string | null) => {
+    setActive(id);
+    setMapped(null);
+    setSelectedEdge(null);
+    setInsightsOpen(false);
+  };
+  const mapGroup = (selection: GraphMapSelection) => {
+    if (mapped?.id === selection.id && !selectedEdge) fit();
+    setMapped(selection);
+    setActive(null);
+    setHover(null);
+    setSelectedEdge(null);
+    setSearch("");
+    setMode("graph");
+    setInsightsOpen(selection.kind === "insight");
+  };
+  const mapInsight = (insight: GraphInsight) =>
+    mapGroup({
+      id: insight.id,
+      kind: "insight",
+      label: insight.title,
+      nodeIds: insight.nodeIds,
+      edges: insight.edges,
+    });
+  const showAll = useCallback(() => {
+    setActive(null);
+    setHover(null);
+    setMapped(null);
+    setSelectedEdge(null);
+  }, []);
+  const frameIds = useMemo(
+    () =>
+      selectedEdge
+        ? [selectedEdge.from, selectedEdge.to]
+        : (mapped?.nodeIds ??
+          (active ? [...(hopSet(active, visible.edges, view.hops) ?? [])] : null)),
+    [selectedEdge, mapped, active, visible.edges, view.hops],
+  );
+  const {
+    camera,
+    move,
+    pan,
+    zoom: zoomBy,
+    fit,
+    stop,
+  } = useGraphCamera(
+    viewportRef,
+    layout.items,
+    frameIds,
+    mode === "graph" && !!analysis.graph.nodes.length,
+  );
+  const mappedEdges = useMemo(
+    () =>
+      selectedEdge
+        ? new Set([graphEdgeKey(selectedEdge)])
+        : mapped
+          ? new Set(mapped.edges.map(graphEdgeKey))
+          : null,
+    [selectedEdge, mapped],
+  );
+  useEffect(() => {
+    if (active && !nodeById.has(active)) setActive(null);
+  }, [active, nodeById]);
   const focusId = active ?? hover;
+  const hasFocus = !!(selectedEdge || mapped || focusId);
   const linked = useMemo(
     () =>
-      hopSet(focusId, visible.edges, view.hops) ?? new Set(visible.nodes.map((node) => node.id)),
-    [focusId, visible.edges, visible.nodes, view.hops],
+      selectedEdge
+        ? new Set([selectedEdge.from, selectedEdge.to])
+        : mapped
+          ? new Set(mapped.nodeIds)
+          : (hopSet(focusId, visible.edges, view.hops) ??
+            new Set(visible.nodes.map((node) => node.id))),
+    [selectedEdge, mapped, focusId, visible.edges, visible.nodes, view.hops],
   );
   const matches = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -240,7 +373,13 @@ export function KnowledgeGraph({
   );
   const paths = useMemo(() => {
     if (!active) return [];
-    return rankPaths(enumeratePaths(visible.edges, [active], sharedIds)).slice(0, 6);
+    return rankPaths(
+      enumeratePaths(
+        visible.edges.filter((edge) => hasMatchedGraphEvidence(edge) && !edge.pairedEvidence),
+        [active],
+        sharedIds,
+      ),
+    ).slice(0, 6);
   }, [active, sharedIds, visible.edges]);
   const conflictIds = useMemo(() => {
     const ids = new Set<string>();
@@ -261,54 +400,23 @@ export function KnowledgeGraph({
     return ids;
   }, [visible.edges]);
 
-  const fit = useCallback(() => {
-    const box = viewportRef.current?.getBoundingClientRect();
-    setCamera(
-      fitGraphView(
-        { width: box?.width ?? 720, height: box?.height ?? 420 },
-        { width: layout.width, height: layout.height },
-      ),
-    );
-  }, [layout.height, layout.width]);
-
-  useEffect(() => {
-    const key = `${layout.width}x${layout.height}:${visible.nodes.length}`;
-    if (fittedKey.current === key) return;
-    fittedKey.current = key;
-    fit();
-  }, [fit, layout.height, layout.width, visible.nodes.length]);
-
-  // Wheel and trackpad scroll pan the canvas; zoom is reserved for the +/−
-  // buttons and keys so an accidental scroll never changes the scale.
+  // Manual gestures stop an automatic flight immediately.
   const onWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     event.preventDefault();
     const scale = event.deltaMode === 1 ? 16 : 1;
-    setCamera((current) => ({
-      ...current,
-      x: current.x - event.deltaX * scale,
-      y: current.y - event.deltaY * scale,
-    }));
+    pan(-event.deltaX * scale, -event.deltaY * scale);
   };
-
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a"))
       return;
-    setDragging({ x: event.clientX, y: event.clientY, cam: camera });
+    stop();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging({ x: event.clientX, y: event.clientY });
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!dragging) return;
-    setCamera({
-      ...dragging.cam,
-      x: dragging.cam.x + (event.clientX - dragging.x),
-      y: dragging.cam.y + (event.clientY - dragging.y),
-    });
-  };
-
-  const zoomBy = (factor: number) => {
-    const box = viewportRef.current?.getBoundingClientRect();
-    setCamera((current) =>
-      zoomAt(current, (box?.width ?? 720) / 2, (box?.height ?? 420) / 2, factor),
-    );
+    pan(event.clientX - dragging.x, event.clientY - dragging.y);
+    setDragging({ x: event.clientX, y: event.clientY });
   };
 
   useEffect(() => {
@@ -326,12 +434,12 @@ export function KnowledgeGraph({
         fit();
       } else if (event.key === "1") {
         event.preventDefault();
-        setCamera({ x: 0, y: 0, k: 1 });
+        move({ x: 0, y: 0, k: 1 });
       }
     };
     node.addEventListener("keydown", onKey);
     return () => node.removeEventListener("keydown", onKey);
-  }, [fit]);
+  }, [fit, move, zoomBy]);
 
   const focusNode = active ? nodeById.get(active) : null;
   const focusLaid = active ? byId.get(active) : null;
@@ -444,27 +552,35 @@ export function KnowledgeGraph({
         <ul className="mt-1 space-y-1">
           {clusters.map((cluster, index) => (
             <li key={cluster.id}>
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 text-left text-[12px] hover:text-foreground"
-                onClick={() => {
-                  setView((current) => ({ ...current, colorBy: "cluster" }));
-                  const first = cluster.nodeIds[0];
-                  if (first) setActive(first);
-                }}
-              >
-                <span
-                  className="h-2 w-2 shrink-0 rounded-full"
-                  style={{ background: CLUSTER_PALETTE[index % CLUSTER_PALETTE.length] }}
-                />
-                <span className="truncate">{cluster.label}</span>
-                <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
-                  {cluster.nodeIds.length}
-                  {cluster.conflicts
-                    ? ` · ${cluster.conflicts} conflict${cluster.conflicts === 1 ? "" : "s"}`
-                    : ""}
-                </span>
-              </button>
+              <PopoverClose asChild>
+                <button
+                  type="button"
+                  aria-label={`Map group: ${cluster.label}`}
+                  className="flex w-full items-center gap-2 text-left text-[12px] hover:text-foreground"
+                  onClick={() => {
+                    const ids = new Set(cluster.nodeIds);
+                    mapGroup({
+                      id: `cluster:${cluster.id}`,
+                      kind: "cluster",
+                      label: cluster.label,
+                      nodeIds: cluster.nodeIds,
+                      edges: visible.edges.filter((edge) => ids.has(edge.from) && ids.has(edge.to)),
+                    });
+                  }}
+                >
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full"
+                    style={{ background: CLUSTER_PALETTE[index % CLUSTER_PALETTE.length] }}
+                  />
+                  <span className="truncate">{cluster.label}</span>
+                  <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                    {cluster.nodeIds.length}
+                    {cluster.conflicts
+                      ? ` · ${cluster.conflicts} conflict${cluster.conflicts === 1 ? "" : "s"}`
+                      : ""}
+                  </span>
+                </button>
+              </PopoverClose>
             </li>
           ))}
         </ul>
@@ -481,15 +597,20 @@ export function KnowledgeGraph({
     label: node.label,
     kind: node.kind,
     witnesses: witnessNames(visible.files.get(node.id) ?? []),
-    neighbors: focusEdges.map((edge) => {
-      const otherId = edge.from === node.id ? edge.to : edge.from;
-      return {
-        relation: edge.class === "contradicts" ? "contradicts" : edge.label || "related to",
-        other: nodeById.get(otherId)?.label ?? otherId,
-        conflict: edge.class === "contradicts",
-      };
-    }),
-    cites: focusEdges.map((edge) => edge.cite).filter(Boolean),
+    neighbors: focusEdges
+      .filter((edge) => edge.evidenceStatus === "source_matched")
+      .map((edge) => {
+        const otherId = edge.from === node.id ? edge.to : edge.from;
+        return {
+          relation: edge.class === "contradicts" ? "contradicts" : edge.label || "related to",
+          other: nodeById.get(otherId)?.label ?? otherId,
+          conflict: edge.class === "contradicts",
+        };
+      }),
+    cites: focusEdges
+      .filter((edge) => edge.evidenceStatus === "source_matched")
+      .map((edge) => `${edge.fileName ?? ""} ${edge.cite}`)
+      .filter(Boolean),
   });
   const askFromGraph = (node: DepGraphNode, kind: GraphAskKind) => {
     if (!onAsk) return;
@@ -498,235 +619,395 @@ export function KnowledgeGraph({
     onAsk(question);
   };
   const inlineAnswer = askedHere && focusNode && askedHere.nodeId === focusNode.id;
+  const showDossier =
+    selectedEdge || focusNode || insightsOpen || (mapped && mapped.kind !== "insight");
 
-  const dossier =
-    focusNode && focusLaid ? (
-      <div className="space-y-3 p-3">
-        <div>
-          <p className="text-[14px] font-semibold text-foreground">{focusNode.label}</p>
-          <p className="text-[11px] text-muted-foreground">
-            {KIND_LABEL[focusNode.kind]} · {focusEdges.length} link
-            {focusEdges.length === 1 ? "" : "s"}
-            {(visible.files.get(focusNode.id) ?? []).length > 1
-              ? ` · ${(visible.files.get(focusNode.id) ?? []).length} witnesses`
-              : ""}
-            {conflictIds.has(focusNode.id) ? " · conflict" : ""}
-            {agreeIds.has(focusNode.id) ? " · agreement" : ""}
-          </p>
-        </div>
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            Lens
-          </p>
-          <div className="mt-1 flex flex-wrap gap-1">
-            {LENSES.filter((item) => !item.multiOnly || multi).map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                aria-pressed={lens === item.id}
-                title={item.hint}
-                onClick={() => setLens(item.id)}
-                className={`border px-2 py-1 text-[11px] ${
-                  lens === item.id
-                    ? "border-brand-navy bg-brand-navy text-white"
-                    : "border-border bg-card text-foreground hover:bg-muted"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-          <p className="mt-1 text-[10.5px] text-muted-foreground">
-            {LENSES.find((item) => item.id === lens)?.hint}
-          </p>
-        </div>
-        {onAsk ? (
-          <div className="flex flex-wrap gap-1">
-            <Button
+  const dossier = selectedEdge ? (
+    <GraphEvidencePanel
+      edge={selectedEdge}
+      nodes={nodeById}
+      onCite={onCite}
+      onClose={() => setSelectedEdge(null)}
+    />
+  ) : insightsOpen ? (
+    <GraphMappedInsights
+      result={insights}
+      selectedId={mapped?.kind === "insight" ? mapped.id : undefined}
+      nodes={nodeById}
+      onMap={mapInsight}
+      onEvidence={setSelectedEdge}
+      onClose={() => setInsightsOpen(false)}
+    />
+  ) : mapped && mapped.kind !== "insight" ? (
+    <GraphMappedSelection
+      selection={mapped}
+      nodes={nodeById}
+      onEvidence={setSelectedEdge}
+      onBack={() => {
+        showAll();
+        setInsightsOpen(true);
+      }}
+    />
+  ) : focusNode && focusLaid ? (
+    <div className="space-y-3 p-3">
+      <div>
+        <p className="text-[14px] font-semibold text-foreground">{focusNode.label}</p>
+        <p className="text-[11px] text-muted-foreground">
+          {KIND_LABEL[focusNode.kind]} · {focusEdges.length} link
+          {focusEdges.length === 1 ? "" : "s"}
+          {(visible.files.get(focusNode.id) ?? []).length > 1
+            ? ` · ${(visible.files.get(focusNode.id) ?? []).length} transcripts`
+            : ""}
+          {conflictIds.has(focusNode.id) ? " · conflict" : ""}
+          {agreeIds.has(focusNode.id) ? " · agreement" : ""}
+        </p>
+      </div>
+      <div>
+        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+          Lens
+        </p>
+        <div className="mt-1 flex flex-wrap gap-1">
+          {LENSES.filter((item) => !item.multiOnly || multi).map((item) => (
+            <button
+              key={item.id}
               type="button"
-              size="sm"
-              className="h-7 rounded-sm"
-              disabled={asking}
-              onClick={() => askFromGraph(focusNode, LENS_ASK[lens])}
+              aria-pressed={lens === item.id}
+              title={item.hint}
+              onClick={() => setLens(item.id)}
+              className={`border px-2 py-1 text-[11px] ${
+                lens === item.id
+                  ? "border-brand-navy bg-brand-navy text-white"
+                  : "border-border bg-card text-foreground hover:bg-muted"
+              }`}
             >
-              {asking && inlineAnswer ? (
-                <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" />
-              ) : null}
-              Ask about this
-            </Button>
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <p className="mt-1 text-[10.5px] text-muted-foreground">
+          {LENSES.find((item) => item.id === lens)?.hint}
+        </p>
+      </div>
+      {onAsk ? (
+        <div className="flex flex-wrap gap-1">
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 rounded-sm"
+            disabled={asking}
+            onClick={() => askFromGraph(focusNode, LENS_ASK[lens])}
+          >
+            {asking && inlineAnswer ? (
+              <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" />
+            ) : null}
+            Ask about this
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 rounded-sm"
+            disabled={asking}
+            onClick={() => askFromGraph(focusNode, "timeline")}
+          >
+            Timeline
+          </Button>
+          {multi ? (
             <Button
               type="button"
               variant="outline"
               size="sm"
               className="h-7 rounded-sm"
               disabled={asking}
-              onClick={() => askFromGraph(focusNode, "timeline")}
+              onClick={() => askFromGraph(focusNode, "witnesses")}
             >
-              Timeline
+              Compare witnesses
             </Button>
-            {multi ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-7 rounded-sm"
-                disabled={asking}
-                onClick={() => askFromGraph(focusNode, "witnesses")}
-              >
-                Compare witnesses
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-        {inlineAnswer ? (
-          <div className="border border-border bg-surface p-2.5">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Answer
-            </p>
-            <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{askedHere.question}</p>
-            <div className="mt-2 text-[12.5px]">
-              {asking && !answer ? (
-                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" /> Reading the transcript…
-                </span>
-              ) : answer ? (
-                <AnswerMarkdown
-                  text={answer}
-                  streaming={!!asking}
-                  onCite={(ref) => {
-                    const n = Number(String(ref).replace(/^S/i, ""));
-                    const hit = (hits ?? [])[n - 1];
-                    if (hit) onCite(hit.cite || `${hit.page}:1`, hit.fileName);
-                  }}
-                />
-              ) : (
-                <span className="text-muted-foreground">No answer yet.</span>
-              )}
-            </div>
-          </div>
-        ) : null}
-        <div>
+          ) : null}
+        </div>
+      ) : null}
+      {inlineAnswer ? (
+        <div className="border border-border bg-surface p-2.5">
           <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            Links
+            Answer
           </p>
-          <ul className="mt-1 space-y-1.5">
-            {focusEdges.map((edge, index) => {
-              const otherId = edge.from === focusNode.id ? edge.to : edge.from;
-              const other = nodeById.get(otherId);
-              return (
-                <li
-                  key={`${edge.from}-${edge.to}-${index}`}
-                  className="text-[12px] text-muted-foreground"
+          <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+            {askedHere.question}
+          </p>
+          <div className="mt-2 text-[12.5px]">
+            {asking && !answer ? (
+              <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 motion-safe:animate-spin" /> Reading the transcript…
+              </span>
+            ) : answer ? (
+              <AnswerMarkdown
+                text={answer}
+                streaming={!!asking}
+                onCite={(ref) => {
+                  const n = Number(String(ref).replace(/^S/i, ""));
+                  const hit = (hits ?? [])[n - 1];
+                  if (hit) onCite(hit.cite || `${hit.page}:1`, hit.fileName);
+                }}
+              />
+            ) : (
+              <span className="text-muted-foreground">No answer yet.</span>
+            )}
+          </div>
+        </div>
+      ) : null}
+      <div>
+        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+          Links
+        </p>
+        <ul className="mt-1 space-y-1.5">
+          {focusEdges.map((edge, index) => {
+            const otherId = edge.from === focusNode.id ? edge.to : edge.from;
+            const other = nodeById.get(otherId);
+            return (
+              <li
+                key={`${edge.from}-${edge.to}-${index}`}
+                className="text-[12px] text-muted-foreground"
+              >
+                <span
+                  className={`font-medium ${
+                    edge.class === "contradicts"
+                      ? "text-destructive"
+                      : edge.class === "corroborates"
+                        ? "text-emerald-700"
+                        : "text-foreground"
+                  }`}
                 >
-                  <span
-                    className={`font-medium ${
-                      edge.class === "contradicts"
-                        ? "text-destructive"
-                        : edge.class === "corroborates"
-                          ? "text-emerald-700"
-                          : "text-foreground"
-                    }`}
-                  >
-                    {edge.class === "contradicts" && edge.title
-                      ? `contradicts (${edge.title})`
-                      : edge.label}
-                  </span>{" "}
+                  {edge.class === "contradicts" && edge.title
+                    ? `contradicts (${edge.title})`
+                    : edge.label}
+                </span>{" "}
+                <button
+                  type="button"
+                  className="hover:underline"
+                  onClick={() => selectNode(otherId)}
+                >
+                  {other?.label ?? otherId}
+                </button>
+                <button
+                  type="button"
+                  className="mt-1 flex items-center gap-2 text-xs font-medium text-brand-navy hover:underline"
+                  onClick={() => setSelectedEdge(edge)}
+                >
+                  Review evidence <EvidenceBadge edge={edge} />
+                </button>
+                {edge.cite && edge.fileName && edge.evidenceStatus === "source_matched" ? (
                   <button
                     type="button"
-                    className="hover:underline"
-                    onClick={() => setActive(otherId)}
+                    className="ml-1 font-mono text-[11px] text-brand-navy"
+                    onClick={() => onCite(edge.cite, edge.fileName)}
                   >
-                    {other?.label ?? otherId}
+                    {displayCite(edge.cite)}
                   </button>
-                  {edge.cite ? (
-                    <button
-                      type="button"
-                      className="ml-1 font-mono text-[11px] text-brand-navy"
-                      onClick={() => onCite(edge.cite, edge.fileName)}
-                    >
-                      {displayCite(edge.cite)}
-                    </button>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-        {paths.length ? (
-          <div>
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Paths
-            </p>
-            <ul className="mt-1 space-y-1.5">
-              {paths.map((path) => (
-                <li
-                  key={path.nodes.join(">")}
-                  className="text-[11.5px] leading-relaxed text-muted-foreground"
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+      {paths.length ? (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Short source-matched paths · up to 6
+          </p>
+          <ul className="mt-1 space-y-1.5">
+            {paths.map((path) => (
+              <li
+                key={path.nodes.join(">")}
+                className="text-[11.5px] leading-relaxed text-muted-foreground"
+              >
+                <button
+                  type="button"
+                  className="w-full rounded border border-border p-2 text-left text-foreground hover:border-brand-navy"
+                  onClick={() =>
+                    mapGroup({
+                      id: `path:${path.nodes.join(">")}`,
+                      kind: "path",
+                      label: path.nodes.map((id) => nodeById.get(id)?.label ?? id).join(" — "),
+                      nodeIds: path.nodes,
+                      edges: path.edges,
+                    })
+                  }
                 >
                   {serialisePath(path, (id) => nodeById.get(id)?.label ?? id)}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </div>
-    ) : (
-      <div className="space-y-2 p-3 text-[12px] leading-relaxed text-muted-foreground">
-        <p>
-          Click a person, exhibit, or event to open its dossier, then pick a lens: connections,
-          paths to shared entities, labelled relationships, or conflicts only. Ask about this
-          answers inside this panel.
-        </p>
-        <p>
-          Red edges are contradictions; dashed green edges are corroboration. Scroll pans, +/−
-          zoom, double-click a node to frame its neighbourhood, and click a page:line to open the
-          transcript.
-        </p>
-      </div>
-    );
-
-  if (!layout.items.length) {
-    return (
-      <p className="text-[13px] text-muted-foreground">
-        No connections extracted from this testimony.
+                  <span className="mt-1 flex items-center gap-1 text-xs font-medium text-brand-navy">
+                    <LocateFixed className="size-3" />
+                    Map path
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  ) : (
+    <div className="space-y-2 p-3 text-[12px] leading-relaxed text-muted-foreground">
+      <p>
+        Click a person, exhibit, or event to open its dossier, then pick a lens: connections, paths
+        to shared entities, labelled relationships, or conflicts only. Ask about this answers inside
+        this panel.
       </p>
+      <p>
+        Red links flag potential conflicts; dashed green links flag corroboration. Scroll pans, +/−
+        zoom, select a node to frame its neighbourhood, and click a page:line to open the
+        transcript.
+      </p>
+    </div>
+  );
+
+  if (!analysis.graph.nodes.length) {
+    return (
+      <div ref={rootRef} className="text-[13px] text-muted-foreground">
+        No connections extracted from this testimony.
+      </div>
     );
   }
 
   return (
-    <div ref={rootRef} className="flex h-full min-h-0 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-1 py-2">
-        {wideToolbar ? (
-          filters
-        ) : (
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span>
+          {visible.nodes.length} entities · {visible.edges.length} relationships ·{" "}
+          {visible.edges.filter((e) => e.evidenceStatus === "source_matched").length} source matched
+        </span>
+        <span>AI interpretations · inspect the evidence before use</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card p-2">
+        <div
+          className="flex rounded border border-border p-0.5"
+          role="group"
+          aria-label="Relationship display"
+        >
+          <Button
+            variant={mode === "graph" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-xs"
+            aria-pressed={mode === "graph"}
+            onClick={() => setMode("graph")}
+          >
+            <Network className="size-3.5" />
+            Graph
+          </Button>
+          <Button
+            variant={mode === "list" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-xs"
+            aria-pressed={mode === "list"}
+            onClick={() => setMode("list")}
+          >
+            <List className="size-3.5" />
+            List
+          </Button>
+        </div>
+        <Button
+          variant={insightsOpen ? "secondary" : "outline"}
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          aria-pressed={insightsOpen}
+          onClick={() => {
+            setInsightsOpen(!insightsOpen);
+            setSelectedEdge(null);
+          }}
+        >
+          <ScanSearch className="size-3.5" />
+          Mapped insights <span className="text-muted-foreground">{insights.insights.length}</span>
+        </Button>
+        {clusterList && (
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" className="h-8 text-xs">
+                Groups {clusters.length}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="max-h-80 w-72 overflow-y-auto p-0">
+              {clusterList}
+            </PopoverContent>
+          </Popover>
+        )}
+        <select
+          aria-label="Evidence filter"
+          className="h-8 rounded border border-border bg-card px-2 text-xs"
+          value={view.evidence}
+          onChange={(e) =>
+            setView((v) => ({ ...v, evidence: e.target.value as GraphViewSettings["evidence"] }))
+          }
+        >
+          <option value="all">All evidence</option>
+          <option value="source_matched">Source matched</option>
+          <option value="needs_review">Needs review</option>
+        </select>
+        {transcripts && transcripts.length > 1 ? (
+          <select
+            aria-label="Transcript filter"
+            className="h-8 max-w-48 rounded border border-border bg-card px-2 text-xs"
+            value={view.files?.[0] ?? ""}
+            onChange={(e) =>
+              setView((v) => ({ ...v, files: e.target.value ? [e.target.value] : null }))
+            }
+          >
+            <option value="">All transcripts</option>
+            {transcripts.map((t) => (
+              <option key={t.fileId} value={t.fileName}>
+                {t.witness || t.fileName}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        {
           <Popover>
             <PopoverTrigger asChild>
               <Button variant="outline" size="sm" className="h-8 rounded-sm">
-                Filters
+                <SlidersHorizontal className="size-3.5" />
+                View options
               </Button>
             </PopoverTrigger>
             <PopoverContent align="start" className="w-[22rem]">
               {filters}
             </PopoverContent>
           </Popover>
-        )}
+        }
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          aria-label="Reset graph filters"
+          onClick={() => {
+            setView({ ...DEFAULT_GRAPH_VIEW });
+            setSearch("");
+            setActive(null);
+            setSelectedEdge(null);
+            setMapped(null);
+          }}
+        >
+          <RotateCcw className="size-3.5" />
+        </Button>
         <form
           className="relative min-w-[10rem] flex-1"
           onSubmit={(event) => {
             event.preventDefault();
             const first = visible.nodes.find((node) => matches.has(node.id));
-            if (first) setActive(first.id);
+            if (first) selectNode(first.id);
           }}
         >
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Find a node"
+            placeholder={
+              mode === "list"
+                ? "Search relationships or quotes"
+                : "Find a person, exhibit, or event"
+            }
+            aria-label="Search knowledge graph"
             className="h-8 w-full border border-border bg-card pl-7 pr-2 text-[12px] outline-none focus:border-brand-navy/40"
           />
         </form>
-        <div className="ml-auto flex items-center gap-1">
+        <div className={`ml-auto ${mode === "graph" ? "flex" : "hidden"} items-center gap-1`}>
           <Button
             type="button"
             variant="ghost"
@@ -763,24 +1044,70 @@ export function KnowledgeGraph({
             size="sm"
             className="h-8 rounded-sm px-2"
             aria-label="1:1"
-            onClick={() => setCamera({ x: 0, y: 0, k: 1 })}
+            onClick={() => move({ x: 0, y: 0, k: 1 })}
           >
             1:1
           </Button>
         </div>
       </div>
 
+      {frameIds?.length ? (
+        <div
+          className="flex min-h-8 items-center gap-2 rounded border border-border bg-card px-2.5 py-1 text-xs"
+          role="status"
+          aria-label="Current graph map"
+        >
+          <LocateFixed className="size-3.5 shrink-0 text-brand-navy" />
+          <span
+            className="min-w-0 flex-1 truncate font-medium"
+            title={selectedEdge?.title || selectedEdge?.label || mapped?.label || focusNode?.label}
+          >
+            Mapped:{" "}
+            {selectedEdge?.title || selectedEdge?.label || mapped?.label || focusNode?.label}
+          </span>
+          <span className="shrink-0 text-muted-foreground">{frameIds.length} entities</span>
+          <button
+            type="button"
+            className="shrink-0 font-medium text-brand-navy hover:underline"
+            onClick={fit}
+          >
+            Recenter
+          </button>
+          <button
+            type="button"
+            className="shrink-0 border-l border-border pl-2 font-medium text-brand-navy hover:underline"
+            onClick={showAll}
+          >
+            Show full graph
+          </button>
+        </div>
+      ) : null}
       <div className="flex min-h-0 flex-1 gap-3">
+        {mode === "list" ? (
+          <GraphRelationshipList
+            edges={visible.edges}
+            nodes={nodeById}
+            search={search}
+            onSelect={setSelectedEdge}
+          />
+        ) : null}
         <div
           ref={viewportRef}
           tabIndex={0}
-          className="relative min-h-[28rem] min-w-0 flex-1 overflow-hidden border border-border bg-surface outline-none"
+          className={`relative min-h-[12rem] min-w-0 flex-1 overflow-hidden rounded-md border border-border bg-surface outline-none ${mode === "list" ? "hidden" : ""}`}
+          aria-label="Knowledge graph canvas"
           onWheel={onWheel}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={() => setDragging(null)}
+          onPointerCancel={() => setDragging(null)}
           onPointerLeave={() => setDragging(null)}
         >
+          {!visible.nodes.length ? (
+            <p className="absolute inset-x-0 top-6 z-30 text-center text-sm text-muted-foreground">
+              No entities match these filters. Use Reset graph filters to restore the view.
+            </p>
+          ) : null}
           <div
             className="absolute left-0 top-0 origin-top-left"
             style={{
@@ -794,12 +1121,14 @@ export function KnowledgeGraph({
                 const a = byId.get(edge.from);
                 const b = byId.get(edge.to);
                 if (!a || !b) return null;
-                const inFocus = focusId ? linked.has(edge.from) && linked.has(edge.to) : false;
+                const inFocus = mappedEdges
+                  ? mappedEdges.has(graphEdgeKey(edge))
+                  : hasFocus && linked.has(edge.from) && linked.has(edge.to);
                 // The conflicts lens keeps only contradiction and corroboration
                 // edges legible around the selected node.
                 const lensHidden =
-                  lens === "conflicts" && !!focusId && edge.class === "factual";
-                const dim = (focusId ? !inFocus : false) || lensHidden;
+                  lens === "conflicts" && !!active && !mappedEdges && edge.class === "factual";
+                const dim = (hasFocus ? !inFocus : false) || lensHidden;
                 const on = inFocus && !lensHidden;
                 return (
                   <path
@@ -814,7 +1143,13 @@ export function KnowledgeGraph({
                         : EDGE_HEX[edge.class]
                     }
                     strokeWidth={on ? 2.4 : edge.class === "contradicts" ? 1.9 : 1.5}
-                    strokeDasharray={edge.class === "corroborates" ? "6 4" : undefined}
+                    strokeDasharray={
+                      edge.evidenceStatus !== "source_matched"
+                        ? "3 5"
+                        : edge.class === "corroborates"
+                          ? "6 4"
+                          : undefined
+                    }
                     opacity={dim ? 0.08 : 1}
                     markerEnd={`url(#kg-arrow-${edge.class === "factual" ? (on ? "on" : "factual") : edge.class})`}
                   />
@@ -848,15 +1183,20 @@ export function KnowledgeGraph({
               const a = byId.get(edge.from);
               const b = byId.get(edge.to);
               if (!a || !b) return null;
-              const focused = !!(focusId && linked.has(edge.from) && linked.has(edge.to));
+              const focused = mappedEdges
+                ? mappedEdges.has(graphEdgeKey(edge))
+                : hasFocus && linked.has(edge.from) && linked.has(edge.to);
+              if (hasFocus && !focused) return null;
               if (!shouldShowEdgeLabel(camera.k, view.labels, focused)) return null;
               const mx = (a.x + b.x) / 2;
-              const my = (a.y + b.y) / 2 - 18;
+              const lane = index % 3;
+              const lift = (Math.abs(a.y - b.y) < 8 ? 40 : 24) + Math.floor(lane / 2) * 26;
+              const my = (a.y + b.y) / 2 + (lane % 2 === 0 ? -lift : lift) / 2;
               return (
                 <button
                   key={`label-${edge.from}-${edge.to}-${index}`}
                   type="button"
-                  className={`absolute z-20 -translate-x-1/2 -translate-y-full px-1.5 py-0.5 font-mono text-[10px] ${
+                  className={`absolute z-20 -translate-x-1/2 -translate-y-1/2 rounded border border-border px-2 py-1 text-[11px] font-medium ${
                     edge.class === "contradicts"
                       ? "bg-destructive text-white"
                       : edge.class === "corroborates"
@@ -864,9 +1204,11 @@ export function KnowledgeGraph({
                         : "bg-card text-brand-navy ring-1 ring-border"
                   }`}
                   style={{ left: mx, top: my }}
-                  onClick={() => edge.cite && onCite(edge.cite)}
+                  onClick={() => setSelectedEdge(edge)}
+                  title={`${edge.label} · ${edge.evidenceStatus === "source_matched" ? "Source matched" : "Needs review"}`}
                 >
-                  {edge.cite ? displayCite(edge.cite) : edge.label.slice(0, 22)}
+                  {edge.label.slice(0, 28)}
+                  {edge.evidenceStatus !== "source_matched" ? " · review" : ""}
                 </button>
               );
             })}
@@ -875,10 +1217,11 @@ export function KnowledgeGraph({
               if (!node) return null;
               const degree = visible.degree.get(item.id) ?? 0;
               const files = visible.files.get(item.id) ?? [];
-              const selected = active === item.id;
-              const dim = focusId
+              const selected = active === item.id || (!!mappedEdges && linked.has(item.id));
+              const dim = hasFocus
                 ? !linked.has(item.id) ||
                   (lens === "conflicts" &&
+                    !mappedEdges &&
                     !selected &&
                     !conflictIds.has(item.id) &&
                     !agreeIds.has(item.id))
@@ -898,11 +1241,11 @@ export function KnowledgeGraph({
                   key={item.id}
                   type="button"
                   aria-pressed={selected}
+                  data-graph-node={item.id}
+                  aria-label={`${item.label}, ${KIND_LABEL[item.kind]}`}
                   className={`absolute z-10 flex flex-col justify-center border border-border border-l-4 bg-card px-2.5 text-left shadow-sm ${
                     selected ? "ring-2 ring-brand-navy" : ""
-                  } ${conflictIds.has(item.id) ? "ring-1 ring-destructive/70" : ""} ${
-                    dim ? "opacity-20" : ""
-                  }`}
+                  } ${dim ? "opacity-20" : ""}`}
                   style={{
                     left: item.x - width / 2,
                     top: item.y - height / 2,
@@ -910,25 +1253,8 @@ export function KnowledgeGraph({
                     height,
                     borderLeftColor: nodeAccent(item.id, item.kind),
                   }}
-                  onClick={() => setActive((current) => (current === item.id ? null : item.id))}
-                  onDoubleClick={() => {
-                    setActive(item.id);
-                    const box = viewportRef.current?.getBoundingClientRect();
-                    const neighbors = layout.items.filter(
-                      (other) => linked.has(other.id) || other.id === item.id,
-                    );
-                    const minX = Math.min(...neighbors.map((other) => other.x)) - 80;
-                    const minY = Math.min(...neighbors.map((other) => other.y)) - 60;
-                    const maxX = Math.max(...neighbors.map((other) => other.x)) + 80;
-                    const maxY = Math.max(...neighbors.map((other) => other.y)) + 60;
-                    setCamera(
-                      fitGraphView(
-                        { width: box?.width ?? 720, height: box?.height ?? 420 },
-                        { width: maxX - minX, height: maxY - minY },
-                        24,
-                      ),
-                    );
-                  }}
+                  onClick={() => selectNode(active === item.id ? null : item.id)}
+                  onDoubleClick={() => selectNode(item.id)}
                   onMouseEnter={() => setHover(item.id)}
                   onMouseLeave={() => setHover((current) => (current === item.id ? null : current))}
                 >
@@ -951,7 +1277,7 @@ export function KnowledgeGraph({
                       </span>
                       {multi && files.length > 1 ? (
                         <span className="mt-0.5 text-[10px] text-muted-foreground">
-                          {files.length} witnesses
+                          {files.length} transcripts
                         </span>
                       ) : null}
                     </>
@@ -962,7 +1288,7 @@ export function KnowledgeGraph({
               );
             })}
           </div>
-          {!fits ? (
+          {!fits && !hasFocus ? (
             <button
               type="button"
               aria-label="Minimap"
@@ -985,25 +1311,25 @@ export function KnowledgeGraph({
           ) : null}
         </div>
 
-        {dossierAside ? (
-          <aside className="w-[20rem] shrink-0 overflow-y-auto border border-border bg-card">
+        {dossierAside && showDossier ? (
+          <aside
+            className={`${rootWidth < 1120 ? "w-[18rem]" : "w-[20rem]"} shrink-0 overflow-y-auto border border-border bg-card`}
+          >
             {dossier}
-            {clusterList}
           </aside>
         ) : null}
       </div>
 
-      {!dossierAside && (focusNode || clusterList) ? (
-        <div className="max-h-[15rem] shrink-0 overflow-y-auto border border-border bg-card">
+      {!dossierAside && showDossier ? (
+        <div className="max-h-[34%] shrink-0 overflow-y-auto border border-border bg-card">
           {dossier}
-          {clusterList}
         </div>
       ) : null}
 
       <p className="text-[10.5px] text-muted-foreground">
-        {conflictCount} conflict{conflictCount === 1 ? "" : "s"}
+        {conflictCount} potential conflict{conflictCount === 1 ? "" : "s"}
         {" · "}
-        {agreeCount} agreement{agreeCount === 1 ? "" : "s"}
+        {agreeCount} corroboration flag{agreeCount === 1 ? "" : "s"}
         {" · "}
         {clusters.length} cluster{clusters.length === 1 ? "" : "s"}
         {transcripts?.length ? ` · ${transcripts.length} transcripts` : ""}

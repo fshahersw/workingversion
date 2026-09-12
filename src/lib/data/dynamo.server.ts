@@ -39,6 +39,32 @@ export async function putItem(item: Item): Promise<void> {
   await doc().send(new PutCommand({ TableName: tableName(), Item: item }));
 }
 
+/** Atomic condition for callers that must not overwrite concurrently reviewed data. */
+export async function putItemConditionally(
+  item: Item,
+  condition: {
+    expression: string;
+    names: Record<string, string>;
+    values: Record<string, unknown>;
+  },
+): Promise<boolean> {
+  try {
+    await doc().send(
+      new PutCommand({
+        TableName: tableName(),
+        Item: item,
+        ConditionExpression: condition.expression,
+        ExpressionAttributeNames: condition.names,
+        ExpressionAttributeValues: condition.values,
+      }),
+    );
+    return true;
+  } catch (error) {
+    if ((error as { name?: string })?.name === "ConditionalCheckFailedException") return false;
+    throw error;
+  }
+}
+
 /** Conditional create used by idempotent job/workspace reservations. */
 export async function putItemIfAbsent(item: Item): Promise<boolean> {
   try {

@@ -9,8 +9,8 @@ import { presignPut, presignGet, deleteObject } from "@/lib/data/s3.server";
 const userPK = (p: string) => `USER#${p}`;
 const itemSK = (id: string) => `ITEM#${id}`;
 
-/** Cap for a single upload (50 MB). Files go browser -> S3 directly. */
-export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+/** Cap for original-file preservation (200 MiB). Files go browser -> S3 directly. */
+export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 
 export type ItemKind = "output" | "prompt" | "file" | "review" | "workspace";
 export type LibraryItem = {

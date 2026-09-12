@@ -10,10 +10,10 @@ import { parseDepositionRecord } from "@/lib/kb/deposition-record";
 import { requireClientFileId } from "@/lib/kb/ingest-keys";
 import { isUuid, workspaceSaveFingerprint } from "@/lib/kb/workspace-lifecycle";
 import {
-  ASYNC_INGEST_MAX_BYTES,
   ASYNC_INGEST_MAX_MARKDOWN_CHARS,
   isSha256,
   selectIngestLane,
+  validateSaveByteSize,
 } from "@/lib/kb/ingest-state";
 import type { WorkspaceSurface } from "@/lib/kb/workspace.server";
 
@@ -22,7 +22,7 @@ function principalOf(context: unknown): string {
 }
 
 const SURFACES = new Set<WorkspaceSurface>(["workingset", "deposition", "review"]);
-const MAX_WORKSPACE_FILES = 100;
+const MAX_WORKSPACE_FILES = 120;
 const SAFE_METADATA = /^[^\p{Cc}]{1,256}$/u;
 
 type SaveFile = {
@@ -44,6 +44,8 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       surface: WorkspaceSurface;
       folderId?: string;
       files: SaveFile[];
+      /** Reserve the owned workspace before slow indexing so analysis can be saved independently. */
+      prepareOnly?: boolean;
     }) => {
       const surface = d?.surface;
       if (!SURFACES.has(surface)) throw new Error("valid surface required");
@@ -65,14 +67,7 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
         if (file.sha256 !== undefined && !isSha256(file.sha256)) {
           throw new Error("invalid raw file sha256");
         }
-        if (
-          file.byteSize !== undefined &&
-          (!Number.isSafeInteger(file.byteSize) ||
-            file.byteSize < 1 ||
-            file.byteSize > ASYNC_INGEST_MAX_BYTES)
-        ) {
-          throw new Error("invalid file byte size");
-        }
+        validateSaveByteSize(file.byteSize, "sync");
         if (
           file.mime !== undefined &&
           (!SAFE_METADATA.test(file.mime) || !/^[A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+$/.test(file.mime))
@@ -94,6 +89,7 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       if (!SAFE_METADATA.test(folderId)) throw new Error("valid folderId required");
       return {
         requestId,
+        prepareOnly: d.prepareOnly === true,
         name: (d.name || "Untitled workspace").slice(0, 120),
         surface,
         folderId,
@@ -163,6 +159,22 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
     if (incompleteAsync.length) {
       throw new Error("Asynchronous ingest requires verified byte size, storage key, and SHA-256.");
     }
+    for (const file of prepared) {
+      if (file.lane.lane !== "reject") validateSaveByteSize(file.byteSize, file.lane.lane);
+    }
+    if (prepared.some((file) => file.lane.lane === "async")) {
+      const { kbAsyncIngestConfigured } = await import("@/lib/config.server");
+      let available = false;
+      try {
+        available = kbAsyncIngestConfigured();
+      } catch {
+        /* configuration is deliberately not exposed */
+      }
+      if (!available)
+        throw new Error(
+          "Background document conversion is unavailable in this environment. Use a searchable transcript within the text limits, or ask an administrator to configure the ingest workers. Your analysis remains in this tab.",
+        );
+    }
 
     const { requestFingerprint, fileFingerprints } = workspaceSaveFingerprint({
       name: data.name,
@@ -209,6 +221,7 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
         ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
       });
     });
+    if (data.prepareOnly) return responseFromStatus();
     const existing = new Map(
       (await listWorkspaceDocumentCheckpoints(sub, reservation.itemId)).map((checkpoint) => [
         checkpoint.clientFileId,
@@ -244,6 +257,7 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
           clientFileId: file.clientFileId,
           status: "embedding",
         });
+        let pagesKey = "";
         const res = await ingestPages(sub, {
           workspaceId: reservation.kbWorkspaceId,
           surface: data.surface,
@@ -252,8 +266,20 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
           sha256: fileFingerprints[index],
           ...(file.byteSize !== undefined ? { byteSize: file.byteSize } : {}),
           pages: file.pages,
+          onRegistered: async (docId) => {
+            // Preserve the source text before embeddings. Index failure must
+            // not prevent reopening an already analysed deposition.
+            pagesKey = await putWorkspacePages(sub, docId, file.pages);
+            await checkpointWorkspaceDocument(sub, {
+              itemId: reservation.itemId,
+              clientFileId: file.clientFileId,
+              status: "embedding",
+              docId,
+              pagesKey,
+              pageCount: file.pages.length,
+            });
+          },
         });
-        const pagesKey = await putWorkspacePages(sub, res.docId, file.pages);
         await updateDocumentIngest(
           sub,
           res.docId,
@@ -385,7 +411,9 @@ export const deleteWorkspaceFn = createServerFn({ method: "POST" })
     if (!result.ok) {
       const why = result.failures[0]?.summary;
       throw new Error(
-        why ? `Workspace deletion did not complete: ${why}` : "Workspace deletion did not complete.",
+        why
+          ? `Workspace deletion did not complete: ${why}`
+          : "Workspace deletion did not complete.",
       );
     }
     // Tabular Review tables that read from this workspace keep their grid but

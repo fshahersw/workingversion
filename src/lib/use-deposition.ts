@@ -1,4 +1,12 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  runDocumentScan,
+  scanCacheKey,
+  retryScan,
+  type DiscoveryScope,
+  type ScanCoverage,
+  type ScanWindowResult,
+} from "@/lib/pile/discovery-scan";
 
 import { extractFile, transcriptFileKind } from "@/lib/extract-text";
 import { abortableDelay, rawFileSha256, uploadOriginalBytes } from "@/lib/kb/client-upload";
@@ -22,11 +30,12 @@ import {
   saveWorkspaceFn,
 } from "@/lib/kb/workspace.functions";
 import { streamSSE } from "@/lib/orchestrate";
-import { AdaptiveLimiter, mapPool, withRetry } from "@/lib/pile/async";
+import { AdaptiveLimiter, HttpStatusError, mapPool, withRetry } from "@/lib/pile/async";
 import { packAskHits, pagesForClientHits } from "@/lib/pile/client-search";
 import {
   analysisToMarkdown,
-  compactDepAnalysis,
+  matchDepEvidence,
+  depositionFindingBatches,
   EMPTY_ANALYSIS,
   extractCaptionMeta,
   mergeDepAnalysis,
@@ -36,12 +45,10 @@ import {
   type DepAnalysis,
 } from "@/lib/pile/deposition-analysis";
 import {
-  ANALYZE_WINDOW,
   ANALYZE_WINDOW_CONCURRENCY,
   DEP_MAX_BYTES,
   DEP_MAX_FILES,
   DEP_MAX_PAGES,
-  DEP_OCR_ANALYZE_AFTER,
   FILE_EXTRACT_CONCURRENCY,
   OCR_CONCURRENCY,
   OCR_CONCURRENCY_MAX,
@@ -49,13 +56,13 @@ import {
   OCR_PAGE_CAP,
 } from "@/lib/pile/limits";
 import {
-  looksLikeTranscript,
   pageNeedsDepOcr,
   transcriptFromPages,
   type TranscriptBlock,
   type TranscriptParse,
 } from "@/lib/pile/transcript";
 import { textQualityScore } from "@/lib/pile/text-quality";
+import { batchEvidence } from "@/lib/pile/deposition-context";
 import type { PileHit, PilePage } from "@/lib/pile/types";
 import { forEachRenderedPdfPage } from "@/lib/pile-render";
 
@@ -63,7 +70,12 @@ export type DepPhase = "idle" | "reading" | "indexing" | "ready" | "analyzing" |
 export type DepSpeakerFilter = "any" | "question" | "answer" | "objection";
 export type DepPass = DepositionRecordPass;
 export type DepPassStatus = DepositionRecordPassStatus;
-export type DepStep = { id: string; label: string; detail?: string; status: "running" | "done" | "error" };
+export type DepStep = {
+  id: string;
+  label: string;
+  detail?: string;
+  status: "running" | "done" | "error";
+};
 export type DepTranscript = TranscriptParse & { fileId: string };
 
 /** Durable copy of this deposition set: transcript bytes, pages, chunk index, analysis. */
@@ -78,6 +90,7 @@ export type DepSaved = {
   docIdByFileId: Record<string, string>;
   message: string | null;
   analysis: DepAnalysisSaveStatus;
+  analysisError: string | null;
   analysisSavedAt: string | null;
   /** True when this session was rehydrated from the Library. */
   loaded: boolean;
@@ -87,7 +100,13 @@ export type DepSaved = {
 
 export type DepState = {
   phase: DepPhase;
-  files: { name: string; pages: number; empty: number; done: number; status: "reading" | "ready" | "error" }[];
+  files: {
+    name: string;
+    pages: number;
+    empty: number;
+    done: number;
+    status: "reading" | "ready" | "error";
+  }[];
   steps: DepStep[];
   error: string | null;
   transcripts: DepTranscript[];
@@ -112,6 +131,7 @@ export type DepState = {
   ocr: { done: number; total: number } | null;
   analyzeProgress: { done: number; total: number } | null;
   saved: DepSaved;
+  scanCoverage?: ScanCoverage | null;
 };
 
 const IDLE_PASSES: Record<DepPass, DepPassStatus> = {
@@ -129,6 +149,7 @@ const EMPTY_SAVED: DepSaved = {
   docIdByFileId: {},
   message: null,
   analysis: "idle",
+  analysisError: null,
   analysisSavedAt: null,
   loaded: false,
   hybridAsk: false,
@@ -166,8 +187,10 @@ const EMPTY: DepState = {
 const PASS_QUERY: Record<DepPass, string> = {
   case: "Build the trial-usable case layer: witness profile, admissions, impeachment, and objections.",
   record: "Build the record layer: chronology, exhibits, and case themes.",
-  connections: "Map witnesses, material contradictions, and a knowledge graph of people, companies, documents, and themes.",
-  cross: "Compare these depositions. Find only material conflicts or omissions across witnesses, and one shared knowledge graph.",
+  connections:
+    "Map witnesses, material contradictions, and a knowledge graph of people, companies, documents, and themes.",
+  cross:
+    "Compare these depositions. Identify potential conflicts supported by affirmative testimony about the same subject and time period, and one shared knowledge graph. Silence alone is not a conflict.",
 };
 
 /** Debounce for mid-analysis record writes; the final write is immediate. */
@@ -206,13 +229,6 @@ function coverUnits(t: DepTranscript): (TranscriptBlock & { fileId: string; file
     }));
 }
 
-function chunkCover<T>(items: T[], size: number): T[][] {
-  if (!items.length) return [];
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
-  return out;
-}
-
 async function json<T>(url: string, init?: RequestInit, opts?: { tries?: number }): Promise<T> {
   return withRetry(
     async () => {
@@ -227,7 +243,12 @@ async function json<T>(url: string, init?: RequestInit, opts?: { tries?: number 
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       return body;
     },
-    { tries: opts?.tries ?? 3, baseMs: 400, signal: init?.signal ?? undefined, retry429: (opts?.tries ?? 3) > 1 },
+    {
+      tries: opts?.tries ?? 3,
+      baseMs: 400,
+      signal: init?.signal ?? undefined,
+      retry429: (opts?.tries ?? 3) > 1,
+    },
   );
 }
 
@@ -260,6 +281,9 @@ export function useDeposition() {
   const filesRef = useRef<Map<string, File>>(new Map());
   const pdfFilesRef = useRef<Map<string, File>>(new Map());
   const pagesRef = useRef<PilePage[]>([]);
+  const scanCache = useRef(new Map<string, ScanWindowResult>());
+  const lastScan = useRef<{ query: string; fileIds?: string[] } | null>(null);
+  const analysisCache = useRef(new Map<string, DepAnalysis>());
   const transcriptsRef = useRef<DepTranscript[]>([]);
   const instructionsRef = useRef("");
   const analysisRef = useRef<DepAnalysis>(EMPTY_ANALYSIS);
@@ -270,20 +294,58 @@ export function useDeposition() {
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const persistInflight = useRef<Promise<void> | null>(null);
   const persistDirty = useRef<{ complete: boolean } | null>(null);
+  const ocrActive = useRef(false);
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!transcriptsRef.current.length) return;
+      if (
+        savedRef.current.analysis === "saved" &&
+        !persistDirty.current &&
+        !persistTimer.current &&
+        !Object.values(passesRef.current).includes("running")
+      )
+        return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, []);
+
+  useEffect(
+    () => () => {
+      ingestAbort.current?.abort();
+      analyzeAbort.current?.abort();
+      askAbort.current?.abort();
+      saveAbort.current?.abort();
+      if (persistTimer.current) clearTimeout(persistTimer.current);
+      persistDirty.current = null;
+      runRef.current = null;
+    },
+    [],
+  );
 
   const step = useCallback((s: DepStep) => {
     setState((prev) => {
       const i = prev.steps.findIndex((x) => x.id === s.id);
-      const steps = i === -1 ? [...prev.steps, s] : prev.steps.map((x, j) => (j === i ? { ...x, ...s } : x));
+      const steps =
+        i === -1 ? [...prev.steps, s] : prev.steps.map((x, j) => (j === i ? { ...x, ...s } : x));
       return { ...prev, steps };
     });
   }, []);
 
-  const setSaved = useCallback((patch: Partial<DepSaved> | ((prev: DepSaved) => Partial<DepSaved>)) => {
-    const next = { ...savedRef.current, ...(typeof patch === "function" ? patch(savedRef.current) : patch) };
-    savedRef.current = next;
-    setState((s) => ({ ...s, saved: next }));
-  }, []);
+  const setSaved = useCallback(
+    (patch: Partial<DepSaved> | ((prev: DepSaved) => Partial<DepSaved>)) => {
+      const next = {
+        ...savedRef.current,
+        ...(typeof patch === "function" ? patch(savedRef.current) : patch),
+      };
+      savedRef.current = next;
+      setState((s) => ({ ...s, saved: next }));
+    },
+    [],
+  );
 
   const setPasses = useCallback((patch: Partial<Record<DepPass, DepPassStatus>>) => {
     passesRef.current = { ...passesRef.current, ...patch };
@@ -299,6 +361,9 @@ export function useDeposition() {
   };
 
   const reset = useCallback(() => {
+    scanCache.current.clear();
+    lastScan.current = null;
+    analysisCache.current.clear();
     ingestAbort.current?.abort();
     analyzeAbort.current?.abort();
     askAbort.current?.abort();
@@ -319,6 +384,7 @@ export function useDeposition() {
     savedRef.current = EMPTY_SAVED;
     saveAttemptRef.current = null;
     runRef.current = null;
+    ocrActive.current = false;
     setState(EMPTY);
   }, []);
 
@@ -382,25 +448,29 @@ export function useDeposition() {
         passes: passesRef.current,
         analysis: analysisRef.current,
       });
-      setSaved({ analysis: "saving" });
+      setSaved({ analysis: "saving", analysisError: null });
       const task = (async () => {
         try {
           const res = await withRetry(() => saveWorkspaceAnalysisFn({ data: { itemId, record } }), {
             tries: 3,
             baseMs: 500,
           });
-          if (savedRef.current.itemId !== itemId) return;
+          if (savedRef.current.itemId !== itemId || runRef.current !== run) return;
           if (res.ok) {
-            setSaved({ analysis: "saved", analysisSavedAt: res.analysis.updatedAt, message: null });
+            setSaved({
+              analysis: "saved",
+              analysisSavedAt: res.analysis.updatedAt,
+              analysisError: null,
+            });
           } else {
             // A newer run owns the stored record; this run's output is superseded.
             setSaved({ analysis: "saved", analysisSavedAt: res.analysis.updatedAt });
           }
         } catch (e) {
-          if (savedRef.current.itemId !== itemId) return;
+          if (savedRef.current.itemId !== itemId || runRef.current !== run) return;
           setSaved({
             analysis: "error",
-            message: e instanceof Error ? e.message : "Could not save the analysis.",
+            analysisError: e instanceof Error ? e.message : "Could not save the analysis.",
           });
         } finally {
           persistInflight.current = null;
@@ -409,7 +479,9 @@ export function useDeposition() {
       persistInflight.current = task;
       await task;
       const dirty = persistDirty.current;
-      if (dirty && savedRef.current.itemId === itemId) {
+      // A new workspace/run may have queued its first write while this request
+      // was finishing. Drain the CURRENT dirty record, never the old snapshot.
+      if (dirty) {
         persistDirty.current = null;
         await persistAnalysisNow(dirty.complete);
       }
@@ -432,6 +504,101 @@ export function useDeposition() {
     [persistAnalysisNow],
   );
 
+  /** Read-only polling never resubmits conversion or embedding work. */
+  const refreshSaveStatus = useCallback(
+    async (
+      initialStatus: NonNullable<Awaited<ReturnType<typeof getWorkspaceStatusFn>>>,
+      signal: AbortSignal,
+    ) => {
+      let status = initialStatus;
+      for (let poll = 0; status.status === "saving" && poll < SAVE_POLL_MAX; poll++) {
+        setSaved({
+          status: status.stage === "embedding" ? "embedding" : "queued",
+          itemId: initialStatus.itemId,
+          message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} pending`,
+        });
+        await abortableDelay(SAVE_POLL_MS, signal);
+        const polled = await withRetry(
+          () => getWorkspaceStatusFn({ data: { itemId: initialStatus.itemId } }),
+          {
+            tries: 3,
+            baseMs: 500,
+            signal: signal,
+          },
+        );
+        if (signal.aborted) return;
+        if (!polled) throw new Error("Saved workspace status is unavailable.");
+        status = polled;
+      }
+      if (signal.aborted) return;
+      if (status.status === "saving") {
+        setSaved({
+          status: "queued",
+          itemId: initialStatus.itemId,
+          message: "Indexing is continuing in the background.",
+        });
+        step({
+          id: "save",
+          label: "Indexing is pending",
+          status: "running",
+          detail: "Use Check status to refresh.",
+        });
+        return;
+      }
+      if (status.status === "error") {
+        saveAttemptRef.current = null;
+        setSaved({
+          status: "error",
+          itemId: initialStatus.itemId,
+          message: status.errorSummary ?? "Some transcripts could not be indexed.",
+        });
+        step({
+          id: "save",
+          label: "Saving to your library",
+          status: "error",
+          ...(status.errorSummary ? { detail: status.errorSummary } : {}),
+        });
+        return;
+      }
+      const docIdByFileId = Object.fromEntries(
+        status.documents.flatMap((doc) =>
+          doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
+        ),
+      );
+      const bound = transcriptsRef.current.every((t) => Boolean(docIdByFileId[t.fileId]));
+      setSaved({
+        status: "ready",
+        itemId: initialStatus.itemId,
+        docIdByFileId,
+        hybridAsk: bound,
+        message: bound
+          ? transcriptsRef.current.some(
+              (t) =>
+                filesRef.current.has(t.fileId) &&
+                !saveAttemptRef.current?.bytesKeyByFileId[t.fileId],
+            )
+            ? "Transcript text and analysis can be saved, but an original file upload failed. Keep your original files."
+            : null
+          : "Saved, but not every transcript is indexed. Ask uses in-tab retrieval.",
+      });
+      step({
+        id: "save",
+        label: "Saved to your library",
+        status: "done",
+        detail: `${status.docCount} transcript${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages`,
+      });
+      const dirty = persistDirty.current as { complete: boolean } | null;
+      persistDirty.current = null;
+      // Re-save the manifest with stable KB document IDs, even if the analysis
+      // itself was already saved while indexing was in progress.
+      void persistAnalysisNow(
+        dirty?.complete ??
+          Object.values(passesRef.current).every((p) => p === "done" || p === "error"),
+      );
+    },
+    [persistAnalysisNow, setSaved, step],
+  );
+
   /**
    * Save this deposition set as a workspace: original bytes (best-effort),
    * parsed pages, and the chunk index (BM25 + embeddings) so Ask can use the
@@ -441,8 +608,17 @@ export function useDeposition() {
   const saveWorkspace = useCallback(async (): Promise<void> => {
     const transcripts = transcriptsRef.current;
     if (!transcripts.length) return;
-    if (savedRef.current.loaded || savedRef.current.status === "ready") return;
-    saveAbort.current?.abort();
+    if (savedRef.current.loaded || savedRef.current.status === "ready") {
+      await persistAnalysisNow(
+        Object.values(passesRef.current).every((p) => p === "done" || p === "error"),
+      );
+      return;
+    }
+    if (saveAbort.current) return;
+    const pendingItemId =
+      savedRef.current.status === "queued" || savedRef.current.status === "embedding"
+        ? savedRef.current.itemId
+        : null;
     const controller = new AbortController();
     saveAbort.current = controller;
     let attempt = saveAttemptRef.current;
@@ -452,8 +628,19 @@ export function useDeposition() {
     }
     const name = depositionWorkspaceName(transcripts);
     setSaved({ status: "saving", name, message: null });
-    step({ id: "save", label: "Saving to your library", status: "running", detail: "transcripts, pages, index" });
+    step({
+      id: "save",
+      label: "Saving to your library",
+      status: "running",
+      detail: "transcripts, pages, index",
+    });
     try {
+      if (pendingItemId) {
+        const progress = await getWorkspaceStatusFn({ data: { itemId: pendingItemId } });
+        if (!progress) throw new Error("Saved workspace status is unavailable.");
+        await refreshSaveStatus(progress, controller.signal);
+        return;
+      }
       const byFile = new Map<string, { page: number; text: string }[]>();
       for (const p of pagesRef.current) {
         if (!p.text.trim()) continue;
@@ -481,14 +668,17 @@ export function useDeposition() {
         // Transcripts are indexed from the text the reader shows (including OCR
         // repairs) so chunk cites line up with the transcript. Only oversize or
         // textless files fall back to the asynchronous lane over the original
-        // bytes; without bytes such a file is left out rather than failing the set.
+        // bytes; reject unsavable sources explicitly instead of dropping a file.
         const plan = planSaveLane({
           readablePages: fp.length,
           totalChars,
           lowQuality: false,
           hasBytes: Boolean(bytesKey && sha256),
         });
-        if (plan === "skip") return null;
+        if (plan === "skip")
+          throw new Error(
+            `The transcript “${t.fileName}” could not be saved. Its readable text or original file is unavailable. Your analysis remains in this tab; download it before closing.`,
+          );
         return {
           clientFileId: t.fileId,
           fileName: t.fileName,
@@ -501,90 +691,38 @@ export function useDeposition() {
       });
       if (controller.signal.aborted) return;
       const submitted = files.filter((file): file is NonNullable<typeof file> => file !== null);
-      const skipped = transcripts.length - submitted.length;
       if (!submitted.length) {
         throw new Error(
           "No transcript could be saved: no readable text and the original files are not in this session.",
         );
       }
-      const res = await saveWorkspaceFn({
-        data: { requestId: attempt.requestId, name, surface: "deposition", files: submitted },
+      const payload = {
+        requestId: attempt.requestId,
+        name,
+        surface: "deposition" as const,
+        files: submitted,
+      };
+      const reservation = await saveWorkspaceFn({ data: { ...payload, prepareOnly: true } });
+      if (controller.signal.aborted) return;
+      setSaved({ itemId: reservation.itemId, kbWorkspaceId: reservation.kbWorkspaceId });
+      const checkpoint = persistDirty.current;
+      persistDirty.current = null;
+      void persistAnalysisNow(checkpoint?.complete ?? false);
+      // If transport times out after reservation, recover status rather than
+      // treating the completed analysis as lost or creating another workspace.
+      const res = await saveWorkspaceFn({ data: payload }).catch(async (error) => {
+        if (controller.signal.aborted) throw error;
+        const status = await getWorkspaceStatusFn({ data: { itemId: reservation.itemId } });
+        if (!status) throw error;
+        return { ...status, kbWorkspaceId: reservation.kbWorkspaceId };
       });
       if (controller.signal.aborted) return;
-      let status: Omit<typeof res, "kbWorkspaceId"> = res;
-      for (let poll = 0; status.status === "saving" && poll < SAVE_POLL_MAX; poll++) {
-        setSaved({
-          status: status.stage === "embedding" ? "embedding" : "queued",
-          itemId: res.itemId,
-          kbWorkspaceId: res.kbWorkspaceId,
-          message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} pending`,
-        });
-        await abortableDelay(SAVE_POLL_MS, controller.signal);
-        const polled = await withRetry(() => getWorkspaceStatusFn({ data: { itemId: res.itemId } }), {
-          tries: 3,
-          baseMs: 500,
-          signal: controller.signal,
-        });
-        if (controller.signal.aborted) return;
-        if (!polled) throw new Error("Saved workspace status is unavailable.");
-        status = polled;
-      }
-      if (controller.signal.aborted) return;
-      if (status.status === "saving") {
-        setSaved({
-          status: "queued",
-          itemId: res.itemId,
-          kbWorkspaceId: res.kbWorkspaceId,
-          message: "Indexing is continuing in the background.",
-        });
-        step({ id: "save", label: "Saving to your library", status: "done", detail: "indexing in background" });
-        return;
-      }
-      if (status.status === "error") {
-        saveAttemptRef.current = null;
-        setSaved({
-          status: "error",
-          itemId: res.itemId,
-          kbWorkspaceId: res.kbWorkspaceId,
-          message: status.errorSummary ?? "Some transcripts could not be indexed.",
-        });
-        step({
-          id: "save",
-          label: "Saving to your library",
-          status: "error",
-          ...(status.errorSummary ? { detail: status.errorSummary } : {}),
-        });
-        return;
-      }
-      const docIdByFileId = Object.fromEntries(
-        status.documents.flatMap((doc) =>
-          doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
-        ),
-      );
-      const bound = transcriptsRef.current.every((t) => Boolean(docIdByFileId[t.fileId]));
-      setSaved({
-        status: "ready",
-        itemId: res.itemId,
-        kbWorkspaceId: res.kbWorkspaceId,
-        docIdByFileId,
-        hybridAsk: bound,
-        message: bound
-          ? null
-          : skipped
-            ? `Saved ${submitted.length} of ${transcripts.length} transcripts. ${skipped} had no readable text and no original file to convert. Ask uses in-tab retrieval.`
-            : "Saved, but not every transcript is indexed. Ask uses in-tab retrieval.",
-      });
-      step({
-        id: "save",
-        label: "Saved to your library",
-        status: "done",
-        detail: `${status.docCount} transcript${status.docCount === 1 ? "" : "s"} · ${status.chunkCount} passages${skipped ? ` · ${skipped} left out` : ""}`,
-      });
-      const dirty = persistDirty.current;
-      if (dirty || savedRef.current.analysis === "pending") {
-        persistDirty.current = null;
-        void persistAnalysisNow(dirty?.complete ?? false);
-      }
+      setSaved({ itemId: res.itemId, kbWorkspaceId: res.kbWorkspaceId });
+      // Preserve the analysis independently of index completion/failure.
+      const pendingAnalysis = persistDirty.current as { complete: boolean } | null;
+      persistDirty.current = null;
+      void persistAnalysisNow(pendingAnalysis?.complete ?? false);
+      await refreshSaveStatus(res, controller.signal);
     } catch (e) {
       if (controller.signal.aborted) return;
       const message = e instanceof Error ? e.message : "Save failed";
@@ -594,7 +732,7 @@ export function useDeposition() {
     } finally {
       if (saveAbort.current === controller) saveAbort.current = null;
     }
-  }, [persistAnalysisNow, setSaved, step]);
+  }, [persistAnalysisNow, refreshSaveStatus, setSaved, step]);
 
   /** Remove the saved copy (bytes, pages, index, analysis) and clear this tab. */
   const deleteSaved = useCallback(async (): Promise<boolean> => {
@@ -604,7 +742,11 @@ export function useDeposition() {
       return true;
     }
     saveAbort.current?.abort();
+    analyzeAbort.current?.abort();
     clearPersistTimer();
+    persistDirty.current = null;
+    runRef.current = null;
+    await persistInflight.current;
     setSaved({ status: "saving", message: "Deleting saved copy…" });
     try {
       await deleteWorkspaceFn({ data: { itemId } });
@@ -621,200 +763,328 @@ export function useDeposition() {
 
   // ---- Analysis -------------------------------------------------------------
 
-  const analyze = useCallback(async () => {
-    const transcripts = transcriptsRef.current;
-    if (!transcripts.length) {
-      setState((s) => ({ ...s, phase: "error", error: "Drop deposition files first." }));
-      return;
-    }
-    analyzeAbort.current?.abort();
-    const controller = new AbortController();
-    analyzeAbort.current = controller;
-    clearPersistTimer();
-    persistDirty.current = null;
-    const run: AnalysisRun = { runId: newId(), startedAt: Date.now() };
-    runRef.current = run;
-    const focus = instructionsRef.current;
-    analysisRef.current = { ...EMPTY_ANALYSIS, witnesses: seedWitnesses(transcripts) };
-    passesRef.current = {
-      case: "running",
-      record: "running",
-      connections: "running",
-      cross: transcripts.length > 1 ? "idle" : "done",
-    };
-    setState((s) => ({
-      ...s,
-      phase: "analyzing",
-      analysis: { ...analysisRef.current },
-      error: null,
-      passes: passesRef.current,
-      analyzeProgress: { done: 0, total: 1 },
-    }));
-
-    type Packed = { hits: PileHit[]; pages: { fileName: string; page: number; text: string; cite: string }[] };
-    const packUnits = (units: ReturnType<typeof coverUnits>): Packed => {
-      const hits: PileHit[] = units.map((b, i) => ({
-        fileId: b.fileId,
-        fileName: b.fileName,
-        page: b.startPage,
-        score: 1 / (i + 1),
-        snippet: (b.question || b.answer).replace(/\s+/g, " ").slice(0, 220),
-        cite: b.cite,
-        startLine: b.startLine,
-        endLine: b.endLine,
-      }));
-      const pages = units.map((b) => ({
-        fileName: b.fileName,
-        page: b.startPage,
-        text: `Q. ${b.question}\nA. ${b.answer}`.trim() || b.answer,
-        cite: b.cite,
-      }));
-      return { hits, pages };
-    };
-
-    const runPass = async (
-      pass: DepPass | "cover" | "synth",
-      list: DepTranscript[],
-      hits: PileHit[],
-      pages: Packed["pages"],
-      mark = false,
-    ) => {
-      let raw = "";
-      await streamSSE(
-        "/api/pile/ask",
-        {
-          query:
-            pass === "cover"
-              ? focus
-                ? `Extract every trial-usable finding from this window. Focus: ${focus}`
-                : "Extract every trial-usable finding from this window of testimony."
-              : pass === "synth"
-                ? focus
-                  ? `Synthesize the full record. Focus: ${focus}`
-                  : "Synthesize the full covering analysis into one trial-usable record."
-                : focus
-                  ? `${PASS_QUERY[pass]} Focus: ${focus}`
-                  : PASS_QUERY[pass],
-          mode: "analyze",
-          pass,
-          pages,
-          hits,
-          files: list.map((t) => ({ name: t.fileName, pageCount: t.blocks.length || t.lines.length })),
-          instructions: focus || null,
-          caption: list.map((t) => t.caption).filter(Boolean).join("\n---\n").slice(0, 2000),
-          citeReady: list.some((t) => t.citeReady),
-          witness: list.map((t) => t.witness).filter(Boolean).join("; ") || list[0]?.witness,
-        },
-        (evt) => {
-          const d = (evt.data ?? {}) as Record<string, unknown>;
-          if (evt.event === "delta") raw += String(d["text"] ?? "");
-          else if (evt.event === "error") throw new Error(String(d["message"] ?? "Analysis failed"));
-        },
-        controller.signal,
-      );
-      if (controller.signal.aborted || runRef.current !== run) return;
-      const verified = verifyDepAnalysis(parseDepAnalysis(raw), list);
-      analysisRef.current = mergeDepAnalysis(analysisRef.current, verified);
-      if (mark && pass !== "cover" && pass !== "synth") passesRef.current = { ...passesRef.current, [pass]: "done" };
-      const passes = passesRef.current;
-      setState((s) => ({
-        ...s,
-        analysis: analysisRef.current,
-        role: analysisRef.current.role || s.role,
-        passes,
-      }));
-      persistAnalysis(false);
-    };
-
-    const windows = transcripts.flatMap((t) =>
-      chunkCover(coverUnits(t), ANALYZE_WINDOW).map((units) => ({ t, pack: packUnits(units) })),
-    );
-    const extra = 1 + (transcripts.length > 1 ? 1 : 0);
-    if (!windows.length) {
-      setState((s) => ({ ...s, phase: "error", error: "No testimony blocks to analyze.", analyzeProgress: null }));
-      return;
-    }
-    let done = 0;
-    const bump = () => {
-      done += 1;
-      setState((s) => ({ ...s, analyzeProgress: { done, total: windows.length + extra } }));
-    };
-    setState((s) => ({ ...s, analyzeProgress: { done: 0, total: Math.max(1, windows.length + extra) } }));
-
-    try {
-      await mapPool(
-        windows,
-        ANALYZE_WINDOW_CONCURRENCY,
-        async (w) => {
-          await runPass("cover", [w.t], w.pack.hits, w.pack.pages);
-          bump();
-        },
-        controller.signal,
-      );
-    } catch {
-      if (controller.signal.aborted) {
-        setState((s) => (s.phase === "analyzing" ? { ...s, phase: "ready", analyzeProgress: null } : s));
+  const analyze = useCallback(
+    async (fresh = false) => {
+      if (fresh) analysisCache.current.clear();
+      if (ocrActive.current) return;
+      const transcripts = transcriptsRef.current;
+      if (!transcripts.length) {
+        setState((s) => ({ ...s, phase: "error", error: "Drop deposition files first." }));
         return;
       }
-      setPasses({ case: "error", record: "error", connections: "error" });
-      setState((s) => ({ ...s, phase: "error", error: "Analysis failed", analyzeProgress: null }));
-      persistAnalysis(true);
-      return;
-    }
-    if (controller.signal.aborted) return;
+      analyzeAbort.current?.abort();
+      const controller = new AbortController();
+      analyzeAbort.current = controller;
+      clearPersistTimer();
+      persistDirty.current = null;
+      const run: AnalysisRun = { runId: newId(), startedAt: Date.now() };
+      runRef.current = run;
+      const focus = instructionsRef.current;
+      analysisRef.current = { ...EMPTY_ANALYSIS, witnesses: seedWitnesses(transcripts) };
+      passesRef.current = {
+        case: "running",
+        record: "running",
+        connections: "running",
+        cross: transcripts.length > 1 ? "idle" : "done",
+      };
+      setState((s) => ({
+        ...s,
+        phase: "analyzing",
+        analysis: { ...analysisRef.current },
+        error: null,
+        passes: passesRef.current,
+        analyzeProgress: { done: 0, total: 1 },
+      }));
 
-    setPasses({ case: "running", record: "done", connections: "done" });
-    try {
-      const findings = compactDepAnalysis(analysisRef.current);
-      await runPass(
-        "synth",
-        transcripts,
-        [],
-        [{ fileName: "findings.json", page: 1, text: `FINDINGS\n${findings}`, cite: "" }],
+      type Packed = {
+        hits: PileHit[];
+        pages: { fileName: string; page: number; text: string; cite: string }[];
+      };
+      const packUnits = (units: ReturnType<typeof coverUnits>): Packed => {
+        const hits: PileHit[] = units.map((b, i) => ({
+          fileId: b.fileId,
+          fileName: b.fileName,
+          page: b.startPage,
+          score: 1 / (i + 1),
+          snippet: (b.question || b.answer).replace(/\s+/g, " ").slice(0, 220),
+          cite: b.cite,
+          startLine: b.startLine,
+          endLine: b.endLine,
+        }));
+        const pages = units.map((b) => ({
+          fileName: b.fileName,
+          page: b.startPage,
+          text:
+            b.lines
+              .map((l) => `${l.page}:${l.line} ${l.speakerLabel || l.speaker}. ${l.text}`)
+              .join("\n") || `Q. ${b.question}\nA. ${b.answer}`,
+          cite: b.cite,
+        }));
+        return { hits, pages };
+      };
+
+      const runPass = async (
+        pass: DepPass | "cover" | "synth",
+        list: DepTranscript[],
+        hits: PileHit[],
+        pages: Packed["pages"],
+        mark = false,
+      ) => {
+        const key = await scanCacheKey([
+          "dep-pass-v2",
+          pass,
+          focus,
+          pages,
+          list.map((t) => [t.fileId, t.witness, t.caption]),
+        ]);
+        const verified =
+          analysisCache.current.get(key) ??
+          (await retryScan(async () => {
+            let raw = "";
+            let completed = false;
+            await streamSSE(
+              "/api/pile/ask",
+              {
+                query:
+                  pass === "cover"
+                    ? focus
+                      ? `Extract every trial-usable finding from this window. Focus: ${focus}`
+                      : "Extract every trial-usable finding from this window of testimony."
+                    : pass === "synth"
+                      ? focus
+                        ? `Synthesize the full record. Focus: ${focus}`
+                        : "Synthesize the full covering analysis into one trial-usable record."
+                      : focus
+                        ? `${PASS_QUERY[pass]} Focus: ${focus}`
+                        : PASS_QUERY[pass],
+                mode: "analyze",
+                pass,
+                pages,
+                hits,
+                files: list.map((t) => ({
+                  name: t.fileName,
+                  pageCount: new Set(t.lines.map((line) => line.page)).size,
+                })),
+                instructions: focus || null,
+                caption: list
+                  .map((t) => t.caption)
+                  .filter(Boolean)
+                  .join("\n---\n")
+                  .slice(0, 2000),
+                citeReady: list.some((t) => t.citeReady),
+                witness:
+                  list
+                    .map((t) => t.witness)
+                    .filter(Boolean)
+                    .join("; ") || list[0]?.witness,
+              },
+              (evt) => {
+                const d = (evt.data ?? {}) as Record<string, unknown>;
+                if (evt.event === "delta") raw += String(d["text"] ?? "");
+                else if (evt.event === "done") completed = true;
+                else if (evt.event === "error")
+                  throw new HttpStatusError(
+                    typeof d["status"] === "number" ? d["status"] : 502,
+                    String(d["message"] ?? "Analysis failed"),
+                  );
+              },
+              controller.signal,
+            );
+            controller.signal.throwIfAborted();
+            if (!completed)
+              throw new HttpStatusError(
+                502,
+                "Analysis stream ended before completing this section",
+              );
+            try {
+              return verifyDepAnalysis(parseDepAnalysis(raw, true), list);
+            } catch {
+              throw new HttpStatusError(502, "Incomplete analysis output; retrying this section");
+            }
+          }, controller.signal));
+        if (controller.signal.aborted || runRef.current !== run) return;
+        if (analysisCache.current.size >= 2500)
+          analysisCache.current.delete(analysisCache.current.keys().next().value!);
+        analysisCache.current.set(key, verified);
+        analysisRef.current = mergeDepAnalysis(analysisRef.current, verified);
+        if (mark && pass !== "cover" && pass !== "synth")
+          passesRef.current = { ...passesRef.current, [pass]: "done" };
+        const passes = passesRef.current;
+        setState((s) => ({
+          ...s,
+          analysis: analysisRef.current,
+          role: analysisRef.current.role || s.role,
+          passes,
+        }));
+        persistAnalysis(false);
+        return verified;
+      };
+
+      const windows = transcripts.flatMap((t) =>
+        batchEvidence(packUnits(coverUnits(t)).pages, 80_000, 16).map((pages) => ({
+          t,
+          pack: { hits: [], pages },
+        })),
       );
-    } catch {
-      /* covering windows still stand */
-    }
-    if (controller.signal.aborted) return;
-    bump();
-    setPasses({ case: "done" });
+      let extra = 1;
+      if (!windows.length) {
+        setState((s) => ({
+          ...s,
+          phase: "error",
+          error: "No testimony blocks to analyze.",
+          analyzeProgress: null,
+        }));
+        return;
+      }
+      let done = 0;
+      const bump = () => {
+        done += 1;
+        setState((s) => ({ ...s, analyzeProgress: { done, total: windows.length + extra } }));
+      };
+      setState((s) => ({
+        ...s,
+        analyzeProgress: { done: 0, total: Math.max(1, windows.length + extra) },
+      }));
 
-    if (transcripts.length > 1) {
-      setPasses({ cross: "running" });
-      const findings = compactDepAnalysis(analysisRef.current);
       try {
-        await runPass(
-          "cross",
-          transcripts,
-          [],
-          [{ fileName: "findings.json", page: 1, text: `FINDINGS\n${findings}`, cite: "" }],
-          true,
+        await mapPool(
+          windows,
+          ANALYZE_WINDOW_CONCURRENCY,
+          async (w) => {
+            await runPass("cover", [w.t], w.pack.hits, w.pack.pages);
+            bump();
+          },
+          controller.signal,
         );
-      } catch {
-        /* per-window results still usable */
+      } catch (error) {
+        if (controller.signal.aborted) {
+          setState((s) =>
+            s.phase === "analyzing" ? { ...s, phase: "ready", analyzeProgress: null } : s,
+          );
+          return;
+        }
+        setPasses({ case: "error", record: "error", connections: "error" });
+        setState((s) => ({
+          ...s,
+          phase: "error",
+          error: error instanceof Error ? error.message : "Analysis failed",
+          analyzeProgress: null,
+        }));
+        persistAnalysis(true);
+        return;
       }
       if (controller.signal.aborted) return;
-      if (passesRef.current.cross === "running") setPasses({ cross: "error" });
-      bump();
-    }
 
-    if (!analysisRef.current.admissions.length && !analysisRef.current.summary && !windows.length) {
-      setState((s) => ({ ...s, phase: "error", error: "Analysis failed", analyzeProgress: null }));
-      return;
-    }
-    setState((s) => ({ ...s, phase: "ready", analysis: analysisRef.current, analyzeProgress: null }));
-    persistAnalysis(true);
-  }, [persistAnalysis, setPasses]);
+      setPasses({ case: "running", record: "done", connections: "done" });
+      try {
+        const batches = depositionFindingBatches(analysisRef.current).map((batch) =>
+          batch.map((p) => ({ ...p, cite: "" })),
+        );
+        // Compare each pair of evidence batches, so no late batch is silently excluded.
+        const comparisons =
+          transcripts.length > 1
+            ? batches.flatMap((a, i) =>
+                batches.slice(i).map((b, j) => (j === 0 ? a : [...a, ...b])),
+              )
+            : [];
+        extra = batches.length + (batches.length > 1 ? 1 : 0) + comparisons.length;
+        setState((s) => ({ ...s, analyzeProgress: { done, total: windows.length + extra } }));
+        const syntheses = await mapPool(
+          batches,
+          2,
+          async (pages) => {
+            const result = await runPass("synth", transcripts, [], pages);
+            bump();
+            return result;
+          },
+          controller.signal,
+        );
+        if (batches.length > 1) {
+          await runPass(
+            "synth",
+            transcripts,
+            [],
+            syntheses.flatMap((a, i) =>
+              a?.summary
+                ? [{ fileName: `Synthesis ${i + 1}`, page: i + 1, text: a.summary, cite: "" }]
+                : [],
+            ),
+          );
+          bump();
+        }
+        setPasses({ case: "done" });
+        if (comparisons.length) {
+          setPasses({ cross: "running" });
+          await mapPool(
+            comparisons,
+            2,
+            async (pages) => {
+              await runPass("cross", transcripts, [], pages);
+              bump();
+            },
+            controller.signal,
+          );
+          setPasses({ cross: "done" });
+        }
+      } catch (error) {
+        if (controller.signal.aborted || runRef.current !== run) return;
+        setPasses({
+          ...(passesRef.current.case === "running" ? { case: "error" } : {}),
+          ...(transcripts.length > 1 ? { cross: "error" } : {}),
+        });
+        setState((s) => ({
+          ...s,
+          error: `Covering results are retained. Synthesis or cross-review is incomplete: ${error instanceof Error ? error.message : "request failed"}`,
+        }));
+      }
+      if (controller.signal.aborted || runRef.current !== run) return;
+
+      if (!analysisRef.current.admissions.length && !analysisRef.current.summary) {
+        setState((s) => ({
+          ...s,
+          phase: "error",
+          error: "Analysis failed",
+          analyzeProgress: null,
+        }));
+        return;
+      }
+      setState((s) => ({
+        ...s,
+        phase: "ready",
+        analysis: analysisRef.current,
+        analyzeProgress: null,
+      }));
+      persistAnalysis(true);
+    },
+    [persistAnalysis, setPasses],
+  );
 
   // ---- Upload -> read -> OCR -> save -> analyze -------------------------------
 
   const start = useCallback(
     async (incoming: File[], instructions?: string) => {
-      const files = incoming.filter((f) => transcriptFileKind(f) !== null).slice(0, DEP_MAX_FILES);
+      const files = incoming.filter((f) => transcriptFileKind(f) !== null);
+      if (files.length > DEP_MAX_FILES) {
+        setState((s) => ({
+          ...s,
+          error: `Choose up to ${DEP_MAX_FILES} deposition files per set. No files were processed.`,
+        }));
+        return;
+      }
+      if (new Set(files.map((f) => f.name.toLowerCase())).size !== files.length) {
+        setState((s) => ({
+          ...s,
+          error:
+            "Two transcripts have the same filename. Rename them before uploading so every citation has an unambiguous source.",
+        }));
+        return;
+      }
       if (!files.length) {
         setState({ ...EMPTY, phase: "error", error: "Drop depositions as PDF, Word, or TXT." });
         return;
       }
+      ingestAbort.current?.abort();
+      askAbort.current?.abort();
       saveAbort.current?.abort();
       analyzeAbort.current?.abort();
       clearPersistTimer();
@@ -822,7 +1092,9 @@ export function useDeposition() {
       const controller = new AbortController();
       ingestAbort.current = controller;
       filesRef.current = new Map();
-      pdfFilesRef.current = new Map(files.filter((f) => transcriptFileKind(f) === "pdf").map((f) => [f.name, f]));
+      pdfFilesRef.current = new Map(
+        files.filter((f) => transcriptFileKind(f) === "pdf").map((f) => [f.name, f]),
+      );
       pagesRef.current = [];
       transcriptsRef.current = [];
       instructionsRef.current = instructions?.trim() || "";
@@ -831,6 +1103,7 @@ export function useDeposition() {
       savedRef.current = EMPTY_SAVED;
       saveAttemptRef.current = null;
       runRef.current = null;
+      ocrActive.current = false;
       setState({
         ...EMPTY,
         phase: "reading",
@@ -839,7 +1112,9 @@ export function useDeposition() {
       });
       step({ id: "read", label: "Reading files", status: "running" });
 
-      const extracted: { file: File; res: Awaited<ReturnType<typeof extractFile>> }[] = new Array(files.length);
+      const extracted: { file: File; res: Awaited<ReturnType<typeof extractFile>> }[] = new Array(
+        files.length,
+      );
       try {
         await mapPool(
           files,
@@ -850,17 +1125,30 @@ export function useDeposition() {
               (done, total) =>
                 setState((s) => ({
                   ...s,
-                  files: s.files.map((x, j) => (j === i ? { ...x, done, pages: total, status: "reading" } : x)),
+                  files: s.files.map((x, j) =>
+                    j === i ? { ...x, done, pages: total, status: "reading" } : x,
+                  ),
                 })),
               controller.signal,
-              { maxPages: DEP_MAX_PAGES, maxBytes: DEP_MAX_BYTES, layout: "transcript" },
+              {
+                maxPages: DEP_MAX_PAGES,
+                maxBytes: DEP_MAX_BYTES,
+                layout: "transcript",
+                requireComplete: true,
+              },
             );
             extracted[i] = { file: f, res };
             setState((s) => ({
               ...s,
               files: s.files.map((x, j) =>
                 j === i
-                  ? { name: f.name, pages: res.pageCount, empty: res.emptyPages, done: res.pageCount, status: "ready" }
+                  ? {
+                      name: f.name,
+                      pages: res.pageCount,
+                      empty: res.emptyPages,
+                      done: res.pageCount,
+                      status: "ready",
+                    }
                   : x,
               ),
             }));
@@ -875,15 +1163,20 @@ export function useDeposition() {
         return;
       }
 
-      let remaining = DEP_MAX_PAGES;
+      if (controller.signal.aborted) return;
+      const totalPages = extracted.reduce((count, item) => count + item.res.pageCount, 0);
+      if (totalPages > DEP_MAX_PAGES) {
+        const message = `This set has ${totalPages.toLocaleString()} pages. Split it into sets of at most ${DEP_MAX_PAGES.toLocaleString()} pages so no testimony is omitted.`;
+        step({ id: "read", label: "Reading files", status: "error", detail: message });
+        setState((s) => ({ ...s, phase: "error", error: message }));
+        return;
+      }
       const pages: PilePage[] = [];
       for (const item of extracted) {
         if (!item) continue;
         const fileId = newId();
         filesRef.current.set(fileId, item.file);
-        const take = item.res.pages.slice(0, Math.max(0, remaining));
-        remaining -= take.length;
-        for (const p of take) {
+        for (const p of item.res.pages) {
           const text = (p.text ?? "").trim();
           pages.push({ fileId, fileName: item.res.name, page: p.page, text, ocr: false });
         }
@@ -901,7 +1194,11 @@ export function useDeposition() {
         }
         setState((s) => ({
           ...s,
-          phase: s.phase === "asking" || s.phase === "analyzing" ? s.phase : "ready",
+          phase: ocrActive.current
+            ? "reading"
+            : s.phase === "asking" || s.phase === "analyzing"
+              ? s.phase
+              : "ready",
           transcripts: list,
           activeFileId: s.activeFileId ?? primary.fileId,
           analysis: s.analysis ?? analysisRef.current,
@@ -919,45 +1216,51 @@ export function useDeposition() {
         setState((s) => ({ ...s, phase: "error", error: "No readable pages in these files." }));
         return;
       }
-      const fileReady = (t: DepTranscript, pages: { text: string }[]) =>
-        t.citeReady ||
-        t.blocks.length >= 3 ||
-        t.lines.filter((l) => l.speaker === "Q").length >= 4 ||
-        looksLikeTranscript(pages.map((p) => p.text).join("\n"));
-      const usable = (list: DepTranscript[]) =>
-        list.some((t) => fileReady(t, pagesRef.current.filter((p) => p.fileId === t.fileId)));
       publish(transcripts);
-      let startedAnalyze = false;
-      if (usable(transcripts)) {
-        startedAnalyze = true;
-        void analyze();
-      }
 
       const ocrJobs: { file: File; name: string; page: number; score: number }[] = [];
       for (const item of extracted) {
         if (!item || transcriptFileKind(item.file) !== "pdf") continue;
-        const t = transcripts.find((x) => x.fileName === item.res.name);
-        if (t && fileReady(t, item.res.pages)) continue;
         for (const p of item.res.pages) {
-          if (pageNeedsDepOcr(p.text)) {
-            ocrJobs.push({ file: item.file, name: item.res.name, page: p.page, score: textQualityScore(p.text) });
+          if (
+            pagesRef.current.some(
+              (saved) => saved.fileName === item.res.name && saved.page === p.page,
+            ) &&
+            pageNeedsDepOcr(p.text)
+          ) {
+            ocrJobs.push({
+              file: item.file,
+              name: item.res.name,
+              page: p.page,
+              score: textQualityScore(p.text),
+            });
           }
         }
       }
       ocrJobs.sort((a, b) => a.score - b.score);
       const ocrPick = ocrJobs.slice(0, OCR_PAGE_CAP);
       if (!ocrPick.length) {
-        if (!startedAnalyze) void analyze();
+        void analyze();
         // The transcript text is final; index and store it now.
         void saveWorkspace();
         return;
       }
 
-      step({ id: "ocr", label: "OCR on scanned / noisy pages (Nano VL)", status: "running", detail: `${ocrPick.length} pages` });
-      setState((s) => ({ ...s, ocr: { done: 0, total: ocrPick.length } }));
+      step({
+        id: "ocr",
+        label: "OCR on scanned / noisy pages (Nano VL)",
+        status: "running",
+        detail: `${ocrPick.length} pages`,
+      });
+      ocrActive.current = true;
+      setState((s) => ({ ...s, phase: "reading", ocr: { done: 0, total: ocrPick.length } }));
       let ocrN = 0;
       try {
-        const limiter = new AdaptiveLimiter(OCR_CONCURRENCY_MIN, OCR_CONCURRENCY, OCR_CONCURRENCY_MAX);
+        const limiter = new AdaptiveLimiter(
+          OCR_CONCURRENCY_MIN,
+          OCR_CONCURRENCY,
+          OCR_CONCURRENCY_MAX,
+        );
         const byFile = new Map<string, number[]>();
         for (const job of ocrPick) {
           const cur = byFile.get(job.name) ?? [];
@@ -977,23 +1280,25 @@ export function useDeposition() {
                 await limiter.run(async () => {
                   const ocrRes = await json<{ text?: string }>(
                     "/api/pile/ocr",
-                    { method: "POST", body: JSON.stringify({ imageBase64 }), signal: controller.signal },
+                    {
+                      method: "POST",
+                      body: JSON.stringify({ imageBase64 }),
+                      signal: controller.signal,
+                    },
                     { tries: 1 },
                   );
                   if (ocrRes.text) {
-                    const idx = pagesRef.current.findIndex((p) => p.fileName === fileName && p.page === page);
+                    const idx = pagesRef.current.findIndex(
+                      (p) => p.fileName === fileName && p.page === page,
+                    );
                     if (idx >= 0) {
                       const prev = pagesRef.current[idx]!;
                       pagesRef.current[idx] = { ...prev, text: ocrRes.text, ocr: true };
                     }
                     ocrN += 1;
-                    if (ocrN % 8 === 0 || ocrN === ocrPick.length || (!startedAnalyze && ocrN >= DEP_OCR_ANALYZE_AFTER)) {
+                    if (ocrN % 8 === 0 || ocrN === ocrPick.length) {
                       transcripts = rebuildTranscripts();
                       publish(transcripts, { done: ocrN, total: ocrPick.length });
-                      if (!startedAnalyze && usable(transcripts)) {
-                        startedAnalyze = true;
-                        void analyze();
-                      }
                     } else {
                       setState((s) => ({ ...s, ocr: { done: ocrN, total: ocrPick.length } }));
                     }
@@ -1022,9 +1327,16 @@ export function useDeposition() {
       }
 
       if (controller.signal.aborted) return;
+      ocrActive.current = false;
       transcripts = rebuildTranscripts();
       publish(transcripts, null);
-      if (!startedAnalyze) void analyze();
+      void analyze();
+      if (ocrN < ocrJobs.length) {
+        setState((s) => ({
+          ...s,
+          error: `${ocrJobs.length - ocrN} pages still need OCR review. Analysis covers the readable text only.`,
+        }));
+      }
       // Save after OCR so the stored pages and chunks match what the reader shows.
       void saveWorkspace();
     },
@@ -1056,8 +1368,16 @@ export function useDeposition() {
         const ws = await getWorkspaceFn({ data: { itemId } });
         if (!ws) throw new Error("Saved deposition was not found.");
         if (ws.surface !== "deposition") throw new Error("That workspace is not a deposition set.");
-        if (ws.status !== "ready") throw new Error("Saved deposition is still indexing. Try again shortly.");
-        const loaded = await mapPool(ws.docs, 4, async (doc) => {
+        const docs = [
+          ...new Map(
+            [...ws.docs, ...(ws.recoverableDocs ?? [])].map((doc) => [doc.docId, doc]),
+          ).values(),
+        ];
+        if (!docs.length)
+          throw new Error(
+            "Transcript pages are not available yet. Indexing may still be in progress; try opening this set again shortly.",
+          );
+        const loaded = await mapPool(docs, 4, async (doc) => {
           const pg = await getWorkspacePagesFn({ data: { itemId, docId: doc.docId } });
           if (!pg?.length) throw new Error(`Stored pages are missing for ${doc.fileName}`);
           return {
@@ -1081,24 +1401,36 @@ export function useDeposition() {
         const primary = transcripts[0]!;
         const meta = extractCaptionMeta(transcripts.map((t) => t.caption).join(" "));
         savedRef.current = {
-          status: "ready",
+          status: ws.status === "ready" ? "ready" : "error",
           itemId,
           kbWorkspaceId: ws.kbWorkspaceId,
           name: ws.name,
           docIdByFileId: Object.fromEntries(transcripts.map((t) => [t.fileId, t.fileId])),
-          message: null,
+          message:
+            ws.status === "ready"
+              ? null
+              : "Stored transcripts and analysis are available. The search index is not ready; Ask will use the loaded text.",
           analysis: "idle",
+          analysisError: null,
           analysisSavedAt: null,
           loaded: true,
-          hybridAsk: true,
+          hybridAsk: ws.status === "ready",
         };
-        step({ id: "read", label: "Opened saved deposition", status: "done", detail: `${pages.length} pages` });
+        step({
+          id: "read",
+          label: "Opened saved deposition",
+          status: "done",
+          detail: `${pages.length} pages`,
+        });
 
-        const record = await getWorkspaceAnalysisFn({ data: { itemId } }).catch(() => null);
+        const record = await getWorkspaceAnalysisFn({ data: { itemId } });
         if (record) {
           analysisRef.current = record.analysis.witnesses.length
-            ? record.analysis
-            : { ...record.analysis, witnesses: seedWitnesses(transcripts) };
+            ? verifyDepAnalysis(record.analysis, transcripts)
+            : {
+                ...verifyDepAnalysis(record.analysis, transcripts),
+                witnesses: seedWitnesses(transcripts),
+              };
           instructionsRef.current = record.instructions;
           runRef.current = { runId: record.runId, startedAt: record.runStartedAt };
           // A run interrupted by a refresh is shown as it was left; the user can Re-run.
@@ -1112,7 +1444,9 @@ export function useDeposition() {
             ...savedRef.current,
             analysis: "saved",
             analysisSavedAt: record.savedAt,
-            message: record.complete ? null : "Analysis was interrupted before it finished. Re-run to complete it.",
+            message: record.complete
+              ? savedRef.current.message
+              : "Analysis was interrupted before it finished. Re-run to complete it.",
           };
         } else {
           analysisRef.current = { ...EMPTY_ANALYSIS, witnesses: seedWitnesses(transcripts) };
@@ -1153,26 +1487,52 @@ export function useDeposition() {
   // ---- Ask ------------------------------------------------------------------
 
   const ask = useCallback(
-    async (query: string) => {
+    async (query: string, opts: { scope?: DiscoveryScope; fileIds?: string[] } = {}) => {
       if (!pagesRef.current.length || !query.trim()) return;
       askAbort.current?.abort();
       const controller = new AbortController();
       askAbort.current = controller;
-      setState((s) => ({ ...s, phase: "asking", query, answer: "", hits: [], asking: true, error: null }));
+      setState((s) => ({
+        ...s,
+        phase: "asking",
+        query,
+        answer: "",
+        hits: [],
+        asking: true,
+        scanCoverage: null,
+        error: null,
+      }));
       step({ id: "ask", label: "Retrieving testimony and drafting", status: "running" });
 
       const finish = () => {
         step({ id: "ask", label: "Retrieving testimony and drafting", status: "done" });
-        setState((s) => (s.phase === "asking" ? { ...s, phase: "ready", asking: false } : { ...s, asking: false }));
+        setState((s) =>
+          s.phase === "asking" ? { ...s, phase: "ready", asking: false } : { ...s, asking: false },
+        );
       };
       const fail = (msg: string) => {
-        step({ id: "ask", label: "Retrieving testimony and drafting", status: "error", detail: msg });
-        setState((s) => ({ ...s, phase: "error", error: msg, asking: false }));
+        step({
+          id: "ask",
+          label: "Retrieving testimony and drafting",
+          status: "error",
+          detail: msg,
+        });
+        setState((s) => ({
+          ...s,
+          phase: "error",
+          error: msg,
+          asking: false,
+          scanCoverage: s.scanCoverage ? { ...s.scanCoverage, running: false } : null,
+        }));
       };
 
       const askLocal = async () => {
-        const hits = packAskHits(pagesRef.current, query);
-        const packed = pagesForClientHits(pagesRef.current, hits);
+        const scopedPages = pagesRef.current.filter(
+          (p) => !opts.fileIds || opts.fileIds.includes(p.fileId),
+        );
+        const hits = packAskHits(scopedPages, query);
+        const packed = pagesForClientHits(scopedPages, hits);
+        let completed = false;
         await streamSSE(
           "/api/pile/ask",
           {
@@ -1180,16 +1540,29 @@ export function useDeposition() {
             mode: "ask",
             pages: packed.map((p) => {
               const hit = hits.find((h) => h.fileName === p.fileName && h.page === p.page);
-              return { fileName: p.fileName, page: p.page, text: p.text, ocr: p.ocr, cite: hit?.cite };
+              return {
+                fileName: p.fileName,
+                page: p.page,
+                text: p.text,
+                ocr: p.ocr,
+                cite: hit?.cite,
+              };
             }),
             hits,
-            files: transcriptsRef.current.map((t) => ({ name: t.fileName, pageCount: t.lines.length })),
+            files: transcriptsRef.current
+              .filter((t) => !opts.fileIds || opts.fileIds.includes(t.fileId))
+              .map((t) => ({
+                name: t.fileName,
+                pageCount: new Set(t.lines.map((line) => line.page)).size,
+              })),
             instructions: instructionsRef.current || null,
             citeReady: transcriptsRef.current.some((t) => t.citeReady),
           },
           (evt) => {
             const d = (evt.data ?? {}) as Record<string, unknown>;
-            if (evt.event === "delta") setState((s) => ({ ...s, answer: s.answer + String(d["text"] ?? "") }));
+            if (evt.event === "delta")
+              setState((s) => ({ ...s, answer: s.answer + String(d["text"] ?? "") }));
+            else if (evt.event === "done") completed = true;
             else if (evt.event === "retrieve" && d["status"] === "done") {
               const next = Array.isArray(d["hits"]) ? (d["hits"] as PileHit[]) : [];
               if (next.length) setState((s) => ({ ...s, hits: next }));
@@ -1199,6 +1572,7 @@ export function useDeposition() {
           },
           controller.signal,
         );
+        if (!completed) throw new Error("The answer stream ended early. Retry your question.");
       };
 
       // Saved sets answer from the hybrid index (BM25 + embeddings + rerank) over
@@ -1207,10 +1581,16 @@ export function useDeposition() {
       const askSaved = async (): Promise<boolean> => {
         const saved = savedRef.current;
         if (saved.status !== "ready" || !saved.itemId || !saved.hybridAsk) return false;
-        const transcripts = transcriptsRef.current;
+        const transcripts = transcriptsRef.current.filter(
+          (t) => !opts.fileIds || opts.fileIds.includes(t.fileId),
+        );
         const docIds = transcripts.map((t) => saved.docIdByFileId[t.fileId]).filter(Boolean);
         if (docIds.length !== transcripts.length) return false;
-        const outcome: { streamed: boolean; softError: string | null } = { streamed: false, softError: null };
+        const outcome: { streamed: boolean; completed: boolean; softError: string | null } = {
+          streamed: false,
+          completed: false,
+          softError: null,
+        };
         try {
           await streamSavedWorkspaceAsk(
             {
@@ -1224,7 +1604,8 @@ export function useDeposition() {
               if (evt.event === "delta") {
                 outcome.streamed = true;
                 setState((s) => ({ ...s, answer: s.answer + String(d["text"] ?? "") }));
-              } else if (evt.event === "retrieve" && d["status"] === "done") {
+              } else if (evt.event === "done") outcome.completed = true;
+              else if (evt.event === "retrieve" && d["status"] === "done") {
                 const sources = Array.isArray(d["sources"]) ? (d["sources"] as KbAskSource[]) : [];
                 const hits = kbSourcesToDepositionHits(
                   sources,
@@ -1249,17 +1630,69 @@ export function useDeposition() {
         }
         if (outcome.softError && !outcome.streamed) return false;
         if (outcome.softError) throw new Error(outcome.softError);
+        if (!outcome.completed) {
+          if (outcome.streamed)
+            throw new Error("The answer stream ended early. Retry your question.");
+          return false;
+        }
         return true;
       };
 
       try {
+        if (opts.scope === "full") {
+          lastScan.current = { query, fileIds: opts.fileIds ? [...opts.fileIds] : undefined };
+          const selected = transcriptsRef.current.filter(
+            (t) => !opts.fileIds || opts.fileIds.includes(t.fileId),
+          );
+          if (!selected.length) throw new Error("Select at least one transcript");
+          const result = await runDocumentScan({
+            query,
+            instructions: instructionsRef.current,
+            pages: pagesRef.current,
+            files: selected.map((t) => ({
+              id: t.fileId,
+              name: t.fileName,
+              pageCount: new Set(
+                pagesRef.current.filter((p) => p.fileId === t.fileId).map((p) => p.page),
+              ).size,
+            })),
+            signal: controller.signal,
+            cache: scanCache.current,
+            onProgress: (scanCoverage) => {
+              if (!controller.signal.aborted) setState((s) => ({ ...s, scanCoverage }));
+            },
+          });
+          controller.signal.throwIfAborted();
+          const hits = result.evidence.map((e) => {
+            const matched = matchDepEvidence(
+              { quote: e.quote, fileName: e.fileName, cite: "" },
+              selected,
+            );
+            return {
+              fileId: e.fileId,
+              fileName: e.fileName,
+              page: e.page,
+              score: 1,
+              snippet: e.quote,
+              cite: matched?.cite || "",
+            };
+          });
+          setState((s) => ({ ...s, answer: result.answer, hits, scanCoverage: result.coverage }));
+          finish();
+          return;
+        }
         const answered = await askSaved();
         if (controller.signal.aborted) {
           setState((s) => ({ ...s, phase: "ready", asking: false }));
           return;
         }
         if (!answered) {
-          step({ id: "ask", label: "Retrieving testimony and drafting", status: "running", detail: "in-tab retrieval" });
+          step({
+            id: "ask",
+            label: "Retrieving testimony and drafting",
+            status: "running",
+            detail: "in-tab retrieval",
+          });
           await askLocal();
         }
       } catch (e) {
@@ -1289,10 +1722,24 @@ export function useDeposition() {
     URL.revokeObjectURL(url);
   }, [state.analysis]);
 
-  const active = state.transcripts.find((t) => t.fileId === state.activeFileId) ?? state.transcripts[0] ?? null;
+  const active =
+    state.transcripts.find((t) => t.fileId === state.activeFileId) ?? state.transcripts[0] ?? null;
 
   return {
     state,
+    retryQueryScan: () => {
+      const previous = lastScan.current;
+      if (previous) void ask(previous.query, { scope: "full", fileIds: previous.fileIds });
+    },
+    cancelAsk: () => {
+      askAbort.current?.abort();
+      setState((s) => ({
+        ...s,
+        asking: false,
+        phase: s.phase === "asking" ? "ready" : s.phase,
+        scanCoverage: s.scanCoverage ? { ...s.scanCoverage, running: false } : null,
+      }));
+    },
     active,
     start,
     analyze,
@@ -1306,19 +1753,25 @@ export function useDeposition() {
     setRegex: (regex: boolean) => setState((s) => ({ ...s, regex })),
     setSpeaker: (speaker: DepSpeakerFilter) => setState((s) => ({ ...s, speaker })),
     setQuery: (query: string) => setState((s) => ({ ...s, query })),
-    setActiveFile: (fileId: string) => setState((s) => ({ ...s, activeFileId: fileId, selectedCite: null })),
+    setActiveFile: (fileId: string) =>
+      setState((s) => ({ ...s, activeFileId: fileId, selectedCite: null })),
     selectCite: (cite: string | null, fileName?: string) => {
       const startCite = cite ? parseCiteStart(cite) : null;
       setState((s) => {
         let activeFileId = s.activeFileId;
-        if (fileName) {
-          const match = s.transcripts.find((t) => t.fileName === fileName);
-          if (match) activeFileId = match.fileId;
-        } else if (startCite) {
-          const match = s.transcripts.find((t) =>
-            t.lines.some((l) => l.page === startCite.page && l.line === startCite.line),
+        if (startCite) {
+          const candidates = s.transcripts.filter(
+            (t) =>
+              (!fileName || t.fileName === fileName) &&
+              t.lines.some((l) => l.page === startCite.page && l.line === startCite.line),
           );
-          if (match) activeFileId = match.fileId;
+          if (candidates.length !== 1)
+            return {
+              ...s,
+              error:
+                "This citation cannot be resolved to one transcript. Select its source from the evidence panel.",
+            };
+          activeFileId = candidates[0]!.fileId;
         }
         return {
           ...s,

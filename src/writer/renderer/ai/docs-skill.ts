@@ -1,21 +1,22 @@
-import type { Editor } from '@tiptap/core'
-import type { AgentSkill } from '@genoffice/agent-core'
+import type { Editor } from "@tiptap/core";
+import type { AgentSkill } from "@genoffice/agent-core";
 import {
   AGENT_SYSTEM_PROMPT,
   buildDocContext,
   getSelectionScope,
   type AiTrack,
   type NumIds,
-} from './protocol'
+} from "./protocol";
 import {
   AGENT_TOOLS,
   PLATFORM_SYSTEM_PROMPT,
   executeTool,
   markDocSeen,
+  beginOfficeTask,
   type AiCommentsAccess,
   type AiHeaderFooterAccess,
   type FrozenSelection,
-} from './tools'
+} from "./tools";
 
 /**
  * The docx capability as an AgentSkill: document skeleton context, the five
@@ -32,19 +33,20 @@ export function createDocsSkill(
   // Selection frozen per run: tools act on the range the prompt described,
   // not on wherever the user's live selection has wandered mid-run. The doc
   // snapshot bounds the freeze's validity (see FrozenSelection).
-  let frozen: FrozenSelection | null = null
+  let frozen: FrozenSelection | null = null;
   return {
-    id: 'docx',
+    id: "docx",
     // Platform build: the shared platform tools (Python, diagrams, citation
     // checks, guides, clarification card) ride along with the docx tools; their
     // definitions are appended to AGENT_TOOLS in tools.ts.
-    systemPrompt: AGENT_SYSTEM_PROMPT + '\n\n' + PLATFORM_SYSTEM_PROMPT,
+    systemPrompt: AGENT_SYSTEM_PROMPT + "\n\n" + PLATFORM_SYSTEM_PROMPT,
     tools: AGENT_TOOLS,
     buildContext: () => {
-      const editor = getEditor()
-      markDocSeen(editor) // the context the model receives is the freshness baseline for index-addressed writes
-      frozen = { scope: getSelectionScope(editor), doc: editor.state.doc }
-      return buildDocContext(editor, frozen.scope, getComments?.()?.list(), getHf?.()?.read())
+      const editor = getEditor();
+      beginOfficeTask(editor);
+      markDocSeen(editor); // the context the model receives is the freshness baseline for index-addressed writes
+      frozen = { scope: getSelectionScope(editor), doc: editor.state.doc };
+      return buildDocContext(editor, frozen.scope, getComments?.()?.list(), getHf?.()?.read());
     },
     executeTool: (call, signal) =>
       executeTool(
@@ -57,5 +59,5 @@ export function createDocsSkill(
         getComments?.(),
         getHf?.(),
       ),
-  }
+  };
 }

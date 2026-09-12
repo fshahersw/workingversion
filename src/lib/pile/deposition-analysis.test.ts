@@ -114,7 +114,7 @@ test("mergeDepAnalysis dedupes a re-titled duplicate quote from a later pass", (
   const merged = mergeDepAnalysis(base, next);
   assert.equal(merged.admissions.length, 1);
   assert.equal(merged.contradictions.length, 1);
-  assert.equal(merged.witnesses.length, 1);
+  assert.equal(merged.witnesses.length, 2); // Same witness, distinct source records.
 });
 
 test("mergeDepAnalysis keeps distinct findings that share only a cite", () => {
@@ -140,4 +140,121 @@ test("mergeDepAnalysis keeps summary-only findings without quote or cite", () =>
     merged.themes.map((item) => item.title),
     ["Baseline theme", "Cross-pass synthesis"],
   );
+});
+
+test("verification rejects a contradiction with an invented side", () => {
+  const parsed = parseTranscript(ASCII, "smith.txt");
+  const input = parseDepAnalysis(
+    JSON.stringify({
+      contradictions: [
+        {
+          title: "Timing",
+          a: { fileName: "smith.txt", quote: "I have been there ten years." },
+          b: { fileName: "smith.txt", quote: "The company hid the risk." },
+        },
+      ],
+    }),
+  );
+  const result = verifyDepAnalysis(input, parsed);
+  assert.equal(result.contradictions.length, 0);
+  assert.ok(result.dropped > 0);
+});
+
+test("verification never moves a quote from the named transcript to another file", () => {
+  const jane = parseTranscript(ASCII, "smith.txt");
+  const other = parseTranscript(
+    ASCII.replace("I have been there ten years.", "I joined the company last month."),
+    "other.txt",
+  );
+  const input = parseDepAnalysis(
+    JSON.stringify({
+      admissions: [
+        { title: "Tenure", fileName: "other.txt", quote: "I have been there ten years." },
+      ],
+    }),
+  );
+  assert.equal(verifyDepAnalysis(input, [jane, other]).admissions.length, 0);
+});
+
+test("graph source verification requires the whole quote and preserves source identity", () => {
+  const input = parseDepAnalysis(
+    JSON.stringify({
+      graph: {
+        nodes: [
+          { id: "p", label: "Jane Smith", kind: "person" },
+          { id: "o", label: "Acme", kind: "org" },
+        ],
+        edges: [
+          {
+            from: "p",
+            to: "o",
+            label: "tenure",
+            quote: "I have been there ten years.",
+            fileName: "smith.txt",
+          },
+          {
+            from: "p",
+            to: "o",
+            label: "concealed",
+            quote: "I have been there ten years and concealed all the documents.",
+            fileName: "smith.txt",
+          },
+          { from: "p", to: "o", label: "legacy", cite: "1:5" },
+        ],
+      },
+    }),
+  );
+  const result = verifyDepAnalysis(input, parseTranscript(ASCII, "smith.txt"));
+  assert.equal(result.graph.edges[0]?.evidenceStatus, "source_matched");
+  assert.equal(result.graph.edges[0]?.fileName, "smith.txt");
+  assert.equal(result.graph.edges[0]?.cite, "1:5");
+  assert.equal(result.graph.edges[1]?.evidenceStatus, "needs_review");
+  assert.equal(result.graph.edges[2]?.evidenceStatus, "needs_review");
+});
+
+test("graph merge remaps reused model IDs and equivalent labels without misconnecting nodes", () => {
+  const first = parseDepAnalysis(
+    JSON.stringify({
+      graph: {
+        nodes: [
+          { id: "1", label: "Jane Smith", kind: "person" },
+          { id: "2", label: "Acme", kind: "org" },
+        ],
+        edges: [{ from: "1", to: "2", label: "works at" }],
+      },
+    }),
+  );
+  const second = parseDepAnalysis(
+    JSON.stringify({
+      graph: {
+        nodes: [
+          { id: "1", label: "John Jones", kind: "person" },
+          { id: "9", label: "ACME", kind: "org" },
+        ],
+        edges: [{ from: "1", to: "9", label: "works at" }],
+      },
+    }),
+  );
+  const result = mergeDepAnalysis(first, second);
+  assert.equal(result.graph.nodes.length, 3);
+  const labels = new Map(result.graph.nodes.map((n) => [n.id, n.label.toLowerCase()]));
+  assert.deepEqual(
+    result.graph.edges.map((e) => [labels.get(e.from), labels.get(e.to)]),
+    [
+      ["jane smith", "acme"],
+      ["john jones", "acme"],
+    ],
+  );
+});
+
+test("matching citations in different files remain separate findings", () => {
+  const make = (fileName: string) =>
+    parseDepAnalysis(
+      JSON.stringify({
+        admissions: [
+          { title: "Tenure", fileName, cite: "1:5", quote: "I have been there ten years." },
+        ],
+      }),
+    );
+  assert.equal(mergeDepAnalysis(make("a.txt"), make("b.txt")).admissions.length, 2);
 });
