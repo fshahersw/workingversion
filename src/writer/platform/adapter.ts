@@ -21,6 +21,13 @@ import { AI_PROVIDERS } from "../shared/ipc";
 import type { WriterStatus } from "../shared/sw-policy";
 import type { ProjectApi } from "@genoffice/project-store";
 import { parseDocx } from "@genoffice/docx-engine";
+import {
+  classifyOfficeAttachment,
+  extractOfficeAttachment,
+  OFFICE_ATTACHMENT_ACCEPT,
+  OFFICE_EXTRACT_EXTS,
+  OFFICE_LOCAL_TEXT_EXTS,
+} from "@/office/shared/extract-attachment";
 
 import {
   appendWriterChatFn,
@@ -73,6 +80,7 @@ const state: {
 };
 const pendingFiles = new Map<string, File>();
 const attachments = new Map<string, File>();
+const attachmentTextCache = new Map<string, Promise<string>>();
 const streams = new Map<string, AbortController>();
 const pendingSaves = new Map<string, string>();
 
@@ -295,12 +303,11 @@ async function addFiles(files: File[]) {
   for (const file of files.slice(0, 10)) {
     try {
       const ext = file.name.split(".").at(-1)?.toLowerCase() || "";
-      if (
-        !["txt", "md", "json", "docx", "png", "jpg", "jpeg", "gif", "webp"].includes(ext) ||
-        file.size > 5 * 1024 * 1024
-      ) {
-        throw new Error("Use DOCX/text or an image up to 5 MB.");
-      }
+      const check =
+        ext === "docx" && file.size <= 5 * 1024 * 1024
+          ? { ok: true as const }
+          : classifyOfficeAttachment(ext, file.size);
+      if (!check.ok) throw new Error(check.error);
       const path = "web-attachment/" + crypto.randomUUID();
       attachments.set(path, file);
       accepted.push({ path, name: file.name, ext, sizeBytes: file.size });
@@ -324,19 +331,36 @@ async function attachmentText(path: string, offset: number, maxChars: number) {
   const file = attachments.get(path);
   if (!file)
     return { ok: false, error: "This attachment is not available in this document session." };
+  const ext = file.name.split(".").at(-1)?.toLowerCase() || "";
   let text = "";
-  if (file.name.toLowerCase().endsWith(".docx")) {
-    const d = await parseDocx(new Uint8Array(await file.arrayBuffer()));
-    text =
-      "[Main body text; headers and footers are not included in this attachment extraction.]\n" +
-      d.blocks
-        .map((b) =>
-          b.table
-            ? b.table.rows.map((row) => row.map((c) => c.paras.join("\n")).join("\t")).join("\n")
-            : (b.runs ?? []).map((r) => r.text || "").join("") || b.previewText || "",
-        )
-        .join("\n");
-  } else text = await file.text();
+  try {
+    if (ext === "docx") {
+      const d = await parseDocx(new Uint8Array(await file.arrayBuffer()));
+      text =
+        "[Main body text; headers and footers are not included in this attachment extraction.]\n" +
+        d.blocks
+          .map((b) =>
+            b.table
+              ? b.table.rows.map((row) => row.map((c) => c.paras.join("\n")).join("\t")).join("\n")
+              : (b.runs ?? []).map((r) => r.text || "").join("") || b.previewText || "",
+          )
+          .join("\n");
+    } else if (OFFICE_LOCAL_TEXT_EXTS.has(ext)) {
+      text = await file.text();
+    } else if (OFFICE_EXTRACT_EXTS.has(ext)) {
+      let pending = attachmentTextCache.get(path);
+      if (!pending) {
+        pending = extractOfficeAttachment(file);
+        attachmentTextCache.set(path, pending);
+      }
+      text = await pending;
+    } else {
+      text = await file.text();
+    }
+  } catch (error) {
+    attachmentTextCache.delete(path);
+    return { ok: false, error: error instanceof Error ? error.message : "The attachment could not be read." };
+  }
   const start = Math.max(0, Math.trunc(offset || 0));
   const length = Math.min(24000, Math.max(1, Math.trunc(maxChars || 24000)));
   return {
@@ -381,7 +405,7 @@ async function streamRequest(r: AiStreamRequest): Promise<void> {
         const part = await reader.read();
         if (part.done) break;
         buffer += decoder.decode(part.value, { stream: true });
-        if (buffer.length > 1_600_000) throw new Error("Stream event is too large.");
+        if (buffer.length > 12_000_000) throw new Error("Stream event is too large.");
         let at: number;
         while ((at = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, at).trimEnd();
@@ -645,15 +669,34 @@ export function installPlatformAdapter(options: PlatformAdapterOptions): void {
         };
       }
     },
-    imageSearch: async () => ({
-      images: [],
-      method: "error",
-      error: "External image search is not enabled.",
-    }),
-    fetchImage: async () => null,
-    aiGenerateImage: async () => ({ error: "External image generation is not enabled." }),
+    imageSearch: async (query, maxResults) => {
+      try {
+        const { officeImageSearchFn } = await import("@/lib/office/tools.functions");
+        const r = await officeImageSearchFn({ data: { query, maxResults: maxResults ?? 8 } });
+        if (r.method === "error") return { images: [], method: "error", error: r.error };
+        return {
+          images: r.images.map((i) => ({ imageUrl: i.imageUrl, title: i.title, sourceUrl: i.imageUrl, source: "web" })),
+          method: "tavily",
+        };
+      } catch (error) {
+        return { images: [], method: "error", error: error instanceof Error ? error.message : "Image search failed." };
+      }
+    },
+    // Public image URLs download through the platform (SSRF-guarded, bounded);
+    // the browser cannot fetch them directly because of CORS.
+    fetchImage: async (url) => {
+      if (!/^https?:\/\//i.test(url)) return null;
+      try {
+        const { officeFetchImageFn } = await import("@/lib/office/tools.functions");
+        const r = await officeFetchImageFn({ data: { url } });
+        return { base64: r.base64, mime: r.mime };
+      } catch {
+        return null;
+      }
+    },
+    aiGenerateImage: async () => ({ error: "Use the assistant's generate_image tool." }),
     pickAttachments: async () =>
-      addFiles(await pickFiles(".txt,.md,.json,.docx,.png,.jpg,.jpeg,.gif,.webp", true)),
+      addFiles(await pickFiles(OFFICE_ATTACHMENT_ACCEPT, true)),
     addAttachmentPaths: async (paths) => {
       const files: File[] = [];
       for (const path of paths) {

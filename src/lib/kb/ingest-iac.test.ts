@@ -82,8 +82,10 @@ test("worker identity stays least privilege and runtime receives producer contra
   assert.match(template, /KB_INGEST_JOBS_TABLE/);
   assert.match(template, /KB_INGEST_QUEUE_URL/);
   assert.match(runtime, /KbIngestAccessPolicyArn/);
-  assert.match(runtime, /KB_INGEST_JOBS_TABLE: !Ref KbIngestJobsTableName/);
-  assert.match(runtime, /KB_INGEST_QUEUE_URL: !Ref KbIngestQueueUrl/);
+  assert.match(runtime, /KB_INGEST_JOBS_TABLE: !If/);
+  assert.match(runtime, /KB_INGEST_QUEUE_URL: !If/);
+  assert.match(runtime, /!Ref KbIngestJobsTableName/);
+  assert.match(runtime, /!Ref KbIngestQueueUrl/);
   assert.match(template, /Sid: QueryStaleJobs[\s\S]*?dynamodb:PutItem[\s\S]*?dynamodb:UpdateItem/);
   assert.match(
     template,

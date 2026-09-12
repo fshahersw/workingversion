@@ -20,6 +20,13 @@ import type { OfficeDocSummary } from "@/lib/office/types";
 import { writerWebSearchFn } from "@/lib/writer/writer.functions";
 
 import { getPlatformImage, handleOf, isPlatformImage, putPlatformImage } from "@/office/shared/image-store";
+import {
+  classifyOfficeAttachment,
+  extractOfficeAttachment,
+  OFFICE_ATTACHMENT_ACCEPT,
+  OFFICE_EXTRACT_EXTS,
+  OFFICE_LOCAL_TEXT_EXTS,
+} from "@/office/shared/extract-attachment";
 
 import { createBlankDeck, downloadBlob, pickFiles, platformFetch, uploadDeck } from "../api";
 import { emitHost, installHost, takeDropped } from "./electron";
@@ -58,6 +65,7 @@ const state: State = {
 const observers = new Set<() => void>();
 const streams = new Map<string, AbortController>();
 const attachments = new Map<string, File>();
+const attachmentTextCache = new Map<string, Promise<string>>();
 let options: SlidesHostOptions | null = null;
 let engine: EngineSession | null = null;
 let queue: Promise<unknown> = Promise.resolve();
@@ -252,7 +260,7 @@ async function stream(r: {
         const p = await reader.read();
         if (p.done) break;
         text += decoder.decode(p.value, { stream: true });
-        if (text.length > 1_600_000) throw new Error("Stream event is too large.");
+        if (text.length > 12_000_000) throw new Error("Stream event is too large.");
         let at: number;
         while ((at = text.indexOf("\n")) >= 0) {
           const line = text.slice(0, at).trimEnd();
@@ -297,11 +305,9 @@ async function addAttachments(files: File[]) {
   const rejected: string[] = [];
   for (const f of files.slice(0, 10)) {
     const ext = f.name.split(".").at(-1)!.toLowerCase();
-    if (
-      !["txt", "md", "csv", "json", "png", "jpg", "jpeg", "gif", "webp"].includes(ext) ||
-      f.size > 5 * 1024 * 1024
-    ) {
-      rejected.push(f.name + ": use text or an image up to 5 MB.");
+    const check = classifyOfficeAttachment(ext, f.size);
+    if (!check.ok) {
+      rejected.push(f.name + ": " + check.error);
       continue;
     }
     const path = "attachment:" + crypto.randomUUID();
@@ -313,7 +319,7 @@ async function addAttachments(files: File[]) {
 
 async function fileAction(channel: string, args: unknown[]) {
   if (channel.endsWith("files-pick"))
-    return addAttachments(await pickFiles(".txt,.md,.csv,.json,.png,.jpg,.jpeg,.gif,.webp", true));
+    return addAttachments(await pickFiles(OFFICE_ATTACHMENT_ACCEPT, true));
   if (channel.endsWith("files-add"))
     return addAttachments(((args[0] as string[]) ?? []).map(takeDropped).filter(Boolean) as File[]);
   if (channel.endsWith("files-add-pasted-image")) {
@@ -328,7 +334,26 @@ async function fileAction(channel: string, args: unknown[]) {
   if (channel.endsWith("files-read-image")) {
     return { ok: true, mime: f.type, base64: await base64Of(f) };
   }
-  const text = await f.text();
+  const ext = f.name.split(".").at(-1)?.toLowerCase() || "";
+  const path = String(args[0]);
+  let text = "";
+  try {
+    if (OFFICE_LOCAL_TEXT_EXTS.has(ext)) {
+      text = await f.text();
+    } else if (OFFICE_EXTRACT_EXTS.has(ext)) {
+      let pending = attachmentTextCache.get(path);
+      if (!pending) {
+        pending = extractOfficeAttachment(f);
+        attachmentTextCache.set(path, pending);
+      }
+      text = await pending;
+    } else {
+      text = await f.text();
+    }
+  } catch (error) {
+    attachmentTextCache.delete(path);
+    return { ok: false, error: error instanceof Error ? error.message : "The attachment could not be read." };
+  }
   const offset = Math.max(0, Math.trunc(Number(args[1]) || 0));
   const max = Math.min(24000, Math.max(1, Math.trunc(Number(args[2]) || 24000)));
   return {
@@ -469,6 +494,45 @@ function platformImageBytes(url: unknown): { base64: string; ext: string; label:
   return { base64: image.base64, ext: image.mime === "image/png" ? "png" : "jpg", label: image.label };
 }
 
+/**
+ * Bytes for an image reference: a platform-image handle from the browser
+ * store, or a public http(s) URL downloaded through the platform (the
+ * browser cannot fetch cross-origin images itself).
+ */
+async function imageSearch(query: string, maxResults: number) {
+  try {
+    const { officeImageSearchFn } = await import("@/lib/office/tools.functions");
+    const r = await officeImageSearchFn({ data: { query, maxResults } });
+    if (r.method === "error") return { images: [], method: "error", error: r.error };
+    return {
+      images: r.images.map((i) => ({ imageUrl: i.imageUrl, title: i.title, sourceUrl: i.imageUrl, source: "web" })),
+      method: "tavily",
+    };
+  } catch (error) {
+    return { images: [], method: "error", error: error instanceof Error ? error.message : "Image search failed." };
+  }
+}
+
+async function imageBytesFor(url: unknown): Promise<{ base64: string; ext: string; label: string }> {
+  const local = platformImageBytes(url);
+  if (local) return local;
+  if (isPlatformImage(url)) throw new Error("That image handle is no longer available; produce the image again.");
+  const href = String(url ?? "");
+  if (!/^https?:\/\//i.test(href)) {
+    throw new Error("Pass an http(s) image URL or a platform-image handle from generate_image / render_diagram / run_python / edit_image.");
+  }
+  const { officeFetchImageFn } = await import("@/lib/office/tools.functions");
+  const r = await officeFetchImageFn({ data: { url: href } });
+  const ext = r.mime === "image/png" ? "png" : r.mime === "image/gif" ? "gif" : r.mime === "image/webp" ? "webp" : "jpg";
+  let label = "Web image";
+  try {
+    label = decodeURIComponent(new URL(href).pathname.split("/").pop() || label).slice(0, 80) || label;
+  } catch {
+    /* keep the default label */
+  }
+  return { base64: r.base64, ext, label };
+}
+
 async function insertPlatformImage(op: {
   slideIndex: number;
   url: string;
@@ -478,14 +542,7 @@ async function insertPlatformImage(op: {
   hPx: number;
   fitWidthPx: number;
 }) {
-  const bytes = platformImageBytes(op?.url);
-  if (!bytes) {
-    throw new Error(
-      isPlatformImage(op?.url)
-        ? "That image handle is no longer available; produce the image again."
-        : "Only images produced by generate_image, render_diagram or run_python (platform-image handles) can be inserted here.",
-    );
-  }
+  const bytes = await imageBytesFor(op?.url);
   return rpc("slides:add-image-bytes", [
     {
       slideIndex: op.slideIndex,
@@ -502,8 +559,7 @@ async function insertPlatformImage(op: {
 }
 
 async function replacePlatformImage(op: { slideIndex: number; sourceId: string; url: string; keepSrcRect?: boolean }) {
-  const bytes = platformImageBytes(op?.url);
-  if (!bytes) throw new Error("Only platform-image handles can replace a picture here; produce the image first.");
+  const bytes = await imageBytesFor(op?.url);
   return rpc("slides:replace-picture-bytes", [
     {
       slideIndex: op.slideIndex,
@@ -744,8 +800,7 @@ async function invoke(channel: string, args: unknown[]): Promise<unknown> {
   if (channel === "ai:gsk-status") return { loggedIn: false, available: false };
   if (channel === "ai:gsk-login") return;
   if (channel === "ai:log-run-failure") return;
-  if (channel === "ai:image-search")
-    return { images: [], method: "error", error: "External image search is not enabled." };
+  if (channel === "ai:image-search") return imageSearch(String(args[0] ?? ""), Number(args[1]) || 8);
   if (channel === "ai:insert-image-url") return insertPlatformImage(args[0] as never);
   if (channel === "ai:replace-picture-url") return replacePlatformImage(args[0] as never);
   if (channel === "ai:generate-image") return generateImage(args[0] as never);

@@ -14,11 +14,16 @@ import type {
 export interface IpcStreamChunk {
   requestId: string
   /** 'ping' = wire-level keepalive; re-arms the silence watchdog and carries no payload;
-   * 'reasoning' = model thinking delta (text carries it) */
-  type: 'delta' | 'reasoning' | 'tool-call' | 'done' | 'error' | 'ping'
+   * 'reasoning' = model thinking delta (text carries it);
+   * 'status' = server status line (text carries it; model/tier optional) */
+  type: 'delta' | 'reasoning' | 'tool-call' | 'done' | 'error' | 'ping' | 'status'
   text?: string
   toolCall?: AgentToolCall
   error?: string
+  /** model id serving the turn (status chunks) */
+  model?: string
+  /** routing tier the server picked (status chunks) */
+  tier?: string
   /** machine-readable error cause; maps to the localized timeout/credits/network/overloaded message */
   errorCode?: 'timeout' | 'credits' | 'network' | 'overloaded'
   /** normalized stop reason on 'done' ('max_tokens' = cut off by the token limit) */
@@ -101,6 +106,9 @@ export function createIpcTransport<S>(options: IpcTransportOptions<S>): AgentTra
         } else if (chunk.type === 'reasoning') {
           armSilence()
           if (chunk.text) cb.onReasoning?.(chunk.text)
+        } else if (chunk.type === 'status') {
+          armSilence()
+          cb.onStatus?.({ text: chunk.text ?? '', model: chunk.model, tier: chunk.tier })
         } else if (chunk.type === 'tool-call') {
           armSilence()
           if (chunk.toolCall) cb.onToolCall(chunk.toolCall)
@@ -108,6 +116,10 @@ export function createIpcTransport<S>(options: IpcTransportOptions<S>): AgentTra
           settle()
           if (chunk.stopReason) cb.onStopReason?.(chunk.stopReason)
           cb.onDone()
+        } else if (chunk.type !== 'error') {
+          // Forward-compatible: unknown chunk kinds from a newer server are
+          // wire activity, not failures.
+          armSilence()
         } else {
           settle()
           cb.onError(

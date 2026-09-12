@@ -16,6 +16,7 @@ The user may attach local files to the conversation (see the "attachment list" i
 - When the user's request involves attachment content, read it with read_attachment first, then answer or write; do not guess content from file names.
 - Long files are read in pages: the result reports the total character count and the current range; to continue, set offset to the end position of the previous slice.
 - Image attachments (png/jpg/gif/webp) are already sent as images with the user message — just look at them; read_attachment is only for text-like attachments.
+- PDFs (including scans), Word, PowerPoint, Excel and TIFF files are OCR'd / extracted on first read_attachment. Wait for that result before answering; do not guess from the file name.
 - Do not call read_attachment when there are no attachments or they are unrelated to the request.`
 
 function formatSize(bytes: number): string {

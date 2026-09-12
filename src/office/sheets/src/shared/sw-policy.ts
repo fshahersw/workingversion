@@ -9,11 +9,13 @@ export interface WriterStatus {
 // Platform tools (src/office/shared/platform-skill.ts) change nothing in the
 // workbook, so they are available in every mode; web_search runs through the
 // platform's curated search.
-const PLATFORM_READ = ['run_python', 'verify_citations', 'fetch_page', 'load_firm_guide', 'ask_clarification', 'web_search']
-const READ = ['get_workbook_context', 'read_range', 'aggregate_range', 'load_guide', 'read_formats', 'read_sheet_features', 'read_cells', 'find_cells', 'select_range', 'trace_precedents', 'trace_dependents', 'read_attachment', ...PLATFORM_READ]
+// Mirrors src/lib/writer/inference.server.ts (the server enforces).
+const PLATFORM_READ = ['run_python', 'verify_citations', 'fetch_page', 'load_firm_guide', 'ask_clarification', 'render_diagram', 'generate_image', 'edit_image', 'search_firm_knowledge', 'search_library', 'web_search', 'image_search']
+const READ = ['get_workbook_context', 'read_range', 'aggregate_range', 'load_guide', 'read_formats', 'read_sheet_features', 'read_cells', 'find_cells', 'select_range', 'trace_precedents', 'trace_dependents', 'read_attachment', 'view_range', 'list_templates', ...PLATFORM_READ]
 // Browser host supports current-workbook edits and separate-document creation
 // (docx/pdf from content, through the platform); merge is not exposed.
-const WRITE = [...READ, 'propose_operations', 'create_document']
+const WRITE = [...READ, 'propose_operations', 'insert_image', 'create_document', 'apply_template', 'save_template']
+const RESEARCH = ['web_search', 'fetch_page', 'search_firm_knowledge', 'search_library', 'verify_citations', 'run_python', 'ask_clarification']
 export function modeName(value: unknown): WriterMode {
   return value === 'ask' || value === 'review' || value === 'research' ? value : 'write'
 }
@@ -23,7 +25,7 @@ export function publicPreferences(value: unknown): WriterPreferences {
   return {swMode: modeName(x.swMode), swProfile: profileName(x.swProfile)}
 }
 export function allowedTools(mode: WriterMode): string[] {
-  return mode === 'research' ? ['web_search'] : mode === 'write' ? [...WRITE] : [...READ]
+  return mode === 'research' ? [...RESEARCH] : mode === 'write' ? [...WRITE] : [...READ]
 }
 export function filterTools<T extends {name: string}>(tools: T[], mode: WriterMode): T[] {
   const allowed = new Set(allowedTools(mode)); return tools.filter(t => allowed.has(t.name))

@@ -200,6 +200,7 @@ import { createMergeSkill } from './ai/merge-skill'
 import { mergeAttachedWorkbooks } from './merge-workbooks'
 import { createSearchSkill } from './ai/search-skill'
 import { createPlatformSkill } from '@/office/shared/platform-skill'
+import { createViewSkill, sheetsTemplateHooks } from './ai/view-skill'
 import { createImageSkill } from './ai/image-skill'
 import { ATTACHMENT_IMAGE_EXTS } from '../shared/desktop-api'
 import type {
@@ -998,7 +999,7 @@ export function App(): React.JSX.Element {
                 summary: t.summary,
                 isError: !!t.isError,
                 ...(t.name ? { name: t.name } : {}),
-                ...(t.output ? { output: t.output.slice(0, 2000) } : {}),
+                ...(t.output ? { output: t.output.slice(0, 6000) } : {}),
               })) ?? [],
             // stored metadata only: no thumbnail read for history, the chips render name/size
             ...(m.attachments && m.attachments.length > 0
@@ -1098,12 +1099,47 @@ export function App(): React.JSX.Element {
 
   const agentLoopRef = useRef<AgentLoop | null>(null)
   if (!agentLoopRef.current) {
+    const workbookSkill = createWorkbookSkill(sheetsSkillDeps())
+    const runPropose = (operations: unknown[], summary: string) =>
+      Promise.resolve(
+        workbookSkill.executeTool(
+          { id: `tpl-${Date.now()}`, name: 'propose_operations', input: { operations, summary } },
+          undefined,
+        ),
+      )
+    const captureSheet = async () => {
+      const deps = sheetsSkillDeps()
+      const info = deps.getActiveSheetInfo()
+      const addresses = info.knownAddresses.slice(0, 3000)
+      if (!addresses.length) throw new Error('the active sheet is empty')
+      const cells = deps.readCells(addresses, info.sheetId)
+      const formats = deps.readFormats(addresses, info.sheetId)
+      const operations: unknown[] = []
+      for (const address of addresses) {
+        const cell = cells[address]
+        if (cell && (cell.formula || (cell.value !== null && cell.value !== undefined && cell.value !== ''))) {
+          operations.push(
+            cell.formula
+              ? { op: 'set_formula', sheetId: '{{sheetId}}', address, formula: cell.formula }
+              : { op: 'set_cell', sheetId: '{{sheetId}}', address, value: cell.value },
+          )
+        }
+        const format = formats[address]
+        if (format && Object.keys(format).length) {
+          const { textRotation: _r, indent: _i, ...rest } = format
+          operations.push({ op: 'format_range', sheetId: '{{sheetId}}', range: `${address}:${address}`, format: rest })
+        }
+      }
+      if (!operations.length) throw new Error('the active sheet has no content to capture')
+      return { format: 'ops' as const, operations }
+    }
     agentLoopRef.current = new AgentLoop({
       transport: createElectronTransport(() => aiSettingsRef.current!),
       systemSuffix: aiLangDirective,
-      maxTurns: 24,
+      maxTurns: 40,
       skill: sheetsSkill(composeSkills('sheets+files', '', [
-        createWorkbookSkill(sheetsSkillDeps()),
+        workbookSkill,
+        createViewSkill(sheetsSkillDeps()),
         createFilesSkill(availableAttachments),
         createMergeSkill({
           getAttachments: availableAttachments,
@@ -1118,7 +1154,13 @@ export function App(): React.JSX.Element {
         // clarification card. The workbook skill keeps its own create_document
         // (worksheet export / separate documents through the host).
         createSearchSkill(),
-        createPlatformSkill({ app: 'sheets', exclude: ['create_document'] }),
+        // image_search through the platform (Tavily); generate_image comes from the platform skill.
+        createImageSkill(() => false),
+        createPlatformSkill({
+          app: 'sheets',
+          exclude: ['create_document'],
+          templates: sheetsTemplateHooks(runPropose, sheetsSkillDeps(), captureSheet),
+        }),
       ]), () => modeName((aiSettingsRef.current as unknown as WriterPreferences | null)?.swMode)),
       events: {
         onText: (text) => {
@@ -1131,6 +1173,8 @@ export function App(): React.JSX.Element {
           // otherwise the whole successful message stays rendered in red.
           patchLastAssistant((entry) => ({ ...entry, text, isError: false }))
         },
+        onReasoning: (text) => patchLastAssistant((entry) => ({ ...entry, reasoning: text })),
+        onStatus: (status) => patchLastAssistant((entry) => ({ ...entry, status: status.text })),
         onToolStart: (call) => {
           // Live "running" chip: replaced in place by onToolExecuted
           patchLastAssistant((entry) => ({
@@ -1171,7 +1215,7 @@ export function App(): React.JSX.Element {
                   summary: execution.summary,
                   isError: !!execution.isError,
                   name: call.name,
-                  ...(execution.output ? { output: execution.output.slice(0, 2000) } : {}),
+                  ...(execution.output ? { output: execution.output.slice(0, 6000) } : {}),
                 },
               ],
             }

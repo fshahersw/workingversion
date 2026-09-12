@@ -65,7 +65,8 @@ test("CloudFront caches only immutable assets and preserves authenticated state"
   assert.match(runtime, /PathPattern: \/assets\/\*/);
   assert.match(runtime, /PathPattern: \/assets\/\*[\s\S]*CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6/);
   assert.match(runtime, /DefaultCacheBehavior:[\s\S]*Compress: false/);
-  assert.equal(count(runtime, /PathPattern:/g), 1);
+  assert.equal(count(runtime, /PathPattern:/g), 2);
+  assert.match(runtime, /PathPattern: \/engine\/\*/);
 });
 
 test("all streamed API routes emit heartbeats below the CloudFront idle timeout", () => {

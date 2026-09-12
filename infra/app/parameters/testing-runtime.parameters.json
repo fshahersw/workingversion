@@ -21,11 +21,11 @@
   },
   {
     "ParameterKey": "ArtifactObjectKey",
-    "ParameterValue": "releases/00fad1d075d841b02b35d1250d27049f6f01037f33eb05e5af03ca540192c174/app-runtime.zip"
+    "ParameterValue": "releases/51901b4779fd437104def3aa3327b25c9975a3b4717b23a2de78bb4c4d1cdd46/app-runtime.zip"
   },
   {
     "ParameterKey": "ArtifactObjectVersion",
-    "ParameterValue": "zQY.xCszaKQ2xxQtERzXDBOzsqHDozWv"
+    "ParameterValue": "xkMSx5qeM183X9l.D3e32fcT9o0zSMsK"
   },
   {
     "ParameterKey": "Architecture",
@@ -69,11 +69,11 @@
   },
   {
     "ParameterKey": "CognitoRedirectUri",
-    "ParameterValue": "https://d1f0twgeed7iq3.cloudfront.net/auth/callback"
+    "ParameterValue": "https://testing.seegerweiss.com/auth/callback"
   },
   {
     "ParameterKey": "CognitoLogoutUri",
-    "ParameterValue": "https://d1f0twgeed7iq3.cloudfront.net/"
+    "ParameterValue": "https://testing.seegerweiss.com/"
   },
   {
     "ParameterKey": "KbAccessPolicyArn",
@@ -106,6 +106,22 @@
   {
     "ParameterKey": "BedrockRegion",
     "ParameterValue": "us-east-1"
+  },
+  {
+    "ParameterKey": "OfficeModel",
+    "ParameterValue": "us.anthropic.claude-sonnet-5"
+  },
+  {
+    "ParameterKey": "OfficeFastModel",
+    "ParameterValue": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  },
+  {
+    "ParameterKey": "OfficeInspectModel",
+    "ParameterValue": "nvidia.nemotron-super-3-120b"
+  },
+  {
+    "ParameterKey": "OfficeTiering",
+    "ParameterValue": "on"
   },
   {
     "ParameterKey": "BdaProjectArn",
@@ -141,11 +157,11 @@
   },
   {
     "ParameterKey": "AppAliasDomain",
-    "ParameterValue": ""
+    "ParameterValue": "testing.seegerweiss.com"
   },
   {
     "ParameterKey": "AcmCertificateArn",
-    "ParameterValue": ""
+    "ParameterValue": "arn:aws:acm:us-east-1:475976462949:certificate/a6a6af35-de96-436d-b17e-3298929724fb"
   },
   {
     "ParameterKey": "ApiDeploymentSlot",
@@ -173,7 +189,7 @@
   },
   {
     "ParameterKey": "OfficeEnginePublicUrl",
-    "ParameterValue": "https://d1f0twgeed7iq3.cloudfront.net"
+    "ParameterValue": "https://testing.seegerweiss.com"
   },
   {
     "ParameterKey": "OfficeEngineJwtSecretArn",

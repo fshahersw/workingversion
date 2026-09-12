@@ -13,9 +13,13 @@ export interface WriterStatus {
 // citation checks, page reading, firm guides, diagrams and generated images
 // change nothing in the document, so they are available in every mode;
 // placing an image or creating a separate document is an edit.
-const PLATFORM_READ = ['run_python', 'verify_citations', 'fetch_page', 'load_firm_guide', 'ask_clarification', 'render_diagram', 'generate_image']
-const READ = ['get_document_context', 'read_blocks', 'read_revisions', 'read_comments', 'read_attachment', 'web_search', ...PLATFORM_READ]
-const WRITE = [...READ, 'insert_content', 'replace_blocks', 'apply_commands', 'insert_chart', 'edit_chart', 'insert_image', 'set_header_footer', 'reply_comment', 'resolve_comment', 'create_document']
+// Mirrors src/lib/writer/inference.server.ts (the server enforces; this filters
+// the tool list the browser sends so the model never sees a tool it cannot use).
+const PLATFORM_READ = ['run_python', 'verify_citations', 'fetch_page', 'load_firm_guide', 'ask_clarification', 'render_diagram', 'edit_image', 'search_firm_knowledge', 'search_library', 'web_search', 'image_search']
+const READ = ['get_document_context', 'read_blocks', 'read_revisions', 'read_comments', 'read_attachment', 'view_page', 'list_templates', ...PLATFORM_READ]
+// The Writer's generate_image places the picture in the document, so it is an edit here.
+const WRITE = [...READ, 'generate_image', 'insert_content', 'replace_blocks', 'apply_commands', 'insert_chart', 'edit_chart', 'insert_image', 'insert_table', 'edit_table', 'set_header_footer', 'reply_comment', 'resolve_comment', 'create_document', 'apply_template', 'save_template']
+const RESEARCH = ['web_search', 'fetch_page', 'search_firm_knowledge', 'search_library', 'verify_citations', 'run_python', 'ask_clarification']
 export function modeName(value: unknown): WriterMode {
   return value === 'ask' || value === 'review' || value === 'research' ? value : 'write'
 }
@@ -25,7 +29,7 @@ export function publicPreferences(value: unknown): WriterPreferences {
   return {swMode: modeName(x.swMode), swProfile: profileName(x.swProfile)}
 }
 export function allowedTools(mode: WriterMode): string[] {
-  return mode === 'research' ? ['web_search'] : mode === 'write' ? [...WRITE] : [...READ]
+  return mode === 'research' ? [...RESEARCH] : mode === 'write' ? [...WRITE] : [...READ]
 }
 export function filterTools<T extends {name: string}>(tools: T[], mode: WriterMode): T[] {
   const allowed = new Set(allowedTools(mode)); return tools.filter(t => allowed.has(t.name))

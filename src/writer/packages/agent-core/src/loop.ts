@@ -2,6 +2,7 @@ import type { AgentSkill, ExecutedToolCall } from './skill'
 import type {
   AgentImage,
   AgentMessage,
+  AgentStatus,
   AgentStreamHandle,
   AgentToolCall,
   AgentToolResult,
@@ -39,6 +40,10 @@ export interface AgentLoopEvents<TSnapshot> {
   onTurnEnd?(): void
   onDone?(result: AgentRunResult): void
   onError?(error: string): void
+  /** cumulative model reasoning of the current turn (call per delta); UIs render it as a collapsible "thinking" strip */
+  onReasoning?(text: string): void
+  /** server status line for the current turn (model tier chosen, planning, ...) */
+  onStatus?(status: AgentStatus): void
 }
 
 /** Context compaction config (budget tracked in UTF-8 bytes rather than message count) */
@@ -69,17 +74,33 @@ export interface AgentLoopOptions<TSnapshot = unknown> {
   systemSuffix?(): string
 }
 
-const COMPACT_MAX_BYTES = 256 * 1024
-const COMPACT_KEEP_RECENT_BYTES = 96 * 1024
+/**
+ * Context budgets. Generous by design: the models behind the suite carry
+ * 200k+ token windows and the platform caches the conversation prefix, so
+ * trimming early costs more in re-reads than it saves in tokens. Compaction
+ * kicks in only when a session's history nears the provider payload limit.
+ */
+const COMPACT_MAX_BYTES = 1536 * 1024
+const COMPACT_KEEP_RECENT_BYTES = 640 * 1024
 /** Pre-truncation of each tool output in the summary request (the compaction request itself must not blow up on huge outputs) */
-const SUMMARIZE_TOOL_OUTPUT_MAX = 2_000
-const SUMMARIZE_TIMEOUT_MS = 30_000
+const SUMMARIZE_TOOL_OUTPUT_MAX = 8_000
+const SUMMARIZE_TIMEOUT_MS = 45_000
 /** When over budget mid-run, keep the last N tool messages verbatim and truncate earlier outputs to this length */
-const STALE_TOOL_KEEP_RECENT = 2
-const STALE_TOOL_OUTPUT_MAX = 1_000
+const STALE_TOOL_KEEP_RECENT = 4
+const STALE_TOOL_OUTPUT_MAX = 8_000
+/** Default history cap in messages (trimmed at user-turn boundaries) */
+const DEFAULT_MAX_HISTORY = 200
 
 /** Unified turn budget across the suite's chat panels (apps may still override per loop) */
 export const DEFAULT_MAX_TURNS = 100
+
+/**
+ * Prefix of reasoning deltas that carry an opaque, provider-signed blob rather
+ * than readable text (the platform packs Bedrock thinking blocks this way so
+ * they can be echoed back verbatim). Shared contract with the platform's
+ * inference layer; UIs never display these.
+ */
+export const OPAQUE_REASONING_PREFIX = 'sw-opaque-reasoning:'
 
 /** Cap on consecutive tool-input parse failures (a successful parse resets it); abort beyond it (keeps the model from burning turns on bad JSON) */
 const MAX_INPUT_PARSE_RETRIES = 3
@@ -151,7 +172,11 @@ function utf8Size(s: string): number {
 /** Approximate byte cost of one message (text + tool inputs/outputs + image base64) */
 function messageSize(m: AgentMessage): number {
   if (m.role === 'tool') {
-    return m.results.reduce((n, r) => n + utf8Size(r.output) + 40, 0)
+    return m.results.reduce(
+      (n, r) =>
+        n + utf8Size(r.output) + 40 + (r.images?.reduce((s, img) => s + img.base64.length, 0) ?? 0),
+      0,
+    )
   }
   let n = utf8Size(m.text)
   if (m.role === 'user' && m.images) {
@@ -208,7 +233,10 @@ export class AgentLoop<TSnapshot = unknown> {
   private allErrorTurns = 0
   private turnStopReason: string | null = null
   private turnText = ''
-  private turnReasoning = ''
+  /** opaque provider-signed reasoning of the current turn, echoed back verbatim */
+  private turnReasoningOpaque = ''
+  /** human-readable reasoning of the current turn (shown in UIs; echoed only when no opaque blob exists) */
+  private turnReasoningText = ''
   private toolCalls: AgentToolCall[] = []
   /** tools actually executed during this run, fed to skill.verifyResponse */
   private executedCalls: ExecutedToolCall[] = []
@@ -410,7 +438,9 @@ export class AgentLoop<TSnapshot = unknown> {
         return {
           role: 'tool' as const,
           results: m.results.map((r) => ({
-            ...r,
+            id: r.id,
+            name: r.name,
+            isError: r.isError,
             output: r.output.slice(0, SUMMARIZE_TOOL_OUTPUT_MAX),
           })),
         }
@@ -471,14 +501,21 @@ export class AgentLoop<TSnapshot = unknown> {
       if (m.role !== 'tool') continue
       recent++
       if (recent <= STALE_TOOL_KEEP_RECENT) continue
-      m.results = m.results.map((r) =>
-        r.output.length > STALE_TOOL_OUTPUT_MAX
+      m.results = m.results.map((r) => {
+        // Stale captures (rendered pages/slides) are the heaviest payload and
+        // the least useful once the model has acted on them: drop the pixels,
+        // keep a note that a capture existed.
+        const { images, ...rest } = r
+        const withoutImages: AgentToolResult = images?.length
+          ? { ...rest, output: `${rest.output}\n…(${images.length} earlier capture(s) omitted)` }
+          : rest
+        return withoutImages.output.length > STALE_TOOL_OUTPUT_MAX
           ? {
-              ...r,
-              output: `${r.output.slice(0, STALE_TOOL_OUTPUT_MAX)}\n…(output truncated: too long)`,
+              ...withoutImages,
+              output: `${withoutImages.output.slice(0, STALE_TOOL_OUTPUT_MAX)}\n…(output truncated: too long)`,
             }
-          : r,
-      )
+          : withoutImages
+      })
     }
   }
 
@@ -505,7 +542,7 @@ export class AgentLoop<TSnapshot = unknown> {
 
   /** Runs at run boundaries only (restore / before a new user message): a long run's tail is all assistant/tool messages, and cutting mid-run would empty the request. */
   private trimHistory(): void {
-    const max = this.options.maxHistory ?? 40
+    const max = this.options.maxHistory ?? DEFAULT_MAX_HISTORY
     if (this.history.length <= max) return
     // cut only at a user message so tool_use/tool_result pairs stay intact
     let i = this.history.length - max
@@ -519,7 +556,8 @@ export class AgentLoop<TSnapshot = unknown> {
   private startTurn(retriesUsed = 0): void {
     const generation = this.generation
     this.turnText = ''
-    this.turnReasoning = ''
+    this.turnReasoningOpaque = ''
+    this.turnReasoningText = ''
     this.toolCalls = []
     this.turnStopReason = null
     // Some transports emit an extra onDone after cancel — this turn may finalize only once
@@ -541,7 +579,19 @@ export class AgentLoop<TSnapshot = unknown> {
         },
         onReasoning: (text) => {
           if (generation !== this.generation || settled) return
-          this.turnReasoning += text
+          // Opaque provider blobs (signed thinking blocks) are echoed back to
+          // the model only; readable deltas go to the UI. When a transport
+          // sends both, the opaque blob wins for the echo.
+          if (text.startsWith(OPAQUE_REASONING_PREFIX)) {
+            this.turnReasoningOpaque += text
+            return
+          }
+          this.turnReasoningText += text
+          this.options.events?.onReasoning?.(this.turnReasoningText)
+        },
+        onStatus: (status) => {
+          if (generation !== this.generation || settled) return
+          this.options.events?.onStatus?.(status)
         },
         onToolCall: (call) => {
           if (generation !== this.generation || settled) return
@@ -662,12 +712,13 @@ export class AgentLoop<TSnapshot = unknown> {
     // history is echoed back on the next turn. The OpenAI-compatible stream
     // paths attach `inputError: undefined` on every parsed call, so without
     // this the second turn of any custom-provider agent run fails validation.
+    const reasoningEcho = this.turnReasoningOpaque || this.turnReasoningText
     this.history.push({
       role: 'assistant',
       text: this.turnText,
       toolCalls: toolCalls.map(({ id, name, input }) => ({ id, name, input })),
       // interleaved-thinking models degrade in tool loops unless their reasoning is echoed back
-      ...(this.turnReasoning ? { reasoning: this.turnReasoning } : {}),
+      ...(reasoningEcho ? { reasoning: reasoningEcho } : {}),
     })
     const generation = this.generation
     const results: AgentToolResult[] = []
@@ -703,6 +754,7 @@ export class AgentLoop<TSnapshot = unknown> {
         name: call.name,
         output: execution.output,
         isError: execution.isError,
+        ...(execution.images?.length ? { images: execution.images } : {}),
       })
       events?.onToolExecuted?.({
         call,

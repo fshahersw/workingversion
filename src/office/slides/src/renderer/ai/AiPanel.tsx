@@ -1,8 +1,9 @@
-import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel} from '@genoffice/ui'
+import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
 import {SwControls} from './SwControls'
 import {SwLibrary} from './SwLibrary'
 import {createTemplateSkill,createLocalPresentation} from './sw-template-skill'
+import {createHtmlDesignSkill} from './html-design-skill'
 import { createPlatformSkill } from '@/office/shared/platform-skill'
 import { DictationButton } from '@/office/shared/DictationButton'
 import {createCompanionSkill} from './sw-skill'
@@ -79,7 +80,7 @@ interface ToolActivity {
 }
 
 /** Max stored chars of tool output (UI-side truncation, doesn't affect what the LLM receives) */
-const TOOL_OUTPUT_MAX_CHARS = 2000
+const TOOL_OUTPUT_MAX_CHARS = 6000
 
 /** Clipboard bitmap MIME → attachment extension (matches ATTACHMENT_IMAGE_EXTS) */
 const PASTE_MIME_EXT: Record<string, string> = {
@@ -257,6 +258,10 @@ interface ChatEntry {
   /** the run failed because Genspark is signed out — render an inline sign-in button */
   loginRequired?: boolean
   tools?: ToolActivity[]
+  /** streamed model reasoning for this segment (UI only, never persisted) */
+  reasoning?: string
+  /** model tier status line for this segment (UI only) */
+  status?: string
   /** Generation progress card (only one per turn, replaced in real time) */
   deckProgress?: DeckProgressSnapshot
   /** Main-process rollback point for this turn's deck edits — rendered as an inline roll-back action */
@@ -1336,23 +1341,88 @@ export function AiPanel({
     loopRef.current = new AgentLoop({
       transport: createElectronTransport(() => settingsRef.current),
       systemSuffix: aiLangDirective,
-      maxTurns: 20,
+      maxTurns: 36,
       skill: createCompanionSkill(composeSkills('slides+files', '', [
         createSlidesSkill(access),
         createFilesSkill(availableAttachments, (path) => readAttachmentPathsRef.current.add(path)),
         createTemplateSkill(access),
+        createHtmlDesignSkill(access),
+        {
+          id: 'slides-view',
+          systemPrompt:
+            '## Visual check\n- view_slide renders a slide exactly as it will export and shows it to you. Use it after layout edits (positions, fonts, images, tables) to confirm the result before finishing, and when the user asks how a slide looks; audit_layout catches geometry problems, view_slide catches everything else.',
+          tools: [
+            {
+              name: 'view_slide',
+              readOnly: true,
+              description:
+                'Render one slide (0-based slideIndex; default the current slide) to a PNG and attach it so you can check the layout, text fit, alignment, colors and images visually.',
+              inputSchema: {
+                type: 'object',
+                properties: { slideIndex: { type: 'integer', minimum: 0, description: '0-based slide index' } },
+                required: [],
+              },
+            },
+          ],
+          executeTool: async (call) => {
+            const slides = slidesRef.current
+            const raw = call.input.slideIndex
+            const index = raw === undefined ? currentRef.current : Number(raw)
+            if (!Number.isInteger(index) || index < 0 || index >= slides.length) {
+              return { output: `slideIndex must be 0-${Math.max(0, slides.length - 1)}`, isError: true, mutated: false, summary: 'View slide' }
+            }
+            const slide = slides[index]
+            if (!slide) return { output: 'slide not found', isError: true, mutated: false, summary: 'View slide' }
+            try {
+              const [png] = await renderSlidesToPngBase64([slide], imagesRef.current, 1.25)
+              if (!png) throw new Error('render returned nothing')
+              const { boundImage } = await import('@/office/shared/capture')
+              const shot = await boundImage(png, 'image/png')
+              return {
+                output: `Rendered slide ${index + 1} of ${slides.length} (${shot.width}x${shot.height}px). Inspect the attached image.`,
+                mutated: false,
+                summary: `Viewed slide ${index + 1}`,
+                images: [{ base64: shot.base64, mime: 'image/png' }],
+                display: { kind: 'images', items: [{ url: `data:image/png;base64,${shot.base64}`, title: `Slide ${index + 1}` }] },
+              }
+            } catch (error) {
+              return { output: `view_slide failed: ${error instanceof Error ? error.message : String(error)}`, isError: true, mutated: false, summary: 'View slide' }
+            }
+          },
+        },
         // Platform build: sandboxed Python, diagrams, Nova Canvas images,
         // citation checks, page reading, firm guides, cross-app documents.
         // Slides keeps its own questionnaire card. Its Genspark-only
         // generate_image stays hidden (the platform host never reports a
         // Genspark login), so the platform's generate_image is the only one.
-        createPlatformSkill({ app: 'slides', exclude: ['ask_clarification'] }),
+        createPlatformSkill({
+          app: 'slides',
+          exclude: ['ask_clarification'],
+          templates: {
+            apply: async (payload, template, input) => {
+              if (payload.format !== 'deck') return { output: 'this template is not a Slides template', isError: true, mutated: false, summary: 'Apply template' }
+              try {
+                const deck = { ...(payload.deck as Record<string, unknown>), mode: input['replace'] === true ? 'replace' : 'append' }
+                const result = await createLocalPresentation(access, deck)
+                return {
+                  mutated: true,
+                  summary: `Template: ${template.name}`,
+                  output: `Applied template "${template.name}": ${result.created} slides created (${result.total} in the deck). Placeholders are written as [Bracketed Labels]; fill them with the slide editing tools (read_slide first). ${result.issues.length ? `Layout findings: ${result.issues.join('; ')}` : ''}`,
+                }
+              } catch (error) {
+                return { output: error instanceof Error ? error.message : String(error), isError: true, mutated: false, summary: 'Apply template' }
+              }
+            },
+          },
+        }),
       ]),()=>publicPreferences(settingsRef.current).swMode),
       events: {
         onText: (text) => {
           streamedTextRef.current = text
           patchLastAssistant({ text })
         },
+        onReasoning: (text) => patchLastAssistant({ reasoning: text }),
+        onStatus: (status) => patchLastAssistant({ status: status.text }),
         onToolStart: (call) => {
           // Live "running" chip: replaced in place by onToolExecuted
           const activity: ToolActivity = { id: call.id, startedAt: Date.now(), 
@@ -2083,6 +2153,9 @@ export function AiPanel({
             >
               {entry.role === 'user' && entry.attachments && entry.attachments.length > 0 && (
                 <SentAttachments atts={entry.attachments} previews={attachmentPreviews} />
+              )}
+              {entry.role === 'assistant' && (entry.reasoning || entry.status) && (
+                <AssistantReasoning text={entry.reasoning} status={entry.status} active={!!entry.streaming && !entry.text} />
               )}
               {entry.role === 'assistant' && !entry.text && entry.streaming ? (
                 <span className="ai-typing-row">

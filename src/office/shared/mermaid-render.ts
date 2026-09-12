@@ -5,20 +5,22 @@
 const MAX_SOURCE = 60_000;
 const MAX_SIDE = 4096;
 
-let initialized = false;
+const THEMES = new Set(["default", "neutral", "forest", "dark", "base"]);
+let initializedTheme: string | null = null;
 
 export async function renderMermaidPng(
   source: string,
-  options: { scale?: number; theme?: "default" | "neutral" | "forest" | "dark" } = {},
+  options: { scale?: number; theme?: string | undefined } = {},
 ): Promise<{ base64: string; width: number; height: number; svg: string }> {
   if (!source.trim()) throw new Error("Diagram source is empty.");
   if (source.length > MAX_SOURCE) throw new Error("Diagram source is too long.");
   const { default: mermaid } = await import("mermaid");
-  if (!initialized) {
+  const theme = options.theme && THEMES.has(options.theme) ? options.theme : "neutral";
+  if (initializedTheme !== theme) {
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
-      theme: options.theme ?? "neutral",
+      theme,
       fontFamily: "Calibri, Carlito, Arial, sans-serif",
       // HTML labels wrap text in <foreignObject>, which taints the canvas and
       // blocks PNG export; plain SVG text labels rasterize cleanly.
@@ -30,7 +32,7 @@ export async function renderMermaidPng(
       sequence: { useMaxWidth: false },
       gantt: { useMaxWidth: false },
     } as Parameters<typeof mermaid.initialize>[0]);
-    initialized = true;
+    initializedTheme = theme;
   }
   const id = "sw-mermaid-" + crypto.randomUUID().replace(/-/g, "").slice(0, 10);
   const { svg } = await mermaid.render(id, source);

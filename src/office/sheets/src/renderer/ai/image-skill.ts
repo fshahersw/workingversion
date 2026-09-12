@@ -8,7 +8,7 @@ import { t } from '../i18n/locale'
  * add_image path, which downloads the URL in the main process on apply.
  */
 
-const PLACEMENT_PROMPT = `- To place an image on a sheet, pass the URL to propose_operations {op:"add_image", sheetId, path:"<https url>", anchorCell} — field details in guide charts. The image anchors at that cell and is written into the file on save (imported xlsx only).
+const PLACEMENT_PROMPT = `- To place an image on a sheet, pass the URL or platform-image handle to propose_operations {op:"add_image", sheetId, path:"<https url or platform-image:id>", anchorCell} — field details in guide charts. The image anchors at that cell and is written into the file on save.
 - Only insert images the user asked for; data correctness always outranks decoration.`
 
 const IMAGES_SYSTEM_PROMPT = `## Images
@@ -16,7 +16,7 @@ const IMAGES_SYSTEM_PROMPT = `## Images
 ${PLACEMENT_PROMPT}`
 
 const IMAGES_SYSTEM_PROMPT_NO_GEN = `## Images
-- image_search finds real web images (returns direct imageUrl entries).
+- image_search finds real web images (returns direct imageUrl entries); generate_image / render_diagram / edit_image (platform tools) return platform-image handles.
 ${PLACEMENT_PROMPT}`
 
 /**

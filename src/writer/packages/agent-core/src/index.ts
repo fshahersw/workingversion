@@ -1,6 +1,9 @@
 export type {
   AgentImage,
   AgentMessage,
+  AgentPhase,
+  AgentPhaseKind,
+  AgentStatus,
   AgentStreamCallbacks,
   AgentStreamHandle,
   AgentStreamRequest,
@@ -17,6 +20,7 @@ export {
   AgentLoop,
   COMPLETED_VIA_TOOLS_TEXT,
   DEFAULT_MAX_TURNS,
+  OPAQUE_REASONING_PREFIX,
   runtimePreamble,
   sanitizeAgentPayload,
 } from './loop'

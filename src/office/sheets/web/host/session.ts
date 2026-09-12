@@ -17,9 +17,37 @@ import {
 } from "@/lib/office/office.functions";
 import type { OfficeDocSummary } from "@/lib/office/types";
 import { writerWebSearchFn } from "@/lib/writer/writer.functions";
+import { getPlatformImage, isPlatformImage } from "@/office/shared/image-store";
+import {
+  classifyOfficeAttachment,
+  extractOfficeAttachment,
+  OFFICE_ATTACHMENT_ACCEPT,
+  OFFICE_EXTRACT_EXTS,
+  OFFICE_LOCAL_TEXT_EXTS,
+} from "@/office/shared/extract-attachment";
 
 import { createWorkbook, downloadBlob, pickFiles, platformFetch, uploadWorkbook } from "../api";
 import { emitHost, installHost, takeDropped } from "./electron";
+
+/**
+ * Image bytes for add_image: platform-image handles come from the browser
+ * store; http(s) URLs are downloaded through the platform (SSRF-guarded,
+ * bounded). Returns null on failure so the renderer reports "cannot read".
+ */
+async function fetchImageForWorkbook(url: string): Promise<{ base64: string; mime: string } | null> {
+  if (isPlatformImage(url)) {
+    const stored = getPlatformImage(url);
+    return stored ? { base64: stored.base64, mime: stored.mime } : null;
+  }
+  if (!/^https?:\/\//i.test(url)) return null;
+  try {
+    const { officeFetchImageFn } = await import("@/lib/office/tools.functions");
+    const r = await officeFetchImageFn({ data: { url } });
+    return { base64: r.base64, mime: r.mime };
+  } catch {
+    return null;
+  }
+}
 
 type EngineSession = {
   engineUrl: string;
@@ -55,6 +83,7 @@ const state: State = {
 const observers = new Set<() => void>();
 const streams = new Map<string, AbortController>();
 const attachments = new Map<string, File>();
+const attachmentTextCache = new Map<string, Promise<string>>();
 let options: SheetsHostOptions | null = null;
 let engine: EngineSession | null = null;
 let queue: Promise<unknown> = Promise.resolve();
@@ -248,7 +277,7 @@ async function stream(r: {
         const p = await reader.read();
         if (p.done) break;
         text += decoder.decode(p.value, { stream: true });
-        if (text.length > 1_600_000) throw new Error("Stream event is too large.");
+        if (text.length > 12_000_000) throw new Error("Stream event is too large.");
         let at: number;
         while ((at = text.indexOf("\n")) >= 0) {
           const line = text.slice(0, at).trimEnd();
@@ -293,11 +322,9 @@ async function addAttachments(files: File[]) {
   const rejected: string[] = [];
   for (const f of files.slice(0, 10)) {
     const ext = f.name.split(".").at(-1)!.toLowerCase();
-    if (
-      !["txt", "md", "csv", "json", "png", "jpg", "jpeg", "gif", "webp"].includes(ext) ||
-      f.size > 5 * 1024 * 1024
-    ) {
-      rejected.push(f.name + ": use text or an image up to 5 MB.");
+    const check = classifyOfficeAttachment(ext, f.size);
+    if (!check.ok) {
+      rejected.push(f.name + ": " + check.error);
       continue;
     }
     const path = "attachment:" + crypto.randomUUID();
@@ -309,7 +336,7 @@ async function addAttachments(files: File[]) {
 
 async function fileAction(channel: string, args: unknown[]) {
   if (channel.endsWith("files-pick"))
-    return addAttachments(await pickFiles(".txt,.md,.csv,.json,.png,.jpg,.jpeg,.gif,.webp", true));
+    return addAttachments(await pickFiles(OFFICE_ATTACHMENT_ACCEPT, true));
   if (channel.endsWith("files-add"))
     return addAttachments(((args[0] as string[]) ?? []).map(takeDropped).filter(Boolean) as File[]);
   if (channel.endsWith("files-add-pasted-image")) {
@@ -328,7 +355,26 @@ async function fileAction(channel: string, args: unknown[]) {
       base64: (encode(await f.arrayBuffer()) as { $officeBytes: string }).$officeBytes,
     };
   }
-  const text = await f.text();
+  const ext = f.name.split(".").at(-1)?.toLowerCase() || "";
+  const path = String(args[0]);
+  let text = "";
+  try {
+    if (OFFICE_LOCAL_TEXT_EXTS.has(ext)) {
+      text = await f.text();
+    } else if (OFFICE_EXTRACT_EXTS.has(ext)) {
+      let pending = attachmentTextCache.get(path);
+      if (!pending) {
+        pending = extractOfficeAttachment(f);
+        attachmentTextCache.set(path, pending);
+      }
+      text = await pending;
+    } else {
+      text = await f.text();
+    }
+  } catch (error) {
+    attachmentTextCache.delete(path);
+    return { ok: false, error: error instanceof Error ? error.message : "The attachment could not be read." };
+  }
   const offset = Math.max(0, Math.trunc(Number(args[1]) || 0));
   const max = Math.min(24000, Math.max(1, Math.trunc(Number(args[2]) || 24000)));
   return {
@@ -507,11 +553,22 @@ async function invoke(channel: string, args: unknown[]): Promise<unknown> {
     }
   }
   if (channel === "ai:gsk-status") return { loggedIn: false };
-  if (channel === "ai:image-search")
-    return { images: [], method: "error", error: "External image search is not enabled." };
-  if (channel === "ai:fetch-image") return null;
+  if (channel === "ai:image-search") {
+    try {
+      const { officeImageSearchFn } = await import("@/lib/office/tools.functions");
+      const r = await officeImageSearchFn({ data: { query: String(args[0] ?? ""), maxResults: Number(args[1]) || 8 } });
+      if (r.method === "error") return { images: [], method: "error", error: r.error };
+      return {
+        images: r.images.map((i) => ({ imageUrl: i.imageUrl, title: i.title, sourceUrl: i.imageUrl, source: "web" })),
+        method: "tavily",
+      };
+    } catch (error) {
+      return { images: [], method: "error", error: error instanceof Error ? error.message : "Image search failed." };
+    }
+  }
+  if (channel === "ai:fetch-image") return fetchImageForWorkbook(String(args[0] ?? ""));
   if (channel === "sheets:ai-generate-image")
-    return { error: "External image generation is not enabled." };
+    return { error: "Use the assistant's generate_image tool; it returns a platform-image handle for add_image." };
   if (channel === "ai:list-style-templates") return [];
   if (channel.startsWith("project:")) return project(channel, args);
   if (/files-(pick|add|add-pasted-image|read|read-image)$/.test(channel))
@@ -541,7 +598,21 @@ async function invoke(channel: string, args: unknown[]): Promise<unknown> {
     if (/^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener");
     return;
   }
-  if (channel === "shell:read-local-image" || channel.startsWith("sheets:capture-screen")) {
+  if (channel === "shell:read-local-image") {
+    // add_image with a platform-image:<id> handle (generate_image, render_diagram,
+    // run_python, edit_image) resolves from the browser image store.
+    const path = String((args[0] as { path?: string } | undefined)?.path ?? args[0] ?? "");
+    const stored = isPlatformImage(path) ? getPlatformImage(path) : null;
+    if (!stored) {
+      throw new Error(
+        isPlatformImage(path)
+          ? "That image handle is no longer available; produce the image again."
+          : "Local file paths are not available in the browser; use an http(s) URL or a platform-image handle.",
+      );
+    }
+    return { base64: stored.base64, mediaType: stored.mime, width: stored.width, height: stored.height };
+  }
+  if (channel.startsWith("sheets:capture-screen")) {
     throw new Error("This desktop-only operation is not available in the browser.");
   }
   if (channel === "workbook:csv-save-confirm") {

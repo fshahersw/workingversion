@@ -1626,8 +1626,11 @@ async function executeTool(
       const idx = Number(call.input.slideIndex)
       if (!slides[idx])
         return fail(t('aiFailInsertImage'), `slideIndex out of range (0-${slides.length - 1})`)
-      const url = String(call.input.url ?? '')
-      if (!/^https?:\/\//.test(url)) return fail(t('aiFailInsertImage'), 'Invalid url')
+      const url = String(call.input.url ?? '').trim()
+      // Direct http(s) URL or a platform-image:<id> handle (generate_image,
+      // render_diagram, run_python figures, edit_image); the host resolves both.
+      if (!/^(https?:\/\/|platform-image:)/.test(url))
+        return fail(t('aiFailInsertImage'), 'url must be an http(s) URL or a platform-image:<id> handle')
       const r = await window.slidesApi.insertImageUrl({
         slideIndex: idx,
         url,
@@ -1667,8 +1670,9 @@ async function executeTool(
           `Element ${sourceId} is inside a group; this tool only supports top-level pictures — ungroup it first (apply_ops ungroupElement)`,
         )
 
-      const url = String(call.input.url ?? '')
-      if (!/^https?:\/\//.test(url)) return fail(t(failKey), 'Invalid url')
+      const url = String(call.input.url ?? '').trim()
+      if (!/^(https?:\/\/|platform-image:)/.test(url))
+        return fail(t(failKey), 'url must be an http(s) URL or a platform-image:<id> handle')
       const updated = await window.slidesApi.replacePictureUrl({
         slideIndex: idx,
         sourceId,

@@ -1,4 +1,4 @@
-import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel} from '@genoffice/ui'
+import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
 /* Modified for the Seeger Weiss Writer desktop preview from GenOffice commit 69b4ce0. See the retained LICENSE, NOTICE, and source-change list. */
 import { useEffect, useRef, useState } from 'react'
@@ -59,7 +59,7 @@ interface ToolActivity {
 }
 
 /** Max characters of tool output in the UI expansion panel */
-const TOOL_OUTPUT_MAX_CHARS = 2000
+const TOOL_OUTPUT_MAX_CHARS = 6000
 
 /** Cap on tool args/output persisted in the transcript (the store layer has another 16k truncation fallback) */
 const PERSIST_TOOL_FIELD_MAX = 16_000
@@ -84,6 +84,10 @@ interface ChatEntry {
   loginRequired?: boolean
   /** tool executions performed during this assistant turn */
   tools?: ToolActivity[]
+  /** streamed model reasoning for this segment (UI only, never persisted) */
+  reasoning?: string
+  /** model tier status line for this segment (UI only) */
+  status?: string
   /** document state before this turn's first edit — rendered as an inline roll-back action */
   snapshot?: PmNode
   /** attachments consumed from the composer by this user message (read-only echo chips) */
@@ -647,7 +651,7 @@ export function AiPanel({
     loopRef.current = new AgentLoop<PmNode>({
       transport: createElectronTransport(() => settingsRef.current),
       systemSuffix: aiLangDirective,
-      get maxTurns() { return writerProfileRef.current==='thorough'?24:12 },
+      get maxTurns() { return writerProfileRef.current==='thorough'?48:24 },
       skill: writerSkill(composeSkills('docs+files', '', [
         createDocsSkill(
           () => editorRef.current,
@@ -661,6 +665,8 @@ export function AiPanel({
       captureSnapshot: () => editorRef.current.getJSON() as PmNode,
       events: {
         onText: (text) => patchLastAssistant({ text }),
+        onReasoning: (text) => patchLastAssistant({ reasoning: text }),
+        onStatus: (status) => patchLastAssistant({ status: status.text }),
         onToolStart: (call) => {
           // Live "running" chip: replaced in place by onToolExecuted
           patchLastAssistant((last) => ({
@@ -1180,6 +1186,9 @@ export function AiPanel({
             >
               {entry.role === 'user' && entry.attachments && entry.attachments.length > 0 && (
                 <SentAttachments atts={entry.attachments} previews={attachmentPreviews} />
+              )}
+              {entry.role === 'assistant' && (entry.reasoning || entry.status) && (
+                <AssistantReasoning text={entry.reasoning} status={entry.status} active={!!entry.streaming && !entry.text} />
               )}
               {entry.role === 'assistant' && !entry.text && entry.streaming ? (
                 <span className="ai-typing-row">

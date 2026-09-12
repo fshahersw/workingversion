@@ -28,6 +28,64 @@ function timeRange(publishedAfter?: string): "day" | "week" | "month" | "year" |
   return undefined;
 }
 
+export type TavilyImage = { imageUrl: string; title: string; sourceUrl?: string };
+
+/**
+ * Image search through Tavily (`include_images` + descriptions). Used by the
+ * Office assistants' image_search tool. Returns [] when Tavily is not configured
+ * or on any error; callers report "no results" vs "not configured" themselves.
+ */
+export async function tavilyImageSearch(
+  query: string,
+  maxResults = 8,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<TavilyImage[]> {
+  const key = process.env["TAVILY_API_KEY"]?.trim();
+  const q = (query || "").trim().slice(0, 400);
+  if (!key || !q) return [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 15_000);
+  if (opts?.signal) opts.signal.addEventListener("abort", () => controller.abort());
+  try {
+    const res = await fetch(TAVILY_ENDPOINT, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: q,
+        max_results: Math.max(1, Math.min(Math.floor(maxResults || 8), 20)),
+        search_depth: "basic",
+        include_answer: false,
+        include_raw_content: false,
+        include_images: true,
+        include_image_descriptions: true,
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) return [];
+    const data = (await res.json().catch(() => ({}))) as {
+      images?: Array<string | { url?: string; description?: string }>;
+      results?: Array<{ url?: string }>;
+    };
+    const out: TavilyImage[] = [];
+    const seen = new Set<string>();
+    for (const im of data.images ?? []) {
+      const url = typeof im === "string" ? im : im?.url;
+      if (typeof url !== "string" || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      out.push({
+        imageUrl: url,
+        title: typeof im === "object" && im && typeof im.description === "string" ? im.description.slice(0, 200) : "",
+      });
+      if (out.length >= Math.max(1, Math.min(Math.floor(maxResults || 8), 20))) break;
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Search Tavily. Returns [] on ANY error (never throws) so it can never break the
  *  parallel merge — AgentCore + Brave still answer. */
 export async function tavilySearch(

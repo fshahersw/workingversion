@@ -1,4 +1,4 @@
-import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel as assistantScopeLabel} from '@genoffice/ui'
+import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel as assistantScopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
 import React, { useEffect, useRef, useState } from 'react'
 import { AiComposer, AiTypingIndicator } from '@genoffice/ui'
@@ -197,6 +197,10 @@ export interface AiChatMessage {
   readonly text: string
   readonly tools: readonly AiToolChip[]
   readonly streaming?: boolean | undefined
+  /** streamed model reasoning for this segment (UI only, never persisted) */
+  readonly reasoning?: string | undefined
+  /** model tier status line for this segment (UI only) */
+  readonly status?: string | undefined
   readonly isError?: boolean | undefined
   /** the run failed and this user message was rolled back out of the model context */
   readonly undelivered?: boolean | undefined
@@ -572,6 +576,9 @@ export function AiChatPanel({
               </>
             ) : (
               <>
+                {(entry.reasoning || entry.status) && (
+                  <AssistantReasoning text={entry.reasoning} status={entry.status} active={!!entry.streaming && !entry.text} />
+                )}
                 {entry.tools.length > 0 && <AssistantActivity tools={entry.tools} active={!!entry.streaming}/>}
                 {entry.text ? (
                   <div dir="auto">

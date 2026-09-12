@@ -451,8 +451,8 @@ export async function deleteOfficeDoc(
 
 // --- Assistant chat history (per document, separate from Research) -----------------
 
-const MAX_CHAT_TEXT = 60_000;
-const MAX_TOOL_FIELD = 4_000;
+const MAX_CHAT_TEXT = 120_000;
+const MAX_TOOL_FIELD = 16_000;
 const MAX_CHAT_MESSAGES = 400;
 
 function cleanTools(v: unknown): OfficeChatMessage["tools"] {

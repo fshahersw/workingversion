@@ -30,6 +30,13 @@ export interface AgentToolResult {
   name: string
   output: string
   isError?: boolean | undefined
+  /**
+   * Images the model must see as part of this result (a rendered page, slide
+   * or range the tool captured for visual verification). Vision-capable
+   * providers receive them as multimodal tool-result content; text-only
+   * providers get the text only.
+   */
+  images?: AgentImage[] | undefined
 }
 
 /** inline image attached to a user turn, fed to vision-capable providers as multimodal input */
@@ -78,6 +85,20 @@ export interface ToolExecution {
    * Ignored when tool results are assembled into an AgentMessage.
    */
   display?: ToolDisplay
+  /**
+   * Images fed back to the model with this result (see AgentToolResult.images).
+   * Use for visual verification captures; keep them to a few per call.
+   */
+  images?: AgentImage[]
+}
+
+/** Live status line pushed by the transport while a turn is in flight (model chosen, planning, etc.). */
+export interface AgentStatus {
+  text: string
+  /** model id serving this turn, when the transport knows it */
+  model?: string | undefined
+  /** routing tier the server picked for this turn */
+  tier?: string | undefined
 }
 
 // ---- run phase (drives the in-progress status line in chat UIs) ----
@@ -112,6 +133,8 @@ export interface AgentStreamCallbacks {
   onToolCall(call: AgentToolCall): void
   /** Phase changes within the model stream (thinking / responding / tool-input); older transports may omit this */
   onPhase?(phase: AgentPhase): void
+  /** Server status lines (model routing, planning); transports may omit this */
+  onStatus?(status: AgentStatus): void
   /** normalized stop reason of the turn ('max_tokens' = cut off by the token limit); transports may omit this */
   onStopReason?(reason: string): void
   onDone(): void

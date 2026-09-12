@@ -242,6 +242,328 @@ export async function generateOfficeImage(input: {
   return { mime: "image/png", base64, width: dims.width, height: dims.height };
 }
 
+// --- Image editing (Stability Image Services on Bedrock) ------------------------------------------------
+
+/**
+ * Stability's edit/upscale/control models are enabled in this account in the
+ * platform region. Each is its own model id with its own request shape; the
+ * response shape matches text-to-image ({ images: [base64], finish_reasons }).
+ */
+const IMAGE_EDIT_REGION = process.env["OFFICE_IMAGE_EDIT_REGION"] || REGION;
+
+export type ImageEditOperation =
+  | "remove_background"
+  | "search_replace"
+  | "recolor"
+  | "erase"
+  | "inpaint"
+  | "outpaint"
+  | "style_guide"
+  | "style_transfer"
+  | "sketch"
+  | "structure"
+  | "upscale_fast"
+  | "upscale_conservative"
+  | "upscale_creative";
+
+const IMAGE_EDIT_MODELS: Record<ImageEditOperation, string> = {
+  remove_background: "stability.stable-image-remove-background-v1:0",
+  search_replace: "stability.stable-image-search-replace-v1:0",
+  recolor: "stability.stable-image-search-recolor-v1:0",
+  erase: "stability.stable-image-erase-object-v1:0",
+  inpaint: "stability.stable-image-inpaint-v1:0",
+  outpaint: "stability.stable-outpaint-v1:0",
+  style_guide: "stability.stable-image-style-guide-v1:0",
+  style_transfer: "stability.stable-style-transfer-v1:0",
+  sketch: "stability.stable-image-control-sketch-v1:0",
+  structure: "stability.stable-image-control-structure-v1:0",
+  upscale_fast: "stability.stable-fast-upscale-v1:0",
+  upscale_conservative: "stability.stable-conservative-upscale-v1:0",
+  upscale_creative: "stability.stable-creative-upscale-v1:0",
+};
+
+export const IMAGE_EDIT_OPERATIONS = Object.keys(IMAGE_EDIT_MODELS) as ImageEditOperation[];
+
+export type ImageEditInput = {
+  operation: ImageEditOperation;
+  /** Source image bytes (PNG/JPEG/WebP base64, no data: prefix). */
+  image: string;
+  prompt?: string;
+  /** search_replace / recolor: what to find in the image. */
+  searchPrompt?: string;
+  negativePrompt?: string;
+  /** erase / inpaint: white = edit, black = keep. Optional for erase when the image has alpha. */
+  mask?: string;
+  /** style_transfer: the image whose look is applied to `image`. */
+  styleImage?: string;
+  /** outpaint: pixels to add per side (0..2000). */
+  expand?: { left?: number; right?: number; up?: number; down?: number };
+  /** sketch/structure control strength or style_guide fidelity, 0..1 */
+  strength?: number;
+  signal?: AbortSignal;
+};
+
+const MAX_EDIT_IMAGE_B64 = 14_000_000;
+
+function clamp01(v: unknown, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : fallback;
+}
+
+function stabilityEditBody(input: ImageEditInput): Record<string, unknown> {
+  const prompt = String(input.prompt ?? "").trim().slice(0, 1024);
+  const negative = String(input.negativePrompt ?? "").trim().slice(0, 1024);
+  const withNeg = negative ? { negative_prompt: negative } : {};
+  const needPrompt = (): string => {
+    if (!prompt) throw new OfficeToolError(422, `${input.operation} needs a prompt.`);
+    return prompt;
+  };
+  switch (input.operation) {
+    case "remove_background":
+      return { image: input.image, output_format: "png" };
+    case "search_replace":
+      if (!input.searchPrompt) throw new OfficeToolError(422, "search_replace needs searchPrompt (what to find).");
+      return { image: input.image, prompt: needPrompt(), search_prompt: input.searchPrompt.slice(0, 512), output_format: "png", ...withNeg };
+    case "recolor":
+      if (!input.searchPrompt) throw new OfficeToolError(422, "recolor needs searchPrompt (what to recolor).");
+      return { image: input.image, prompt: needPrompt(), select_prompt: input.searchPrompt.slice(0, 512), output_format: "png", ...withNeg };
+    case "erase":
+      return { image: input.image, ...(input.mask ? { mask: input.mask } : {}), output_format: "png" };
+    case "inpaint":
+      return { image: input.image, prompt: needPrompt(), ...(input.mask ? { mask: input.mask } : {}), output_format: "png", ...withNeg };
+    case "outpaint": {
+      const side = (v: unknown) => Math.min(2000, Math.max(0, Math.round(Number(v) || 0)));
+      const e = input.expand ?? {};
+      const body: Record<string, unknown> = { image: input.image, output_format: "png", ...(prompt ? { prompt } : {}) };
+      for (const k of ["left", "right", "up", "down"] as const) {
+        const n = side(e[k]);
+        if (n > 0) body[k] = n;
+      }
+      if (!["left", "right", "up", "down"].some((k) => k in body)) {
+        throw new OfficeToolError(422, "outpaint needs at least one side in expand (left/right/up/down pixels).");
+      }
+      return body;
+    }
+    case "style_guide":
+      return { image: input.image, prompt: needPrompt(), fidelity: clamp01(input.strength, 0.5), output_format: "png", ...withNeg };
+    case "style_transfer":
+      if (!input.styleImage) throw new OfficeToolError(422, "style_transfer needs styleImage.");
+      return { init_image: input.image, style_image: input.styleImage, ...(prompt ? { prompt } : {}), output_format: "png", ...withNeg };
+    case "sketch":
+    case "structure":
+      return { image: input.image, prompt: needPrompt(), control_strength: clamp01(input.strength, 0.7), output_format: "png", ...withNeg };
+    case "upscale_fast":
+      return { image: input.image, output_format: "png" };
+    case "upscale_conservative":
+    case "upscale_creative":
+      return { image: input.image, prompt: needPrompt(), output_format: "png", ...withNeg };
+    default:
+      throw new OfficeToolError(422, `Unknown image operation "${String(input.operation)}".`);
+  }
+}
+
+/** Edit, extend, restyle or upscale an image with the Stability suite on Bedrock. */
+export async function editOfficeImage(input: ImageEditInput): Promise<ToolImage & { width: number; height: number }> {
+  if (!imageGenerationEnabled()) throw new OfficeToolError(501, "Image generation is disabled.");
+  const model = IMAGE_EDIT_MODELS[input.operation];
+  if (!model) throw new OfficeToolError(422, `Unknown image operation "${String(input.operation)}".`);
+  if (typeof input.image !== "string" || input.image.length < 64) throw new OfficeToolError(422, "image (base64) is required.");
+  if (input.image.length > MAX_EDIT_IMAGE_B64) throw new OfficeToolError(413, "The source image is too large.");
+  const body = stabilityEditBody(input);
+  const url = `https://bedrock-runtime.${IMAGE_EDIT_REGION}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
+  const res = await signedBedrockFetch(url, {
+    body: JSON.stringify(body),
+    headers: { accept: "application/json" },
+    region: IMAGE_EDIT_REGION,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new OfficeToolError(
+      res.status === 400 ? 422 : 502,
+      `Image edit failed [${res.status}] (${model} in ${IMAGE_EDIT_REGION}): ${text.replace(/\s+/g, " ").slice(0, 300)}`,
+    );
+  }
+  let parsed: { images?: string[]; error?: string; finish_reasons?: Array<string | null> };
+  try {
+    parsed = JSON.parse(text) as typeof parsed;
+  } catch {
+    throw new OfficeToolError(502, "Image edit returned an unreadable response.");
+  }
+  if (parsed.error) throw new OfficeToolError(422, `Image edit refused the request: ${parsed.error}`);
+  const refused = parsed.finish_reasons?.find((r) => r && r !== "SUCCESS");
+  if (refused) throw new OfficeToolError(422, `Image edit did not complete (${refused}); adjust the prompt.`);
+  const base64 = parsed.images?.[0];
+  if (!base64) throw new OfficeToolError(502, "Image edit returned no image.");
+  const dims = imageDimensions(base64) ?? { width: 0, height: 0 };
+  return { mime: "image/png", base64, width: dims.width, height: dims.height };
+}
+
+// --- Image download (for insert-by-URL in every editor) ---------------------------------------------------
+
+const MAX_FETCHED_IMAGE_BYTES = 12 * 1024 * 1024;
+const IMAGE_MIMES: Record<string, "image/png" | "image/jpeg" | "image/gif" | "image/webp"> = {
+  "image/png": "image/png",
+  "image/jpeg": "image/jpeg",
+  "image/jpg": "image/jpeg",
+  "image/gif": "image/gif",
+  "image/webp": "image/webp",
+};
+
+function sniffMime(bytes: Uint8Array): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | null {
+  if (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e) return "image/png";
+  if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+  if (bytes.length > 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
+  if (bytes.length > 12 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
+  return null;
+}
+
+/**
+ * Download a public image for insertion (the browser cannot: CORS). Same SSRF
+ * guard as fetch_page (blocked hosts/ranges, DNS check, no redirects to
+ * private space), bounded size, image content only.
+ */
+export async function fetchOfficeImage(
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ base64: string; mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; bytes: number }> {
+  const { validateFetchTarget } = await import("@/lib/agents/fetch-page.server");
+  let target: URL;
+  try {
+    target = await validateFetchTarget(String(url ?? ""), undefined, signal);
+  } catch (e) {
+    throw new OfficeToolError(422, e instanceof Error ? e.message : "Invalid image URL.");
+  }
+  let current = target;
+  for (let hop = 0; hop < 4; hop++) {
+    const res = await fetch(current.toString(), {
+      redirect: "manual",
+      headers: { accept: "image/*,*/*;q=0.5", "user-agent": "SeegerWeissLitAI/1.0 (+image-fetch)" },
+      ...(signal ? { signal } : {}),
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) throw new OfficeToolError(502, "The image server redirected without a target.");
+      try {
+        current = await validateFetchTarget(new URL(loc, current), undefined, signal);
+      } catch (e) {
+        throw new OfficeToolError(422, e instanceof Error ? e.message : "Blocked redirect.");
+      }
+      continue;
+    }
+    if (!res.ok) throw new OfficeToolError(502, `The image could not be downloaded [${res.status}].`);
+    const declared = Number(res.headers.get("content-length") ?? 0);
+    if (declared > MAX_FETCHED_IMAGE_BYTES) throw new OfficeToolError(413, "The image is larger than 12 MB.");
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length > MAX_FETCHED_IMAGE_BYTES) throw new OfficeToolError(413, "The image is larger than 12 MB.");
+    const header = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    const mime = sniffMime(buf) ?? IMAGE_MIMES[header] ?? null;
+    if (!mime) throw new OfficeToolError(422, "The URL did not return a PNG, JPEG, GIF or WebP image.");
+    return { base64: Buffer.from(buf).toString("base64"), mime, bytes: buf.length };
+  }
+  throw new OfficeToolError(502, "Too many redirects while downloading the image.");
+}
+
+// --- Firm knowledge (KB workspaces) and Library ---------------------------------------------------------------
+
+export type FirmKnowledgeHit = {
+  workspace: string;
+  workspaceId: string;
+  document: string;
+  docId: string;
+  pages: string;
+  score: number;
+  snippet: string;
+};
+
+/**
+ * Search the user's knowledge-base workspaces (uploaded, OCR'd document sets:
+ * working sets, deposition sets, review sets). Hybrid pgvector + BM25 search
+ * with rerank per workspace; the newest ready workspaces are searched when no
+ * workspace is named. Access is scoped by the caller's principal throughout.
+ */
+export async function searchFirmKnowledge(
+  principal: string,
+  input: { query: string; workspace?: string; topK?: number; signal?: AbortSignal },
+): Promise<{ hits: FirmKnowledgeHit[]; searched: string[]; available: string[] }> {
+  const query = String(input.query ?? "").trim();
+  if (!query) throw new OfficeToolError(422, "query is required.");
+  const { listWorkspaces, getWorkspace } = await import("@/lib/kb/workspace.server");
+  const { searchKb } = await import("@/lib/kb/search.server");
+  const all = (await listWorkspaces(principal)).filter((w) => w.status === "ready" && w.docCount > 0);
+  const wanted = String(input.workspace ?? "").trim().toLowerCase();
+  const chosen = wanted
+    ? all.filter((w) => w.itemId === input.workspace || w.name.toLowerCase().includes(wanted))
+    : all.slice(0, 6);
+  const topK = Math.min(Math.max(1, input.topK ?? 10), 30);
+  const hits: FirmKnowledgeHit[] = [];
+  await Promise.all(
+    chosen.map(async (w) => {
+      const detail = await getWorkspace(principal, w.itemId).catch(() => null);
+      if (!detail?.kbWorkspaceId) return;
+      const names = new Map(detail.docs.map((d) => [d.docId, d.fileName]));
+      const found = await searchKb(principal, {
+        workspaceId: detail.kbWorkspaceId,
+        surface: w.surface,
+        query,
+        topK,
+        ...(input.signal ? { signal: input.signal } : {}),
+      }).catch(() => []);
+      for (const h of found) {
+        hits.push({
+          workspace: w.name,
+          workspaceId: w.itemId,
+          document: names.get(h.doc_id) ?? h.doc_id,
+          docId: h.doc_id,
+          pages:
+            h.page_start && h.page_end && h.page_end !== h.page_start
+              ? `${h.page_start}-${h.page_end}`
+              : String(h.page_start ?? "?"),
+          score: h.score,
+          snippet: h.content.replace(/\s+/g, " ").trim().slice(0, 1200),
+        });
+      }
+    }),
+  );
+  hits.sort((a, b) => b.score - a.score);
+  return { hits: hits.slice(0, topK), searched: chosen.map((w) => w.name), available: all.map((w) => w.name) };
+}
+
+export type LibraryHit = OfficeDocSummary & { url: string };
+
+/** Route that opens a Library document in its editor. */
+export function officeDocUrl(doc: Pick<OfficeDocSummary, "kind" | "draftId">): string {
+  return doc.kind === "pptx"
+    ? `/office/slides/${doc.draftId}`
+    : doc.kind === "xlsx"
+      ? `/office/sheets/${doc.draftId}`
+      : `/office/drafts/${doc.draftId}`;
+}
+
+/** Find documents in the user's Library by name (all kinds or one kind). */
+export async function searchLibrary(
+  principal: string,
+  input: { query?: string; kind?: string; limit?: number },
+): Promise<LibraryHit[]> {
+  const { listOfficeDocs } = await import("./office.server");
+  const kind = input.kind === "docx" || input.kind === "xlsx" || input.kind === "pptx" ? input.kind : undefined;
+  const docs = await listOfficeDocs(principal, kind);
+  const terms = String(input.query ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  const scored = docs
+    .map((d) => {
+      const name = d.name.toLowerCase();
+      const score = terms.length ? terms.reduce((n, t) => n + (name.includes(t) ? 1 : 0), 0) : 1;
+      return { d, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || (a.d.updatedAt < b.d.updatedAt ? 1 : -1))
+    .slice(0, Math.min(Math.max(1, input.limit ?? 20), 50));
+  return scored.map(({ d }) => ({ ...d, url: officeDocUrl(d) }));
+}
+
 // --- Citations ------------------------------------------------------------------------------------------
 
 export async function verifyOfficeCitations(text: string): Promise<string> {
@@ -261,8 +583,8 @@ export async function verifyOfficeCitations(text: string): Promise<string> {
 
 // --- Web page -------------------------------------------------------------------------------------------
 
-export async function readOfficePage(url: string, maxChars = 8000): Promise<string> {
-  const page = await fetchPage(String(url ?? ""), { maxChars: Math.min(Math.max(1000, maxChars), 20_000), timeoutMs: 20_000 });
+export async function readOfficePage(url: string, maxChars = 12_000): Promise<string> {
+  const page = await fetchPage(String(url ?? ""), { maxChars: Math.min(Math.max(1000, maxChars), 60_000), timeoutMs: 25_000 });
   const head = [`Title: ${page.title || "(untitled)"}`, `URL: ${page.finalUrl || page.url}`];
   if (page.note) head.push(`Note: ${page.note}`);
   if (page.truncated) head.push("Note: the page was longer than the limit; this is the beginning.");

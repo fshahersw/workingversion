@@ -247,9 +247,9 @@ export interface SheetsSkillDeps {
   createDocument?(request: CreateDocumentToolRequest): Promise<CreateDocumentToolOutcome>
 }
 
-const MAX_READ_ADDRESSES = 100
+const MAX_READ_ADDRESSES = 400
 /** Max cells per streamed block; the App's ensureRangeLoaded enforces it too. */
-export const MAX_READ_RANGE_CELLS = 2000
+export const MAX_READ_RANGE_CELLS = 8000
 const MAX_AGGREGATE_CELLS = 1_000_000
 const MAX_AGGREGATE_TOP_VALUES = 50
 const DEFAULT_AGGREGATE_TOP_VALUES = 10
@@ -257,8 +257,8 @@ const DEFAULT_AGGREGATE_TOP_VALUES = 10
 const MAX_READBACK_FORMULAS = 10
 /** Read-back after write: wait time (ms) for Univer's async formula recalc */
 const FORMULA_RECALC_DELAY_MS = 300
-const MAX_READ_FORMAT_CELLS = 200
-const MAX_FIND_RESULTS = 200
+const MAX_READ_FORMAT_CELLS = 800
+const MAX_FIND_RESULTS = 500
 const DEFAULT_FIND_RESULTS = 50
 
 export const WORKBOOK_TOOLS: AgentToolDef[] = [

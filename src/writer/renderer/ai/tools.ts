@@ -2,8 +2,9 @@ import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { ChartDisplay, CommentInfo, NewChart } from '@genoffice/docx-engine'
 import type { AgentToolCall, AgentToolDef, CreateDocumentType } from '../../shared/ipc'
-import type { ToolDisplay } from '@genoffice/agent-core'
+import type { AgentImage, ToolDisplay } from '@genoffice/agent-core'
 import { createPlatformSkill } from '@/office/shared/platform-skill'
+import { captureElement } from '@/office/shared/capture'
 import { getPlatformImage, isPlatformImage } from '@/office/shared/image-store'
 import { t } from '../i18n/locale'
 import { executeCommands, type Command, type CommandEnvelope } from './commands'
@@ -30,9 +31,24 @@ import {
  * into three safe primitives plus the deterministic command engine.
  */
 
-const READ_MAX_CHARS = 24_000
+const READ_MAX_CHARS = 60_000
 
 export const AGENT_TOOLS: AgentToolDef[] = [
+  {
+    name: 'view_page',
+    readOnly: true,
+    description:
+      'Capture a rendering of the document as it looks on screen (PNG) so you can check layout, fonts, tables, alignment and spacing visually. Optionally limit the capture to a block range; without a range the capture starts at the top of the document. Use after formatting edits to verify the result, or when the user asks about how something looks. The image is attached to the result.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        startBlockIndex: { type: 'integer', description: 'first block to include (0-based)' },
+        endBlockIndex: { type: 'integer', description: 'last block to include (inclusive)' },
+        scale: { type: 'number', description: 'render scale 0.5-2, default 1.25' },
+      },
+      required: [],
+    },
+  },
   {
     name: 'get_document_context',
     readOnly: true,
@@ -333,9 +349,49 @@ export const AGENT_TOOLS: AgentToolDef[] = [
 // Graphviz/Mermaid diagrams, citation verification, page reading, firm guides,
 // clarification card). generate_image and create_document keep the Writer's own
 // definitions above and are routed to the platform in executeAsyncTool.
+/** Editor the current tool call targets; set by executeTool before platform tools run. */
+let activeEditor: Editor | null = null
+let activeNumIds: NumIds | null = null
+let activeTrack: AiTrack | undefined
+
 const platformSkill = createPlatformSkill({
   app: 'writer',
   exclude: ['generate_image', 'create_document'],
+  templates: {
+    apply: async (payload, template, input) => {
+      const editor = activeEditor
+      if (!editor) return fail(t('aiSumInsertContent'), 'the editor is not available')
+      if (payload.format !== 'html') return fail(t('aiSumInsertContent'), 'this template is not a Writer template')
+      const echo = toolEchoError(payload.html)
+      if (echo) return fail(t('aiSumInsertContent'), echo)
+      let nodes: ReturnType<typeof parseHtmlFragment>
+      try {
+        nodes = parseHtmlFragment(payload.html, activeNumIds ?? { bullet: null, ordered: null })
+      } catch (e) {
+        return fail(t('aiSumInsertContent'), e instanceof Error ? e.message : String(e))
+      }
+      if (!nodes.length) return fail(t('aiSumInsertContent'), 'the template produced no content blocks')
+      const count = editor.state.doc.childCount
+      if (input['replace'] === true || isBlankDocument(editor)) {
+        replaceBlockRange(editor, 0, count - 1, nodes, activeTrack)
+      } else {
+        insertBlocksAfter(editor, count - 1, nodes, activeTrack)
+      }
+      markDocSeen(editor)
+      return {
+        output: `Applied template "${template.name}" (${nodes.length} blocks). Placeholders are written as [Bracketed Labels]; call get_document_context, then fill them from the user's facts with replace_blocks or apply_commands (find & replace).`,
+        mutated: true,
+        summary: t('aiSumInsertedBlocks', { count: nodes.length }),
+      }
+    },
+    capture: async () => {
+      const editor = activeEditor
+      if (!editor) throw new Error('the editor is not available')
+      const html = serializeRangeToHtml(editor, 0, editor.state.doc.childCount - 1)
+      if (!html.trim()) throw new Error('the document is empty')
+      return { format: 'html', html }
+    },
+  },
 })
 AGENT_TOOLS.push(...platformSkill.tools)
 export const PLATFORM_SYSTEM_PROMPT = platformSkill.systemPrompt
@@ -387,6 +443,8 @@ export interface ToolExecution {
   summary: string
   /** UI-only side channel (image thumbnails, links); never sent to the model */
   display?: ToolDisplay
+  /** images the model should look at (captures, generated pictures) */
+  images?: AgentImage[]
 }
 
 const fail = (summary: string, output: string): ToolExecution => ({
@@ -533,8 +591,11 @@ async function executeAsyncTool(
       }
     }
     case 'insert_image': {
-      const url = String(call.input.url ?? '')
-      if (!/^https?:\/\//.test(url)) return fail(t('aiSumInsertImage'), 'invalid url')
+      const url = String(call.input.url ?? '').trim()
+      // Accepts a direct http(s) URL or a platform-image:<id> handle from
+      // generate_image / render_diagram / run_python / edit_image.
+      if (!/^https?:\/\//.test(url) && !isPlatformImage(url))
+        return fail(t('aiSumInsertImage'), 'url must be an http(s) URL or a platform-image:<id> handle')
       return insertImageFromUrl(editor, url, Number(call.input.maxWidthPx) || 480, signal, {
         failLabel: t('aiSumInsertImage'),
         doneLabel: t('aiSumInsertWebImage'),
@@ -733,8 +794,12 @@ export function executeTool(
   hf?: AiHeaderFooterAccess,
 ): ToolExecution | Promise<ToolExecution> {
   const scope = frozen && frozen.doc === editor.state.doc ? frozen.scope : null
+  activeEditor = editor
+  activeNumIds = numIds
+  activeTrack = track
   const staleSummary = INDEX_WRITE_SUMMARIES[call.name]
   if (staleSummary && editedExternally(editor)) return fail(staleSummary(), STALE_DOC_ERROR)
+  if (call.name === 'view_page') return viewPage(editor, call)
   const settle = (exec: ToolExecution): ToolExecution => {
     const readsDoc = call.name === 'get_document_context' || call.name === 'read_blocks'
     if (exec.mutated || (readsDoc && !exec.isError)) markDocSeen(editor)
@@ -1143,6 +1208,51 @@ function executeSyncTool(
 
     default:
       return fail(call.name, `unknown tool: ${call.name}`)
+  }
+}
+
+/** Render the document (or a block range) to a PNG the model can look at. */
+async function viewPage(editor: Editor, call: AgentToolCall): Promise<ToolExecution> {
+  const root = editor.view.dom as HTMLElement
+  const count = editor.state.doc.childCount
+  let clip: { x: number; y: number; width: number; height: number } | undefined
+  let label = 'the document from the top'
+  const hasRange = call.input.startBlockIndex !== undefined || call.input.endBlockIndex !== undefined
+  if (hasRange) {
+    const range = validRange(
+      editor,
+      call.input.startBlockIndex ?? 0,
+      call.input.endBlockIndex ?? call.input.startBlockIndex ?? 0,
+    )
+    if (!range) return fail(t('aiSumReadBlocks'), rangeError(editor))
+    const rootRect = root.getBoundingClientRect()
+    const first = editor.view.nodeDOM(blockRangePositions(editor, range.start, range.start).from) as HTMLElement | null
+    const last = editor.view.nodeDOM(blockRangePositions(editor, range.end, range.end).from) as HTMLElement | null
+    if (first && last && first.getBoundingClientRect && last.getBoundingClientRect) {
+      const a = first.getBoundingClientRect()
+      const b = last.getBoundingClientRect()
+      clip = {
+        x: 0,
+        y: Math.max(0, a.top - rootRect.top - 8),
+        width: rootRect.width,
+        height: Math.max(40, b.bottom - a.top + 16),
+      }
+      label = `blocks ${range.start}-${range.end}`
+    }
+  }
+  try {
+    const scaleIn = Number(call.input.scale)
+    const scale = Number.isFinite(scaleIn) && scaleIn > 0 ? Math.min(2, Math.max(0.5, scaleIn)) : 1.25
+    const shot = await captureElement(root, { clip, scale, maxHeightCss: 2400 })
+    return {
+      output: `Captured ${label} (${shot.width}x${shot.height}px${shot.truncated ? ', cut at the capture height limit; pass a block range for more' : ''}; the document has ${count} blocks). Inspect the attached image.`,
+      mutated: false,
+      summary: t('aiSumReadDocContext'),
+      images: [{ base64: shot.base64, mime: 'image/png' }],
+      display: { kind: 'images', items: [{ url: `data:image/png;base64,${shot.base64}`, title: `View: ${label}` }] },
+    }
+  } catch (e) {
+    return fail(t('aiSumReadDocContext'), `view_page failed: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
 

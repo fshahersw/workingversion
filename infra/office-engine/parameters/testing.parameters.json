@@ -13,7 +13,7 @@
   { "ParameterKey": "AssignPublicIp", "ParameterValue": "ENABLED" },
   { "ParameterKey": "AlbCertificateArn", "ParameterValue": "" },
   { "ParameterKey": "CloudFrontPrefixListId", "ParameterValue": "pl-3b927c52" },
-  { "ParameterKey": "PlatformUrl", "ParameterValue": "https://d1f0twgeed7iq3.cloudfront.net" },
+  { "ParameterKey": "PlatformUrl", "ParameterValue": "https://testing.seegerweiss.com" },
   {
     "ParameterKey": "ImageUri",
     "ParameterValue": "475976462949.dkr.ecr.us-east-1.amazonaws.com/litai-testing-office-engine:v1"

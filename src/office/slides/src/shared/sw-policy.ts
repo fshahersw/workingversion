@@ -9,9 +9,11 @@ export interface WriterStatus {
 // Platform tools (src/office/shared/platform-skill.ts) change nothing in the
 // deck, so they are available in every mode; placing an image or creating a
 // separate document is an edit. web_search runs through the platform.
-const PLATFORM_READ = ['run_python','verify_citations','fetch_page','load_firm_guide','ask_clarification','render_diagram','generate_image','web_search']
-const READ = ['read_slide','load_guide','read_attachment','list_slide_templates','audit_layout','list_style_templates',...PLATFORM_READ]
-const WRITE = [...READ,'execute_slide_script','add_slide','edit_table_style','edit_chart','apply_ops','save_style_template','create_presentation','insert_web_image','replace_image','create_document']
+// Mirrors src/lib/writer/inference.server.ts (the server enforces).
+const PLATFORM_READ = ['run_python','verify_citations','fetch_page','load_firm_guide','ask_clarification','render_diagram','generate_image','edit_image','search_firm_knowledge','search_library','web_search','image_search']
+const READ = ['read_slide','load_guide','read_attachment','list_slide_templates','audit_layout','list_style_templates','view_slide','list_templates',...PLATFORM_READ]
+const WRITE = [...READ,'execute_slide_script','add_slide','edit_table_style','edit_chart','apply_ops','design_slide_html','save_style_template','create_presentation','insert_web_image','replace_image','create_document','apply_template','save_template']
+const RESEARCH = ['web_search','fetch_page','search_firm_knowledge','search_library','verify_citations','run_python','ask_clarification']
 export function modeName(value: unknown): WriterMode {
   return value === 'ask' || value === 'review' || value === 'research' ? value : 'write'
 }
@@ -21,7 +23,7 @@ export function publicPreferences(value: unknown): WriterPreferences {
   return {swMode: modeName(x.swMode), swProfile: profileName(x.swProfile)}
 }
 export function allowedTools(mode: WriterMode): string[] {
-  return mode === 'research' ? [] : mode === 'write' ? [...WRITE] : [...READ]
+  return mode === 'research' ? [...RESEARCH] : mode === 'write' ? [...WRITE] : [...READ]
 }
 export function filterTools<T extends {name: string}>(tools: T[], mode: WriterMode): T[] {
   const allowed = new Set(allowedTools(mode)); return tools.filter(t => allowed.has(t.name))

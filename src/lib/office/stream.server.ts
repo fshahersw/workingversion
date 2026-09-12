@@ -1,8 +1,8 @@
 // One model turn for an Office editor's browser-side assistant loop (server-only).
 // Shared by /api/writer/stream (app = writer) and /api/office/stream (app from
 // the body). Body: { requestId, mode, profile, system, messages, tools }.
-// Streams `data: {requestId, type, ...}` lines (delta | reasoning | tool-call |
-// done | error | ping), the chunk protocol the editors' transports read. Tool
+// Streams `data: {requestId, type, ...}` lines (delta | reasoning | status |
+// tool-call | done | error | ping), the chunk protocol the editors' transports read. Tool
 // execution happens in the browser; this only filters the tool set to the
 // caller's app and mode and relays the model.
 import {
@@ -16,7 +16,76 @@ import {
 } from "@/lib/writer/inference.server";
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,100}$/;
-const TURN_TIMEOUT_MS = 180_000;
+/**
+ * Per-turn ceiling. A 64k-token redraft on the main tier can legitimately run
+ * several minutes; the Lambda/API Gateway window is 300 s, so stop a little
+ * under it and let the browser loop continue on the next round.
+ */
+const TURN_TIMEOUT_MS = 280_000;
+
+/**
+ * One structured line per model turn, in CloudWatch embedded-metric format so
+ * the dashboards get TTFB, tokens and cache hit rate per app and tier without
+ * a metrics client. Disable with OFFICE_METRICS=off.
+ */
+function emitTurnMetric(fields: {
+  app: string;
+  mode: string;
+  profile: string;
+  tier: string;
+  model: string;
+  taskClass: string;
+  ttfbMs: number;
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  toolCalls: number;
+  stopReason: string;
+  outcome: "ok" | "error" | "cancelled";
+}): void {
+  if ((process.env["OFFICE_METRICS"] ?? "on").toLowerCase() === "off") return;
+  const namespace = process.env["OFFICE_METRICS_NAMESPACE"] || "LitAI/Office";
+  const line = {
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [
+        {
+          Namespace: namespace,
+          Dimensions: [["App", "Tier"], ["App"]],
+          Metrics: [
+            { Name: "TurnTtfbMs", Unit: "Milliseconds" },
+            { Name: "TurnDurationMs", Unit: "Milliseconds" },
+            { Name: "InputTokens", Unit: "Count" },
+            { Name: "OutputTokens", Unit: "Count" },
+            { Name: "CacheReadTokens", Unit: "Count" },
+            { Name: "ToolCalls", Unit: "Count" },
+            { Name: "TurnErrors", Unit: "Count" },
+          ],
+        },
+      ],
+    },
+    App: fields.app,
+    Tier: fields.tier,
+    TurnTtfbMs: fields.ttfbMs,
+    TurnDurationMs: fields.durationMs,
+    InputTokens: fields.inputTokens,
+    OutputTokens: fields.outputTokens,
+    CacheReadTokens: fields.cacheReadTokens,
+    ToolCalls: fields.toolCalls,
+    TurnErrors: fields.outcome === "error" ? 1 : 0,
+    mode: fields.mode,
+    profile: fields.profile,
+    model: fields.model,
+    taskClass: fields.taskClass,
+    cacheWriteTokens: fields.cacheWriteTokens,
+    stopReason: fields.stopReason,
+    outcome: fields.outcome,
+    kind: "office-turn",
+  };
+  console.log(JSON.stringify(line));
+}
 
 export async function handleOfficeStream(
   request: Request,
@@ -49,12 +118,8 @@ export async function handleOfficeStream(
   if (!isWriterMode(mode) || !isWriterProfile(profile)) {
     return Response.json({ error: "Invalid assistant mode or depth." }, { status: 422 });
   }
-  if (mode === "research") {
-    return Response.json(
-      { error: "Public research mode is not enabled; use web search inside Edit or Ask." },
-      { status: 501 },
-    );
-  }
+  // Research mode runs the same loop with research-only tools (web search,
+  // page reading, firm knowledge, library, citations); no document tools.
   const allowed = allowedToolNames(mode, app);
   const tools = conversation.tools ?? [];
   if (tools.some((t) => !t || typeof t.name !== "string" || !allowed.has(t.name))) {
@@ -80,9 +145,23 @@ export async function handleOfficeStream(
       const heartbeat = setInterval(() => send({ type: "ping" }), 10_000);
       const deadline = setTimeout(() => controller.abort(), TURN_TIMEOUT_MS);
       let stopReason = "end_turn";
+      const startedAt = Date.now();
+      const metric = {
+        tier: "main",
+        model: "",
+        taskClass: "",
+        ttfbMs: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        toolCalls: 0,
+      };
+      let outcome: "ok" | "error" | "cancelled" = "ok";
       try {
         await streamWriterTurn(
           {
+            app,
             profile,
             system: conversation.system,
             messages: conversation.messages,
@@ -92,16 +171,30 @@ export async function handleOfficeStream(
           {
             onDelta: (text) => send({ type: "delta", text }),
             onReasoning: (text) => send({ type: "reasoning", text }),
-            onToolCall: (toolCall) => send({ type: "tool-call", toolCall }),
+            onToolCall: (toolCall) => {
+              metric.toolCalls++;
+              send({ type: "tool-call", toolCall });
+            },
             onStopReason: (reason) => {
               stopReason = reason;
             },
+            onStatus: (status) => {
+              metric.tier = status.tier;
+              metric.model = status.model;
+              metric.taskClass = status.taskClass ?? "";
+              send({ type: "status", text: status.text, model: status.model, tier: status.tier });
+            },
             onUsage: (usage) => {
+              metric.ttfbMs = usage.ttfbMs;
+              metric.inputTokens = usage.inputTokens;
+              metric.outputTokens = usage.outputTokens;
+              metric.cacheReadTokens = usage.cacheReadTokens;
+              metric.cacheWriteTokens = usage.cacheWriteTokens;
               // Server-side only: confirms prompt-cache hits per round without
               // exposing accounting to the renderer.
               if (process.env["OFFICE_LOG_USAGE"] === "1") {
                 console.info(
-                  `[office:${String(app)}] tokens in=${usage.inputTokens} out=${usage.outputTokens} cache_read=${usage.cacheReadTokens} cache_write=${usage.cacheWriteTokens}`,
+                  `[office:${String(app)}] ${usage.tier}/${usage.model} ttfb=${usage.ttfbMs}ms tokens in=${usage.inputTokens} out=${usage.outputTokens} cache_read=${usage.cacheReadTokens} cache_write=${usage.cacheWriteTokens}`,
                 );
               }
             },
@@ -110,6 +203,7 @@ export async function handleOfficeStream(
         send({ type: "done", stopReason });
       } catch (err) {
         const aborted = controller.signal.aborted || (err as Error)?.name === "AbortError";
+        outcome = aborted ? "cancelled" : "error";
         const status = Number((err as { status?: number })?.status);
         send(
           aborted
@@ -127,6 +221,15 @@ export async function handleOfficeStream(
       } finally {
         clearInterval(heartbeat);
         clearTimeout(deadline);
+        emitTurnMetric({
+          app,
+          mode,
+          profile,
+          ...metric,
+          durationMs: Date.now() - startedAt,
+          stopReason,
+          outcome,
+        });
         request.signal.removeEventListener("abort", onAbort);
         closed = true;
         try {

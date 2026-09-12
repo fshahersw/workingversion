@@ -80,6 +80,10 @@ Metadata:
           - CorpusUrl
           - CorpusPublishableKey
           - CorpusServiceSecretArn
+          - OfficeModel
+          - OfficeFastModel
+          - OfficeInspectModel
+          - OfficeTiering
       - Label:
           default: API, edge, and WAF controls
         Parameters:
@@ -393,6 +397,41 @@ Parameters:
       NCBI_API_KEY and OPENFDA_API_KEY may be present and empty). CloudFormation
       resolves each key without accepting credentials as plaintext parameters.
 
+  OfficeModel:
+    Type: String
+    Default: us.anthropic.claude-sonnet-5
+    MinLength: 1
+    MaxLength: 128
+    Description: >
+      Office assistant main tier (drafting, analysis, thorough runs). Bedrock
+      model or inference-profile id; must be in the foundation policy's
+      Bedrock allow-list.
+
+  OfficeFastModel:
+    Type: String
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    MinLength: 1
+    MaxLength: 128
+    Description: >
+      Office assistant fast tier (short edits, routing, vision inspection).
+      Must accept image content blocks.
+
+  OfficeInspectModel:
+    Type: String
+    Default: nvidia.nemotron-super-3-120b
+    MaxLength: 128
+    Description: >
+      Optional text-only inspect/format tier (e.g. nvidia.nemotron-super-3-120b).
+      Empty routes those rounds to the fast tier.
+
+  OfficeTiering:
+    Type: String
+    Default: "on"
+    AllowedValues:
+      - "on"
+      - "off"
+    Description: off sends every Office assistant turn to the main tier.
+
   ApiStageName:
     Type: String
     Default: app
@@ -590,6 +629,10 @@ Conditions:
       - !Equals
         - !Ref KbIngestQueueUrl
         - ""
+  HasOfficeInspectModel: !Not
+    - !Equals
+      - !Ref OfficeInspectModel
+      - ""
   UseBlueDeployment: !Equals
     - !Ref ApiDeploymentSlot
     - blue
@@ -704,6 +747,29 @@ Resources:
                     - secretsmanager:GetSecretValue
                   Resource: !Ref OfficeEngineJwtSecretArn
                 - !Ref AWS::NoValue
+        - PolicyName: office-image-edit
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: OfficeImageEditModels
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-remove-background-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-search-replace-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-search-recolor-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-erase-object-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-inpaint-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-outpaint-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-style-guide-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-style-transfer-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-control-sketch-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-image-control-structure-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-fast-upscale-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-conservative-upscale-v1:0"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/stability.stable-creative-upscale-v1:0"
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -787,6 +853,11 @@ Resources:
             - !Ref KbIngestQueueUrl
             - !Ref AWS::NoValue
           BEDROCK_REGION: !Ref BedrockRegion
+          # Office assistant model tiers (src/lib/writer/inference.server.ts).
+          OFFICE_MODEL: !Ref OfficeModel
+          OFFICE_FAST_MODEL: !Ref OfficeFastModel
+          OFFICE_INSPECT_MODEL: !If [HasOfficeInspectModel, !Ref OfficeInspectModel, !Ref AWS::NoValue]
+          OFFICE_TIERING: !Ref OfficeTiering
           BDA_PROJECT_ARN: !Ref BdaProjectArn
           BDA_PROFILE_ARN: !Ref BdaProfileArn
           AGENTCORE_SEARCH_URL: !Ref AgentCoreGatewayUrl
