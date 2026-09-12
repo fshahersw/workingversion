@@ -4,15 +4,15 @@ Parameters:
   NamePrefix:
     Type: String
     AllowedPattern: "[a-zA-Z][a-zA-Z0-9-]{1,40}"
-  WorkerRoleArn:
-    Type: String
-    Description: Reviewed execution role with DynamoDB/S3/KMS, approved model/tool and CloudWatch permissions.
   ApplicationRoleName:
     Type: String
     Description: Existing app role name; receives only queue delivery and transactional condition-check permissions here.
-  WorkerRoleName:
+  AppAccessPolicyArn:
     Type: String
-    Description: Role name corresponding to WorkerRoleArn.
+    Description: Reviewed app access managed-policy ARN (Dynamo/S3/KMS/Bedrock/AgentCore), attached to the dedicated worker role created by this stack.
+  KbAccessPolicyArn:
+    Type: String
+    Description: KB access managed-policy ARN, attached to the dedicated worker role.
   TableName:
     Type: String
   CognitoUserPoolId:
@@ -63,7 +63,7 @@ Resources:
     Type: AWS::IAM::Policy
     Properties:
       PolicyName: !Sub "${NamePrefix}-workflow-queue"
-      Roles: [!Ref ApplicationRoleName, !Ref WorkerRoleName]
+      Roles: [!Ref ApplicationRoleName, !Ref WorkerRole]
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -77,7 +77,7 @@ Resources:
     Type: AWS::IAM::Policy
     Properties:
       PolicyName: !Sub "${NamePrefix}-workflow-consume"
-      Roles: [!Ref WorkerRoleName]
+      Roles: [!Ref WorkerRole]
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -106,6 +106,33 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/${NamePrefix}-workflows-scheduler"
       RetentionInDays: 90
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-workflows-worker"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      # Dedicated worker role (separate from the app role). Attaches the same
+      # reviewed access policies the worker code needs — Dynamo/S3/KMS, Bedrock
+      # invoke/rerank/data-automation, AgentCore gateway + code interpreter — plus
+      # scoped log writes. SQS receive/delete and Cognito read are added by the
+      # Consume/Queue policies above. (Least-privilege tightening below the app's
+      # grant set is a documented follow-up.)
+      ManagedPolicyArns:
+        - !Ref AppAccessPolicyArn
+        - !Ref KbAccessPolicyArn
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: [!GetAtt WorkerLog.Arn, !GetAtt SchedulerLog.Arn]
   Worker:
     Type: AWS::Lambda::Function
     DependsOn: [QueuePermissions, ConsumePermissions, WorkerLog]
@@ -113,7 +140,7 @@ Resources:
       FunctionName: !Sub "${NamePrefix}-workflows-worker"
       Runtime: nodejs22.x
       Handler: worker.handler
-      Role: !Ref WorkerRoleArn
+      Role: !GetAtt WorkerRole.Arn
       Timeout: 900
       MemorySize: 2048
       ReservedConcurrentExecutions: 4
@@ -144,7 +171,7 @@ Resources:
       FunctionName: !Sub "${NamePrefix}-workflows-scheduler"
       Runtime: nodejs22.x
       Handler: scheduler.handler
-      Role: !Ref WorkerRoleArn
+      Role: !GetAtt WorkerRole.Arn
       Timeout: 300
       MemorySize: 512
       ReservedConcurrentExecutions: 1

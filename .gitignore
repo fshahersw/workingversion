@@ -66,3 +66,4 @@ scripts/pipeline/downloads/
 /quickstart.py
 /AGENT-HANDOFF.md
 /.bedrock-pol-*.json
+/.artifacts/
