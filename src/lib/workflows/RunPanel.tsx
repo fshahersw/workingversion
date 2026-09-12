@@ -1,7 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useRef, useState } from "react";
 import { definition } from "./catalog";
-import { displayValue } from "./engine";
+import { OutputView } from "./OutputView";
 import { SourcePicker } from "./SourcePicker";
 import { downloadArtifact, downloadBlob, readSourceBatch } from "./files";
 import { Badge, Button, Icon, IconButton, Notice, Tile, statusTone, timeLabel } from "./ui";
@@ -436,7 +436,10 @@ export function RunPanel(props: Props) {
                                 <Icon name="ChevronDown" size={14} />
                               </summary>
                               {result.output !== undefined && (
-                                <pre className="swf-result-json">{displayValue(result.output)}</pre>
+                                <OutputView
+                                  output={result.output}
+                                  artifacts={run.artifacts.filter((a) => a.nodeId === n.id)}
+                                />
                               )}
                               {result.error && <Notice tone="error">{result.error}</Notice>}
                               {result.output === undefined && !result.error && (
@@ -496,7 +499,11 @@ export function RunPanel(props: Props) {
                             All outputs
                           </Button>
                           <h3>{preview.name}</h3>
-                          <pre>{preview.content}</pre>
+                          {preview.format === "csv" ? (
+                            <pre>{preview.content}</pre>
+                          ) : (
+                            <OutputView output={preview.content} />
+                          )}
                           <Button
                             icon="Download"
                             variant="primary"
@@ -543,14 +550,28 @@ export function RunPanel(props: Props) {
                             </div>
                           )}
                           <h4>Final response</h4>
-                          <pre className="swf-result-json">
-                            {displayValue(
-                              Object.values(run.results)
-                                .reverse()
-                                .find((r) => r.status === "completed" && r.output)?.output ||
-                                "The response will appear when a step completes.",
-                            )}
-                          </pre>
+                          {(() => {
+                            // Prefer the graph's terminal Response node; fall back to
+                            // the last completed step so branching graphs don't surface
+                            // an arbitrary intermediate result.
+                            const responseNode = run.graph.nodes.find(
+                              (n) =>
+                                n.data.kind === "response" &&
+                                run.results[n.id]?.status === "completed",
+                            );
+                            const finalOutput = responseNode
+                              ? run.results[responseNode.id]?.output
+                              : Object.values(run.results)
+                                  .reverse()
+                                  .find((r) => r.status === "completed" && r.output)?.output;
+                            return finalOutput !== undefined ? (
+                              <OutputView output={finalOutput} artifacts={run.artifacts} />
+                            ) : (
+                              <p className="swf-body-muted">
+                                The response will appear when a step completes.
+                              </p>
+                            );
+                          })()}
                         </>
                       )}
                     </>

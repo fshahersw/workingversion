@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { bedrockChat, userText } from "../agents/bedrock.server";
-import { loadResearchModel } from "../agents/research-models";
+import { loadResearchModel, isClaudeModel } from "../agents/research-models";
 import { SourceBook } from "../agents/tools.server";
 import { executeResearchTool } from "../agents/research-tools.server";
 import { fetchPage } from "../agents/fetch-page.server";
@@ -47,7 +47,7 @@ const SYSTEM =
 
 export function productionAdapter(user: Principal, previousRequests = 0) {
   const usage = { input: 0, output: 0, requests: 0 };
-  async function chat(system: string, prompt: string, signal?: AbortSignal) {
+  async function chat(system: string, prompt: string, signal?: AbortSignal, maxTokens = 8192) {
     if (!process.env.BEDROCK_RESEARCH_MODEL?.trim())
       throw new WorkflowError(
         503,
@@ -63,11 +63,16 @@ export function productionAdapter(user: Principal, previousRequests = 0) {
         422,
         "This work exceeds the model-request budget (100 per step, 200 per run). Split the source set into identified batches.",
       );
+    const model = loadResearchModel();
     const answer = await bedrockChat({
-      model: loadResearchModel(),
+      model,
       system,
       messages: [userText(prompt)],
-      maxTokens: 8192,
+      maxTokens,
+      // Cache the stable SYSTEM+instructions prefix so the many per-chunk
+      // extraction calls re-read it cheaply. Claude-only on Bedrock Converse;
+      // gate so a non-Claude research model never 400s.
+      ...(isClaudeModel(model) ? { cache: true } : {}),
       signal,
     });
     usage.requests++;
@@ -91,6 +96,7 @@ export function productionAdapter(user: Principal, previousRequests = 0) {
           chunkCount: req.chunkCount,
         }),
         req.signal,
+        16384,
       );
       try {
         return findingSchema.parse(
@@ -169,6 +175,7 @@ export function productionAdapter(user: Principal, previousRequests = 0) {
                 evidence: report,
               }),
               ctx.signal,
+              32768,
             );
             return {
               ...result,
@@ -207,6 +214,7 @@ export function productionAdapter(user: Principal, previousRequests = 0) {
                 "Create a draft for professional review using the evidence. Retain exact source references and list unresolved gaps.",
             }),
             ctx.signal,
+            32768,
           );
           return {
             output: {

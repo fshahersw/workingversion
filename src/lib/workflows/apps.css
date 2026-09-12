@@ -665,6 +665,26 @@
   padding: 23px;
   background: var(--swf-white);
 }
+/* Rendered-markdown container for the report "Full report" tab and step/response
+   outputs. Unlike swf-report-draft it does not force pre-wrap/monospace, so the
+   markdown renderer's own block styling governs. */
+.swf-root .swf-report-md {
+  padding: 20px 23px;
+  background: var(--swf-white);
+  overflow-wrap: anywhere;
+}
+.swf-root .swf-output-md {
+  overflow-wrap: anywhere;
+}
+.swf-root .swf-output-raw {
+  margin-top: 10px;
+}
+.swf-root .swf-output-raw > summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--swf-muted);
+  user-select: none;
+}
 .swf-root .swf-report-notes {
   padding: 15px 18px;
   color: var(--swf-navy);

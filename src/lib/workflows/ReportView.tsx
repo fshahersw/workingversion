@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AnswerMarkdown } from "@/components/chat/AnswerMarkdown";
 import { downloadBlob, downloadReportDocument, reportDocumentBlob, saveToOffice } from "./files";
 import { Badge, Button, Icon, Notice } from "./ui";
 import { reportCsv } from "./recipes";
@@ -235,7 +236,9 @@ export function ReportView({ report }: { report: AnalysisReport; artifacts: Arti
           </div>
         </>
       ) : (
-        <pre className="swf-report-draft">{report.text}</pre>
+        <div className="swf-report-md">
+          <AnswerMarkdown text={report.text} onCite={() => {}} streaming={false} />
+        </div>
       )}
       {selected && (
         <aside className="swf-source-peek">
