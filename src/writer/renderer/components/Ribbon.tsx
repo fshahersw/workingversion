@@ -51,7 +51,7 @@ import { stepParagraphIndent } from '../editor/indent'
 import { formatNumber } from '../editor/numbering'
 import type { InkTool } from '../editor/ink'
 import type { RibbonFormatState } from './ribbon-format-state'
-import { TemplateGallery } from './TemplateGallery'
+import { TemplateGallery } from '@/office/shared/TemplateGallery'
 import { setSelectedColumnWidth } from '../editor/table-sizing'
 import {
   applyTablePreset,

@@ -3,26 +3,54 @@ import { useEffect, useRef, useState } from 'react'
 type TemplateItem = { id: string; name: string; category: string; source: string }
 
 /**
- * Ribbon dropdown that lists firm + user-saved document templates and applies
- * the picked one. It reuses the already-wired `apply_template` tool through a
- * natural-language preset (via `onPick` -> the assistant), so there is no new
- * tool surface and no allow-list change. Self-contained (own open state, fetch,
- * outside-click close, inline styles) to avoid touching the shared ribbon state.
+ * Shared ribbon dropdown that lists firm + user-saved templates and applies the
+ * picked one. Reuses the already-wired `apply_template` tool through a
+ * natural-language preset (via `onPick`) — no new tool surface, no allow-list
+ * change. Used by Writer, Slides (and Sheets) ribbons; `triggerClassName` lets
+ * each shell style the button natively.
+ *
+ * The popover is `position: fixed` and anchored to the button rect on open,
+ * because the ribbon body is `overflow-y: hidden` and would clip a normally
+ * flowed dropdown (same reason the built-in ribbon popovers are fixed +
+ * JS-anchored). Self-contained state; closes on outside click / scroll / resize.
  */
 export function TemplateGallery({
   kind,
   onPick,
   disabled,
+  triggerClassName = 'rb-big ai-entry',
+  label = 'Templates',
 }: {
   kind: 'docx' | 'xlsx' | 'pptx'
   onPick: (id: string) => void
   disabled?: boolean
+  triggerClassName?: string
+  label?: string
 }) {
   const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   const [items, setItems] = useState<TemplateItem[]>([])
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+
+  const PANEL_WIDTH = 260
+
+  const anchor = () => {
+    const r = rootRef.current?.getBoundingClientRect()
+    if (!r) return
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - PANEL_WIDTH - 8))
+    setPos({ top: Math.round(r.bottom + 4), left: Math.round(left) })
+  }
+
+  const toggle = () => {
+    if (open) {
+      setOpen(false)
+      return
+    }
+    anchor()
+    setOpen(true)
+  }
 
   // Fetch once, lazily, the first time the menu opens.
   useEffect(() => {
@@ -49,14 +77,21 @@ export function TemplateGallery({
     })()
   }, [open, loaded, loading, kind])
 
-  // Close on outside click.
+  // Close on outside click; close on scroll/resize (the fixed popover would detach).
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
     }
+    const onLeave = () => setOpen(false)
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
+    window.addEventListener('resize', onLeave)
+    window.addEventListener('scroll', onLeave, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('resize', onLeave)
+      window.removeEventListener('scroll', onLeave, true)
+    }
   }, [open])
 
   const grouped = items.reduce<Record<string, TemplateItem[]>>((acc, it) => {
@@ -68,12 +103,12 @@ export function TemplateGallery({
   return (
     <div ref={rootRef} style={{ position: 'relative', display: 'inline-flex' }}>
       <button
-        className="rb-big ai-entry"
+        className={triggerClassName}
         disabled={disabled}
         data-tip="Insert a firm template"
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
       >
         <span className="rb-big-icon">
           <span className="ai-feature-icon" aria-hidden="true">
@@ -92,26 +127,28 @@ export function TemplateGallery({
             </svg>
           </span>
         </span>
-        <span>Templates</span>
+        <span>{label}</span>
       </button>
-      {open && (
+      {open && pos && (
         <div
           role="menu"
-          data-rb-panel=""
           style={{
-            position: 'absolute',
-            top: '100%',
-            left: 0,
-            zIndex: 60,
-            minWidth: 248,
-            maxHeight: 360,
+            position: 'fixed',
+            top: pos.top,
+            left: pos.left,
+            zIndex: 2000,
+            width: PANEL_WIDTH,
+            maxHeight: 380,
             overflowY: 'auto',
-            background: 'var(--rb-menu-bg, #ffffff)',
-            border: '1px solid var(--rb-menu-border, #d5d7db)',
+            display: 'block',
+            background: 'var(--sw-white, #ffffff)',
+            color: 'var(--sw-ink, #1a1a1a)',
+            border: '1px solid var(--sw-line, #d5d7db)',
             borderRadius: 8,
-            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.16)',
+            boxShadow: '0 10px 30px rgba(0, 0, 0, 0.18)',
             padding: 6,
             textAlign: 'left',
+            font: "13px/1.4 'Segoe UI', Arial, sans-serif",
           }}
         >
           {loading && <div style={{ padding: '8px 10px', opacity: 0.7 }}>Loading…</div>}
@@ -139,6 +176,8 @@ export function TemplateGallery({
                     setOpen(false)
                     onPick(it.id)
                   }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--sw-subtle, #eef1f4)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}
                   style={{
                     display: 'block',
                     width: '100%',

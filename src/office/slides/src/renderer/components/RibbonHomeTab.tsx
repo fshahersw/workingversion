@@ -1,5 +1,6 @@
 /** Home tab of the slides ribbon. Extracted from Ribbon.tsx. */
 import { useState } from 'react'
+import { TemplateGallery } from '@/office/shared/TemplateGallery'
 import { platformShortcuts } from '@genoffice/i18n'
 import { ColorPicker, isSymbolFontFamily } from '@genoffice/ui'
 import { saveEditSelection } from '../TextEditOverlay'
@@ -236,6 +237,13 @@ export function RibbonHomeTab({ rb }: { rb: RibbonTabCtx }) {
           </span>
           <span>{t('aiFactCheckBtn')}</span>
         </button>
+        <TemplateGallery
+          kind="pptx"
+          disabled={!hasDoc}
+          onPick={(id) =>
+            onAiPreset(`Apply the firm template with id "${id}" to this deck, then stop.`)
+          }
+        />
       </Group>
       <div className="ribbon-sep" />
       <Group label={t('ribbonGroupClipboard')}>
