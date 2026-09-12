@@ -317,10 +317,28 @@ function extractTitle(html: string): string {
 function extractLinks(html: string, base: string): { href: string; text: string }[] {
   const out: { href: string; text: string }[] = [];
   const seen = new Set<string>();
-  const re = /<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) && out.length < 60) {
-    const raw = m[1].trim();
+  // Linear scan via indexOf. A single `<a ...>([\s\S]*?)</a>` regex backtracks
+  // O(n^2) on hostile bodies (many "<a " with no href/'>'/'</a>"), which can pin the
+  // CPU for a minute+ uninterruptibly. Here each byte is visited once: find the next
+  // "<a", find its ">", parse href from the bounded tag text, then take the link text
+  // up to the next "</a>".
+  const lower = html.toLowerCase();
+  let i = 0;
+  const hrefRe = /href\s*=\s*["']([^"']+)["']/i;
+  while (out.length < 60) {
+    const a = lower.indexOf("<a", i);
+    if (a === -1) break;
+    const gt = html.indexOf(">", a);
+    if (gt === -1) break; // no complete tag remains
+    const tag = html.slice(a, gt + 1);
+    i = gt + 1;
+    // Only real anchor tags: "<a>" or "<a " (avoid <article>, <aside>, etc.)
+    const after = tag.charCodeAt(2);
+    if (!(tag.length === 3 || after === 32 || after === 9 || after === 10 || after === 13 || after === 47))
+      continue;
+    const hrefMatch = hrefRe.exec(tag);
+    if (!hrefMatch) continue;
+    const raw = hrefMatch[1].trim();
     if (!raw || raw.startsWith("#") || raw.startsWith("javascript:") || raw.startsWith("mailto:")) continue;
     let href: string;
     try {
@@ -330,7 +348,9 @@ function extractLinks(html: string, base: string): { href: string; text: string 
     }
     if (!/^https?:/i.test(href) || seen.has(href)) continue;
     seen.add(href);
-    const text = decodeEntities(m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 120);
+    const close = lower.indexOf("</a>", i);
+    const inner = close === -1 ? "" : html.slice(i, close);
+    const text = decodeEntities(inner.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 120);
     out.push({ href, text });
   }
   return out;
@@ -338,7 +358,12 @@ function extractLinks(html: string, base: string): { href: string; text: string 
 
 /** Strip HTML to readable text, preserving block structure as line breaks. */
 function htmlToText(html: string): string {
-  let s = html;
+  // Bound the input to the region-strip regex below: its lazy `[\s\S]*?</\1>` and
+  // `[^>]*>` backtrack O(n^2) on hostile bodies (e.g. many "<script " with no close),
+  // which can otherwise pin the CPU for a minute+ uninterruptibly. Callers slice the
+  // returned text to maxChars anyway, so a large legitimate page keeps its leading
+  // content; only a pathological tail is dropped.
+  let s = html.length > 500_000 ? html.slice(0, 500_000) : html;
   // Drop non-content regions entirely.
   s = s.replace(/<(script|style|noscript|svg|head|nav|footer|header|form|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
   s = s.replace(/<!--[\s\S]*?-->/g, " ");

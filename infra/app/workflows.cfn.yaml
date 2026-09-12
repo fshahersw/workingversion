@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Additive Workflows queue and workers. Uses existing application storage and roles; never recreates the foundation.
+Parameters:
+  NamePrefix:
+    Type: String
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9-]{1,40}"
+  ApplicationRoleName:
+    Type: String
+    Description: Existing app role name; receives only queue delivery and transactional condition-check permissions here.
+  AppAccessPolicyArn:
+    Type: String
+    Description: Reviewed app access managed-policy ARN (Dynamo/S3/KMS/Bedrock/AgentCore), attached to the dedicated worker role created by this stack.
+  KbAccessPolicyArn:
+    Type: String
+    Description: KB access managed-policy ARN, attached to the dedicated worker role.
+  TableName:
+    Type: String
+  CognitoUserPoolId:
+    Type: String
+  DataBucket:
+    Type: String
+  ArtifactBucket:
+    Type: String
+  WorkerZipKey:
+    Type: String
+  SchedulerZipKey:
+    Type: String
+  BedrockModel:
+    Type: String
+    Description: Approved Bedrock research model or inference profile identifier.
+  Enabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  PythonInterpreterId:
+    Type: String
+    Default: ""
+    Description: Optional dedicated interpreter with network access disabled. Leave empty to disable Python.
+Conditions:
+  WorkflowsEnabled: !Equals [!Ref Enabled, "true"]
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "${NamePrefix}-workflows-dead"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+  Queue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: !Sub "${NamePrefix}-workflows"
+      VisibilityTimeout: 5400
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 5
+  QueuePermissions:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${NamePrefix}-workflow-queue"
+      Roles: [!Ref ApplicationRoleName, !Ref WorkerRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sqs:SendMessage
+            Resource: !GetAtt Queue.Arn
+          - Effect: Allow
+            Action: dynamodb:ConditionCheckItem
+            Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}"
+  ConsumePermissions:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${NamePrefix}-workflow-consume"
+      Roles: [!Ref WorkerRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              [cognito-idp:ListUsers, cognito-idp:AdminGetUser, cognito-idp:AdminListGroupsForUser]
+            Resource: !Sub "arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPoolId}"
+          - Effect: Allow
+            Action:
+              [
+                sqs:ReceiveMessage,
+                sqs:DeleteMessage,
+                sqs:GetQueueAttributes,
+                sqs:ChangeMessageVisibility,
+              ]
+            Resource: !GetAtt Queue.Arn
+  WorkerLog:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NamePrefix}-workflows-worker"
+      RetentionInDays: 90
+  SchedulerLog:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${NamePrefix}-workflows-scheduler"
+      RetentionInDays: 90
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-workflows-worker"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      # Dedicated worker role (separate from the app role). Attaches the same
+      # reviewed access policies the worker code needs — Dynamo/S3/KMS, Bedrock
+      # invoke/rerank/data-automation, AgentCore gateway + code interpreter — plus
+      # scoped log writes. SQS receive/delete and Cognito read are added by the
+      # Consume/Queue policies above. (Least-privilege tightening below the app's
+      # grant set is a documented follow-up.)
+      ManagedPolicyArns:
+        - !Ref AppAccessPolicyArn
+        - !Ref KbAccessPolicyArn
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: [!GetAtt WorkerLog.Arn, !GetAtt SchedulerLog.Arn]
+  Worker:
+    Type: AWS::Lambda::Function
+    DependsOn: [QueuePermissions, ConsumePermissions, WorkerLog]
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-workflows-worker"
+      Runtime: nodejs22.x
+      Handler: worker.handler
+      Role: !GetAtt WorkerRole.Arn
+      Timeout: 900
+      MemorySize: 2048
+      ReservedConcurrentExecutions: 4
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref WorkerZipKey }
+      Environment:
+        Variables:
+          NODE_ENV: production
+          SW_WORKFLOWS_ENABLED: !Ref Enabled
+          SW_WORKFLOWS_QUEUE_URL: !Ref Queue
+          SW_DDB_TABLE: !Ref TableName
+          SW_S3_BUCKET: !Ref DataBucket
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          BEDROCK_REGION: !Ref AWS::Region
+          BEDROCK_RESEARCH_MODEL: !Ref BedrockModel
+          SW_WORKFLOWS_PYTHON_INTERPRETER_ID: !Ref PythonInterpreterId
+  QueueMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt Queue.Arn
+      FunctionName: !Ref Worker
+      BatchSize: 1
+      FunctionResponseTypes: [ReportBatchItemFailures]
+      Enabled: !If [WorkflowsEnabled, true, false]
+  Scheduler:
+    Type: AWS::Lambda::Function
+    DependsOn: [QueuePermissions, SchedulerLog]
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-workflows-scheduler"
+      Runtime: nodejs22.x
+      Handler: scheduler.handler
+      Role: !GetAtt WorkerRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      ReservedConcurrentExecutions: 1
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref SchedulerZipKey }
+      Environment:
+        Variables:
+          NODE_ENV: production
+          SW_WORKFLOWS_ENABLED: !Ref Enabled
+          SW_WORKFLOWS_SCHEDULER_ENABLED: !Ref Enabled
+          SW_WORKFLOWS_QUEUE_URL: !Ref Queue
+          SW_DDB_TABLE: !Ref TableName
+          SW_S3_BUCKET: !Ref DataBucket
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+  Timer:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 minute)
+      State: !If [WorkflowsEnabled, ENABLED, DISABLED]
+      Targets: [{ Arn: !GetAtt Scheduler.Arn, Id: WorkflowScheduler }]
+  TimerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Scheduler
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt Timer.Arn
+  DeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Workflow messages require investigation or redrive.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions: [{ Name: QueueName, Value: !GetAtt DeadLetterQueue.QueueName }]
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+Outputs:
+  QueueUrl: { Value: !Ref Queue }
+  WorkerName: { Value: !Ref Worker }
+  SchedulerName: { Value: !Ref Scheduler }

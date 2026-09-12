@@ -21,11 +21,11 @@
   },
   {
     "ParameterKey": "ArtifactObjectKey",
-    "ParameterValue": "releases/2d94475c075418d64f7ae89b9a5180d08c157702a96e6ae11f257aac041e9c7b/app-runtime.zip"
+    "ParameterValue": "releases/f3f742c23d76b25b124312728b4b971cce72c35086db46eae0136f1a5194a8ff/app-runtime.zip"
   },
   {
     "ParameterKey": "ArtifactObjectVersion",
-    "ParameterValue": "uNUnzrO5h7AuXWxGdSgMa6QlkCCR2b_M"
+    "ParameterValue": "pMfL6BsqS_xZCGEyHR.U4obuKNJSRtPw"
   },
   {
     "ParameterKey": "Architecture",
@@ -194,5 +194,29 @@
   {
     "ParameterKey": "OfficeEngineJwtSecretArn",
     "ParameterValue": "arn:aws:secretsmanager:us-east-1:475976462949:secret:litai/testing/office-engine-jwt-U06SZ8"
+  },
+  {
+    "ParameterKey": "WorkflowsEnabled",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "WorkflowsQueueUrl",
+    "ParameterValue": "https://sqs.us-east-1.amazonaws.com/475976462949/litai-workflows"
+  },
+  {
+    "ParameterKey": "WorkflowsSchedulerEnabled",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "WorkflowsPythonInterpreterId",
+    "ParameterValue": "aws.codeinterpreter.v1"
+  },
+  {
+    "ParameterKey": "WorkflowsDailyRunLimit",
+    "ParameterValue": "200"
+  },
+  {
+    "ParameterKey": "BedrockResearchModel",
+    "ParameterValue": "us.anthropic.claude-sonnet-5"
   }
 ]

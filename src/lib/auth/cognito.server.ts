@@ -113,6 +113,8 @@ export async function refreshTokens(refreshToken: string): Promise<TokenResponse
 export type SwUser = {
   sub: string;
   email: string;
+  /** Only verified addresses may receive workflow reviewer access. */
+  emailVerified?: boolean;
   name?: string;
   groups: string[];
   role: "admin" | "user";
@@ -133,6 +135,7 @@ export async function verifyIdToken(idToken: string): Promise<SwUser> {
   return {
     sub: String(payload.sub),
     email: String(claims["email"] ?? ""),
+    emailVerified: claims["email_verified"] === true,
     name: claims["name"] ? String(claims["name"]) : undefined,
     groups,
     role: groups.includes("admin") ? "admin" : "user",
