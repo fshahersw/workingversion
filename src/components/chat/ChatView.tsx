@@ -3,8 +3,7 @@ import {
   AlertCircle,
   ArrowRight,
   ArrowUp,
-  Loader2,
-  ShieldCheck,
+  Square,
   SquarePen,
 } from "lucide-react";
 import {
@@ -16,9 +15,8 @@ import {
   useState,
 } from "react";
 
-import { factCheck, kindLabel, unverified } from "@/lib/fact-check";
 import { sentencesForRef } from "@/lib/highlight";
-import type { Attachment, MatterScope, Message, Source } from "@/lib/chat-types";
+import type { Attachment, ChoiceAnswer, MatterScope, Message, Source } from "@/lib/chat-types";
 import {
   ModeDropdown,
   useUploads,
@@ -35,8 +33,8 @@ import { ArtifactPanel } from "./ArtifactPanel";
 import { AnswerActions } from "./AnswerActions";
 import { WorkspaceRail } from "./WorkspaceRail";
 import { StructuredChoicePanel } from "./StructuredChoicePanel";
-import { choiceResponseText } from "@/lib/agents/research-activity";
-
+import { SkillForm, SlashPalette } from "./SkillMenu";
+import { filterSkills, slashDraft, type ResearchSkill } from "@/lib/research-skills";
 
 const MIN_LEFT = 45;
 const MAX_LEFT = 75;
@@ -44,10 +42,77 @@ const SPLIT_STORAGE_KEY = "wr.splitPct";
 const HANDLE_PX = 12;
 const clamp = (n: number) => Math.min(MAX_LEFT, Math.max(MIN_LEFT, n));
 
+/** True while the composer holds a slash command that matches at least one
+ *  skill: the palette owns Enter then, so Send stays off. An unmatched draft
+ *  such as "/remand" is ordinary text and can be sent. */
+function slashSkillPending(text: string): boolean {
+  const draft = slashDraft(text);
+  return draft !== null && filterSkills(draft).length > 0;
+}
+
+/** Upper-cased refs an answer cites, with or without the brackets. */
+function citedRefsIn(answer: string): Set<string> {
+  const set = new Set<string>();
+  if (!answer) return set;
+  for (const match of answer.matchAll(/\[?\b([SsDd]\d{1,3})\b\]?/g)) {
+    set.add(match[1]!.toUpperCase());
+  }
+  return set;
+}
+
+type SourceIndex = { allSources: Source[]; sourcesByRef: Record<string, Source> };
+type SourceIndexCache = { ids: string[]; arrays: (Source[] | undefined)[]; index: SourceIndex };
+
+function buildSourceIndex(messages: Message[]): SourceIndex {
+  // Sources carried into a follow-up keep their refs, so the same source appears
+  // on several turns; the rail shows each ref once (latest copy wins).
+  const byRef = new Map<string, Source>();
+  for (const m of messages) for (const s of m.sources ?? []) byRef.set(s.ref, s);
+  const allSources = [...byRef.values()];
+  // Ref -> source for the citation hover cards (one map for the whole thread,
+  // since refs are stable across turns).
+  const sourcesByRef: Record<string, Source> = {};
+  for (const s of allSources) sourcesByRef[s.ref.toUpperCase()] = s;
+  return { allSources, sourcesByRef };
+}
+
+function sameSourceArrays(cache: SourceIndexCache, messages: Message[]): boolean {
+  return (
+    cache.ids.length === messages.length &&
+    messages.every((m, i) => cache.ids[i] === m.id && cache.arrays[i] === m.sources)
+  );
+}
+
+/**
+ * The thread's source index, rebuilt only when some message's `sources` ARRAY
+ * changes identity. The reducer spreads the message on every delta flush but
+ * keeps `sources` as is; keying this on `messages` would hand every memoized
+ * markdown block a new map each frame and re-parse the whole answer.
+ */
+function useSourceIndex(messages: Message[]): SourceIndex {
+  const cache = useRef<SourceIndexCache | null>(null);
+  const prev = cache.current;
+  const index =
+    prev && sameSourceArrays(prev, messages) ? prev.index : buildSourceIndex(messages);
+  // Remember what was handed out, after commit, so a discarded render never
+  // poisons the cache.
+  useEffect(() => {
+    if (cache.current?.index !== index) {
+      cache.current = {
+        ids: messages.map((m) => m.id),
+        arrays: messages.map((m) => m.sources),
+        index,
+      };
+    }
+  });
+  return index;
+}
+
 export function ChatView({
   messages,
   busy,
   onSend,
+  onStop,
   onNewChat,
   sessionId,
   matter,
@@ -57,8 +122,17 @@ export function ChatView({
   busy: boolean;
   onSend: (
     text: string,
-    opts?: { mode?: ComposerMode; attachments?: Attachment[] },
+    opts?: {
+      mode?: ComposerMode;
+      attachments?: Attachment[];
+      choice?: ChoiceAnswer;
+      /** With `choice`: id of the assistant message whose clarifying question
+       *  is being answered, so the run resumes on that message. */
+      resumeId?: string;
+    },
   ) => void;
+  /** Abort the in-flight run, keeping what has streamed so far. */
+  onStop?: () => void;
   onNewChat: () => void;
   sessionId: string;
   matter: MatterScope | null;
@@ -84,13 +158,7 @@ export function ChatView({
     () => [...messages].reverse().find((m) => m.role === "user")?.id,
     [messages],
   );
-  // Sources carried into a follow-up keep their refs, so the same source appears
-  // on several turns; the rail shows each ref once (latest copy wins).
-  const allSources = useMemo(() => {
-    const byRef = new Map<string, Source>();
-    for (const m of messages) for (const s of m.sources ?? []) byRef.set(s.ref, s);
-    return [...byRef.values()];
-  }, [messages]);
+  const { allSources, sourcesByRef } = useSourceIndex(messages);
   const lastAssistant = useMemo(
     () => [...messages].reverse().find((m) => m.role === "assistant"),
     [messages],
@@ -110,13 +178,28 @@ export function ChatView({
   const citedRefs = useMemo(() => {
     const set = new Set<string>();
     for (const m of messages) {
-      if (m.role !== "assistant" || !m.answer) continue;
-      for (const match of m.answer.matchAll(/\[?\b([SsDd]\d{1,3})\b\]?/g)) {
-        set.add(match[1]!.toUpperCase());
-      }
+      if (m.role !== "assistant") continue;
+      for (const ref of citedRefsIn(m.answer)) set.add(ref);
     }
     return set;
   }, [messages]);
+  // The rail's "This answer" scope. The server re-seeds every turn with the
+  // carried sources, so the latest message's `sources` is close to the whole
+  // thread; what is specific to this turn is what its answer cites plus what
+  // was retrieved for the first time on it.
+  const turnSources = useMemo(() => {
+    if (!lastAssistant) return undefined;
+    const earlier = new Set<string>();
+    for (const m of messages) {
+      if (m === lastAssistant) break;
+      for (const s of m.sources ?? []) earlier.add(s.ref.toUpperCase());
+    }
+    const cited = citedRefsIn(lastAssistant.answer);
+    return (lastAssistant.sources ?? []).filter((s) => {
+      const ref = s.ref.toUpperCase();
+      return cited.has(ref) || !earlier.has(ref);
+    });
+  }, [messages, lastAssistant]);
 
   useEffect(() => {
     try {
@@ -348,30 +431,35 @@ export function ChatView({
               className="wr-app-scroll h-full overflow-y-auto overscroll-contain px-4 pb-[168px] pt-4 sm:px-7 lg:px-8"
             >
               <div className="mx-auto w-full max-w-[820px]">
-                {messages.map((m, i) =>
-                  m.role === "user" ? (
-                    <UserMessage key={m.id} msg={m} />
-                  ) : (
+                {messages.map((m, i) => {
+                  if (m.role === "user") {
+                    return <UserMessage key={m.id} msg={m} />;
+                  }
+                  const question =
+                    [...messages.slice(0, i)]
+                      .reverse()
+                      .find((p) => p.role === "user")?.text ?? "";
+                  return (
                     <AssistantMessage
                       key={m.id}
                       msg={m}
                       onCite={(ref) => handleCite(ref, m)}
                       selectedRef={selectedRef}
-                      question={
-                        [...messages.slice(0, i)]
-                          .reverse()
-                          .find((p) => p.role === "user")?.text ?? ""
-                      }
+                      sourcesByRef={sourcesByRef}
+                      question={question}
                       matter={matter}
                       conversationId={conversationId}
                       onWorkspaceChange={() => setRailKey((k) => k + 1)}
-                      onChoice={(request, optionId) => {
-                        const response = choiceResponseText(request, optionId);
-                        if (response) onSend(response);
+                      onChoice={(answer) => {
+                        // Resume on THIS message (not whichever panel happens
+                        // to be the last unanswered one), with its own question.
+                        if (question.trim()) {
+                          onSend(question, { choice: answer, resumeId: m.id });
+                        }
                       }}
                     />
-                  ),
-                )}
+                  );
+                })}
 
                 {!lastBusy && lastFollowups.length > 0 && (
                   <div className="mb-4">
@@ -410,8 +498,8 @@ export function ChatView({
                   setComposer("");
                   onSend(t, opts);
                 }}
-
                 busy={busy}
+                onStop={onStop}
                 onNewChat={onNewChat}
                 textareaRef={composerRef}
               />
@@ -463,6 +551,7 @@ export function ChatView({
         >
           <WorkspaceRail
             sources={allSources}
+            turnSources={turnSources}
             selectedRef={selectedRef}
             citedRefs={citedRefs}
             selectedQuote={selectedQuote}
@@ -502,6 +591,7 @@ export function ChatView({
               <div className="h-[calc(100%-2.75rem)]">
                 <WorkspaceRail
                   sources={allSources}
+                  turnSources={turnSources}
                   selectedRef={selectedRef}
                   citedRefs={citedRefs}
                   selectedQuote={selectedQuote}
@@ -525,6 +615,7 @@ function ChatComposer({
   onChange,
   onSubmit,
   busy,
+  onStop,
   onNewChat,
   textareaRef,
 }: {
@@ -532,6 +623,7 @@ function ChatComposer({
   onChange: (v: string) => void;
   onSubmit: (v: string, opts: { mode: ComposerMode; attachments: Attachment[] }) => void;
   busy: boolean;
+  onStop?: () => void;
   onNewChat: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
 }) {
@@ -541,10 +633,11 @@ function ChatComposer({
     persistMode(m);
   }, []);
   const { files, uploading, uploadError, handleFiles, removeFile } = useUploads();
+  const [skill, setSkill] = useState<ResearchSkill | null>(null);
 
   const submit = useCallback(
     (v: string) => {
-      if (!v.trim() || busy) return;
+      if (!v.trim() || busy || slashSkillPending(v)) return;
       onSubmit(v, { mode, attachments: files });
     },
     [onSubmit, mode, files, busy],
@@ -607,6 +700,25 @@ function ChatComposer({
       }}
       className="relative flex w-full flex-col rounded-lg border border-border bg-card/95 shadow-[0_8px_28px_-14px_rgba(31,42,94,0.22)] backdrop-blur-md transition-all focus-within:border-primary/40 focus-within:shadow-[0_12px_32px_-16px_rgba(31,42,94,0.28)]"
     >
+      <SlashPalette
+        value={value}
+        onPick={(s) => {
+          onChange("");
+          setSkill(s);
+        }}
+      />
+      {skill ? (
+        <div className="border-b border-border/60 p-2">
+          <SkillForm
+            skill={skill}
+            onCancel={() => setSkill(null)}
+            onRun={(prompt) => {
+              setSkill(null);
+              onSubmit(prompt, { mode, attachments: files });
+            }}
+          />
+        </div>
+      ) : null}
       <FileChips files={files} onRemove={removeFile} className="px-2.5 pt-2" />
       <div className="px-2.5 pt-2">
         <textarea
@@ -614,14 +726,14 @@ function ChatComposer({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => {
+            if (e.defaultPrevented) return;
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               submit(value);
             }
           }}
           rows={1}
-          disabled={busy}
-          placeholder="Ask a follow-up about MDLs, bellwethers, or precedent…"
+          placeholder={busy ? "Type your next question…" : "Ask a follow-up about MDLs, bellwethers, or precedent…"}
           className="block max-h-[220px] min-h-[44px] w-full resize-none bg-transparent px-1.5 py-1.5 text-[14px] leading-[1.55] placeholder:text-muted-foreground/80 focus:outline-none"
         />
       </div>
@@ -645,18 +757,26 @@ function ChatComposer({
             onTranscript={(t) => onChange(value.trim() ? `${value.trim()} ${t}` : t)}
             disabled={busy}
           />
-          <button
-            type="submit"
-            disabled={busy || !value.trim()}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all duration-200 hover:bg-brand-navy/90 disabled:opacity-40"
-            aria-label="Send"
-          >
-            {busy ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
+          {busy && onStop ? (
+            <button
+              type="button"
+              onClick={onStop}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all duration-200 hover:bg-brand-navy/90"
+              aria-label="Stop"
+              title="Stop (keeps what has been written so far)"
+            >
+              <Square className="h-[12px] w-[12px]" strokeWidth={2.4} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={busy || !value.trim() || slashSkillPending(value)}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all duration-200 hover:bg-brand-navy/90 disabled:opacity-40"
+              aria-label="Send"
+            >
               <ArrowUp className="h-[16px] w-[16px]" strokeWidth={2.4} />
-            )}
-          </button>
+            </button>
+          )}
         </div>
       </div>
       {uploadError && (
@@ -668,28 +788,17 @@ function ChatComposer({
   );
 }
 
-/** Citation-faithfulness trust chip: how many [S#]-cited claims a reasoning
- *  judge found the cited sources actually support. Green when all supported;
- *  amber when some are unsupported (tooltip lists them). A signal, not a gate. */
-function FaithfulnessChip({
-  f,
-}: {
-  f: { checked: number; supported: number; unsupported: { claim: string; refs: string[] }[] };
-}) {
-  const clean = f.unsupported.length === 0 && f.supported >= f.checked;
-  const tone = clean ? "bg-emerald-500/70" : "bg-amber-500/70";
-  const title = f.unsupported.length
-    ? "Cited claims the source may not fully support:\n" +
-      f.unsupported
-        .map((u) => `• ${u.claim}${u.refs.length ? ` [${u.refs.join(", ")}]` : ""}`)
-        .join("\n")
-    : "Every cited claim is supported by its source (reasoning-model check).";
+/** Placeholder for the gap between the research finishing and the first
+ *  answer token (the model's hidden synthesis thinking), so the page moves
+ *  instead of sitting still. */
+function ComposingSkeleton() {
   return (
-    <span className="inline-flex items-center gap-1" title={title}>
-      <span className={`h-1.5 w-1.5 rounded-full ${tone}`} />
-      {f.supported}/{f.checked} cited claims source-supported
-      {f.unsupported.length ? ` · ${f.unsupported.length} to review` : ""}
-    </span>
+    <div className="mt-1 space-y-2.5" aria-hidden="true">
+      <div className="wr-skeleton h-[13px] w-[92%] rounded" />
+      <div className="wr-skeleton h-[13px] w-[97%] rounded" />
+      <div className="wr-skeleton h-[13px] w-[78%] rounded" />
+      <div className="wr-skeleton mt-4 h-[13px] w-[60%] rounded" />
+    </div>
   );
 }
 
@@ -708,6 +817,7 @@ function AssistantMessage({
   msg,
   onCite,
   selectedRef,
+  sourcesByRef,
   question,
   matter,
   conversationId,
@@ -717,84 +827,48 @@ function AssistantMessage({
   msg: Message;
   onCite: (ref: string) => void;
   selectedRef: string | null;
+  sourcesByRef: Record<string, Source>;
   question: string;
   matter: MatterScope | null;
   conversationId: string | null;
   onWorkspaceChange: () => void;
-  onChoice: (request: NonNullable<Message["choice"]>, optionId: string) => void;
+  onChoice: (answer: ChoiceAnswer) => void;
 }) {
-
-  const quietStart =
-    msg.status === "thinking" &&
-    msg.rounds.length === 0 &&
-    !(msg.thinking ?? "").trim() &&
-    !(msg.reasoning ?? "").trim();
+  const composing = msg.status === "writing" && !msg.answer.trim();
 
   return (
     <div className="mb-3">
-      {quietStart && (
-        <div className="mb-2 flex h-[11px] items-center">
-          <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-brand-orange" />
-        </div>
-      )}
       <ActivityPanel msg={msg} />
+      {msg.choice ? (
+        <StructuredChoicePanel
+          request={msg.choice}
+          disabled={
+            Boolean(msg.choice.answered) ||
+            Boolean(msg.choice.dismissed) ||
+            msg.status === "thinking" ||
+            msg.status === "writing"
+          }
+          onSelect={(answer) => onChoice(answer)}
+        />
+      ) : null}
       <div className="prose prose-neutral max-w-none text-foreground [&_code]:break-all [&_pre]:whitespace-pre-wrap">
+        {composing && <ComposingSkeleton />}
         <AnswerMarkdown
           text={msg.answer}
           onCite={onCite}
           selectedRef={selectedRef}
+          sourcesByRef={sourcesByRef}
           streaming={msg.status === "writing"}
         />
         {msg.artifacts && msg.artifacts.length > 0 && (
           <ArtifactPanel artifacts={msg.artifacts} />
         )}
-        {msg.choice ? (
-          <StructuredChoicePanel
-            request={msg.choice}
-            disabled={msg.status === "thinking" || msg.status === "writing"}
-            onSelect={(optionId) => onChoice(msg.choice!, optionId)}
-          />
-        ) : null}
         {msg.status === "error" && (
           <div className="mt-2 flex items-start gap-2 text-sm text-red-600">
             <AlertCircle className="mt-[2px] h-4 w-4 shrink-0" />
             <span>{msg.error || "Something went wrong while researching."}</span>
           </div>
         )}
-        {msg.status === "done" &&
-          msg.verification &&
-          (msg.verification.factsChecked > 0 ||
-            (msg.verification.faithfulness?.checked ?? 0) > 0) && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground/70">
-              {msg.verification.factsChecked > 0 && (
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" />
-                  {msg.verification.factsVerified}/{msg.verification.factsChecked}{" "}
-                  specifics verified against sources
-                </span>
-              )}
-              {msg.verification.factsChecked > 0 &&
-                msg.verification.unverified.length +
-                  msg.verification.orphanRefs.length >
-                  0 && (
-                  <span
-                    className="text-amber-700/80"
-                    title={[
-                      ...msg.verification.unverified,
-                      ...msg.verification.orphanRefs.map((r) => `unmatched ${r}`),
-                    ].join(" · ")}
-                  >
-                    ·{" "}
-                    {msg.verification.unverified.length +
-                      msg.verification.orphanRefs.length}{" "}
-                    to confirm
-                  </span>
-                )}
-              {(msg.verification.faithfulness?.checked ?? 0) > 0 && (
-                <FaithfulnessChip f={msg.verification.faithfulness!} />
-              )}
-            </div>
-          )}
         {msg.status === "done" && msg.answer.trim().length > 0 && (
           <AnswerActions
             question={question}

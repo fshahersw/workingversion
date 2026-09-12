@@ -1,4 +1,4 @@
-import type { Attachment } from "@/lib/chat-types";
+import type { Attachment, ChoiceAnswer } from "@/lib/chat-types";
 
 export type Emit = (event: string, data: unknown) => void;
 
@@ -18,4 +18,6 @@ export type OrchestrateInput = {
   };
   forceMode?: "fast" | "think";
   attachments?: Attachment[];
+  /** Present when this request resumes after a clarification panel. */
+  choice?: ChoiceAnswer;
 };

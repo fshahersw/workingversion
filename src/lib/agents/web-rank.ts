@@ -438,3 +438,105 @@ export function allStale(ranked: RankedResult[], maxAgeDays = 365): boolean {
   if (!ranked.length) return true;
   return ranked.every((r) => r.ageDays === null || r.ageDays > maxAgeDays);
 }
+
+// ---------------------------------------------------------------------------
+// Rank fusion. The lexical ranker above scores term overlap x recency x tier;
+// a semantic ranker (query/passage embedding similarity) catches on-point
+// passages whose wording differs from the 3-4 word search query. Reciprocal
+// rank fusion combines the two orderings without needing their scores on a
+// common scale: each item scores sum(1 / (k + rank_i)) across the lists it
+// appears in. By default an item missing from a list gets nothing from it —
+// right when every list is complete, but a PARTIAL list (a wall-clock-capped
+// semantic stage that scored 9 of 15 candidates) then costs every unscored
+// item half its score; `missingRank: "listLength"` scores it as if ranked
+// just after that list's last entry instead, so being unscored costs one rank
+// on that axis rather than the whole axis.
+// ---------------------------------------------------------------------------
+
+export type FusedItem<T> = { item: T; fused: number; ranks: number[] };
+
+export type FuseOptions = {
+  /** RRF smoothing constant (default 60). */
+  k?: number;
+  /**
+   * How an item absent from one list scores on that list. Omitted: nothing.
+   * "listLength": as if ranked at that list's length (one past its last entry).
+   */
+  missingRank?: "listLength";
+};
+
+/**
+ * Fuse several rankings of the same item set. `orders` are arrays of item
+ * KEYS in rank order (best first); `items` maps key -> item. Keys absent from
+ * every order are dropped. Ties break on the first ordering's position so the
+ * lexical order stays the tiebreaker when the semantic ranker is indifferent.
+ * The third argument is either the RRF constant `k` (positional, legacy) or
+ * a `FuseOptions` object. `ranks` records each item's actual position per
+ * list, -1 when absent, regardless of `missingRank`.
+ */
+export function fuseRankings<T>(
+  items: Map<string, T>,
+  orders: string[][],
+  kOrOpts: number | FuseOptions = 60,
+): FusedItem<T>[] {
+  const opts: FuseOptions = typeof kOrOpts === "number" ? { k: kOrOpts } : kOrOpts;
+  const k = opts.k ?? 60;
+  const score = new Map<string, { fused: number; ranks: number[] }>();
+  orders.forEach((order, listIdx) => {
+    order.forEach((key, rank) => {
+      if (!items.has(key)) return;
+      const cur = score.get(key) ?? { fused: 0, ranks: new Array<number>(orders.length).fill(-1) };
+      cur.fused += 1 / (k + rank + 1);
+      cur.ranks[listIdx] = rank;
+      score.set(key, cur);
+    });
+  });
+  if (opts.missingRank === "listLength") {
+    for (const s of score.values()) {
+      s.ranks.forEach((rank, listIdx) => {
+        if (rank < 0) s.fused += 1 / (k + orders[listIdx]!.length + 1);
+      });
+    }
+  }
+  const first = orders[0] ?? [];
+  const firstPos = new Map(first.map((key, i) => [key, i] as const));
+  return [...score.entries()]
+    .map(([key, s]) => ({ item: items.get(key)!, fused: s.fused, ranks: s.ranks, key }))
+    .sort((a, b) => {
+      if (b.fused !== a.fused) return b.fused - a.fused;
+      const pa = firstPos.get(a.key) ?? Number.MAX_SAFE_INTEGER;
+      const pb = firstPos.get(b.key) ?? Number.MAX_SAFE_INTEGER;
+      return pa - pb;
+    })
+    .map(({ item, fused, ranks }) => ({ item, fused, ranks }));
+}
+
+/** Cosine similarity of two equal-length vectors (0 when either is empty). */
+export function cosineSim(a: number[], b: number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    dot += a[i]! * b[i]!;
+    na += a[i]! * a[i]!;
+    nb += b[i]! * b[i]!;
+  }
+  const d = Math.sqrt(na) * Math.sqrt(nb);
+  return d ? dot / d : 0;
+}
+
+/**
+ * Order candidate keys by similarity to a query vector. Candidates with no
+ * vector (embedding failed or timed out) are omitted, so they fall back to
+ * their lexical rank alone in fusion. Pure so it is testable without Bedrock.
+ */
+export function semanticOrder(
+  queryVec: number[],
+  vectors: Map<string, number[]>,
+): string[] {
+  return [...vectors.entries()]
+    .map(([key, v]) => ({ key, sim: cosineSim(queryVec, v) }))
+    .sort((a, b) => b.sim - a.sim)
+    .map((x) => x.key);
+}

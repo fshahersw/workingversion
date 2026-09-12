@@ -2,11 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { Round } from "../chat-types.ts";
-import {
-  choiceResponseText,
-  normalizeChoiceRequest,
-  summarizeResearchActivity,
-} from "./research-activity.ts";
+import { normalizeChoiceRequest, summarizeResearchActivity } from "./research-activity.ts";
 
 const rounds: Round[] = [
   {
@@ -53,6 +49,29 @@ test("choice normalization accepts only complete data-driven requests", () => {
   });
   assert.ok(choice);
   assert.equal(choice.options.length, 2);
-  assert.equal(choiceResponseText(choice, "selected"), "Choice scope: Selected records");
+  assert.equal(choice.options[1]?.label, "Selected records");
   assert.equal(normalizeChoiceRequest({ id: "bad", prompt: "Missing options" }), null);
+  assert.equal(
+    normalizeChoiceRequest({ id: "x", prompt: "p", recommendedId: "missing", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] })?.recommendedId,
+    undefined,
+    "a recommendedId naming no option is dropped",
+  );
+
+  const rich = normalizeChoiceRequest({
+    id: "forum",
+    prompt: "Which docket?",
+    description: "Federal and state calendars differ.",
+    recommendedId: "both",
+    allowOther: true,
+    otherPlaceholder: "Name the proceeding",
+    options: [
+      { id: "federal", label: "Federal MDL" },
+      { id: "state", label: "State coordinated" },
+      { id: "both", label: "Both tracks" },
+    ],
+  });
+  assert.ok(rich);
+  assert.equal(rich.recommendedId, "both");
+  assert.equal(rich.allowOther, true);
+  assert.equal(rich.description, "Federal and state calendars differ.");
 });

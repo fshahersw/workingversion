@@ -15,6 +15,13 @@
 import type { Emit, OrchestrateInput } from "./orchestration-types.ts";
 import type { ChatMessage, EvidenceBundle, RequestContext, RoutePlan, UserMode } from "./frontier-contracts.ts";
 import type { Attachment, Source } from "@/lib/chat-types";
+import { classifyEffort } from "@/lib/research-intent";
+import {
+  applyChoice,
+  clarifyEnabled,
+  contextFrom,
+  detectClarification,
+} from "./clarify.ts";
 import { routeRequest } from "./frontier-router.server.ts";
 import { ResearchState } from "./frontier-research-state.ts";
 import { GrokOrchestrator } from "./frontier-orchestrator.server.ts";
@@ -23,7 +30,7 @@ import { ResearchToolRunner } from "./frontier-tool-runner.server.ts";
 import { streamGrokWriter } from "./frontier-writer.server.ts";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
-import { normalizeMemory, updateMemory } from "./memory.server";
+import { normalizeMemory, tailMessages, updateMemory } from "./memory.server";
 import { checkFaithfulness, judgeEnabled } from "./faithfulness.server";
 import { checkCitations, factCheck, kindLabel, unverified } from "@/lib/fact-check";
 import { agentError, agentLog, since, trunc } from "./log.server";
@@ -137,9 +144,43 @@ async function streamAndFinish(opts: {
   }
 }
 
-export async function runFrontierAgent(input: OrchestrateInput, emit: Emit): Promise<void> {
+export async function runFrontierAgent(init: OrchestrateInput, emit: Emit): Promise<void> {
+  let input = init;
   const runId = crypto.randomUUID();
   const runStart = Date.now();
+
+  const memory = normalizeMemory(input.memory);
+  const effort = classifyEffort(input.query, memory.tail.length);
+  const conversational = effort.mode === "conversational" && effort.confidence >= 0.9;
+
+  if (input.choice) {
+    input = { ...input, query: applyChoice(input.query, input.choice) };
+  } else if (!conversational && clarifyEnabled()) {
+    const request = detectClarification({
+      query: input.query,
+      // Same context the legacy path uses (the memory tail carries the
+      // [Clarification — …] markers of forks already answered), so the two
+      // engines ask the same questions. `input.history` is not sent by the
+      // research client, which made this check blind on the frontier path.
+      context: contextFrom(
+        tailMessages(memory).map((h) => ({ role: h.role, content: h.content })),
+        memory.entities.map((e) => e.label),
+      ),
+    });
+    if (request) {
+      emit("run", { run_id: runId, query: input.query });
+      emit("choice", { choice: request });
+      emit("done", { run_id: runId, status: "awaiting_choice", rounds: 0, source_count: 0 });
+      agentLog("run_done", {
+        run: runId,
+        status: "awaiting_choice",
+        engine: "frontier",
+        clarify: request.id,
+        total_ms: since(runStart),
+      });
+      return;
+    }
+  }
 
   const ctx: RequestContext = {
     requestId: runId,

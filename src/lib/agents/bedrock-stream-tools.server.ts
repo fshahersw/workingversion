@@ -14,7 +14,7 @@ import {
   bedrockRetryDelayMs,
   BEDROCK_MAX_RETRIES,
 } from "./bedrock-sign.server";
-import type { BedrockToolDef, BedrockToolCall, BedrockMsg } from "./bedrock.server";
+import { tierAllowedFor, type BedrockToolDef, type BedrockToolCall, type BedrockMsg, type ServiceTier } from "./bedrock.server";
 import { isClaudeModel } from "./research-models";
 
 const REGION = process.env["BEDROCK_REGION"] ?? "us-east-1";
@@ -141,6 +141,8 @@ export async function streamOneTurn(
     /** Adaptive-thinking effort (low|medium|high|xhigh|max). When set, sent via
      *  additionalModelRequestFields as output_config.effort with thinking.adaptive. */
     effort?: string;
+    /** Bedrock processing tier for this request (only for models that support it). */
+    serviceTier?: ServiceTier;
     signal?: AbortSignal;
   },
   onText: (delta: string) => void,
@@ -153,6 +155,7 @@ export async function streamOneTurn(
       maxTokens: req.maxTokens,
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     },
+    ...(req.serviceTier ? { serviceTier: { type: req.serviceTier } } : {}),
     // Tool-less turns (the frontier writer) send no toolConfig at all — Bedrock
     // rejects an empty tools array.
     ...(req.tools && req.tools.length
@@ -364,11 +367,17 @@ export async function streamConverseToolLoop(
     synthesisSystem?: string;
     cache?: boolean;
     temperature?: number;
+    /** Bedrock processing tier for the research turns (only for models that support it). */
+    serviceTier?: ServiceTier;
+    /** Tier for the synthesis turn; defaults to `serviceTier` when the writer is the loop model. */
+    synthesisServiceTier?: ServiceTier;
     signal?: AbortSignal;
     callBudget?: { perTool?: number; total?: number };
     deadlineMs?: number;
-    /** Hard per-tool wall-clock cap (ms). Default 20s. */
-    perToolTimeoutMs?: number;
+    /** Hard per-tool wall-clock cap (ms). A number applies to every tool; a
+     *  function resolves the cap per tool name (search-class tools short, page
+     *  reads and the code sandbox longer). Default 20s. */
+    perToolTimeoutMs?: number | ((toolName: string) => number);
     /** Time reserved before the deadline for the synthesis turn (ms). Default 10s. */
     synthesisReserveMs?: number;
     /** Only apply synthesisReserveMs once this many tool calls have run, so
@@ -410,6 +419,9 @@ export async function streamConverseToolLoop(
     onSynthesisStart?: () => void;
     onStep?: (s: { step: number; ms: number; stopReason: string; toolCalls: string[]; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) => void;
     onToolUse?: (call: BedrockToolCall) => void;
+    /** Fires when the loop stops waiting on a tool that hit its per-tool cap.
+     *  The underlying call keeps running; this lets the UI settle the row. */
+    onToolTimeout?: (call: BedrockToolCall, ms: number) => void;
     execute: (call: BedrockToolCall) => Promise<string>;
   },
 ): Promise<StreamToolLoopResult> {
@@ -484,6 +496,9 @@ export async function streamConverseToolLoop(
         ...(opts.cache && isClaudeModel(opts.model) ? { cache: true } : {}),
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         ...(opts.researchEffort && isClaudeModel(opts.model) ? { effort: opts.researchEffort } : {}),
+        ...(opts.serviceTier && tierAllowedFor(opts.model, opts.serviceTier)
+          ? { serviceTier: opts.serviceTier }
+          : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
       },
       (delta) => {
@@ -599,20 +614,36 @@ export async function streamConverseToolLoop(
           // wall-clock budget. The underlying call is not cancelled (tools carry
           // their own internal AbortSignal timeouts); this stops the loop from
           // blocking on it and feeds the model a timeout notice instead.
-          const timeoutMs = opts.perToolTimeoutMs ?? 20_000;
+          const timeoutMs =
+            typeof opts.perToolTimeoutMs === "function"
+              ? opts.perToolTimeoutMs(call.name)
+              : (opts.perToolTimeoutMs ?? 20_000);
+          const started = Date.now();
+          let timer: ReturnType<typeof setTimeout> | undefined;
           try {
             const content = await Promise.race([
               handlers.execute(call),
-              new Promise<string>((_, reject) =>
-                setTimeout(
-                  () => reject(new Error(`tool timed out after ${timeoutMs}ms`)),
-                  timeoutMs,
-                ),
-              ),
+              new Promise<string>((_, reject) => {
+                timer = setTimeout(() => {
+                  const e = new Error(`tool timed out after ${timeoutMs}ms`);
+                  e.name = "ToolTimeoutError";
+                  reject(e);
+                }, timeoutMs);
+              }),
             ]);
             return { id: call.id, content, ok: true };
           } catch (err) {
+            if (err instanceof Error && err.name === "ToolTimeoutError") {
+              handlers.onToolTimeout?.(call, Date.now() - started);
+              return {
+                id: call.id,
+                content: `Tool timed out after ${Math.round(timeoutMs / 1000)}s. Do not retry the same call; use what you already have or a different tool/angle.`,
+                ok: false,
+              };
+            }
             return { id: call.id, content: `Tool error: ${err instanceof Error ? err.message : "failed"}`, ok: false };
+          } finally {
+            if (timer) clearTimeout(timer);
           }
         })();
       }),
@@ -649,6 +680,10 @@ export async function streamConverseToolLoop(
       ...(opts.cache && isClaudeModel(writer) ? { cache: true } : {}),
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       ...(opts.synthesisEffort && isClaudeModel(writer) ? { effort: opts.synthesisEffort } : {}),
+      ...((() => {
+        const tier = opts.synthesisServiceTier ?? (writer === opts.model ? opts.serviceTier : undefined);
+        return tier && tierAllowedFor(writer, tier) ? { serviceTier: tier } : {};
+      })()),
       ...(opts.signal ? { signal: opts.signal } : {}),
     },
     handlers.onAnswer ?? (() => {}),

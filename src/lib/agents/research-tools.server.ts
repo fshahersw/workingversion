@@ -217,13 +217,18 @@ async function fetchPageTool(input: Record<string, unknown>, book: SourceBook): 
     const p = await memoTTL(toolCacheKey("fetch_page", { url }), TOOL_CACHE_TTL_MS, () => fetchPage(url, { maxChars: 6000 }));
     if (p.note && !p.text) return { text: `${url}: ${p.note}`, hits: 0, refs: [] };
     if (!p.text.trim()) return { text: `No readable text extracted from ${url} (status ${p.status}).`, hits: 0, refs: [] };
-    const src = book.add({
-      citation: p.title || p.finalUrl,
-      authority: "web",
-      source_type: "web",
-      source_url: p.finalUrl,
-      content: trunc(p.text, 1500),
-    });
+    const src = book.add(
+      {
+        citation: p.title || p.finalUrl,
+        authority: "web",
+        source_type: "web",
+        source_url: p.finalUrl,
+        content: trunc(p.text, 1500),
+      },
+      // The model reads up to 3500 chars below; keep the whole extract for
+      // verification so a specific it quoted from the page counts as verified.
+      { fullText: p.text },
+    );
     const links = p.links.slice(0, 12).map((l) => `- ${l.text || l.href} — ${l.href}`).join("\n");
     return {
       text: `[${src.ref}] ${p.title || p.finalUrl}\n${trunc(p.text, 3500)}${links ? `\n\nLINKS:\n${links}` : ""}`,

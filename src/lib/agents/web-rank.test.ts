@@ -3,13 +3,120 @@ import { test } from "node:test";
 
 import {
   allStale,
+  cosineSim,
   distinctiveTerms,
   extractEvidence,
+  fuseRankings,
   normalizeUrl,
   queryTerms,
   rankResults,
+  semanticOrder,
   wantsRecency,
 } from "./web-rank.ts";
+
+test("fuseRankings: an item ranked well by both lists beats one ranked well by only one", () => {
+  const items = new Map([
+    ["a", "A"],
+    ["b", "B"],
+    ["c", "C"],
+    ["d", "D"],
+  ]);
+  // Lexical says a > b > c > d; semantic says b > c > a (d unscored).
+  const fused = fuseRankings(items, [["a", "b", "c", "d"], ["b", "c", "a"]]);
+  assert.deepEqual(
+    fused.map((f) => f.item),
+    ["B", "A", "C", "D"],
+  );
+  // Ranks are recorded per list; -1 marks "absent from that list".
+  const d = fused.find((f) => f.item === "D")!;
+  assert.deepEqual(d.ranks, [3, -1]);
+});
+
+test("fuseRankings with a single list is that list's order", () => {
+  const items = new Map([
+    ["x", 1],
+    ["y", 2],
+    ["z", 3],
+  ]);
+  assert.deepEqual(fuseRankings(items, [["z", "x", "y"]]).map((f) => f.item), [3, 1, 2]);
+});
+
+test("fuseRankings ignores keys that are not in the item set and breaks ties on the first list", () => {
+  const items = new Map([
+    ["a", "A"],
+    ["b", "B"],
+  ]);
+  // Both lists rank a and b symmetrically opposite: fused scores tie; first list wins.
+  const fused = fuseRankings(items, [["a", "b", "ghost"], ["b", "a"]]);
+  assert.deepEqual(fused.map((f) => f.item), ["A", "B"]);
+});
+
+test("fuseRankings missingRank 'listLength': a partial semantic list does not halve the unscored items", () => {
+  const items = new Map([
+    ["a", "A"],
+    ["b", "B"],
+    ["c", "C"],
+    ["d", "D"],
+    ["e", "E"],
+  ]);
+  const lexical = ["a", "b", "c", "d", "e"];
+  // Only two candidates embedded before the cap; a, b, c were never scored.
+  const semantic = ["d", "e"];
+  // Default RRF: the unscored trio forfeits the semantic axis and sinks to the
+  // bottom purely for being unscored, below the two that happened to embed.
+  assert.deepEqual(
+    fuseRankings(items, [lexical, semantic]).map((f) => f.item),
+    ["D", "E", "A", "B", "C"],
+  );
+  // listLength: an unscored item ranks as if just after the semantic list's
+  // last entry. The lexical leader keeps its place; d still climbs above b on
+  // genuine semantic evidence; e (last on both axes) stays last.
+  const fused = fuseRankings(items, [lexical, semantic], { missingRank: "listLength" });
+  assert.deepEqual(
+    fused.map((f) => f.item),
+    ["A", "D", "B", "C", "E"],
+  );
+  // Unscored items keep their relative lexical order among themselves.
+  const pos = (v: string) => fused.findIndex((f) => f.item === v);
+  assert.ok(pos("A") < pos("B") && pos("B") < pos("C"));
+  // ranks still report the actual positions; -1 marks "absent from that list".
+  assert.deepEqual(fused.find((f) => f.item === "A")!.ranks, [0, -1]);
+  assert.deepEqual(fused.find((f) => f.item === "D")!.ranks, [3, 0]);
+});
+
+test("fuseRankings still accepts the positional k and the k option interchangeably", () => {
+  const items = new Map([
+    ["a", "A"],
+    ["b", "B"],
+    ["c", "C"],
+  ]);
+  const orders = [["a", "b", "c"], ["c", "b", "a"]];
+  assert.deepEqual(
+    fuseRankings(items, orders, 60).map((f) => f.fused),
+    fuseRankings(items, orders, { k: 60 }).map((f) => f.fused),
+  );
+  assert.deepEqual(
+    fuseRankings(items, orders, 60).map((f) => f.fused),
+    fuseRankings(items, orders).map((f) => f.fused),
+  );
+  // A smaller k widens the score gap between adjacent ranks.
+  const sharp = fuseRankings(items, [["a", "b", "c"]], 1);
+  const smooth = fuseRankings(items, [["a", "b", "c"]], 60);
+  assert.deepEqual(sharp.map((f) => f.item), ["A", "B", "C"]);
+  assert.ok(sharp[0]!.fused - sharp[1]!.fused > smooth[0]!.fused - smooth[1]!.fused);
+});
+
+test("semanticOrder sorts by cosine similarity to the query vector and omits unscored items", () => {
+  const q = [1, 0, 0];
+  const vectors = new Map<string, number[]>([
+    ["far", [0, 1, 0]],
+    ["near", [0.9, 0.1, 0]],
+    ["mid", [0.5, 0.5, 0]],
+  ]);
+  assert.deepEqual(semanticOrder(q, vectors), ["near", "mid", "far"]);
+  assert.ok(cosineSim([1, 0], [1, 0]) > 0.999);
+  assert.equal(cosineSim([], [1, 2]), 0);
+});
 
 const day = 86_400_000;
 const NOW = Date.parse("2026-08-31T00:00:00Z");

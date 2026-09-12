@@ -10,6 +10,12 @@ import type { Emit, OrchestrateInput } from "./orchestration-types";
 import { researchAgentPrompt, fastRouterPrompt, fastWriterPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
 import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
+import {
+  applyChoice,
+  clarifyEnabled,
+  contextFrom,
+  detectClarification,
+} from "./clarify";
 import { buildReportMarkdown } from "./report.server";
 import { planSubquestions, runSubagents, assembleFindings, subagentsEnabled } from "./subagent.server";
 import { streamConverseToolLoop } from "./bedrock-stream-tools.server";
@@ -20,6 +26,7 @@ import { agentLog, agentError, since, trunc } from "./log.server";
 import { factCheck, unverified, kindLabel, checkCitations } from "@/lib/fact-check";
 import { coverageGaps, requeryInstruction } from "./coverage.server";
 import { checkFaithfulness, judgeEnabled } from "./faithfulness.server";
+import { startPrefetch } from "./prefetch.server";
 import {
   emptyMemory,
   hasContext,
@@ -74,17 +81,19 @@ type ModeCfg = {
 function modeConfig(mode: EffortMode): ModeCfg {
   if (mode === "fast") {
     return {
-      // Widened so a parallel fan-out (race docket + web + a reformulation) and a
-      // full answer fit — the old 3-step/30s/8k budget starved live-docket work.
-      maxSteps: 5,
-      callBudget: { perTool: 4, total: 14 },
+      // FAST is web-only (no db_* tools), so the old "live-docket work starves"
+      // reason for a 5-step/50s budget no longer applies. Four turns and ten
+      // calls cover a wide parallel first round plus one follow-up round; the
+      // deterministic recency sweep (prefetch.server) runs alongside for free.
+      maxSteps: 4,
+      callBudget: { perTool: 3, total: 10 },
       // Both efforts LOW to keep FAST fast. Writer thoroughness comes from the
       // PROMPT + synthesis instruction (thorough, length-matched), not from spending
       // reasoning latency; 12k is ample for a low-effort thorough write.
       researchEffort: "low",
       synthesisEffort: "low",
       synthesisMaxTokens: 12_000,
-      deadlineMs: 50_000,
+      deadlineMs: 32_000,
     };
   }
   // think (and any non-conversational fallback) — the validated full loop.
@@ -147,6 +156,44 @@ function toolCallLabel(input: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+/**
+ * Wall-clock cap the loop waits on a tool, by class. Search-class tools are
+ * bursty network fan-outs where a slow upstream should not stall the turn (the
+ * model gets a timeout notice and moves on); page reads, the docket sheet, and
+ * the code sandbox legitimately take longer.
+ */
+export function toolTimeoutMs(tool: string): number {
+  switch (tool) {
+    case "web_search":
+    case "verify_citations":
+    case "fda_search":
+    case "federal_register_search":
+    case "ecfr_search":
+    case "search_pubmed":
+    case "sec_search":
+    case "clinicaltrials_search":
+    case "db_find_case":
+    case "db_get_case":
+    case "db_calendar":
+      return 10_000;
+    case "db_search_filings":
+      return 15_000;
+    case "fetch_page":
+    case "db_read_filing":
+    case "db_docket_sheet":
+    case "read_document":
+      return 20_000;
+    case "db_graph_ask":
+      return 25_000;
+    case "run_python":
+      return 30_000;
+    case "create_document":
+      return 45_000;
+    default:
+      return 20_000;
+  }
+}
+
 /** Short friendly confirmation shown in chat when a file deliverable is ready. */
 function friendlyDone(format: string, name: string): string {
   const F = format.toUpperCase();
@@ -171,7 +218,8 @@ function docTitle(query: string, answer: string): string {
   return q.slice(0, 80) || "Research Report";
 }
 
-export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Promise<void> {
+export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Promise<void> {
+  let input = init;
   const runId = crypto.randomUUID();
   const runStart = Date.now();
   emit("run", { run_id: runId, query: input.query });
@@ -192,9 +240,15 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // thanks -> full 18-call tool loop". Conservative by design: only an
     // unmistakable social/meta phrasing with no legal signal lands here.
     const rawDecision = classifyEffort(input.query, memory.tail.length);
-    // An explicit Fast/Think selection means the attorney wants the tool loop —
-    // skip the no-tool conversational path even for greeting-shaped inputs.
-    if (rawDecision.mode === "conversational" && !input.forceMode) {
+    // The composer's Fast/Think choice persists in localStorage, so a forced mode
+    // is the steady state for many users, not a per-message signal. It governs
+    // how hard a real question is researched; it must not turn "thanks" into a
+    // tool loop. Unmistakable social/meta openers (confidence >= 0.9) short-
+    // circuit regardless; only the ambiguous down-routes defer to the forced mode.
+    const conversational =
+      rawDecision.mode === "conversational" &&
+      (!input.forceMode || rawDecision.confidence >= 0.9);
+    if (conversational) {
       emit("mode", { mode: "conversational", reason: rawDecision.reason });
       agentLog("run_start", { run: runId, engine: "conversational", q: trunc(input.query, 200) });
       let convo = "";
@@ -226,14 +280,42 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
       return;
     }
 
+    // --- Pre-flight clarification ------------------------------------------
+    // Ask before spending the tool budget when the question forks in a way
+    // that changes the work (forum / jurisdiction / deliverable). Resume
+    // rewrites the same question deterministically; it does not restart.
+    if (input.choice) {
+      input = { ...input, query: applyChoice(input.query, input.choice) };
+    } else if (clarifyEnabled()) {
+      const request = detectClarification({
+        query: input.query,
+        context: contextFrom(tailMessages(memory), memory.entities.map((e) => e.label)),
+      });
+      if (request) {
+        emit("choice", { choice: request });
+        emit("done", { run_id: runId, status: "awaiting_choice", rounds: 0, source_count: 0 });
+        agentLog("run_done", {
+          run: runId,
+          status: "awaiting_choice",
+          clarify: request.id,
+          total_ms: since(runStart),
+        });
+        return;
+      }
+    }
+
     // --- Research path (fast / think) -------------------------------------
     // Only rewrite a follow-up to standalone when there IS prior context — a
     // first turn is already standalone, so skip the extra model call. Case
     // resolution now happens inside the loop (db_find_case), so the separate
     // grounding pre-pass is gone (one fewer Bedrock hit; less throttle risk).
-    const resolved = hasContext(memory)
-      ? await resolveQuestion(input.query, memory, input.signal).catch(() => ({ query: input.query, topicShift: false }))
-      : { query: input.query, topicShift: false };
+    // A clarified question (resume after a choice panel) is standalone by
+    // construction and carries a trailing [Clarification — …] constraint that a
+    // model rewrite could drop or truncate, so it skips the rewrite entirely.
+    const resolved =
+      hasContext(memory) && !input.choice
+        ? await resolveQuestion(input.query, memory, input.signal).catch(() => ({ query: input.query, topicShift: false }))
+        : { query: input.query, topicShift: false };
     // A topic shift clears the rolling summary / entity ledger / sources, but
     // KEEPS the verbatim tail: those last turns are still the immediate
     // conversational context, and dropping them here (before `history` is
@@ -307,6 +389,27 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
       history.length > 0
         ? "This is a follow-up in an ongoing chat; the earlier turns are your context.\n\n"
         : "";
+    // Speculative recency sweep: a deterministic last-30-days web_search on the
+    // question's distinctive terms, started NOW so it runs during the model's
+    // first turn (TTFT + tool-use generation) instead of after it. Handed to
+    // the model's first web_search result when that executes. Off on a follow-up
+    // that already carries sources (the model will reuse them) and when the
+    // sweep would be noise (see buildPrefetchPlan).
+    const prefetch =
+      book.all().length === 0
+        ? startPrefetch(resolved.query, book, input.signal ? { signal: input.signal } : {})
+        : null;
+    if (prefetch) {
+      agentLog("prefetch_start", {
+        run: runId,
+        q: prefetch.plan.query,
+        variants: prefetch.plan.queries.length,
+        categories: prefetch.plan.categories.join(","),
+      });
+    }
+    // Start times per tool-use id so the completion event can carry a duration.
+    const toolStarted = new Map<string, number>();
+
     if (bedrockEnabled()) {
       try {
         const res = await streamConverseToolLoop(
@@ -338,6 +441,9 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             synthesisMaxTokens: cfg.synthesisMaxTokens,
             callBudget: cfg.callBudget,
             deadlineMs: cfg.deadlineMs,
+            // Per-class caps: a slow search upstream costs the turn ~10s at most
+            // instead of stalling it for the tool's own 30s internal timeout.
+            perToolTimeoutMs: toolTimeoutMs,
             cache: true, // cache the system + tool-defs prefix across every turn
             // Real multi-turn context: prepend the verbatim recent turns so a
             // follow-up isn't riding on the rolling summary alone (memoryBlock
@@ -434,17 +540,73 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             // when it STARTS (no hits, for a live "searching…" row) and once after
             // execute with the hit count. The client upserts by id, so the two
             // coalesce into one row that fills in its result — no duplicate.
-            onToolUse: (call) =>
+            onToolUse: (call) => {
+              toolStarted.set(call.id, Date.now());
               emit("tool_call", {
                 round: 1,
                 agent: "research",
                 id: call.id,
                 tool: call.name,
                 query: toolCallLabel(call.input),
+              });
+            },
+            // The loop stopped waiting on this call. Settle its row as timed out
+            // now; if the underlying call later resolves, execute() below still
+            // emits its real completion and the row updates in place.
+            onToolTimeout: (call, ms) =>
+              emit("tool_call", {
+                round: 1,
+                agent: "research",
+                id: call.id,
+                tool: call.name,
+                query: toolCallLabel(call.input),
+                hits: 0,
+                ms,
+                error: "timeout",
               }),
             execute: async (call) => {
               toolCalls++;
-              const out = await executeResearchTool(call.name, call.input, book, input.attachments);
+              const started = toolStarted.get(call.id) ?? Date.now();
+              let out;
+              try {
+                out = await executeResearchTool(call.name, call.input, book, input.attachments);
+              } catch (err) {
+                // A thrown tool previously left its row spinning forever: emit the
+                // failure so the timeline settles, then let the loop report it.
+                emit("tool_call", {
+                  round: 1,
+                  agent: "research",
+                  id: call.id,
+                  tool: call.name,
+                  query: toolCallLabel(call.input),
+                  hits: 0,
+                  ms: Date.now() - started,
+                  error: "error",
+                });
+                throw err;
+              }
+              // Fold the speculative recency sweep into the FIRST web_search result
+              // (a text enrichment of an existing toolResult; no new wire blocks).
+              // Its sources are already in the book under their own refs.
+              if (call.name === "web_search" && prefetch && !prefetch.consumed) {
+                // Wait for the sweep only within what is left of this call's
+                // loop cap (minus a margin), never past it: a wait that pushed a
+                // finished search over the cap made the model see "timed out"
+                // for a call that had actually succeeded. take(0) is non-blocking
+                // and leaves the sweep for a later web_search when it is still
+                // running.
+                const remaining = toolTimeoutMs(call.name) - (Date.now() - started) - 750;
+                const sweep = await prefetch.take(Math.max(0, Math.min(4_000, remaining)));
+                if (sweep) {
+                  out = {
+                    ...out,
+                    text: `${out.text}\n\n### recency sweep (last 30 days, run in parallel)\n${sweep.text}`,
+                    hits: out.hits + sweep.hits,
+                    refs: [...out.refs, ...sweep.refs],
+                  };
+                  agentLog("prefetch_merged", { run: runId, hits: sweep.hits, ms: prefetch.ms() });
+                }
+              }
               if (call.name === "create_document" && out.artifacts?.length) docCreated = true;
               hits += out.hits;
               out.refs.forEach((r) => refs.add(r));
@@ -455,6 +617,9 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
                 tool: call.name,
                 query: toolCallLabel(call.input),
                 hits: out.hits,
+                ms: Date.now() - started,
+                // Top hosts behind this call's sources, for the timeline's chips.
+                hosts: book.hostsFor(out.refs),
               });
               emit("sources", { sources: book.all() });
               if (out.artifacts?.length)
@@ -588,16 +753,45 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
     // the specifics the model asserted (MDL/docket/dates/figures/citations) appear
     // verbatim in the retrieved sources, and that every [S#] marker maps to a real
     // source. Surfaces invented specifics / orphan citations as a trust signal.
-    const facts = factCheck(answerText, sources);
+    // The corpus includes the book's untrimmed verification shadow, so a
+    // specific the model read on a fetched page or filing verifies even when it
+    // sits past the bounded `content` excerpt the client receives.
+    const facts = factCheck(answerText, sources, book.fullTexts());
     const factsVerified = facts.filter((f) => f.verified).length;
     const cites = checkCitations(answerText, sources);
+    const deterministic = {
+      factsChecked: facts.length,
+      factsVerified,
+      unverified: unverified(facts)
+        .map((f) => `${kindLabel(f.kind)}: ${f.value}`)
+        .slice(0, 10),
+      orphanRefs: cites.orphans,
+    };
+    emit("verification", deterministic);
+
+    // `done` goes out the moment the answer and its deterministic checks are in.
+    // Everything below is post-answer work the reader should not wait on: the
+    // client releases the composer on `done` and keeps reading late events.
+    emit("done", { run_id: runId, status: "complete", rounds: 1, source_count: sources.length });
+    agentLog("run_done", {
+      run: runId,
+      status: "complete",
+      mode,
+      sources: sources.length,
+      answer_chars: answerText.length,
+      total_ms: since(runStart),
+      tokens_in: tokIn,
+      tokens_out: tokOut,
+      tokens_total: tokIn + tokOut,
+    });
+
     // Citation-faithfulness (accuracy lever): a REASONING model judges whether
     // each [S#]-cited claim actually follows from its cited source (catching
     // overstatement / mis-attribution / fabrication) — the valid signal for
     // abstractive legal synthesis, where extractive contextual-grounding was
     // unusable. Score-only — never blocks the already-streamed answer.
     // THINK/report modes only; no-op unless BEDROCK_JUDGE_MODEL is set; null on
-    // any failure/timeout so it can never stall the turn.
+    // any failure/timeout. Re-emits `verification` with the verdict attached.
     const faithful =
       (mode === "think" || docReq.wants) && judgeEnabled()
         ? await checkFaithfulness({
@@ -607,23 +801,16 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             ...(input.signal ? { signal: input.signal } : {}),
           })
         : null;
-    emit("verification", {
-      factsChecked: facts.length,
-      factsVerified,
-      unverified: unverified(facts)
-        .map((f) => `${kindLabel(f.kind)}: ${f.value}`)
-        .slice(0, 10),
-      orphanRefs: cites.orphans,
-      ...(faithful
-        ? {
-            faithfulness: {
-              checked: faithful.checked,
-              supported: faithful.supported,
-              unsupported: faithful.unsupported,
-            },
-          }
-        : {}),
-    });
+    if (faithful) {
+      emit("verification", {
+        ...deterministic,
+        faithfulness: {
+          checked: faithful.checked,
+          supported: faithful.supported,
+          unsupported: faithful.unsupported,
+        },
+      });
+    }
     agentLog("verification", {
       run: runId,
       mode,
@@ -637,19 +824,6 @@ export async function runResearchAgent(input: OrchestrateInput, emit: Emit): Pro
             faith_unsupported: faithful.unsupported.length,
           }
         : {}),
-    });
-
-    emit("done", { run_id: runId, status: "complete", rounds: 1, source_count: sources.length });
-    agentLog("run_done", {
-      run: runId,
-      status: "complete",
-      mode,
-      sources: sources.length,
-      answer_chars: answerText.length,
-      total_ms: since(runStart),
-      tokens_in: tokIn,
-      tokens_out: tokOut,
-      tokens_total: tokIn + tokOut,
     });
 
     // Refresh session memory off the critical path (answer is already done).

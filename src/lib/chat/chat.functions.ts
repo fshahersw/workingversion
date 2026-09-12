@@ -34,6 +34,17 @@ export const appendMessageFn = createServerFn({ method: "POST" })
     return appendMessage(principalOf(context), data.convId, data.role, data.content);
   });
 
+export const updateMessageFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: { convId: string; msgId: string; content: string }) => {
+    if (!d?.convId || !d?.msgId || !d?.content) throw new Error("convId, msgId, content required");
+    return { convId: d.convId, msgId: d.msgId, content: d.content };
+  })
+  .handler(async ({ context, data }) => {
+    const { updateMessage } = await import("@/lib/chat/chat.server");
+    return updateMessage(principalOf(context), data.convId, data.msgId, data.content);
+  });
+
 export const listConversationsFn = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {

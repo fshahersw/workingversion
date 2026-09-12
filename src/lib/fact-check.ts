@@ -63,12 +63,18 @@ function plain(text: string) {
     .replace(/[*_`>#]/g, " ");
 }
 
-export function factCheck(answer: string, sources: Source[]): FactClaim[] {
+/**
+ * @param extraCorpus Untrimmed source texts kept off the wire (SourceBook's
+ *   verification shadow). A specific the model read on the page verifies even
+ *   when it fell outside the bounded `content` excerpt sent to the client.
+ */
+export function factCheck(answer: string, sources: Source[], extraCorpus: string[] = []): FactClaim[] {
   if (!answer.trim() || sources.length === 0) return [];
   const corpus = normalize(
-    sources
-      .map((s) => `${s.citation ?? ""} ${s.section_path ?? ""} ${s.content ?? ""}`)
-      .join(" \n "),
+    [
+      ...sources.map((s) => `${s.citation ?? ""} ${s.section_path ?? ""} ${s.content ?? ""}`),
+      ...extraCorpus,
+    ].join(" \n "),
   );
   const body = plain(answer);
   const out: FactClaim[] = [];

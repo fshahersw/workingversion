@@ -85,6 +85,24 @@ export async function appendMessage(
   return { msgId, role, content, ts: now };
 }
 
+/** Replace a stored message's content in place (the assistant turn is saved
+ *  the moment its answer completes and re-saved once a late verification
+ *  verdict arrives). Never creates a message. */
+export async function updateMessage(
+  principal: string,
+  convId: string,
+  msgId: string,
+  content: string,
+): Promise<{ ok: true }> {
+  await loadConv(principal, convId);
+  const existing = await getItem(convPK(convId), msgSK(msgId));
+  if (!existing) throw new Error("Message not found");
+  const now = new Date().toISOString();
+  await updateItem(convPK(convId), msgSK(msgId), { set: { content, editedAt: now } });
+  await updateItem(userPK(principal), convSK(convId), { set: { updatedAt: now } });
+  return { ok: true };
+}
+
 export async function listConversations(principal: string, limit = 50): Promise<Conversation[]> {
   // ULID sort keys are time-ordered; scanForward:false => most recent first.
   const rows = await queryPrefix(userPK(principal), "CONV#", { scanForward: false, limit });

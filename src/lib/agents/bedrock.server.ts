@@ -26,6 +26,29 @@ const REGION = process.env["BEDROCK_REGION"] ?? "us-east-1";
 export const BEDROCK_AGENT_MODEL =
   process.env["BEDROCK_AGENT_MODEL"] || "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
+/** Bedrock per-request processing tier (Converse `serviceTier.type`). */
+export type ServiceTier = "priority" | "default" | "flex" | "reserved";
+
+function parseTier(raw: string | undefined): ServiceTier | undefined {
+  const t = (raw ?? "").trim().toLowerCase();
+  return t === "priority" || t === "default" || t === "flex" || t === "reserved" ? t : undefined;
+}
+
+/** Tier applied to every call on BEDROCK_AGENT_MODEL (the side calls: coverage
+ *  gate, memory refresh, follow-ups, conversational replies). Set it only for a
+ *  model that supports the tier (Nova / Qwen / DeepSeek / MiniMax accept
+ *  `priority` and `flex`; Claude accepts only `default` / `reserved` and 400s
+ *  on the others), e.g. BEDROCK_AGENT_MODEL=<nova-2-lite id> BEDROCK_AGENT_TIER=priority. */
+export const BEDROCK_AGENT_TIER: ServiceTier | undefined = parseTier(process.env["BEDROCK_AGENT_TIER"]);
+
+/** Claude accepts only the default/reserved tiers; sending priority/flex to a
+ *  Claude id is a 400. A misconfigured BEDROCK_AGENT_TIER must degrade to the
+ *  Bedrock default instead of failing every side call. */
+export function tierAllowedFor(model: string, tier: ServiceTier): boolean {
+  if (tier === "default" || tier === "reserved") return true;
+  return !/anthropic\.claude/.test(model);
+}
+
 export class BedrockError extends Error {
   status: number;
   /** Server-sent Retry-After (ms), when present, so bedrockChat can honor it. */
@@ -83,6 +106,9 @@ export type BedrockChatRequest = {
   /** Cache the tools + system prefix across turns (Claude models only). Cuts
    *  per-turn input ~90% and does not count against rate limits. */
   cache?: boolean;
+  /** Processing tier for this request. Defaults to BEDROCK_AGENT_TIER when the
+   *  request runs on BEDROCK_AGENT_MODEL, else unset (Bedrock default). */
+  serviceTier?: ServiceTier;
   signal?: AbortSignal;
 };
 
@@ -120,6 +146,8 @@ async function converseOnce(req: BedrockChatRequest): Promise<BedrockChatResult>
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     },
   };
+  const tier = req.serviceTier ?? (req.model === BEDROCK_AGENT_MODEL ? BEDROCK_AGENT_TIER : undefined);
+  if (tier && tierAllowedFor(req.model, tier)) body["serviceTier"] = { type: tier };
   if (req.tools?.length) {
     const toolConfig: Record<string, unknown> = {
       tools: [

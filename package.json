@@ -18,7 +18,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node --experimental-strip-types --test src/lib/*.test.ts src/lib/pile/*.test.ts src/lib/agents/*.test.ts src/lib/auth/*.test.ts src/lib/kb/*.test.ts src/lib/review/*.test.ts src/lib/library/*.test.ts src/lib/writer/*.test.ts"
+    "test": "bun test src/lib",
+    "test:node": "node --experimental-strip-types --test src/lib/*.test.ts src/lib/pile/*.test.ts src/lib/agents/*.test.ts src/lib/auth/*.test.ts src/lib/kb/*.test.ts src/lib/review/*.test.ts src/lib/library/*.test.ts"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",

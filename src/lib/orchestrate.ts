@@ -2,9 +2,9 @@
 // Auth is the Cognito httpOnly session cookie (sw_id): it is auto-sent with these
 // same-origin fetches and verified by the /api/* request middleware. The legacy
 // Supabase anon bearer was removed — the app is Cognito-only now.
-import { litigationContext, SW_PROMPT_SUGGESTIONS } from "./system-prompt";
+import { litigationContext } from "./system-prompt";
 import { classifyIntent, type RetrievalHints } from "./research-intent";
-import type { Attachment } from "./chat-types";
+import type { Attachment, ChoiceAnswer } from "./chat-types";
 
 /** Compact per-query frame. The full persona + citation contract now travel as
  *  top-level body fields (system_prompt / citation_contract) instead of being
@@ -12,9 +12,6 @@ import type { Attachment } from "./chat-types";
 function frameQuery(text: string, hints: RetrievalHints) {
   return `[Seeger Weiss LLP — plaintiffs' mass tort & complex litigation. Research focus: ${hints.focus_note}]\n\n${text}`;
 }
-export { type PromptSuggestion, SW_PROMPT_SUGGESTIONS } from "./system-prompt";
-
-
 
 export type SSEEvent = { event: string; data: unknown };
 
@@ -84,6 +81,8 @@ export function streamOrchestrate(
     mode?: "auto" | "fast" | "think";
     /** Files uploaded into the sandbox this session (with extracted content). */
     attachments?: Attachment[];
+    /** Resume the same question after a clarification-panel selection. */
+    choice?: ChoiceAnswer;
   },
   onEvent: (e: SSEEvent) => void,
   signal?: AbortSignal,
@@ -218,13 +217,6 @@ export async function fetchFollowups(
   } catch {
     return [];
   }
-}
-
-export async function fetchPromptSuggestions(): Promise<
-  { text: string; category: string }[]
-> {
-  // Starter prompts are curated in-app for Seeger Weiss's practice areas.
-  return SW_PROMPT_SUGGESTIONS;
 }
 
 // Dictation is handled OS-level by the firm dictation helper (hold Right Alt →

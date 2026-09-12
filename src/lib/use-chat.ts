@@ -1,573 +1,361 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import {
-  streamOrchestrate,
-  fetchFollowups,
-  type SSEEvent,
-} from "@/lib/orchestrate";
-import type { Artifact, Attachment, MatterScope, Message, Round, Source } from "@/lib/chat-types";
-import { normalizeChoiceRequest } from "@/lib/agents/research-activity";
+import { streamOrchestrate, fetchFollowups, type SSEEvent } from "@/lib/orchestrate";
+import type { Attachment, ChoiceAnswer, MatterScope, Message } from "@/lib/chat-types";
 import {
   loadConversation,
   saveFollowups,
   saveTurn,
+  updateAssistantTurn,
+  updateConversationMemory,
   keepConversation,
 } from "@/lib/chat/history";
+import {
+  emptyAssistant,
+  makeStreamChannel,
+  reduceChatMessages,
+  type ChatAction,
+} from "@/lib/chat-reducer";
 
-export type ChatAction =
-  | { type: "user"; id: string; text: string }
-  | { type: "assistant_start"; id: string }
-  | { type: "sse"; id: string; evt: SSEEvent }
-  | { type: "delta_flush"; id: string; text: string }
-  | { type: "thinking"; id: string; text: string }
-  | { type: "reasoning"; id: string; text: string }
-  | { type: "followups"; id: string; followups: string[] }
-  | { type: "proposal_applied"; id: string }
-  | { type: "hydrate"; messages: Message[] }
-  | { type: "reset" };
+// The reducer lives in chat-reducer.ts (pure, unit-tested); these re-exports
+// keep the historical import path working for other hooks.
+export { emptyAssistant, makeStreamChannel, reduceChatMessages, type ChatAction } from "@/lib/chat-reducer";
 
-type Action = ChatAction;
+export type SendMode = "auto" | "fast" | "think";
 
-export function emptyAssistant(id: string): Message {
-  return {
-    id,
-    role: "assistant",
-    text: "",
-    rounds: [],
-    sources: [],
-    answer: "",
-    status: "thinking",
-  };
-}
+export type SendOptions = {
+  mode?: SendMode;
+  attachments?: Attachment[];
+  /** Resume the same question after a clarification-panel selection. */
+  choice?: ChoiceAnswer;
+  /** Id of the assistant message whose panel is being answered. */
+  resumeId?: string;
+};
 
-/** The chat message reducer; shared with the Drafts assistant hook. */
-export function reduceChatMessages(state: Message[], a: Action): Message[] {
-  return reduce(state, a);
-}
+type StoredSendOptions = { mode?: SendMode; attachments?: Attachment[] };
 
-function reduce(state: Message[], a: Action): Message[] {
-  switch (a.type) {
-    case "user":
-      return [
-        ...state,
-        {
-          id: a.id,
-          role: "user",
-          text: a.text,
-          rounds: [],
-          sources: [],
-          answer: "",
-          status: "done",
-        },
-      ];
-    case "assistant_start":
-      return [...state, emptyAssistant(a.id)];
-    case "delta_flush":
-      return state.map((m) =>
-        m.id === a.id && m.role === "assistant"
-          ? { ...m, answer: m.answer + a.text }
-          : m,
-      );
-    case "thinking":
-      return state.map((m) => {
-        if (m.id !== a.id || m.role !== "assistant") return m;
-        // Each server narration is one line ("\n"-prefixed after the first);
-        // RAF batching may deliver several at once, so split and stamp each.
-        const now = Date.now();
-        const lines = a.text
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((text) => ({ text, at: now }));
-        return {
-          ...m,
-          thinking: (m.thinking ?? "") + a.text,
-          narration: lines.length ? [...(m.narration ?? []), ...lines] : m.narration,
-        };
-      });
-    case "reasoning":
-      return state.map((m) =>
-        m.id === a.id && m.role === "assistant"
-          ? { ...m, reasoning: (m.reasoning ?? "") + a.text }
-          : m,
-      );
-    case "sse":
-      return state.map((m) =>
-        m.id === a.id && m.role === "assistant" ? applyEvent(m, a.evt) : m,
-      );
-    case "hydrate":
-      return a.messages;
-    case "proposal_applied":
-      return state.map((m) =>
-        m.id === a.id && m.role === "assistant" && m.proposal
-          ? { ...m, proposal: { ...m.proposal, appliedAt: Date.now() } }
-          : m,
-      );
-    case "followups":
-      return state.map((m) =>
-        m.id === a.id && m.role === "assistant"
-          ? { ...m, followups: a.followups }
-          : m,
-      );
-    case "reset":
-      return [];
-    default:
-      return state;
-  }
-}
-
-function applyEvent(m: Message, e: SSEEvent): Message {
-  const d = (e.data ?? {}) as Record<string, unknown>;
-  switch (e.event) {
-    case "run":
-      return m;
-    case "mode":
-      return { ...m, mode: d.mode ? String(d.mode) : m.mode, modeReason: d.reason ? String(d.reason) : m.modeReason };
-    case "round": {
-      const roundNumber = Number(d.round) || m.rounds.length + 1;
-      const existing = m.rounds.find((candidate) => candidate.round === roundNumber);
-      const now = Date.now();
-      const round: Round = {
-        round: roundNumber,
-        phase: d.phase ? String(d.phase) : undefined,
-        reasoning: String(d.reasoning ?? ""),
-        scratch_note: d.scratch_note as string | undefined,
-        done: Boolean(d.done),
-        startedAt: existing?.startedAt ?? now,
-        completedAt: d.done ? now : existing?.completedAt,
-        dispatch:
-          (d.dispatch as { agent: string; focus: string }[] | undefined) ?? [],
-        agents: {},
-      };
-      for (const dp of round.dispatch) {
-        round.agents[dp.agent] = {
-          agent: dp.agent,
-          focus: dp.focus,
-          status: "running",
-          tools: [],
-        };
-      }
-      const rounds = existing
-        ? m.rounds.map((r) =>
-            r.round === round.round
-              ? { ...r, ...round, agents: { ...r.agents, ...round.agents } }
-              : r,
-          )
-        : [...m.rounds, round];
-      return { ...m, rounds };
-    }
-    case "agent": {
-      const rn = Number(d.round);
-      const agent = String(d.agent);
-      return mapRound(m, rn, (r) => ({
-        ...r,
-        agents: {
-          ...r.agents,
-          [agent]: r.agents[agent] ?? {
-            agent,
-            focus: String(d.focus ?? ""),
-            status: "running",
-            tools: [],
-          },
-        },
-      }));
-    }
-    case "tool_call": {
-      const rn = Number(d.round);
-      const agent = String(d.agent);
-      const id = d.id as string | undefined;
-      const tc = {
-        id,
-        tool: String(d.tool ?? ""),
-        query: d.query as string | undefined,
-        scope: d.scope as string | undefined,
-        hits: d.hits as number | undefined,
-      };
-      return mapRound(m, rn, (r) => {
-        const ex = r.agents[agent] ?? {
-          agent,
-          focus: "",
-          status: "running" as const,
-          tools: [],
-        };
-        // Upsert by tool-use id: a call emits once when it STARTS (no hits) and
-        // again when it COMPLETES (with hits). Merge into one row so the timeline
-        // shows a live "searching…" state that fills in its result, not two rows.
-        const i = id ? ex.tools.findIndex((t) => t.id === id) : -1;
-        const tools =
-          i >= 0
-            ? ex.tools.map((t, j) => (j === i ? { ...t, ...tc } : t))
-            : [...ex.tools, { ...tc, at: Date.now() }];
-        return {
-          ...r,
-          agents: { ...r.agents, [agent]: { ...ex, tools } },
-        };
-      });
-    }
-    case "agent_done": {
-      const rn = Number(d.round);
-      const agent = String(d.agent);
-      return mapRound(m, rn, (r) => {
-        const ex = r.agents[agent];
-        if (!ex) return r;
-        return {
-          ...r,
-          agents: {
-            ...r.agents,
-            [agent]: {
-              ...ex,
-              status: "done",
-              summary: d.summary as string | undefined,
-              count: d.count as number | undefined,
-              citations: d.citations as string[] | undefined,
-            },
-          },
-        };
-      });
-    }
-    case "sources": {
-      const sources = (d.sources as Source[] | undefined) ?? [];
-      return { ...m, sources };
-    }
-    case "writer_start":
-      // Research is over when the writer starts: stamp the rounds so the
-      // elapsed time is fixed (and survives a reopen) instead of ticking.
-      return {
-        ...m,
-        status: "writing",
-        collapseTimeline: true,
-        rounds: completeRounds(m.rounds),
-        deliverable: d.deliverable ? String(d.deliverable) : m.deliverable,
-      };
-    case "delta":
-      // Streaming text is batched outside the reducer via RAF;
-      // see useChat.send. We still tolerate raw deltas here.
-      return { ...m, answer: m.answer + ((d.text as string) ?? "") };
-    case "verification":
-      return {
-        ...m,
-        verification: {
-          factsChecked: Number(d.factsChecked) || 0,
-          factsVerified: Number(d.factsVerified) || 0,
-          unverified: (d.unverified as string[] | undefined) ?? [],
-          orphanRefs: (d.orphanRefs as string[] | undefined) ?? [],
-          ...(d.faithfulness && typeof d.faithfulness === "object"
-            ? { faithfulness: d.faithfulness as NonNullable<Message["verification"]>["faithfulness"] }
-            : {}),
-        },
-      };
-    case "artifact": {
-      const incoming = (d.artifacts as Artifact[] | undefined) ?? [];
-      if (!incoming.length) return m;
-      // Upsert by id so a re-emitted artifact replaces rather than duplicates.
-      const byId = new Map((m.artifacts ?? []).map((x) => [x.id, x]));
-      for (const a of incoming) byId.set(a.id, a);
-      return { ...m, artifacts: [...byId.values()] };
-    }
-    case "choice": {
-      const choice = normalizeChoiceRequest(d.choice ?? d);
-      return choice ? { ...m, choice } : m;
-    }
-    case "proposal": {
-      const material = typeof d.material === "string" ? d.material : "";
-      if (!material.trim()) return m;
-      return {
-        ...m,
-        proposal: {
-          material,
-          target: d.target === "selection" ? "selection" : "cursor",
-          ...(typeof d.note === "string" && d.note ? { note: d.note } : {}),
-          ...(m.proposal?.appliedAt ? { appliedAt: m.proposal.appliedAt } : {}),
-        },
-      };
-    }
-    case "done":
-      return { ...m, status: "done", collapseTimeline: true, rounds: completeRounds(m.rounds) };
-    case "error":
-      return {
-        ...m,
-        status: "error",
-        error: (d.message as string) ?? "Something went wrong.",
-      };
-    default:
-      return m;
-  }
-}
-
-/** Mark every round finished (once); keeps an existing completion time. */
-function completeRounds(rounds: Round[]): Round[] {
-  const now = Date.now();
-  return rounds.map((r) => (r.done && r.completedAt ? r : { ...r, done: true, completedAt: r.completedAt ?? now }));
-}
+type Tail = { role: "user" | "assistant"; content: string }[];
 
 /**
- * RAF-batched channel for a streamed text field: coalesces deltas into one
- * dispatch per frame. Shared by the research and Drafts chat hooks.
+ * Verbatim recent turns for the server, built from the client's own transcript
+ * (the server's copy rides on the `memory` event, which can still be in flight
+ * when the next question is sent). An answered clarification is carried as a
+ * marker on its question so the detectors treat that fork as settled later.
  */
-export function makeStreamChannel(flushTo: (text: string) => void): {
-  push: (text: string) => void;
-  flush: () => void;
-} {
-  let buf = "";
-  let scheduled = false;
-  const flush = () => {
-    scheduled = false;
-    if (!buf) return;
-    const t = buf;
-    buf = "";
-    flushTo(t);
-  };
-  const push = (text: string) => {
-    buf += text;
-    if (scheduled) return;
-    scheduled = true;
-    if (typeof requestAnimationFrame !== "undefined") requestAnimationFrame(flush);
-    else setTimeout(flush, 40);
-  };
-  return { push, flush };
-}
-
-function mapRound(m: Message, n: number, fn: (r: Round) => Round): Message {
-  return { ...m, rounds: m.rounds.map((r) => (r.round === n ? fn(r) : r)) };
+export function buildTail(messages: Message[]): Tail {
+  const tail: Tail = [];
+  for (const m of messages) {
+    if (m.role === "user") {
+      if (m.text.trim()) tail.push({ role: "user", content: m.text.slice(0, 4000) });
+      continue;
+    }
+    const answered = m.choice?.answered;
+    if (m.choice && answered) {
+      const marker = `[Clarification — ${m.choice.id}: ${(answered.text || answered.label).slice(0, 200)}]`;
+      const last = tail[tail.length - 1];
+      if (last && last.role === "user") last.content = `${last.content}\n${marker}`;
+      else tail.push({ role: "user", content: marker });
+    }
+    if (m.answer.trim()) tail.push({ role: "assistant", content: m.answer.slice(0, 4000) });
+  }
+  return tail;
 }
 
 export function useChat(sessionId: string) {
-  const [messages, dispatch] = useReducer(reduce, [] as Message[]);
+  const [messages, dispatch] = useReducer(reduceChatMessages, [] as Message[]);
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   // Maintained conversation memory (rolling summary, entity ledger, verbatim
   // tail, retrieved sources). The server refreshes it after each answer and
-  // sends it back on the `memory` event; we simply carry it forward.
+  // sends it back on the `memory` event; we carry it forward.
   const memoryRef = useRef<unknown>(null);
   // Conversation the turns are being saved to (created lazily on first turn).
   const conversationRef = useRef<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const messagesRef = useRef<Message[]>(messages);
   messagesRef.current = messages;
+  // Monotonic run counter: only the newest run may replace the memory, so an
+  // older run's late `memory` event cannot overwrite a newer one.
+  const runSeqRef = useRef(0);
+  // Chat generation, bumped by reset/open: a run from a previous chat can
+  // neither attach its turn to the new one nor refill its memory.
+  const genRef = useRef(0);
+  // Original send options per assistant message id, replayed on a resume.
+  const sendOptsRef = useRef(new Map<string, StoredSendOptions>());
+  // Persistence runs strictly in order (the first turn creates the conversation
+  // that the second one must append to).
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
 
   const send = useCallback(
-    async (
-      text: string,
-      matter?: MatterScope | null,
-      opts?: { mode?: "auto" | "fast" | "think"; attachments?: Attachment[] },
-    ) => {
+    async (text: string, matter?: MatterScope | null, opts?: SendOptions) => {
       if (busy || !text.trim()) return;
-      const uid = crypto.randomUUID();
-      const aid = crypto.randomUUID();
-      dispatch({ type: "user", id: uid, text });
-      dispatch({ type: "assistant_start", id: aid });
+      const snapshot = messagesRef.current;
+      let uid: string = crypto.randomUUID();
+      let aid: string = crypto.randomUUID();
+      let prior = snapshot;
+      let local: Message;
+      let sendOpts: StoredSendOptions = {
+        ...(opts?.mode ? { mode: opts.mode } : {}),
+        ...(opts?.attachments ? { attachments: opts.attachments } : {}),
+      };
+      const choice = opts?.choice;
+      if (choice) {
+        const open = snapshot.filter(
+          (m) => m.role === "assistant" && m.choice && !m.choice.answered && !m.choice.dismissed,
+        );
+        const target = opts?.resumeId ? open.find((m) => m.id === opts.resumeId) : open[open.length - 1];
+        if (!target) return;
+        aid = target.id;
+        const idx = snapshot.findIndex((m) => m.id === aid);
+        let userIdx = -1;
+        for (let i = idx - 1; i >= 0; i--) {
+          if (snapshot[i]?.role === "user") {
+            userIdx = i;
+            break;
+          }
+        }
+        if (userIdx >= 0) uid = snapshot[userIdx]!.id;
+        // The pending question and its placeholder are the turn being resumed,
+        // not prior context.
+        prior = snapshot.slice(0, userIdx >= 0 ? userIdx : idx);
+        // Replay the original mode and attachments unless overridden.
+        sendOpts = { ...(sendOptsRef.current.get(aid) ?? {}), ...sendOpts };
+        const action: ChatAction = { type: "choice_resume", id: aid, answer: choice };
+        dispatch(action);
+        local = reduceChatMessages([target], action)[0] ?? emptyAssistant(aid);
+      } else {
+        dispatch({ type: "user", id: uid, text });
+        dispatch({ type: "assistant_start", id: aid });
+        local = emptyAssistant(aid);
+      }
+      sendOptsRef.current.set(aid, sendOpts);
+      const myRun = ++runSeqRef.current;
+      const myGen = genRef.current;
       setBusy(true);
       const ac = new AbortController();
       abortRef.current = ac;
 
-      // RAF-batched delta buffer so we don't re-render per token.
-      let buf = "";
+      // Every action is applied to a local copy as well, so persistence never
+      // depends on React having rendered the latest state.
+      const apply = (action: ChatAction) => {
+        local = reduceChatMessages([local], action)[0] ?? local;
+        dispatch(action);
+      };
       let fullAnswer = "";
-      let scheduled = false;
-      const flush = () => {
-        scheduled = false;
-        if (!buf) return;
-        const t = buf;
-        buf = "";
-        dispatch({ type: "delta_flush", id: aid, text: t });
-      };
-      const schedule = () => {
-        if (scheduled) return;
-        scheduled = true;
-        if (typeof requestAnimationFrame !== "undefined") {
-          requestAnimationFrame(flush);
-        } else {
-          setTimeout(flush, 40);
-        }
+      // RAF-batched channels so we do not re-render per token.
+      const answerCh = makeStreamChannel((t) => apply({ type: "delta_flush", id: aid, text: t }));
+      const thinkCh = makeStreamChannel((t) => apply({ type: "thinking", id: aid, text: t }));
+      const reasonCh = makeStreamChannel((t) => apply({ type: "reasoning", id: aid, text: t }));
+      const flushAll = () => {
+        answerCh.flush();
+        thinkCh.flush();
+        reasonCh.flush();
       };
 
-      // Same RAF batching for the streamed research narration ("thinking").
-      let thinkBuf = "";
-      let thinkScheduled = false;
-      const flushThink = () => {
-        thinkScheduled = false;
-        if (!thinkBuf) return;
-        const t = thinkBuf;
-        thinkBuf = "";
-        dispatch({ type: "thinking", id: aid, text: t });
-      };
-      const scheduleThink = () => {
-        if (thinkScheduled) return;
-        thinkScheduled = true;
-        if (typeof requestAnimationFrame !== "undefined") {
-          requestAnimationFrame(flushThink);
-        } else {
-          setTimeout(flushThink, 40);
-        }
+      let doneSeen = false;
+      let awaitingChoice = false;
+      let persisted = false;
+      let savedConv: string | null = null;
+      let savedMsgId: string | null = null;
+      let verificationAfterSave = false;
+      let memoryArrived = false;
+      let followupsRequested = false;
+      let saveDone: Promise<void> = Promise.resolve();
+
+      const requestFollowups = () => {
+        if (followupsRequested || awaitingChoice || !fullAnswer.trim()) return;
+        followupsRequested = true;
+        fetchFollowups(text, fullAnswer).then((followups) => {
+          if (followups.length) {
+            dispatch({ type: "followups", id: aid, followups });
+            void saveFollowups(conversationRef.current, aid, followups);
+          }
+        });
       };
 
-      // Same RAF batching for the model's live reasoning stream.
-      let reasonBuf = "";
-      let reasonScheduled = false;
-      const flushReason = () => {
-        reasonScheduled = false;
-        if (!reasonBuf) return;
-        const t = reasonBuf;
-        reasonBuf = "";
-        dispatch({ type: "reasoning", id: aid, text: t });
+      // Persist the moment the answer is complete (on `done`, or on Stop with
+      // text on screen), not after the late-event drain: a Stop, New chat, or
+      // navigation during the drain used to lose the whole turn.
+      const persist = () => {
+        if (persisted) return;
+        persisted = true;
+        flushAll();
+        const answer: Message = { ...local, answer: fullAnswer || local.answer, status: "done" };
+        if (!answer.answer.trim() && !answer.artifacts?.length) return;
+        const question: Message = {
+          id: uid,
+          role: "user",
+          text,
+          rounds: [],
+          sources: [],
+          answer: "",
+          status: "done",
+        };
+        const capturedConv = conversationRef.current;
+        const run = async () => {
+          // A run whose chat was reset or reopened meanwhile must not attach
+          // its turn to the new chat; it gets its own conversation instead.
+          const convId = capturedConv ?? (genRef.current === myGen ? conversationRef.current : null);
+          const res = await saveTurn({
+            conversationId: convId,
+            question,
+            answer,
+            memory: memoryRef.current,
+            matter: matter ?? null,
+          });
+          savedConv = res.conversationId;
+          savedMsgId = res.assistantMsgId;
+          if (res.conversationId && genRef.current === myGen && res.conversationId !== conversationRef.current) {
+            conversationRef.current = res.conversationId;
+            setConversationId(res.conversationId);
+          }
+        };
+        saveDone = saveChainRef.current = saveChainRef.current.then(run, run).catch(() => undefined);
       };
-      const scheduleReason = () => {
-        if (reasonScheduled) return;
-        reasonScheduled = true;
-        if (typeof requestAnimationFrame !== "undefined") {
-          requestAnimationFrame(flushReason);
-        } else {
-          setTimeout(flushReason, 40);
+
+      const onEvent = (evt: SSEEvent) => {
+        if (evt.event === "delta") {
+          const d = (evt.data ?? {}) as { text?: string };
+          if (d.text) {
+            fullAnswer += d.text;
+            answerCh.push(d.text);
+          }
+          return;
+        }
+        if (evt.event === "thinking") {
+          const d = (evt.data ?? {}) as { text?: string };
+          if (d.text) thinkCh.push(d.text);
+          return;
+        }
+        if (evt.event === "reasoning") {
+          const d = (evt.data ?? {}) as { text?: string };
+          if (d.text) reasonCh.push(d.text);
+          return;
+        }
+        if (evt.event === "memory") {
+          const d = (evt.data ?? {}) as { memory?: unknown };
+          // Only the newest run in the current chat may replace the memory.
+          if (d.memory && runSeqRef.current === myRun && genRef.current === myGen) {
+            memoryRef.current = d.memory;
+            memoryArrived = true;
+          }
+          return;
+        }
+        // For non-delta events, flush pending text first so ordering with
+        // writer_start / done is preserved.
+        flushAll();
+        if (evt.event === "choice") awaitingChoice = true;
+        if (evt.event === "verification" && persisted) verificationAfterSave = true;
+        apply({ type: "sse", id: aid, evt });
+        if (evt.event === "done") {
+          doneSeen = true;
+          const status = String((evt.data as { status?: unknown } | null)?.status ?? "");
+          if (status === "awaiting_choice") awaitingChoice = true;
+          // The answer is complete. Release the composer now; the faithfulness
+          // verdict and the memory refresh arrive as late events on this same
+          // stream and are applied by message id.
+          if (abortRef.current === ac) setBusy(false);
+          if (!awaitingChoice) {
+            persist();
+            requestFollowups();
+          }
         }
       };
 
       try {
-        // First turn (or a memory the server has not built yet): fall back to
-        // the last couple of turns verbatim so context is never empty.
-        const fallbackTail: { role: "user" | "assistant"; content: string }[] = [];
-        for (const m of messages) {
-          if (m.role === "user" && m.text.trim()) {
-            fallbackTail.push({ role: "user", content: m.text.slice(0, 4000) });
-          } else if (m.role === "assistant" && m.answer.trim()) {
-            fallbackTail.push({ role: "assistant", content: m.answer.slice(0, 4000) });
-          }
-        }
         // Sources already retrieved this session keep their [S#] refs, so
         // follow-ups reuse them instead of re-running the same searches.
         const carriedSources = Array.from(
-          new Map(
-            messages.flatMap((m) => (m.sources ?? []).map((s) => [s.ref, s] as const)),
-          ).values(),
+          new Map(snapshot.flatMap((m) => (m.sources ?? []).map((s) => [s.ref, s] as const))).values(),
         ).slice(-24);
-        const memory =
-          (memoryRef.current as Record<string, unknown> | null) ?? null;
+        const tail = buildTail(prior).slice(-4);
+        const memory = (memoryRef.current as Record<string, unknown> | null) ?? null;
         const outboundMemory = memory
-          ? { ...memory, sources: carriedSources }
-          : fallbackTail.length || carriedSources.length
-            ? { tail: fallbackTail.slice(-4), sources: carriedSources }
+          ? { ...memory, tail, sources: carriedSources }
+          : tail.length || carriedSources.length
+            ? { tail, sources: carriedSources }
             : null;
+        // Only fully-ingested attachments; processing/errored ones are skipped.
+        const ready = (sendOpts.attachments ?? []).filter(
+          (a) => a.status !== "processing" && a.status !== "error",
+        );
         await streamOrchestrate(
           {
             query: text,
             session_id: sessionId,
             stream: true,
             ...(outboundMemory ? { memory: outboundMemory } : {}),
-            ...(matter
-              ? { matter_id: matter.matterId, matter_label: matter.label }
-              : {}),
-            ...(opts?.mode && opts.mode !== "auto" ? { mode: opts.mode } : {}),
-            ...(() => {
-              // Only send fully-ingested attachments; processing/errored ones are skipped.
-              const ready = (opts?.attachments ?? []).filter(
-                (a) => a.status !== "processing" && a.status !== "error",
-              );
-              return ready.length ? { attachments: ready } : {};
-            })(),
+            ...(matter ? { matter_id: matter.matterId, matter_label: matter.label } : {}),
+            ...(sendOpts.mode && sendOpts.mode !== "auto" ? { mode: sendOpts.mode } : {}),
+            ...(choice ? { choice } : {}),
+            ...(ready.length ? { attachments: ready } : {}),
           },
-          (evt) => {
-            if (evt.event === "delta") {
-              const d = (evt.data ?? {}) as { text?: string };
-              if (d.text) {
-                buf += d.text;
-                fullAnswer += d.text;
-                schedule();
-              }
-              return;
-            }
-            if (evt.event === "thinking") {
-              const d = (evt.data ?? {}) as { text?: string };
-              if (d.text) {
-                thinkBuf += d.text;
-                scheduleThink();
-              }
-              return;
-            }
-            if (evt.event === "reasoning") {
-              const d = (evt.data ?? {}) as { text?: string };
-              if (d.text) {
-                reasonBuf += d.text;
-                scheduleReason();
-              }
-              return;
-            }
-            if (evt.event === "memory") {
-              const d = (evt.data ?? {}) as { memory?: unknown };
-              if (d.memory) memoryRef.current = d.memory;
-              return;
-            }
-            // For non-delta events, ensure any pending text is flushed first
-            // so ordering with writer_start / done is preserved.
-            if (buf) flush();
-            if (thinkBuf) flushThink();
-            if (reasonBuf) flushReason();
-            dispatch({ type: "sse", id: aid, evt });
-          },
+          onEvent,
           ac.signal,
         );
-        if (buf) flush();
-        if (thinkBuf) flushThink();
-        if (reasonBuf) flushReason();
-
-        // Persist the completed turn (best-effort; never blocks the UI).
-        const finished = messagesRef.current;
-        const answerMsg =
-          finished.find((m) => m.id === aid) ??
-          ({ ...emptyAssistant(aid), answer: fullAnswer, status: "done" } as Message);
-        const turnIndex = Math.max(
-          0,
-          finished.filter((m) => m.role === "user").length - 1,
-        );
-        const savedId = await saveTurn({
-          conversationId: conversationRef.current,
-          question: {
-            id: uid,
-            role: "user",
-            text,
-            rounds: [],
-            sources: [],
-            answer: "",
-            status: "done",
-          },
-          answer: { ...answerMsg, answer: fullAnswer || answerMsg.answer },
-          memory: memoryRef.current,
-          matter: matter ?? null,
-          turnIndex,
-        });
-        if (savedId && savedId !== conversationRef.current) {
-          conversationRef.current = savedId;
-          setConversationId(savedId);
-        }
-
-        if (fullAnswer.trim()) {
-          fetchFollowups(text, fullAnswer).then((followups) => {
-            if (followups.length) {
-              dispatch({ type: "followups", id: aid, followups });
-              void saveFollowups(conversationRef.current, aid, followups);
-            }
-          });
+        flushAll();
+        if (!doneSeen) {
+          // The server closed the stream without a terminal event: settle the
+          // turn with whatever streamed rather than leaving it spinning.
+          doneSeen = true;
+          apply({ type: "sse", id: aid, evt: { event: "done", data: { status: "ended" } } });
+          persist();
+          requestFollowups();
         }
       } catch (err) {
-        if (buf) flush();
-        dispatch({
-          type: "sse",
-          id: aid,
-          evt: {
-            event: "error",
-            data: { message: (err as Error).message ?? "Network error" },
-          },
-        });
+        flushAll();
+        if (ac.signal.aborted) {
+          if (!doneSeen) {
+            // Stop: keep whatever streamed and settle the turn as complete.
+            doneSeen = true;
+            apply({ type: "sse", id: aid, evt: { event: "done", data: { status: "stopped" } } });
+            persist();
+          }
+        } else if (!doneSeen) {
+          apply({
+            type: "sse",
+            id: aid,
+            evt: { event: "error", data: { message: (err as Error).message ?? "Network error" } },
+          });
+        } else {
+          // The late-event drain failed after the answer completed; the answer
+          // stands, only the verdict/memory refresh may be missing.
+          console.warn("[chat] late-event stream ended early", err);
+        }
       } finally {
-        setBusy(false);
+        // Only the stream that currently owns the composer may release it; an
+        // older stream draining its late events must not flip a newer run's state.
+        if (abortRef.current === ac) setBusy(false);
+      }
+
+      // Post-drain bookkeeping for the persisted turn.
+      await saveDone;
+      if (savedConv && savedMsgId && verificationAfterSave) {
+        flushAll();
+        await updateAssistantTurn(savedConv, savedMsgId, {
+          ...local,
+          answer: fullAnswer || local.answer,
+          status: "done",
+        });
+      }
+      if (savedConv && memoryArrived && genRef.current === myGen) {
+        await updateConversationMemory(savedConv, memoryRef.current);
       }
     },
-    [busy, sessionId, messages],
+    [busy, sessionId],
   );
 
+  /** Abort the in-flight run. The answer streamed so far is kept. */
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
   const reset = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+    genRef.current += 1;
     memoryRef.current = null;
     conversationRef.current = null;
+    sendOptsRef.current.clear();
     setConversationId(null);
     dispatch({ type: "reset" });
     setBusy(false);
@@ -577,6 +365,8 @@ export function useChat(sessionId: string) {
   const open = useCallback(async (id: string) => {
     abortRef.current?.abort();
     abortRef.current = null;
+    genRef.current += 1;
+    sendOptsRef.current.clear();
     setBusy(false);
     const loaded = await loadConversation(id);
     if (!loaded) return null;
@@ -597,5 +387,5 @@ export function useChat(sessionId: string) {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  return { messages, send, busy, reset, open, keep, conversationId };
+  return { messages, send, stop, busy, reset, open, keep, conversationId };
 }
