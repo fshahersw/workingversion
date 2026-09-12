@@ -259,6 +259,14 @@ export function useChat(sessionId: string) {
             requestFollowups();
           }
         }
+        if (evt.event === "error") {
+          // Terminal error from the server/transport. Settle WITHOUT converting it
+          // into a successful "done": mark it seen so the stream-close fallback below
+          // cannot overwrite status "error" with "done", release the composer, and do
+          // NOT persist a failed/truncated turn as a completed, cited research result.
+          doneSeen = true;
+          if (abortRef.current === ac) setBusy(false);
+        }
       };
 
       try {

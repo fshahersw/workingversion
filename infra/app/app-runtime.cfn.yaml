@@ -904,6 +904,11 @@ Resources:
             - !Ref KbIngestQueueUrl
             - !Ref AWS::NoValue
           BEDROCK_REGION: !Ref BedrockRegion
+          # Research landing "Since you were here" headlines are OFF by default:
+          # the brief derived topics from raw conversation titles and egressed
+          # matter/party terms to Tavily/Firecrawl on page load (confidentiality).
+          # Re-enable only after the brief is redesigned to use non-matter topics.
+          RESEARCH_BRIEF: "off"
           # Office assistant model tiers (src/lib/writer/inference.server.ts).
           OFFICE_MODEL: !Ref OfficeModel
           OFFICE_FAST_MODEL: !Ref OfficeFastModel

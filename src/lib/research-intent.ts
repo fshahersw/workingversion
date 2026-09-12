@@ -207,7 +207,7 @@ const REFORMAT_RE =
 
 /** Any hint that this is a real legal-research question — blocks a down-route. */
 const LEGAL_SIGNAL_RE =
-  /\b(mdl|jpml|docket|cmo|pto|bellwether|pacer|court|circuit|opinion|ruling|holding|motion|order|settle(ment)?|class(\s|-)?(cert|action)?|rule ?\d|daubert|preemption|fda|recall|statute|limitations|repose|v\.|et al|plaintiff|defendant|deposition|complaint|filing|litigation|lawsuit|damages|injur|causation|liab|remand|removal|discovery|subpoena|expert|verdict|appeal)\b/i;
+  /\b(mdl|jpml|docket|cmo|pto|bellwether|pacer|court|circuit|opinion|ruling|holding|motion|order|settle(ment)?|class(\s|-)?(cert|action)?|rule ?\d|daubert|preemption|fda|recall|statute|limitations|repose|v\.|et al|plaintiff|defendant|deposition|complaint|filing|litigation|lawsuit|damages|injur|causation|liab|remand|removal|discovery|subpoena|expert|verdict|appeal|trials?|cases?|claims?|hearings?|schedule|updates?|latest|pending|status)\b/i;
 
 /** Multi-part / comparative / strategic phrasing -> think. */
 const THINK_RE =
