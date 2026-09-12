@@ -9,6 +9,8 @@ import {
 import type { Source } from "@/lib/chat-types";
 import { streamQuickAsk } from "@/lib/orchestrate";
 import { gradeSource, sortByAuthority } from "@/lib/source-tiering";
+import { hostOf } from "@/lib/host";
+import { Favicon } from "./Favicon";
 
 type Bucket =
   | "corpus"
@@ -48,15 +50,6 @@ const STATE_COURT_RE =
 const STATUTE_RE =
   /\b(\d+\s?u\.?s\.?c\.?|\d+\s?c\.?f\.?r\.?|fed\.?\s?reg\.?|pub\.?\s?l\.?\s?no|public law|§)/i;
 
-function hostOf(url?: string): string | null {
-  if (!url || url.startsWith("/")) return null;
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return null;
-  }
-}
-
 function bucketOf(s: Source): Bucket {
   const type = (s.source_type || "").toLowerCase();
   if (CORPUS_TYPES.has(type) || /docket|motion|order|complaint/.test(type)) {
@@ -89,73 +82,24 @@ function bucketOf(s: Source): Bucket {
   return gradeSource(s).tier === 3 ? "press" : "web";
 }
 
-/** 16px site favicon with monogram fallback; corpus rows get a doc glyph.
- *  Prefers a provider-supplied favicon URL (Tavily), else the Google proxy. */
-function Favicon({
-  host,
-  size = 16,
-  src,
-}: {
-  host: string | null;
-  size?: number;
-  src?: string;
-}) {
-  const [failed, setFailed] = useState(false);
-  const [proxyFailed, setProxyFailed] = useState(false);
-  const px = `${size}px`;
-
-  if (!host) {
-    return (
-      <span
-        style={{ width: px, height: px }}
-        className="grid shrink-0 place-items-center rounded-[4px] bg-brand-navy/10"
-      >
-        <FileText className="h-2.5 w-2.5 text-brand-navy/70" />
-      </span>
-    );
-  }
-
-  // DuckDuckGo's icon service returns a 200 default for unknown hosts, avoiding
-  // the console 404s that Google's s2/faviconV2 proxy throws; the monogram
-  // fallback below still covers any host that errors.
-  const proxy = `https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico`;
-  const url = src && !failed ? src : proxy;
-
-  if ((!src || failed) && proxyFailed) {
-    return (
-      <span
-        style={{ width: px, height: px }}
-        className="grid shrink-0 place-items-center rounded-[4px] bg-muted text-[8px] font-semibold uppercase text-muted-foreground"
-      >
-        {host.charAt(0)}
-      </span>
-    );
-  }
-
-  return (
-    <img
-      src={url}
-      alt=""
-      loading="lazy"
-      width={size}
-      height={size}
-      onError={() => (url === proxy ? setProxyFailed(true) : setFailed(true))}
-      style={{ width: px, height: px }}
-      className="shrink-0 rounded-[4px] bg-white object-contain ring-1 ring-border/50"
-    />
-  );
-}
-
+type Scope = "turn" | "all";
 
 export function SourcePanel({
   sources,
+  turnSources,
   selectedRef,
   citedRefs,
   onClearSelect,
   onRead,
   onPin,
 }: {
+  /** Every source retrieved in the conversation (refs are stable across turns). */
   sources: Source[];
+  /** Sources specific to the latest answer: the ones it cites plus the ones
+   *  first retrieved for it (the server re-seeds every turn with the carried
+   *  sources, so the raw per-message list is nearly the whole thread). Enables
+   *  the "This answer" scope whenever it is smaller than `sources`. */
+  turnSources?: Source[];
   selectedRef: string | null;
   selectedQuote?: string;
   citedRefs?: Set<string>;
@@ -164,12 +108,42 @@ export function SourcePanel({
   onRead?: (source: Source) => void;
   onPin?: (source: Source) => void;
 }) {
+  // Scope defaults to the latest answer whenever its own sources are a strict
+  // subset of the thread's; otherwise (single turn, or nothing new) the toggle
+  // would be a no-op, so it is hidden and everything shows.
+  const hasTurnScope = Boolean(
+    turnSources && turnSources.length > 0 && turnSources.length < sources.length,
+  );
+  const [scope, setScope] = useState<Scope>("turn");
+  const [citedOnly, setCitedOnly] = useState(false);
+  const effectiveScope: Scope = hasTurnScope ? scope : "all";
+  const scoped = effectiveScope === "turn" && turnSources ? turnSources : sources;
+  const canFilterCited = Boolean(citedRefs && citedRefs.size > 0);
+  const visibleSources = useMemo(
+    () =>
+      citedOnly && canFilterCited
+        ? scoped.filter((s) => citedRefs!.has(s.ref.toUpperCase()))
+        : scoped,
+    [scoped, citedOnly, canFilterCited, citedRefs],
+  );
+
+  // A citation click may target a source outside the current scope/filter:
+  // widen so the highlighted row is actually visible.
+  useEffect(() => {
+    if (!selectedRef) return;
+    if (!visibleSources.some((s) => s.ref === selectedRef)) {
+      if (effectiveScope === "turn" && sources.some((s) => s.ref === selectedRef)) setScope("all");
+      if (citedOnly) setCitedOnly(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRef]);
+
   const grouped = useMemo(() => {
     const g = {} as Record<Bucket, Source[]>;
     for (const b of BUCKET_ORDER) g[b] = [];
-    for (const s of sortByAuthority(sources)) g[bucketOf(s)].push(s);
+    for (const s of sortByAuthority(visibleSources)) g[bucketOf(s)].push(s);
     return g;
-  }, [sources]);
+  }, [visibleSources]);
 
 
   if (sources.length === 0) {
@@ -192,24 +166,76 @@ export function SourcePanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[oklch(0.995_0.002_260)]">
-      <div className="flex shrink-0 items-center justify-between border-b border-border/50 px-3.5 py-2.5">
-        <h3 className="text-[12.5px] font-semibold tracking-tight text-brand-navy">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-border/50 px-3.5 py-2">
+        <h3 className="text-[13px] font-semibold tracking-tight text-brand-navy">
           Sources{" "}
           <span className="font-normal tabular-nums text-muted-foreground/60">
-            {sources.length}
+            {visibleSources.length}
+            {visibleSources.length !== sources.length ? ` / ${sources.length}` : ""}
           </span>
         </h3>
-        {selectedRef && (
-          <button
-            onClick={onClearSelect}
-            className="text-[10.5px] text-muted-foreground transition-colors hover:text-foreground"
-          >
-            Clear
-          </button>
-        )}
+        <div className="ml-auto flex items-center gap-1">
+          {hasTurnScope && (
+            <div
+              role="tablist"
+              aria-label="Source scope"
+              className="inline-flex rounded-md border border-border/70 bg-card p-[2px] text-[10.5px] font-medium"
+            >
+              {(
+                [
+                  ["turn", "This answer"],
+                  ["all", "All"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={effectiveScope === id}
+                  onClick={() => setScope(id)}
+                  className={`rounded-[4px] px-2 py-[3px] transition-colors ${
+                    effectiveScope === id
+                      ? "bg-brand-blue-soft text-brand-navy"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {canFilterCited && (
+            <button
+              type="button"
+              aria-pressed={citedOnly}
+              onClick={() => setCitedOnly((v) => !v)}
+              title="Show only sources the answer cites"
+              className={`rounded-md border px-2 py-[3px] text-[10.5px] font-medium transition-colors ${
+                citedOnly
+                  ? "border-brand-navy/30 bg-brand-blue-soft text-brand-navy"
+                  : "border-border/70 bg-card text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Cited
+            </button>
+          )}
+          {selectedRef && (
+            <button
+              onClick={onClearSelect}
+              className="px-1 text-[10.5px] text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        {visibleSources.length === 0 && (
+          <p className="px-1 py-6 text-center text-[11.5px] text-muted-foreground">
+            No sources match this filter.
+          </p>
+        )}
         {visible.map((b) => (
           <section key={b} className="mb-3 last:mb-2">
             <div className="flex items-center gap-1.5 pb-1 text-[10px] font-medium uppercase tracking-[0.09em] text-muted-foreground/50">
@@ -279,7 +305,7 @@ function SourceRow({
       data-ref={source.ref}
       layout
       transition={{ duration: 0.26, ease: [0.22, 0.61, 0.36, 1] }}
-      className={`group relative px-2 py-2 transition-colors ${
+      className={`group relative px-2 py-2.5 transition-colors ${
         selected ? "bg-brand-blue-soft/30" : "hover:bg-muted/30"
       } ${cited === false ? "opacity-70 hover:opacity-100" : ""}`}
     >
@@ -301,7 +327,7 @@ function SourceRow({
         <div className="min-w-0 flex-1">
           <h4
             onClick={() => onRead?.(source)}
-            className={`line-clamp-2 text-[12.5px] font-medium leading-snug ${
+            className={`line-clamp-2 text-[13px] font-medium leading-snug ${
               onRead ? "cursor-pointer hover:underline decoration-brand-navy/30 underline-offset-2" : ""
             } ${dim ? "text-foreground/80" : "text-brand-navy"}`}
           >
@@ -310,7 +336,7 @@ function SourceRow({
 
 
           <div
-            className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-muted-foreground/65"
+            className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground/70"
             title={grade.tierHint}
           >
             <span className="truncate">

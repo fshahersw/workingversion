@@ -109,23 +109,3 @@ export function litigationContext() {
     },
   };
 }
-
-
-
-export type PromptSuggestion = { text: string; category: string };
-
-/** Seeger Weiss starter prompts shown on the empty chat state. */
-export const SW_PROMPT_SUGGESTIONS: PromptSuggestion[] = [
-  { text: "Summarize the current posture and bellwether schedule of the most active pharmaceutical MDL.", category: "mdl" },
-  { text: "Which recent FDA recalls or warning letters could support new product liability claims?", category: "regulatory" },
-  { text: "How have courts applied Rule 702 to general causation experts in talc and Roundup litigation?", category: "causation" },
-  { text: "Draft a plaintiff fact sheet checklist for a defective medical device claim.", category: "device" },
-  { text: "Outline the preemption defenses a branded drug manufacturer is likely to raise, and the counterarguments.", category: "pharma" },
-  { text: "What is the current status of AFFF and PFAS personal injury litigation in the District of South Carolina?", category: "environmental" },
-  { text: "Compare recent Rule 23(b)(3) certification rulings in consumer product defect class actions.", category: "class_action" },
-  { text: "Build a case-intake screening criteria list for a new pharmaceutical injury campaign.", category: "mdl" },
-  { text: "Summarize common benefit fee frameworks used in recent large MDL settlements.", category: "settlement" },
-  { text: "What discovery is typically ordered against manufacturers in early MDL CMOs?", category: "discovery" },
-  { text: "Identify the key epidemiological studies supporting causation in ongoing hair relaxer litigation.", category: "causation" },
-  { text: "How do statutes of repose affect filing strategy for long-latency toxic exposure claims?", category: "product_liability" },
-];

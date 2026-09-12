@@ -75,10 +75,19 @@ export function normalizeChoiceRequest(value: unknown): ChoiceRequest | null {
     })
     .filter((option): option is ChoiceRequest["options"][number] => option !== null);
   if (!id || !prompt || options.length < 2) return null;
-  return { id, prompt, options };
-}
-
-export function choiceResponseText(request: ChoiceRequest, optionId: string): string {
-  const option = request.options.find((candidate) => candidate.id === optionId);
-  return option ? `Choice ${request.id}: ${option.label}` : "";
+  const description = text(raw.description);
+  const recommendedId = text(raw.recommendedId) || text(raw.recommended_id);
+  const otherPlaceholder = text(raw.otherPlaceholder) || text(raw.other_placeholder);
+  const allowOther = raw.allowOther === true || raw.allow_other === true;
+  return {
+    id,
+    prompt,
+    options,
+    ...(description ? { description } : {}),
+    ...(recommendedId && options.some((option) => option.id === recommendedId)
+      ? { recommendedId }
+      : {}),
+    ...(allowOther ? { allowOther: true } : {}),
+    ...(otherPlaceholder ? { otherPlaceholder } : {}),
+  };
 }

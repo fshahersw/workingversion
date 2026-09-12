@@ -7,14 +7,15 @@
 // (DynamoDB TTL). `keepConversation` clears the TTL to persist ("save as ongoing").
 //
 // The rich assistant message (answer/rounds/sources/followups/verification/
-// artifacts/mode) is stored as JSON so a reopened conversation renders
-// faithfully, and the conversation's rolling research memory and matter scope
-// are stored on the conversation item after every turn so reopening continues
-// with the same context rather than a bare tail of recent messages.
+// artifacts/mode/narration) is stored as JSON so a reopened conversation
+// renders faithfully, and the conversation's rolling research memory and matter
+// scope are stored on the conversation item after every turn so reopening
+// continues with the same context rather than a bare tail of recent messages.
 import type { Artifact, MatterScope, Message, Round, Source } from "@/lib/chat-types";
 import {
   createConversationFn,
   appendMessageFn,
+  updateMessageFn,
   listConversationsFn,
   getConversationFn,
   saveConversationFn,
@@ -34,14 +35,22 @@ type StoredAssistant = {
   mode?: string;
   modeReason?: string;
   thinking?: string;
+  /** Narration lines with arrival times, so a reopened timeline groups tool
+   *  calls under the step that produced them instead of under the last one. */
+  narration?: { text: string; at: number }[];
   proposal?: Message["proposal"];
+  choice?: Message["choice"];
+  stopped?: boolean;
 };
+
+const MAX_NARRATION_LINES = 80;
 
 export type ConversationSummary = {
   id: string;
   title: string;
   matterLabel: string | null;
   updatedAt: string;
+  createdAt: string;
   saved: boolean;
   /** Library folder (ROOT when unfiled). */
   folderId?: string;
@@ -53,6 +62,12 @@ export type LoadedConversation = {
   matter: MatterScope | null;
   memory: unknown;
   messages: Message[];
+};
+
+export type SavedTurn = {
+  conversationId: string | null;
+  /** Stored id of the assistant row, for a later in-place update. */
+  assistantMsgId: string | null;
 };
 
 /** Round-trip through JSON so only serializable memory reaches the server. */
@@ -71,6 +86,30 @@ function titleFrom(question: string): string {
   return (t.length > 80 ? `${t.slice(0, 77)}…` : t) || "New research";
 }
 
+function toStored(answer: Message): StoredAssistant {
+  return {
+    answer: answer.answer ?? "",
+    rounds: answer.rounds ?? [],
+    sources: answer.sources ?? [],
+    followups: answer.followups ?? [],
+    ...(answer.verification ? { verification: answer.verification } : {}),
+    ...(answer.artifacts?.length ? { artifacts: answer.artifacts } : {}),
+    ...(answer.mode ? { mode: answer.mode } : {}),
+    ...(answer.modeReason ? { modeReason: answer.modeReason } : {}),
+    ...(answer.thinking ? { thinking: answer.thinking.slice(0, 20_000) } : {}),
+    ...(answer.narration?.length
+      ? {
+          narration: answer.narration
+            .slice(0, MAX_NARRATION_LINES)
+            .map((n) => ({ text: n.text.slice(0, 300), at: Number(n.at) || 0 })),
+        }
+      : {}),
+    ...(answer.proposal ? { proposal: answer.proposal } : {}),
+    ...(answer.choice ? { choice: answer.choice } : {}),
+    ...(answer.stopped ? { stopped: true } : {}),
+  };
+}
+
 export async function listConversations(limit = 30): Promise<ConversationSummary[]> {
   try {
     const rows = await listConversationsFn();
@@ -79,6 +118,7 @@ export async function listConversations(limit = 30): Promise<ConversationSummary
       title: c.title || "New research",
       matterLabel: null,
       updatedAt: c.updatedAt,
+      createdAt: c.createdAt || c.updatedAt,
       saved: !!c.saved,
       ...(c.folderId ? { folderId: c.folderId } : {}),
     }));
@@ -112,7 +152,10 @@ export async function loadConversation(id: string): Promise<LoadedConversation |
           ...(parsed?.mode ? { mode: parsed.mode } : {}),
           ...(parsed?.modeReason ? { modeReason: parsed.modeReason } : {}),
           ...(parsed?.thinking ? { thinking: parsed.thinking } : {}),
+          ...(parsed?.narration?.length ? { narration: parsed.narration } : {}),
           ...(parsed?.proposal ? { proposal: parsed.proposal } : {}),
+          ...(parsed?.choice ? { choice: parsed.choice } : {}),
+          ...(parsed?.stopped ? { stopped: true } : {}),
           status: "done" as const,
         };
       }
@@ -152,9 +195,10 @@ export async function deleteConversation(id: string): Promise<boolean> {
 
 /**
  * Persists one completed question/answer pair, creating the conversation on the
- * first turn. Returns the conversation id. Failures are swallowed — saving
- * history must never interrupt chat. The conversation keeps its 3-day TTL until
- * the user explicitly keeps it (see keepConversation).
+ * first turn. Returns the conversation id and the stored assistant row id.
+ * Failures are swallowed — saving history must never interrupt chat. The
+ * conversation keeps its 3-day TTL until the user explicitly keeps it (see
+ * keepConversation).
  */
 export async function saveTurn(args: {
   conversationId: string | null;
@@ -162,8 +206,7 @@ export async function saveTurn(args: {
   answer: Message;
   memory: unknown;
   matter: MatterScope | null;
-  turnIndex: number;
-}): Promise<string | null> {
+}): Promise<SavedTurn> {
   try {
     let conversationId = args.conversationId;
     if (!conversationId) {
@@ -173,23 +216,12 @@ export async function saveTurn(args: {
     await appendMessageFn({
       data: { convId: conversationId, role: "user", content: args.question.text },
     });
-    const stored: StoredAssistant = {
-      answer: args.answer.answer ?? "",
-      rounds: args.answer.rounds ?? [],
-      sources: args.answer.sources ?? [],
-      followups: args.answer.followups ?? [],
-      ...(args.answer.verification ? { verification: args.answer.verification } : {}),
-      ...(args.answer.artifacts?.length ? { artifacts: args.answer.artifacts } : {}),
-      ...(args.answer.mode ? { mode: args.answer.mode } : {}),
-      ...(args.answer.modeReason ? { modeReason: args.answer.modeReason } : {}),
-      ...(args.answer.thinking ? { thinking: args.answer.thinking.slice(0, 20_000) } : {}),
-      ...(args.answer.proposal ? { proposal: args.answer.proposal } : {}),
-    };
-    await appendMessageFn({
-      data: { convId: conversationId, role: "assistant", content: JSON.stringify(stored) },
+    const saved = await appendMessageFn({
+      data: { convId: conversationId, role: "assistant", content: JSON.stringify(toStored(args.answer)) },
     });
     // Memory arrives on the `memory` SSE event after the answer; the caller
-    // passes the latest it has. Best-effort: a miss here only costs context on
+    // passes the latest it has and patches it via updateConversationMemory once
+    // the refreshed copy lands. Best-effort: a miss here only costs context on
     // a later reopen, never the turn itself.
     const memory = toJson(args.memory);
     await updateConversationStateFn({
@@ -199,10 +231,36 @@ export async function saveTurn(args: {
         matter: args.matter,
       },
     }).catch(() => undefined);
-    return conversationId;
+    return { conversationId, assistantMsgId: saved?.msgId ?? null };
   } catch {
-    return args.conversationId;
+    return { conversationId: args.conversationId, assistantMsgId: null };
   }
+}
+
+/** Re-save an assistant turn in place (e.g. once a late faithfulness verdict
+ *  arrived after the answer was persisted). Best-effort. */
+export async function updateAssistantTurn(
+  conversationId: string,
+  msgId: string,
+  answer: Message,
+): Promise<boolean> {
+  try {
+    await updateMessageFn({
+      data: { convId: conversationId, msgId, content: JSON.stringify(toStored(answer)) },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Store the refreshed rolling memory on the conversation. Best-effort. */
+export async function updateConversationMemory(conversationId: string, memory: unknown): Promise<void> {
+  const json = toJson(memory);
+  if (json === undefined) return;
+  await updateConversationStateFn({ data: { convId: conversationId, memory: json } }).catch(
+    () => undefined,
+  );
 }
 
 /** v1: follow-ups are not persisted (they regenerate on demand). */

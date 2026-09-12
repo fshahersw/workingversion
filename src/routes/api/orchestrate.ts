@@ -5,6 +5,7 @@ import { runResearchAgent } from "@/lib/agents/research-agent.server";
 import { runFrontierAgent } from "@/lib/agents/frontier-controller.server";
 import { frontierEnabled } from "@/lib/agents/research-models";
 import type { Attachment } from "@/lib/chat-types";
+import { normalizeChoiceAnswer } from "@/lib/agents/clarify";
 import { startSseHeartbeat } from "@/lib/sse.server";
 
 function sseHeaders() {
@@ -27,6 +28,7 @@ export const Route = createFileRoute("/api/orchestrate")({
           matter_label?: string;
           mode?: string;
           attachments?: Attachment[];
+          choice?: unknown;
         } = {};
         try {
           body = (await request.json()) as typeof body;
@@ -42,6 +44,7 @@ export const Route = createFileRoute("/api/orchestrate")({
         const attachments = Array.isArray(body.attachments)
           ? body.attachments.filter((a) => a && typeof a.name === "string" && a.name.length > 0).slice(0, 20)
           : undefined;
+        const choice = normalizeChoiceAnswer(body.choice) ?? undefined;
 
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
@@ -72,6 +75,7 @@ export const Route = createFileRoute("/api/orchestrate")({
                   signal: request.signal,
                   ...(forceMode ? { forceMode } : {}),
                   ...(attachments && attachments.length ? { attachments } : {}),
+                  ...(choice ? { choice } : {}),
                   ...(matterId
                     ? {
                         matter: {

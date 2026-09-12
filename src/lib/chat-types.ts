@@ -129,6 +129,12 @@ export type ToolCall = {
   hits?: number;
   /** Client arrival time of the call's start, to interleave with narration. */
   at?: number;
+  /** Server-measured wall-clock of the call, set on completion. */
+  ms?: number;
+  /** Top host names behind the sources this call added (timeline chips). */
+  hosts?: string[];
+  /** Set when the call did not complete normally. */
+  error?: "timeout" | "error";
 };
 
 export type AgentRun = {
@@ -187,10 +193,36 @@ export type Artifact = {
   size?: number;
 };
 
+/** A clarifying question the agent asks BEFORE spending research budget when
+ *  the question forks in a way that materially changes the work (forum,
+ *  jurisdiction, deliverable). See src/lib/agents/clarify.ts for the rules. */
 export type ChoiceRequest = {
   id: string;
   prompt: string;
+  /** One line under the prompt explaining why it matters. */
+  description?: string;
   options: { id: string; label: string; description?: string }[];
+  /** The option to take when the reader just wants to proceed. */
+  recommendedId?: string;
+  /** Offer a free-text answer alongside the options. */
+  allowOther?: boolean;
+  otherPlaceholder?: string;
+  /** Set once the attorney answered; the panel renders as a compact receipt. */
+  answered?: ChoiceAnswer;
+  /** Set when the attorney moved on to another question without answering;
+   *  the panel renders as a "Skipped" receipt and can no longer be answered. */
+  dismissed?: boolean;
+};
+
+/** The attorney's answer to a ChoiceRequest, sent back with the original
+ *  question so the server can resume the same request disambiguated. */
+export type ChoiceAnswer = {
+  /** ChoiceRequest.id */
+  id: string;
+  /** Selected option id, or "other" when `text` carries a free-text answer. */
+  optionId: string;
+  label: string;
+  text?: string;
 };
 
 export type Message = {
@@ -220,6 +252,9 @@ export type Message = {
   reasoning?: string;
   status: "thinking" | "writing" | "done" | "error";
   error?: string;
+  /** The run was stopped by the attorney (or the stream ended early); the
+   *  streamed text is kept but the turn did not finish normally. */
+  stopped?: boolean;
   collapseTimeline?: boolean;
   followups?: string[];
   /** Deterministic citation/fact verification computed after synthesis. */

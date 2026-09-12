@@ -26,6 +26,7 @@ type Tab = "sources" | "pins" | "watch";
  */
 export function WorkspaceRail({
   sources,
+  turnSources,
   selectedRef,
   selectedQuote,
   citedRefs,
@@ -35,6 +36,9 @@ export function WorkspaceRail({
   reloadKey = 0,
 }: {
   sources: Source[];
+  /** Sources specific to the latest answer — cited by it or first retrieved
+   *  for it (drives the "This answer" scope). */
+  turnSources?: Source[];
   selectedRef: string | null;
   selectedQuote?: string;
   citedRefs?: Set<string>;
@@ -105,6 +109,7 @@ export function WorkspaceRail({
         {tab === "sources" && (
           <SourcePanel
             sources={sources}
+            turnSources={turnSources}
             selectedRef={selectedRef}
             selectedQuote={selectedQuote}
             citedRefs={citedRefs}

@@ -32,23 +32,65 @@ import {
   type DbCase,
 } from "./docketbird.server";
 import { memoTTL, toolCacheKey, TOOL_CACHE_TTL_MS } from "./run-state.server";
-import { rankResults, allStale, wantsRecency, distinctiveTerms } from "./web-rank";
+import {
+  rankResults,
+  allStale,
+  wantsRecency,
+  distinctiveTerms,
+  fuseRankings,
+  markSuperseded,
+  normalizeUrl,
+  type RankedResult,
+} from "./web-rank";
+import { semanticRerank } from "./web-rerank.server";
 
 
 /** Assigns S1..Sn refs and dedupes sources across the whole run. */
 export class SourceBook {
   private byKey = new Map<string, Source>();
   private order: Source[] = [];
+  /** Verification-only shadow: the untrimmed text a source was built from,
+   *  keyed by ref. Never sent to the model or the client; factCheck reads it so
+   *  a specific the model saw on the page counts as verified even when it fell
+   *  outside the trimmed `content` excerpt. */
+  private fullText = new Map<string, string>();
 
-  add(src: Omit<Source, "ref">): Source {
+  add(src: Omit<Source, "ref">, opts?: { fullText?: string }): Source {
     const key = sourceKey(src);
     const existing = this.byKey.get(key);
-    if (existing) return existing;
+    if (existing) {
+      // A re-read of the same source may carry more text than the first hit.
+      if (opts?.fullText && opts.fullText.length > (this.fullText.get(existing.ref)?.length ?? 0)) {
+        this.fullText.set(existing.ref, opts.fullText);
+      }
+      return existing;
+    }
     const ref = `S${this.nextRef()}`;
     const full: Source = { ...src, ref };
     this.byKey.set(key, full);
     this.order.push(full);
+    if (opts?.fullText) this.fullText.set(ref, opts.fullText);
     return full;
+  }
+
+  /** Untrimmed texts for verification (only sources that had one). */
+  fullTexts(): string[] {
+    return [...this.fullText.values()];
+  }
+
+  /** Host names behind a set of refs, most-cited first, deduped. */
+  hostsFor(refs: string[], max = 3): string[] {
+    const counts = new Map<string, number>();
+    for (const ref of refs) {
+      const src = this.order.find((s) => s.ref === ref);
+      const host = hostOf(src?.source_url);
+      if (!host) continue;
+      counts.set(host, (counts.get(host) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, max)
+      .map(([h]) => h);
   }
 
   /**
@@ -68,6 +110,29 @@ export class SourceBook {
 
   all(): Source[] {
     return this.order;
+  }
+
+  /**
+   * Copy every source of this book into `target`, deduped by the target's own
+   * key (a source it already holds keeps its existing ref; new ones are
+   * numbered after its last). The untrimmed verification text travels with
+   * each source. Returns this book's ref -> the target's ref so the caller can
+   * remap [S#] markers. Used when a speculative sweep that ran against a
+   * scratch book is handed over to the run's real book.
+   */
+  transplantInto(target: SourceBook): Map<string, string> {
+    const refMap = new Map<string, string>();
+    if (target === this) {
+      for (const src of this.order) refMap.set(src.ref, src.ref);
+      return refMap;
+    }
+    for (const src of this.order) {
+      const { ref, ...rest } = src;
+      const full = this.fullText.get(ref);
+      const added = target.add(rest, full ? { fullText: full } : undefined);
+      refMap.set(ref, added.ref);
+    }
+    return refMap;
   }
 
   /** Lowest unused ref number, so seeded refs are never reissued. */
@@ -94,6 +159,15 @@ function sourceKey(src: Omit<Source, "ref">): string {
 function refNum(ref: string): number {
   const n = Number(String(ref).replace(/^S/i, ""));
   return Number.isFinite(n) ? n : 0;
+}
+
+function hostOf(url?: string): string {
+  if (!url || url.startsWith("/")) return "";
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
 export type ToolOutcome = { text: string; hits: number; refs: string[]; artifacts?: Artifact[] };
@@ -301,13 +375,23 @@ function currentMonthYear(now: Date = new Date()): string {
 /** Run-scoped set of normalized URLs already handed to an agent, keyed by the
  *  run's SourceBook so dedupe spans every round and sub-agent of one run. */
 const SEEN_URLS = new WeakMap<SourceBook, Set<string>>();
-function seenFor(book: SourceBook): Set<string> {
+export function seenFor(book: SourceBook): Set<string> {
   let s = SEEN_URLS.get(book);
   if (!s) {
     s = new Set<string>();
     SEEN_URLS.set(book, s);
   }
   return s;
+}
+
+/** Fold the seen-URL set of `from` (a scratch book) into `into`'s, so once a
+ *  speculative sweep is handed over the run's own searches skip its URLs. */
+export function mergeSeen(from: SourceBook, into: SourceBook): void {
+  if (from === into) return;
+  const src = SEEN_URLS.get(from);
+  if (!src?.size) return;
+  const dst = seenFor(into);
+  for (const k of src) dst.add(k);
 }
 
 const RECENCY_GATEWAYS = new Set<GatewayKey>([
@@ -517,32 +601,79 @@ async function categorySearch(
   if (!results.length) return { text: `No ${cfg.key} results for "${query}".`, hits: 0, refs: [] };
 
   const seen = seenFor(book);
-  let ranked = rankResults(results, {
-    query,
-    keep,
-    recency,
-    sourceType: cfg.sourceType,
-    seen,
-    // Tighter than the 0.25 default: a fan-out floods the pool with loosely
-    // related hits (another MDL that merely shares "bellwether trial"), so
-    // require stronger overlap with the matter's distinctive terms. Anchored
-    // queries (party + MDL/JCCP number) clear this easily; topic-only noise does not.
-    minRelevance: 0.32,
-  });
+  // Two-stage selection. (1) A WIDE lexical pass keeps up to 3x the target so
+  // there is something to choose among — against a COPY of `seen` so the
+  // candidates we end up cutting are not marked as already shown. (2) A
+  // semantic order over the same candidates (Titan query/passage similarity,
+  // hard-capped, fail-open) is fused with the lexical order by reciprocal rank,
+  // and the top `keep` survive. Only the survivors are added to the real `seen`.
+  const selectRanked = async (pool: GatewayResult[]): Promise<RankedResult<GatewayResult>[]> => {
+    const wide = rankResults(pool, {
+      query,
+      keep: Math.min(keep * 3, 15),
+      recency,
+      sourceType: cfg.sourceType,
+      seen: new Set(seen),
+      // Tighter than the 0.25 default: a fan-out floods the pool with loosely
+      // related hits (another MDL that merely shares "bellwether trial"), so
+      // require stronger overlap with the matter's distinctive terms. Anchored
+      // queries (party + MDL/JCCP number) clear this easily; topic-only noise does not.
+      minRelevance: 0.32,
+    });
+    const keyOf = (r: RankedResult<GatewayResult>) =>
+      normalizeUrl(r.result.url) || (r.result.title ?? "").toLowerCase();
+    const byKey = new Map(wide.map((r) => [keyOf(r), r] as const));
+    // Lexical order = the ranker's SCORE order (rankResults returns date order
+    // for recency queries; that reordering is reapplied below to the survivors).
+    const lexOrder = [...wide].sort((a, b) => b.score - a.score).map(keyOf);
+    let chosen: RankedResult<GatewayResult>[];
+    if (wide.length > keep) {
+      // Candidates reach the semantic stage in LEXICAL-SCORE order (best first)
+      // so its wall-clock cap trims the weakest matches, never the oldest ones
+      // (`wide` is date-ordered for recency queries). Fuse only when the stage
+      // scored enough of the pool to carry signal — a thin partial list would
+      // just reorder by which candidates happened to embed in time — and score
+      // the candidates it did not reach as if last on the semantic axis
+      // (`missingRank`) instead of forfeiting that axis outright.
+      const SEMANTIC_MIN_COVERAGE = 0.6;
+      const semOrder = await semanticRerank(
+        query,
+        lexOrder.map((key) => {
+          const r = byKey.get(key)!;
+          return { key, text: `${r.result.title ?? ""}. ${r.evidence}` };
+        }),
+      );
+      const covered = semOrder.filter((key) => byKey.has(key)).length;
+      const useSemantic = covered / wide.length >= SEMANTIC_MIN_COVERAGE;
+      const fused = fuseRankings(byKey, useSemantic ? [lexOrder, semOrder] : [lexOrder], {
+        missingRank: "listLength",
+      });
+      chosen = fused.slice(0, keep).map((f) => f.item);
+    } else {
+      chosen = wide;
+    }
+    if (recency) {
+      chosen.sort((a, b) => {
+        if (a.date && b.date && a.date !== b.date) return a.date < b.date ? 1 : -1;
+        if (!a.date && b.date) return 1;
+        if (a.date && !b.date) return -1;
+        return b.score - a.score;
+      });
+    }
+    for (const r of chosen) r.superseded = false;
+    markSuperseded(chosen);
+    for (const r of chosen) seen.add(keyOf(r));
+    return chosen;
+  };
+
+  let ranked = await selectRanked(results);
 
   // One tightened retry when a recency question came back with nothing from the
   // last ~12 months — better than silently accepting stale top hits.
   if (recency && allStale(ranked)) {
     try {
       const retry = await fetchPool(`${query} ${new Date().getUTCFullYear()}`);
-      const rankedRetry = rankResults(retry, {
-        query,
-        keep,
-        recency,
-        sourceType: cfg.sourceType,
-        seen,
-        minRelevance: 0.32,
-      });
+      const rankedRetry = await selectRanked(retry);
       if (rankedRetry.length && !allStale(rankedRetry)) ranked = rankedRetry;
       else if (!ranked.length) ranked = rankedRetry;
     } catch {
@@ -559,17 +690,21 @@ async function categorySearch(
 
   const refs: string[] = [];
   const lines = ranked.map(({ result: r, evidence, date, superseded }) => {
-    const src = book.add({
-      citation: r.title || r.url || `${cfg.key} result`,
-      authority: "web",
-      source_type: cfg.sourceType,
-      source_url: r.url,
-      effective_date: date ?? r.published,
-      is_current: !superseded,
-      // Full text stays on the source for citation/reading; only the prompt
-      // gets the extract.
-      content: trunc(r.text ?? "", 1500),
-    });
+    const src = book.add(
+      {
+        citation: r.title || r.url || `${cfg.key} result`,
+        authority: "web",
+        source_type: cfg.sourceType,
+        source_url: r.url,
+        effective_date: date ?? r.published,
+        is_current: !superseded,
+        // The client/reader gets a bounded excerpt; the prompt gets only the
+        // query-focused evidence below; the untrimmed page text is kept on the
+        // book's verification shadow so factCheck can match against it.
+        content: trunc(r.text ?? "", 1500),
+      },
+      { fullText: r.text ?? "" },
+    );
     refs.push(src.ref);
     const stamp = date ? `as of ${date}` : "date: unknown";
     const flag = superseded ? " [SUPERSEDED — a newer source on this subject is in this list; prefer it]" : "";
@@ -694,13 +829,16 @@ async function dbReadFiling(input: Record<string, unknown>, book: SourceBook): P
   if (!doc.text.trim()) return { text: `No extracted text available for document ${id}.`, hits: 0, refs: [] };
 
   const content = trunc(doc.text, 6000);
-  const src = book.add({
-    citation: doc.title || `DocketBird document ${id}`,
-    authority: "registry",
-    source_type: "filing",
-    section_path: id,
-    content,
-  });
+  const src = book.add(
+    {
+      citation: doc.title || `DocketBird document ${id}`,
+      authority: "registry",
+      source_type: "filing",
+      section_path: id,
+      content,
+    },
+    { fullText: doc.text },
+  );
   return { text: `[${src.ref}] document_id=${id}\n${doc.title}\n${content}`, hits: 1, refs: [src.ref] };
 }
 

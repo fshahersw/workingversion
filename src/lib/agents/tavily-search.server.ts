@@ -86,6 +86,96 @@ export async function tavilyImageSearch(
   }
 }
 
+export type TavilyNewsItem = {
+  title: string;
+  url: string;
+  snippet: string;
+  published?: string;
+  imageUrl?: string;
+};
+
+/**
+ * News-oriented Tavily search with optional images. Used by the research
+ * landing brief (not the research tool loop). Returns [] on any error.
+ */
+export async function tavilyNewsSearch(
+  query: string,
+  opts?: { maxResults?: number; timeoutMs?: number; signal?: AbortSignal; timeRange?: "day" | "week" | "month" },
+): Promise<TavilyNewsItem[]> {
+  const key = process.env["TAVILY_API_KEY"]?.trim();
+  const q = (query || "").trim().slice(0, 400);
+  if (!key || !q) return [];
+  const maxResults = Math.max(1, Math.min(Math.floor(opts?.maxResults || 5), 10));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? 8_000);
+  if (opts?.signal) opts.signal.addEventListener("abort", () => controller.abort());
+  const body: Record<string, unknown> = {
+    query: q,
+    max_results: maxResults,
+    search_depth: "basic",
+    include_answer: false,
+    include_raw_content: false,
+    include_images: true,
+    include_image_descriptions: false,
+    // Deliberately NOT `topic: "news"`. Measured against the live API for
+    // "Depo-Provera MDL 3140 litigation court ruling": the news topic returns
+    // published dates on every result but 0 of 4 are about the matter (it reads
+    // as a recency-sorted general legal feed), while plain search returns 4 of 4
+    // on-topic — including the transferee court's own MDL page — with no dates.
+    // Relevance wins; undated items are kept by the merge, and Firecrawl
+    // supplies dates for the items it finds.
+    time_range: opts?.timeRange ?? "week",
+  };
+  try {
+    const res = await fetch(TAVILY_ENDPOINT, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) return [];
+    const data = (await res.json().catch(() => ({}))) as {
+      results?: Array<{
+        title?: string;
+        url?: string;
+        content?: string;
+        published_date?: string;
+        images?: Array<string | { url?: string }>;
+      }>;
+    };
+    // Tavily's top-level `images` list is query-level (not paired with results);
+    // only a result's own `images` can be shown next to its headline.
+    const firstImage = (list: unknown): string | undefined => {
+      if (!Array.isArray(list)) return undefined;
+      for (const im of list) {
+        const url = typeof im === "string" ? im : (im as { url?: unknown } | null)?.url;
+        if (typeof url === "string" && /^https:\/\//i.test(url)) return url;
+      }
+      return undefined;
+    };
+    const out: TavilyNewsItem[] = [];
+    for (const r of data.results ?? []) {
+      if (!r || typeof r.url !== "string" || !/^https?:\/\//i.test(r.url)) continue;
+      const title = typeof r.title === "string" ? r.title.trim() : "";
+      if (!title) continue;
+      const imageUrl = firstImage(r.images);
+      out.push({
+        title: title.slice(0, 220),
+        url: r.url,
+        snippet: typeof r.content === "string" ? r.content.slice(0, 280) : "",
+        ...(typeof r.published_date === "string" ? { published: r.published_date } : {}),
+        ...(imageUrl ? { imageUrl } : {}),
+      });
+      if (out.length >= maxResults) break;
+    }
+    return out;
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Search Tavily. Returns [] on ANY error (never throws) so it can never break the
  *  parallel merge — AgentCore + Brave still answer. */
 export async function tavilySearch(

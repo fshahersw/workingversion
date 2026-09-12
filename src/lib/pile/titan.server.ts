@@ -22,6 +22,39 @@ export async function embedText(text: string, signal?: AbortSignal): Promise<num
   return Array.isArray(json.embedding) ? json.embedding : null;
 }
 
+export class TitanEmbedError extends Error {
+  status: number;
+  constructor(status: number, detail: string) {
+    super(`Titan embed failed [${status}]: ${detail}`);
+    this.name = "TitanEmbedError";
+    this.status = status;
+  }
+}
+
+/**
+ * Like embedText, but every non-OK response throws a TitanEmbedError carrying
+ * the HTTP status, so a caller can tell "model not enabled / access denied"
+ * (stop trying) apart from a transient throttle (retry later).
+ */
+export async function embedTextStrict(text: string, signal?: AbortSignal): Promise<number[] | null> {
+  const input = text.replace(/\s+/g, " ").trim().slice(0, 8000);
+  if (!input) return null;
+  const res = await signedBedrockFetch(
+    `https://bedrock-runtime.${REGION}.amazonaws.com/model/${encodeURIComponent(TITAN_EMBED_MODEL)}/invoke`,
+    {
+      headers: { accept: "application/json" },
+      body: JSON.stringify({ inputText: input, dimensions: 1024, normalize: true }),
+      ...(signal ? { signal } : {}),
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new TitanEmbedError(res.status, detail.slice(0, 200));
+  }
+  const json = (await res.json()) as { embedding?: number[] };
+  return Array.isArray(json.embedding) ? json.embedding : null;
+}
+
 export function cosine(a: number[], b: number[]): number {
   let dot = 0;
   let na = 0;

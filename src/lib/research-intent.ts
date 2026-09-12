@@ -119,6 +119,36 @@ export function classifyIntent(query: string): RetrievalHints {
 export type EffortMode = "conversational" | "fast" | "think";
 export type EffortDecision = { mode: EffortMode; confidence: number; reason: string };
 
+/**
+ * The client wraps every query in a bracketed firm/focus frame
+ * (`[Seeger Weiss LLP — plaintiffs' mass tort ... Research focus: ...]\n\n<text>`,
+ * see orchestrate.ts frameQuery). That frame contains "litigation" and runs
+ * ~30 words, so classifying the framed string makes EVERY input look like a
+ * long legal question — "hello" then triggers the full tool loop. Strip the
+ * frame before any heuristic looks at the text; the prompt still receives it.
+ */
+export function stripQueryFrame(query: string): string {
+  const q = query ?? "";
+  const m = q.match(/^\s*\[([^\]\n]{0,400})\]\s*\n*/);
+  // Only the FIRM frame is a frame. An attorney's own leading bracket
+  // ("[MDL 3080] bellwether schedule") is part of the question and carries its
+  // most distinctive anchor, so it must survive.
+  if (!m || !/research\s+focus\s*:/i.test(m[1] ?? "")) return q.trim();
+  const rest = q.slice(m[0].length).trim();
+  // A frame with nothing after it is not a frame, it is the whole question.
+  return rest || q.trim();
+}
+
+/** The trailing `[Clarification — id: constraint]` block(s) applyChoice appends
+ *  on a resume. The tool loop and the writer need them; the length/complexity
+ *  heuristics must not see them, or a one-line question inflates to THINK
+ *  purely because it was disambiguated. */
+const CLARIFICATION_BLOCK_RE = /\s*\[\s*clarification\s*[—–-][^\]]*\]\s*/gi;
+
+export function stripClarification(query: string): string {
+  return (query ?? "").replace(CLARIFICATION_BLOCK_RE, " ").replace(/\s+/g, " ").trim();
+}
+
 // ---------------------------------------------------------------------------
 // Document-deliverable intent — did the attorney ask for a downloadable file
 // (PDF/Word/Excel report/memo), not just a chat answer? When true, the server
@@ -129,16 +159,34 @@ export type EffortDecision = { mode: EffortMode; confidence: number; reason: str
 export type DocStyle = "legal" | "modern" | "minimal";
 export type DocRequest = { wants: boolean; format: "pdf" | "docx" | "xlsx"; style: DocStyle; pages?: number };
 
-const DOC_FORMAT_RE = /\b(pdf|word\s?doc(?:ument)?s?|docx|\.docx?|excel|spread\s?sheets?|xlsx|\.xlsx?)\b/i;
-const DOC_VERB_RE = /\b(generate|create|make|draft|produce|build|prepare|assemble|put together|write[- ]?up|export|turn .* into)\b/i;
-const DOC_NOUN_RE = /\b(report|memo|memorandum|one[- ]?pager|write[- ]?up|fact ?sheet|chart ?pack|packet|dossier|deliverable|document|file|workbook)\b/i;
+// ONE definition of "the attorney named a file format / asked for a file /
+// asked to stay in chat", shared with the clarification detectors
+// (agents/clarify.ts). Two copies drifted apart once and produced a question
+// the panel never asked plus a PDF nobody wanted.
+export const DOC_FORMAT_RE = /\b(pdf|word\s?doc(?:ument)?s?|word\s+file|docx|\.docx?|excel|spread\s?sheets?|xlsx|\.xlsx?)\b/i;
+/** "in Word" / "as a Word doc": the product, so a capital W is required —
+ *  lowercase "in a word, yes" is an idiom, not a format. */
+export const DOC_WORD_PRODUCT_RE = /\b(?:in|as)\s+(?:a\s+)?Word\b/;
+export const DOC_VERB_RE = /\b(generate|create|make|draft|produce|build|prepare|assemble|put together|write[- ]?up|export|turn .* into)\b/i;
+export const DOC_NOUN_RE = /\b(report|memo|memorandum|one[- ]?pager|write[- ]?up|fact ?sheet|chart ?pack|packet|dossier|deliverable|document|file|workbook)\b/i;
+export const CHAT_ONLY_RE =
+  /\b(just\s+answer|in\s+chat(?:\s+only)?|chat\s+only|no\s+file(?:\s+needed)?|don'?t\s+generate|do\s+not\s+generate|without\s+(?:a\s+)?(?:file|document|pdf|docx))\b/i;
+const DOCX_FORMAT_RE = /\b(word\s?doc(?:ument)?s?|word\s+file|docx|\.docx?)\b/i;
+
+/** Did the text name a downloadable format (including "in Word")? */
+export function mentionsDocFormat(text: string): boolean {
+  return DOC_FORMAT_RE.test(text) || DOC_WORD_PRODUCT_RE.test(text);
+}
 
 export function detectDocRequest(query: string): DocRequest {
   const q = query || "";
-  const wants = DOC_FORMAT_RE.test(q) || (DOC_VERB_RE.test(q) && DOC_NOUN_RE.test(q));
+  if (CHAT_ONLY_RE.test(q)) {
+    return { wants: false, format: "pdf", style: "legal" };
+  }
+  const wants = mentionsDocFormat(q) || (DOC_VERB_RE.test(q) && DOC_NOUN_RE.test(q));
   let format: "pdf" | "docx" | "xlsx" = "pdf";
   if (/\b(excel|spread\s?sheets?|xlsx|\.xlsx?|workbook)\b/i.test(q)) format = "xlsx";
-  else if (/\b(word\s?doc(?:ument)?s?|docx|\.docx?)\b/i.test(q)) format = "docx";
+  else if (DOCX_FORMAT_RE.test(q) || DOC_WORD_PRODUCT_RE.test(q)) format = "docx";
   let style: DocStyle = "legal";
   if (/\b(modern|sleek|contemporary)\b/i.test(q)) style = "modern";
   else if (/\b(minimal|minimalist|plain|bare[- ]?bones)\b/i.test(q)) style = "minimal";
@@ -171,7 +219,7 @@ const THINK_RE =
  * conversational, since there is no prior answer to reformat/acknowledge).
  */
 export function classifyEffort(query: string, historyTurns = 0): EffortDecision {
-  const q = (query || "").trim();
+  const q = stripClarification(stripQueryFrame(query || ""));
   if (!q) return { mode: "conversational", confidence: 0.9, reason: "empty" };
   const words = q.split(/\s+/).filter(Boolean).length;
   const questionMarks = (q.match(/\?/g) || []).length;

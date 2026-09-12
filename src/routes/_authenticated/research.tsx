@@ -1,23 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  ArrowRight,
-  ArrowUp,
-  BadgeCheck,
-  BookOpen,
-  Briefcase,
-  CalendarClock,
-  FileCheck,
-  Flag,
-  HeartHandshake,
-  Lock,
-  Scale,
-  Shuffle,
-  ShieldCheck,
-  Users,
-} from "lucide-react";
-
+import { ArrowUp } from "lucide-react";
 
 import { AppShell } from "@/components/app-shell";
 import { ChatView } from "@/components/chat/ChatView";
@@ -31,13 +15,11 @@ import {
   persistMode,
   type ComposerMode,
 } from "@/components/chat/composer-kit";
-import type { Attachment, MatterScope } from "@/lib/chat-types";
+import { ResearchLanding } from "@/components/chat/ResearchLanding";
+import { SlashPalette } from "@/components/chat/SkillMenu";
+import type { Attachment, ChoiceAnswer, MatterScope } from "@/lib/chat-types";
 import { useChat } from "@/lib/use-chat";
-import {
-  fetchPromptSuggestions,
-  SW_PROMPT_SUGGESTIONS,
-  type PromptSuggestion,
-} from "@/lib/orchestrate";
+import { filterSkills, slashDraft, type ResearchSkill } from "@/lib/research-skills";
 
 export const Route = createFileRoute("/_authenticated/research")({
   ssr: false,
@@ -62,36 +44,6 @@ export const Route = createFileRoute("/_authenticated/research")({
   component: ResearchPage,
 });
 
-const CATEGORY_META: Record<
-  string,
-  { icon: typeof BookOpen; tone: "blue" | "orange" }
-> = {
-  mdl: { icon: Scale, tone: "blue" },
-  product_liability: { icon: ShieldCheck, tone: "blue" },
-  pharma: { icon: HeartHandshake, tone: "orange" },
-  device: { icon: FileCheck, tone: "blue" },
-  environmental: { icon: Flag, tone: "orange" },
-  settlement: { icon: Briefcase, tone: "blue" },
-  discovery: { icon: BookOpen, tone: "blue" },
-  causation: { icon: BadgeCheck, tone: "blue" },
-  class_action: { icon: Users, tone: "orange" },
-  regulatory: { icon: CalendarClock, tone: "orange" },
-};
-
-const FALLBACK_SUGGESTIONS: PromptSuggestion[] = SW_PROMPT_SUGGESTIONS;
-
-function pickFour(
-  pool: PromptSuggestion[],
-  avoid: PromptSuggestion[] = [],
-): PromptSuggestion[] {
-  if (pool.length <= 4) return pool.slice(0, 4);
-  const avoidSet = new Set(avoid.map((s) => s.text));
-  const preferred = pool.filter((s) => !avoidSet.has(s.text));
-  const base = preferred.length >= 4 ? preferred : pool;
-  const shuffled = [...base].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, 4);
-}
-
 function getSessionId() {
   if (typeof window === "undefined") return "ssr";
   const KEY = "sw.session_id";
@@ -103,13 +55,22 @@ function getSessionId() {
   return id;
 }
 
+/** True while the composer holds a slash command that matches at least one
+ *  skill: the palette owns Enter then, so Send stays off. An unmatched draft
+ *  such as "/remand" is ordinary text and can be sent. */
+function slashSkillPending(text: string): boolean {
+  const draft = slashDraft(text);
+  return draft !== null && filterSkills(draft).length > 0;
+}
+
 function ResearchPage() {
   const sessionId = useMemo(() => getSessionId(), []);
-  const { messages, send, busy, reset, open, conversationId } =
+  const { messages, send, stop, busy, reset, open, conversationId } =
     useChat(sessionId);
   const inChat = messages.length > 0;
   const [prefill, setPrefill] = useState("");
   const [matter, setMatter] = useState<MatterScope | null>(null);
+  const [skill, setSkill] = useState<ResearchSkill | null>(null);
 
   const openConversation = useCallback(
     async (id: string) => {
@@ -120,8 +81,16 @@ function ResearchPage() {
   );
 
   const sendScoped = useCallback(
-    (text: string, opts?: { mode?: "auto" | "fast" | "think"; attachments?: Attachment[] }) =>
-      send(text, matter, opts),
+    (
+      text: string,
+      opts?: {
+        mode?: "auto" | "fast" | "think";
+        attachments?: Attachment[];
+        choice?: ChoiceAnswer;
+        /** With `choice`: the assistant message whose clarifying question is answered. */
+        resumeId?: string;
+      },
+    ) => send(text, matter, opts),
     [send, matter],
   );
 
@@ -172,27 +141,33 @@ function ResearchPage() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
             transition={{ duration: 0.4 }}
-            className="flex h-full w-full items-center justify-center overflow-y-auto px-4 py-6 sm:px-6"
+            className="flex h-full w-full items-start justify-center overflow-y-auto px-4 py-6 sm:px-6"
           >
-            <div className="mx-auto flex w-full max-w-[680px] flex-col items-center">
+            <div className="mx-auto flex w-full max-w-[720px] flex-col items-center pt-[min(12vh,7rem)]">
               <div className="w-full">
                 <HeroComposer
                   onSubmit={sendScoped}
                   disabled={busy}
                   initialValue={prefill}
+                  onPickSkill={(s) => {
+                    setSkill(s);
+                    setPrefill("");
+                  }}
                 />
               </div>
-
-              <div className="mt-6 w-full">
-                <StarterSuggestions onPick={sendScoped} />
-              </div>
-
-              <div className="mt-5 flex items-center gap-2 text-[11px] text-muted-foreground">
-                <Lock className="h-3 w-3" strokeWidth={2} />
-                <span>Your data is secure and confidential.</span>
-                <span className="text-muted-foreground/60">·</span>
-                <span>Legal research, not legal advice.</span>
-              </div>
+              <ResearchLanding
+                onSend={(text) => {
+                  setSkill(null);
+                  sendScoped(text);
+                }}
+                onPrefill={(text) => {
+                  setSkill(null);
+                  setPrefill(text);
+                }}
+                onOpenConversation={openConversation}
+                skill={skill}
+                onSkill={setSkill}
+              />
             </div>
           </motion.main>
         ) : (
@@ -207,6 +182,7 @@ function ResearchPage() {
               messages={messages}
               busy={busy}
               onSend={sendScoped}
+              onStop={stop}
               onNewChat={reset}
               sessionId={sessionId}
               matter={matter}
@@ -223,6 +199,7 @@ function HeroComposer({
   onSubmit,
   disabled,
   initialValue = "",
+  onPickSkill,
 }: {
   onSubmit: (
     t: string,
@@ -230,6 +207,7 @@ function HeroComposer({
   ) => void;
   disabled: boolean;
   initialValue?: string;
+  onPickSkill: (skill: ResearchSkill) => void;
 }) {
   const [v, setV] = useState(initialValue);
   const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
@@ -251,7 +229,7 @@ function HeroComposer({
   }, [v]);
 
   function submit() {
-    if (!v.trim() || disabled) return;
+    if (!v.trim() || disabled || slashSkillPending(v)) return;
     onSubmit(v.trim(), { mode, attachments: files });
     setV("");
   }
@@ -265,7 +243,7 @@ function HeroComposer({
       className="w-full"
     >
       <div
-        className="rounded-lg border border-border bg-card shadow-sm transition-all focus-within:border-primary/40 focus-within:shadow-md"
+        className="relative rounded-lg border border-border bg-card shadow-sm transition-all focus-within:border-primary/40 focus-within:shadow-md"
         onDragOver={(e) => {
           e.preventDefault();
         }}
@@ -274,6 +252,13 @@ function HeroComposer({
           if (!disabled) void handleFiles(e.dataTransfer?.files ?? null);
         }}
       >
+        <SlashPalette
+          value={v}
+          onPick={(s) => {
+            setV("");
+            onPickSkill(s);
+          }}
+        />
         <FileChips files={files} onRemove={removeFile} className="px-3 pt-2.5" />
         <div className="px-3 pt-2.5">
           <textarea
@@ -282,6 +267,7 @@ function HeroComposer({
             value={v}
             onChange={(e) => setV(e.target.value)}
             onKeyDown={(e) => {
+              if (e.defaultPrevented) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 submit();
@@ -302,7 +288,7 @@ function HeroComposer({
             />
             <button
               type="submit"
-              disabled={disabled || !v.trim()}
+              disabled={disabled || !v.trim() || slashSkillPending(v)}
               aria-label="Send"
               title="Send"
               className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all hover:bg-brand-navy/90 disabled:opacity-40"
@@ -318,89 +304,5 @@ function HeroComposer({
         )}
       </div>
     </form>
-  );
-}
-
-function StarterSuggestions({ onPick }: { onPick: (text: string) => void }) {
-  const [pool, setPool] = useState<PromptSuggestion[]>([]);
-  const [shown, setShown] = useState<PromptSuggestion[]>(FALLBACK_SUGGESTIONS.slice(0, 4));
-  const [nonce, setNonce] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchPromptSuggestions().then((rows) => {
-      if (cancelled) return;
-      const effective = rows.length > 0 ? rows : FALLBACK_SUGGESTIONS;
-      setPool(effective);
-      setShown(pickFour(effective));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  function shuffle() {
-    const source = pool.length > 0 ? pool : FALLBACK_SUGGESTIONS;
-    setShown((prev) => pickFour(source, prev));
-    setNonce((n) => n + 1);
-  }
-
-  return (
-    <div className="w-full max-w-2xl">
-      <div className="mb-2.5 flex items-center justify-between px-0.5">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-          Suggested research
-        </p>
-        <button
-          type="button"
-          onClick={shuffle}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:text-brand-navy"
-        >
-          <Shuffle className="h-3 w-3" strokeWidth={2} />
-          Shuffle
-        </button>
-      </div>
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={nonce}
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -4 }}
-          transition={{ duration: 0.18, ease: "easeOut" }}
-          className="grid grid-cols-1 gap-2 sm:grid-cols-2"
-        >
-          {shown.map((s, i) => {
-            const meta = CATEGORY_META[s.category] ?? {
-              icon: BookOpen,
-              tone: "blue" as const,
-            };
-            const Icon = meta.icon;
-            return (
-              <button
-                key={`${nonce}-${i}-${s.text}`}
-                type="button"
-                onClick={() => onPick(s.text)}
-                className="group flex h-[64px] items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-left transition-colors hover:border-primary/30 hover:bg-muted/40"
-              >
-                <span
-                  className={[
-                    "grid h-8 w-8 shrink-0 place-items-center rounded-md",
-                    meta.tone === "orange"
-                      ? "bg-brand-orange-soft text-brand-orange"
-                      : "bg-brand-blue-soft text-primary",
-                  ].join(" ")}
-                >
-                  <Icon className="h-[15px] w-[15px]" strokeWidth={2} />
-                </span>
-                <p className="line-clamp-2 min-w-0 flex-1 text-[12.5px] leading-snug text-brand-navy">
-                  {s.text}
-                </p>
-                <ArrowRight className="h-3.5 w-3.5 shrink-0 text-brand-navy/0 transition-colors group-hover:text-brand-navy/60" />
-              </button>
-            );
-          })}
-        </motion.div>
-      </AnimatePresence>
-    </div>
   );
 }

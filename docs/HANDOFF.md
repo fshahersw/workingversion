@@ -9,7 +9,8 @@ This is the single "get up to speed" document. Read it top to bottom, then read
 `docs/CODEBASE-BRIEF.md` for what the code actually does subsystem by subsystem
 (produced 2026-09-04 by a verified read-only fan-out; it also lists the security
 findings and corrects three errors in this file), `docs/ARCHITECTURE.md` for the
-technical map, and `docs/MCP-AND-PLUGINS.md` for Claude-app configuration. Deeper
+technical map, `docs/RESEARCH-ENV.md` for every research-agent switch and model
+override, and `docs/MCP-AND-PLUGINS.md` for Claude-app configuration. Deeper
 narrative history lives in the user auto-memory (see "Where the rest of the
 context lives" below).
 
