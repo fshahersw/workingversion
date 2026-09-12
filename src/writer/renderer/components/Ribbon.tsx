@@ -51,6 +51,7 @@ import { stepParagraphIndent } from '../editor/indent'
 import { formatNumber } from '../editor/numbering'
 import type { InkTool } from '../editor/ink'
 import type { RibbonFormatState } from './ribbon-format-state'
+import { TemplateGallery } from './TemplateGallery'
 import { setSelectedColumnWidth } from '../editor/table-sizing'
 import {
   applyTablePreset,
@@ -2958,6 +2959,15 @@ function RibbonInner({
                   </span>
                   <span>{t('aiTidyBtn')}</span>
                 </button>
+                <TemplateGallery
+                  kind="docx"
+                  disabled={!canEdit}
+                  onPick={(id) =>
+                    onAiPreset(
+                      `Apply the firm template with id "${id}" to this document, then fill the [bracketed] placeholders you can from the matter and stop.`,
+                    )
+                  }
+                />
               </div>
               <div className="ribbon-group-label">Writing partner</div>
             </div>

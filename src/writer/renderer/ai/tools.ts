@@ -3,6 +3,18 @@ import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { ChartDisplay, CommentInfo, NewChart, TableCell } from '@genoffice/docx-engine'
 import { TABLE_HEADER_FILL } from '@genoffice/docx-engine'
 import { tableModelToPmNode } from '../editor/convert'
+import type { Command as PmCommand } from '@tiptap/pm/state'
+import {
+  CellSelection,
+  TableMap,
+  addColumnAfter,
+  addColumnBefore,
+  addRowAfter,
+  addRowBefore,
+  deleteColumn,
+  deleteRow,
+} from '@tiptap/pm/tables'
+import { applyTablePreset } from '../editor/table-properties'
 import type { AgentToolCall, AgentToolDef, CreateDocumentType } from '../../shared/ipc'
 import type { AgentImage, ToolDisplay } from '@genoffice/agent-core'
 import { createPlatformSkill } from '@/office/shared/platform-skill'
@@ -339,6 +351,50 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     },
   },
   {
+    name: 'edit_table',
+    description:
+      'Edit an existing table (addressed by its block index): set cell text, add or delete a row or column, and/or restyle it. Apply at most one row/column add-or-delete per call (indexes shift after a structural change). Cells hold plain text. After a structural change, call get_document_context before editing the same table again.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        blockIndex: { type: 'integer', description: 'block index of the target table (type "table" in the block list)' },
+        setCells: {
+          type: 'array',
+          description: 'cells to overwrite with new plain text',
+          items: {
+            type: 'object',
+            properties: {
+              row: { type: 'integer', description: '0-based row (header row = 0)' },
+              col: { type: 'integer', description: '0-based column' },
+              text: { type: 'string' },
+            },
+            required: ['row', 'col', 'text'],
+          },
+        },
+        addRow: {
+          type: 'object',
+          description: 'insert a row relative to an existing 0-based row',
+          properties: { at: { type: 'integer' }, position: { type: 'string', enum: ['before', 'after'] } },
+          required: ['at'],
+        },
+        addColumn: {
+          type: 'object',
+          description: 'insert a column relative to an existing 0-based column',
+          properties: { at: { type: 'integer' }, position: { type: 'string', enum: ['before', 'after'] } },
+          required: ['at'],
+        },
+        deleteRow: { type: 'integer', description: '0-based row index to delete' },
+        deleteColumn: { type: 'integer', description: '0-based column index to delete' },
+        restyle: {
+          type: 'string',
+          enum: ['none', 'lightGrid', 'zebraBlue', 'zebraGray', 'headerDarkBlue', 'headerOrange', 'noBorder', 'fullBorder'],
+          description: 'apply a style preset to the whole table',
+        },
+      },
+      required: ['blockIndex'],
+    },
+  },
+  {
     name: 'set_header_footer',
     description:
       'Set the page header or footer text (the current contents are listed in the message context). Plain text; \\n separates lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields; an empty string clears the text. ' +
@@ -546,6 +602,7 @@ const INDEX_WRITE_SUMMARIES: Record<string, () => string> = {
   insert_chart: () => t('aiSumInsertChart'),
   edit_chart: () => t('aiSumEditChart'),
   insert_table: () => t('aiSumInsertContent'),
+  edit_table: () => t('aiSumInsertContent'),
 }
 
 const STALE_DOC_ERROR =
@@ -590,6 +647,53 @@ function tableRowCells(cells: string[], cols: number, rowIndex: number, isHeader
     out.push(cell)
   }
   return out
+}
+
+/** Resolve a docTable block by index into its node + content start + grid map. */
+function docTableAt(
+  editor: Editor,
+  idx: number,
+): { node: ProseMirrorNode; tableStart: number; map: TableMap } | null {
+  if (!Number.isInteger(idx) || idx < 0 || idx >= editor.state.doc.childCount) return null
+  const { from } = blockRangePositions(editor, idx, idx)
+  const node = editor.state.doc.nodeAt(from)
+  if (!node || node.type.name !== 'docTable') return null
+  return { node, tableStart: from + 1, map: TableMap.get(node) }
+}
+
+/** Overwrite one cell's content with plain text (in-place; keeps load-time save signatures). */
+function setTableCellText(editor: Editor, idx: number, row: number, col: number, text: string): boolean {
+  const info = docTableAt(editor, idx)
+  if (!info) return false
+  const { map, tableStart } = info
+  if (row < 0 || col < 0 || row >= map.height || col >= map.width) return false
+  const cellPos = tableStart + map.map[row * map.width + col]!
+  const cellNode = editor.state.doc.nodeAt(cellPos)
+  if (!cellNode) return false
+  editor
+    .chain()
+    .setTextSelection({ from: cellPos + 1, to: cellPos + cellNode.nodeSize - 1 })
+    .insertContent(text.replace(/\r?\n/g, ' '))
+    .run()
+  return true
+}
+
+/** Place a single-cell CellSelection at (row,col) then run a prosemirror-tables command. */
+function runTableCellCommand(
+  editor: Editor,
+  idx: number,
+  row: number,
+  col: number,
+  command: PmCommand,
+): boolean {
+  const info = docTableAt(editor, idx)
+  if (!info) return false
+  const { map, tableStart } = info
+  if (row < 0 || col < 0 || row >= map.height || col >= map.width) return false
+  const cellPos = tableStart + map.map[row * map.width + col]!
+  editor.view.focus()
+  editor.view.dispatch(editor.state.tr.setSelection(CellSelection.create(editor.state.doc, cellPos)))
+  return command(editor.state, editor.view.dispatch)
 }
 
 function validRange(
@@ -1214,6 +1318,68 @@ function executeSyncTool(
       insertBlocksAfter(editor, after, [tableModelToPmNode(table)], track)
       return {
         output: `Inserted a ${modelRows.length}×${cols} table${hasHeader ? ' with a header row' : ''} after block ${after}. Subsequent block indexes shifted; call get_document_context if needed.`,
+        mutated: true,
+        summary: t('aiSumInsertContent'),
+      }
+    }
+
+    case 'edit_table': {
+      const idx = Number(call.input.blockIndex)
+      if (!docTableAt(editor, idx))
+        return fail(t('aiSumInsertContent'), `block ${call.input.blockIndex} is not a table (type "table" in the block list)`)
+      const structural = ['addRow', 'addColumn', 'deleteRow', 'deleteColumn'].filter(
+        (k) => call.input[k] !== undefined && call.input[k] !== null,
+      )
+      if (structural.length > 1)
+        return fail(
+          t('aiSumInsertContent'),
+          'apply at most one row/column add-or-delete per call (indexes shift); setCells and restyle may accompany it',
+        )
+      const done: string[] = []
+      const setCells = Array.isArray(call.input.setCells)
+        ? (call.input.setCells as ReadonlyArray<{ row?: unknown; col?: unknown; text?: unknown } | null>)
+        : []
+      let cellCount = 0
+      for (const sc of setCells) {
+        const r = Number(sc?.row)
+        const c = Number(sc?.col)
+        if (!Number.isInteger(r) || !Number.isInteger(c)) continue
+        if (setTableCellText(editor, idx, r, c, String(sc?.text ?? ''))) cellCount++
+      }
+      if (cellCount) done.push(`${cellCount} cell${cellCount === 1 ? '' : 's'} set`)
+      const addRow = call.input.addRow as { at?: unknown; position?: unknown } | null | undefined
+      if (addRow && typeof addRow === 'object') {
+        const at = Number.isInteger(Number(addRow.at)) ? Number(addRow.at) : 0
+        const before = String(addRow.position ?? 'after') === 'before'
+        if (runTableCellCommand(editor, idx, at, 0, before ? addRowBefore : addRowAfter))
+          done.push(`row ${before ? 'inserted before' : 'inserted after'} ${at}`)
+      }
+      const addColumn = call.input.addColumn as { at?: unknown; position?: unknown } | null | undefined
+      if (addColumn && typeof addColumn === 'object') {
+        const at = Number.isInteger(Number(addColumn.at)) ? Number(addColumn.at) : 0
+        const before = String(addColumn.position ?? 'after') === 'before'
+        if (runTableCellCommand(editor, idx, 0, at, before ? addColumnBefore : addColumnAfter))
+          done.push(`column ${before ? 'inserted before' : 'inserted after'} ${at}`)
+      }
+      if (call.input.deleteRow !== undefined && call.input.deleteRow !== null) {
+        const r = Number(call.input.deleteRow)
+        if (runTableCellCommand(editor, idx, Number.isInteger(r) ? r : -1, 0, deleteRow))
+          done.push(`row ${r} deleted`)
+      }
+      if (call.input.deleteColumn !== undefined && call.input.deleteColumn !== null) {
+        const c = Number(call.input.deleteColumn)
+        if (runTableCellCommand(editor, idx, 0, Number.isInteger(c) ? c : -1, deleteColumn))
+          done.push(`column ${c} deleted`)
+      }
+      const restyle = call.input.restyle !== undefined ? String(call.input.restyle) : null
+      if (restyle) {
+        const preset = TABLE_PRESETS[restyle] ?? TABLE_PRESETS['none']!
+        if (runTableCellCommand(editor, idx, 0, 0, applyTablePreset(preset))) done.push(`restyled ${restyle}`)
+      }
+      if (!done.length)
+        return fail(t('aiSumInsertContent'), 'no valid edit was specified (or a row/column index was out of range)')
+      return {
+        output: `Edited table at block ${idx}: ${done.join('; ')}. Structural changes shift row/column indexes; call get_document_context before editing this table again.`,
         mutated: true,
         summary: t('aiSumInsertContent'),
       }
