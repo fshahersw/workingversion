@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "tests/workflows-unit/**/*.ts",
+    "tests/workflows/**/*.ts",
+    "infra/lambda/workflows/**/*.ts",
+    "playwright.workflows.config.ts"
+  ],
+  "compilerOptions": { "types": ["vite/client", "bun"] }
+}

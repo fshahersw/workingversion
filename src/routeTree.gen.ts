@@ -15,6 +15,7 @@ import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/
 import { Route as AuthLogoutRouteImport } from './routes/auth.logout'
 import { Route as AuthLoginRouteImport } from './routes/auth.login'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
+import { Route as ApiWorkflowsRouteImport } from './routes/api/workflows'
 import { Route as ApiUploadRouteImport } from './routes/api/upload'
 import { Route as ApiTranscribeRouteImport } from './routes/api/transcribe'
 import { Route as ApiTracesRouteImport } from './routes/api/traces'
@@ -22,6 +23,7 @@ import { Route as ApiSummarizeRouteImport } from './routes/api/summarize'
 import { Route as ApiQuickAskRouteImport } from './routes/api/quick-ask'
 import { Route as ApiOrchestrateRouteImport } from './routes/api/orchestrate'
 import { Route as ApiFollowupsRouteImport } from './routes/api/followups'
+import { Route as AuthenticatedWorkflowsRouteImport } from './routes/_authenticated/workflows'
 import { Route as AuthenticatedSummarizeRouteImport } from './routes/_authenticated/summarize'
 import { Route as AuthenticatedResearchRouteImport } from './routes/_authenticated/research'
 import { Route as AuthenticatedLibraryRouteImport } from './routes/_authenticated/library'
@@ -102,6 +104,11 @@ const AuthCallbackRoute = AuthCallbackRouteImport.update({
   path: '/callback',
   getParentRoute: () => AuthRoute,
 } as any)
+const ApiWorkflowsRoute = ApiWorkflowsRouteImport.update({
+  id: '/api/workflows',
+  path: '/api/workflows',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiUploadRoute = ApiUploadRouteImport.update({
   id: '/api/upload',
   path: '/api/upload',
@@ -136,6 +143,11 @@ const ApiFollowupsRoute = ApiFollowupsRouteImport.update({
   id: '/api/followups',
   path: '/api/followups',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedWorkflowsRoute = AuthenticatedWorkflowsRouteImport.update({
+  id: '/workflows',
+  path: '/workflows',
+  getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedSummarizeRoute = AuthenticatedSummarizeRouteImport.update({
   id: '/summarize',
@@ -422,6 +434,7 @@ export interface FileRoutesByFullPath {
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
+  '/workflows': typeof AuthenticatedWorkflowsRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
@@ -429,6 +442,7 @@ export interface FileRoutesByFullPath {
   '/api/traces': typeof ApiTracesRoute
   '/api/transcribe': typeof ApiTranscribeRoute
   '/api/upload': typeof ApiUploadRoute
+  '/api/workflows': typeof ApiWorkflowsRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
@@ -485,6 +499,7 @@ export interface FileRoutesByTo {
   '/library': typeof AuthenticatedLibraryRoute
   '/research': typeof AuthenticatedResearchRoute
   '/summarize': typeof AuthenticatedSummarizeRoute
+  '/workflows': typeof AuthenticatedWorkflowsRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
@@ -492,6 +507,7 @@ export interface FileRoutesByTo {
   '/api/traces': typeof ApiTracesRoute
   '/api/transcribe': typeof ApiTranscribeRoute
   '/api/upload': typeof ApiUploadRoute
+  '/api/workflows': typeof ApiWorkflowsRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
@@ -551,6 +567,7 @@ export interface FileRoutesById {
   '/_authenticated/library': typeof AuthenticatedLibraryRoute
   '/_authenticated/research': typeof AuthenticatedResearchRoute
   '/_authenticated/summarize': typeof AuthenticatedSummarizeRoute
+  '/_authenticated/workflows': typeof AuthenticatedWorkflowsRoute
   '/api/followups': typeof ApiFollowupsRoute
   '/api/orchestrate': typeof ApiOrchestrateRoute
   '/api/quick-ask': typeof ApiQuickAskRoute
@@ -558,6 +575,7 @@ export interface FileRoutesById {
   '/api/traces': typeof ApiTracesRoute
   '/api/transcribe': typeof ApiTranscribeRoute
   '/api/upload': typeof ApiUploadRoute
+  '/api/workflows': typeof ApiWorkflowsRoute
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
@@ -618,6 +636,7 @@ export interface FileRouteTypes {
     | '/library'
     | '/research'
     | '/summarize'
+    | '/workflows'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
@@ -625,6 +644,7 @@ export interface FileRouteTypes {
     | '/api/traces'
     | '/api/transcribe'
     | '/api/upload'
+    | '/api/workflows'
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
@@ -681,6 +701,7 @@ export interface FileRouteTypes {
     | '/library'
     | '/research'
     | '/summarize'
+    | '/workflows'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
@@ -688,6 +709,7 @@ export interface FileRouteTypes {
     | '/api/traces'
     | '/api/transcribe'
     | '/api/upload'
+    | '/api/workflows'
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
@@ -746,6 +768,7 @@ export interface FileRouteTypes {
     | '/_authenticated/library'
     | '/_authenticated/research'
     | '/_authenticated/summarize'
+    | '/_authenticated/workflows'
     | '/api/followups'
     | '/api/orchestrate'
     | '/api/quick-ask'
@@ -753,6 +776,7 @@ export interface FileRouteTypes {
     | '/api/traces'
     | '/api/transcribe'
     | '/api/upload'
+    | '/api/workflows'
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
@@ -810,6 +834,7 @@ export interface RootRouteChildren {
   ApiTracesRoute: typeof ApiTracesRoute
   ApiTranscribeRoute: typeof ApiTranscribeRoute
   ApiUploadRoute: typeof ApiUploadRoute
+  ApiWorkflowsRoute: typeof ApiWorkflowsRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
   ApiKbAskRoute: typeof ApiKbAskRoute
   ApiKbDocumentsRoute: typeof ApiKbDocumentsRoute
@@ -879,6 +904,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthCallbackRouteImport
       parentRoute: typeof AuthRoute
     }
+    '/api/workflows': {
+      id: '/api/workflows'
+      path: '/api/workflows'
+      fullPath: '/api/workflows'
+      preLoaderRoute: typeof ApiWorkflowsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/upload': {
       id: '/api/upload'
       path: '/api/upload'
@@ -927,6 +959,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/api/followups'
       preLoaderRoute: typeof ApiFollowupsRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated/workflows': {
+      id: '/_authenticated/workflows'
+      path: '/workflows'
+      fullPath: '/workflows'
+      preLoaderRoute: typeof AuthenticatedWorkflowsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/summarize': {
       id: '/_authenticated/summarize'
@@ -1291,6 +1330,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedLibraryRoute: typeof AuthenticatedLibraryRoute
   AuthenticatedResearchRoute: typeof AuthenticatedResearchRoute
   AuthenticatedSummarizeRoute: typeof AuthenticatedSummarizeRoute
+  AuthenticatedWorkflowsRoute: typeof AuthenticatedWorkflowsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedDraftsDraftIdRoute: typeof AuthenticatedDraftsDraftIdRoute
   AuthenticatedMattersSlugRoute: typeof AuthenticatedMattersSlugRoute
@@ -1315,6 +1355,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedLibraryRoute: AuthenticatedLibraryRoute,
   AuthenticatedResearchRoute: AuthenticatedResearchRoute,
   AuthenticatedSummarizeRoute: AuthenticatedSummarizeRoute,
+  AuthenticatedWorkflowsRoute: AuthenticatedWorkflowsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedDraftsDraftIdRoute: AuthenticatedDraftsDraftIdRoute,
   AuthenticatedMattersSlugRoute: AuthenticatedMattersSlugRoute,
@@ -1415,6 +1456,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiTracesRoute: ApiTracesRoute,
   ApiTranscribeRoute: ApiTranscribeRoute,
   ApiUploadRoute: ApiUploadRoute,
+  ApiWorkflowsRoute: ApiWorkflowsRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
   ApiKbAskRoute: ApiKbAskRoute,
   ApiKbDocumentsRoute: ApiKbDocumentsRoute,

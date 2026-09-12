@@ -17,6 +17,7 @@ dist-ssr
 /infra/app/artifacts/
 /infra/lambda/kb-ingest/artifacts/
 /.artifacts/kb-ingest/
+/.artifacts/workflows/
 *.local
 
 # Wrangler / Cloudflare
