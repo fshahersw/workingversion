@@ -164,7 +164,6 @@ function ResearchPage() {
                   setSkill(null);
                   setPrefill(text);
                 }}
-                onOpenConversation={openConversation}
                 skill={skill}
                 onSkill={setSkill}
               />
