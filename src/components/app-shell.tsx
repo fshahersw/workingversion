@@ -13,6 +13,7 @@ import {
   PenLine,
   Search,
   X,
+  Workflow,
 } from "lucide-react";
 import { type ComponentType, type ReactNode, useEffect, useState } from "react";
 
@@ -36,6 +37,7 @@ const primaryNav: readonly NavItem[] = [
   { icon: FileSearch, label: "Discovery", to: "/docs" },
   { icon: PenLine, label: "Office", to: "/office" },
   { icon: Library, label: "Library", to: "/library" },
+  { icon: Workflow, label: "Workflows", to: "/workflows" },
 ] as const;
 
 const COLLAPSED_W = 60;
@@ -228,6 +230,12 @@ function SidebarInner({
         <NavRow
           item={primaryNav[5]}
           active={pathname.startsWith("/library")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+        <NavRow
+          item={primaryNav[6]}
+          active={pathname.startsWith("/workflows")}
           expanded={expanded}
           onClick={onNavigate}
         />
