@@ -59,7 +59,11 @@ export async function processWorkflowRun(id: string) {
     throw e;
   }
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 780000);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 780000);
   const priorUsage = initial.usage || { input: 0, output: 0, requests: 0 };
   const runtime = productionAdapter(record.principal, priorUsage.requests);
   const cancellationCheck = setInterval(() => {
@@ -102,6 +106,22 @@ export async function processWorkflowRun(id: string) {
     });
     const latest = await runRecord(id);
     if (!latest || latest.lease !== lease || latest.cancelRequested) return;
+    if (timedOut && result.status === "cancelled") {
+      // The worker's own 13-minute watchdog fired — this is NOT a user cancel and
+      // NOT a lease loss (both return above). A single step could not finish within
+      // the execution window and there is no sub-step checkpoint, so retrying would
+      // only repeat the cost. Surface it as a clear failure instead of storing a
+      // silent "cancelled" run with no output (indistinguishable from a user cancel).
+      result.status = "failed";
+      result.endedAt = new Date().toISOString();
+      result.logs.push({
+        id: crypto.randomUUID(),
+        time: result.endedAt,
+        message:
+          "This step exceeded the maximum execution window before finishing. No partial result was saved. Reduce the number or size of documents, or split the work into smaller steps, then run again.",
+        level: "error",
+      });
+    }
     result.usage = {
       input: priorUsage.input + runtime.usage.input,
       output: priorUsage.output + runtime.usage.output,

@@ -432,6 +432,56 @@ Parameters:
       - "off"
     Description: off sends every Office assistant turn to the main tier.
 
+  WorkflowsEnabled:
+    Type: String
+    Default: ""
+    AllowedValues:
+      - ""
+      - "true"
+      - "false"
+    Description: >
+      "true" enables the Workflows subsystem (/workflows + /api/workflows). Empty
+      or "false" keeps it dark (server gates fail closed). Durable/scheduled runs
+      also require WorkflowsQueueUrl.
+
+  WorkflowsQueueUrl:
+    Type: String
+    Default: ""
+    Description: >
+      SQS queue URL for durable workflow execution — the QueueUrl output of the
+      workflows stack. Empty disables queued/scheduled runs (startRun returns 503).
+
+  WorkflowsSchedulerEnabled:
+    Type: String
+    Default: ""
+    AllowedValues:
+      - ""
+      - "true"
+      - "false"
+    Description: '"true" advertises scheduled-run capability; the scheduler Lambda in the workflows stack drives the actual cron.'
+
+  WorkflowsPythonInterpreterId:
+    Type: String
+    Default: ""
+    MaxLength: 128
+    Description: >
+      Bedrock AgentCore code-interpreter id for isolated workflow Python steps
+      (e.g. aws.codeinterpreter.v1). Empty makes Python steps return 503.
+
+  WorkflowsDailyRunLimit:
+    Type: String
+    Default: ""
+    Description: Optional per-user daily workflow-run cap; empty uses the code default.
+
+  BedrockResearchModel:
+    Type: String
+    Default: us.anthropic.claude-sonnet-5
+    MinLength: 1
+    MaxLength: 128
+    Description: >
+      Bedrock model / inference-profile for research and workflow AI steps; must be
+      in the foundation Bedrock allow-list.
+
   ApiStageName:
     Type: String
     Default: app
@@ -858,6 +908,15 @@ Resources:
           OFFICE_FAST_MODEL: !Ref OfficeFastModel
           OFFICE_INSPECT_MODEL: !If [HasOfficeInspectModel, !Ref OfficeInspectModel, !Ref AWS::NoValue]
           OFFICE_TIERING: !Ref OfficeTiering
+          # Workflows subsystem (src/lib/workflows). Dark unless SW_WORKFLOWS_ENABLED
+          # is "true"; queued/scheduled runs need SW_WORKFLOWS_QUEUE_URL (the workflows
+          # stack QueueUrl output); Python steps need an AgentCore interpreter id.
+          SW_WORKFLOWS_ENABLED: !Ref WorkflowsEnabled
+          SW_WORKFLOWS_QUEUE_URL: !Ref WorkflowsQueueUrl
+          SW_WORKFLOWS_SCHEDULER_ENABLED: !Ref WorkflowsSchedulerEnabled
+          SW_WORKFLOWS_PYTHON_INTERPRETER_ID: !Ref WorkflowsPythonInterpreterId
+          SW_WORKFLOWS_DAILY_RUN_LIMIT: !Ref WorkflowsDailyRunLimit
+          BEDROCK_RESEARCH_MODEL: !Ref BedrockResearchModel
           BDA_PROJECT_ARN: !Ref BdaProjectArn
           BDA_PROFILE_ARN: !Ref BdaProfileArn
           AGENTCORE_SEARCH_URL: !Ref AgentCoreGatewayUrl
