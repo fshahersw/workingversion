@@ -38,10 +38,11 @@ const apiAuthMiddleware = createMiddleware().server(async ({ next }) => {
           headers: { "content-type": "application/json" },
         });
       }
+      const { withInterpreterOwner } = await import("@/lib/agents/interpreter-context.server");
+      const result = await withInterpreterOwner(session.user.sub, () => next());
       if (session.setCookies.length) {
         // The id token was silently refreshed: hand the new cookie back with
         // whatever the route returns (including streamed responses).
-        const result = await next();
         const headers = new Headers(result.response.headers);
         for (const cookie of session.setCookies) headers.append("Set-Cookie", cookie);
         return new Response(result.response.body, {
@@ -50,6 +51,7 @@ const apiAuthMiddleware = createMiddleware().server(async ({ next }) => {
           headers,
         });
       }
+      return result;
     }
   }
   return next();

@@ -50,6 +50,7 @@ import { Route as ApiKbSearchRouteImport } from './routes/api/kb/search'
 import { Route as ApiKbIngestRouteImport } from './routes/api/kb/ingest'
 import { Route as ApiKbDocumentsRouteImport } from './routes/api/kb/documents'
 import { Route as ApiKbAskRouteImport } from './routes/api/kb/ask'
+import { Route as ApiDiscoveryAnalyzeRouteImport } from './routes/api/discovery/analyze'
 import { Route as ApiAuthMeRouteImport } from './routes/api/auth/me'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
 import { Route as AuthenticatedDraftsDraftIdRouteImport } from './routes/_authenticated/drafts.$draftId'
@@ -283,6 +284,11 @@ const ApiKbAskRoute = ApiKbAskRouteImport.update({
   path: '/api/kb/ask',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiDiscoveryAnalyzeRoute = ApiDiscoveryAnalyzeRouteImport.update({
+  id: '/api/discovery/analyze',
+  path: '/api/discovery/analyze',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiAuthMeRoute = ApiAuthMeRouteImport.update({
   id: '/api/auth/me',
   path: '/api/auth/me',
@@ -449,6 +455,7 @@ export interface FileRoutesByFullPath {
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/discovery/analyze': typeof ApiDiscoveryAnalyzeRoute
   '/api/kb/ask': typeof ApiKbAskRoute
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
@@ -515,6 +522,7 @@ export interface FileRoutesByTo {
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/discovery/analyze': typeof ApiDiscoveryAnalyzeRoute
   '/api/kb/ask': typeof ApiKbAskRoute
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
@@ -583,6 +591,7 @@ export interface FileRoutesById {
   '/_authenticated/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/_authenticated/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/auth/me': typeof ApiAuthMeRoute
+  '/api/discovery/analyze': typeof ApiDiscoveryAnalyzeRoute
   '/api/kb/ask': typeof ApiKbAskRoute
   '/api/kb/documents': typeof ApiKbDocumentsRoute
   '/api/kb/ingest': typeof ApiKbIngestRoute
@@ -651,6 +660,7 @@ export interface FileRouteTypes {
     | '/drafts/$draftId'
     | '/matters/$slug'
     | '/api/auth/me'
+    | '/api/discovery/analyze'
     | '/api/kb/ask'
     | '/api/kb/documents'
     | '/api/kb/ingest'
@@ -717,6 +727,7 @@ export interface FileRouteTypes {
     | '/drafts/$draftId'
     | '/matters/$slug'
     | '/api/auth/me'
+    | '/api/discovery/analyze'
     | '/api/kb/ask'
     | '/api/kb/documents'
     | '/api/kb/ingest'
@@ -784,6 +795,7 @@ export interface FileRouteTypes {
     | '/_authenticated/drafts/$draftId'
     | '/_authenticated/matters/$slug'
     | '/api/auth/me'
+    | '/api/discovery/analyze'
     | '/api/kb/ask'
     | '/api/kb/documents'
     | '/api/kb/ingest'
@@ -836,6 +848,7 @@ export interface RootRouteChildren {
   ApiUploadRoute: typeof ApiUploadRoute
   ApiWorkflowsRoute: typeof ApiWorkflowsRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
+  ApiDiscoveryAnalyzeRoute: typeof ApiDiscoveryAnalyzeRoute
   ApiKbAskRoute: typeof ApiKbAskRoute
   ApiKbDocumentsRoute: typeof ApiKbDocumentsRoute
   ApiKbIngestRoute: typeof ApiKbIngestRoute
@@ -1149,6 +1162,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiKbAskRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/discovery/analyze': {
+      id: '/api/discovery/analyze'
+      path: '/api/discovery/analyze'
+      fullPath: '/api/discovery/analyze'
+      preLoaderRoute: typeof ApiDiscoveryAnalyzeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/auth/me': {
       id: '/api/auth/me'
       path: '/api/auth/me'
@@ -1458,6 +1478,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiUploadRoute: ApiUploadRoute,
   ApiWorkflowsRoute: ApiWorkflowsRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
+  ApiDiscoveryAnalyzeRoute: ApiDiscoveryAnalyzeRoute,
   ApiKbAskRoute: ApiKbAskRoute,
   ApiKbDocumentsRoute: ApiKbDocumentsRoute,
   ApiKbIngestRoute: ApiKbIngestRoute,

@@ -1,15 +1,15 @@
 export async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => resolve(), ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -73,8 +73,10 @@ export async function withRetry<T>(
       if (e instanceof DOMException && e.name === "AbortError") throw e;
       if (isRateLimited(e) && opts.retry429 === false) throw e;
       const msg = e instanceof Error ? e.message : "";
-      if (/HTTP 4\d\d/.test(msg) && !isRateLimited(e)) throw e instanceof Error ? e : new Error(msg);
-      if (e instanceof HttpStatusError && e.status < 500 && e.status !== 429 && e.status !== 503) throw e;
+      if (/HTTP 4\d\d/.test(msg) && !isRateLimited(e))
+        throw e instanceof Error ? e : new Error(msg);
+      if (e instanceof HttpStatusError && e.status < 500 && e.status !== 429 && e.status !== 503)
+        throw e;
       if (i === tries - 1) break;
       const ra = retryAfterMsFrom(e);
       await sleep(ra ?? (opts.baseMs ?? 400) * 2 ** i, opts.signal);
@@ -91,16 +93,30 @@ export async function mapPool<T, R>(
 ): Promise<R[]> {
   const out = new Array<R>(items.length);
   let next = 0;
-  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, async () => {
-    for (;;) {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i]!, i);
-    }
-  });
+  let failed = false;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(concurrency, items.length || 1)) },
+    async () => {
+      for (;;) {
+        if (failed) return;
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const i = next++;
+        if (i >= items.length) return;
+        try {
+          out[i] = await fn(items[i]!, i);
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    },
+  );
   if (!items.length) return [];
-  await Promise.all(workers);
+  // Drain work already started before reporting an error. Otherwise callers
+  // can finalize a partial record while other workers keep mutating it.
+  const results = await Promise.allSettled(workers);
+  const failure = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failure) throw failure.reason;
   return out;
 }
 

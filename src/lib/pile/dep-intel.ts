@@ -4,20 +4,15 @@ import type {
   DepGraphEdge,
   DepGraphNode,
 } from "./deposition-analysis.ts";
-import { isCorroborationEdge, personNodeMatchesName } from "./graph-view.ts";
+import { isCorroborationEdge, personNodeMatchesName, nodeFileHints } from "./graph-view.ts";
 
 /**
  * Cross-deposition intelligence. Pure and deterministic: nothing here calls a
  * model, and every number is a count over material the analysis already holds
  * (witness cards, adjudicated contradictions, and the knowledge graph).
  *
- * Attribution model. Findings and exhibits carry page:line cites but no file,
- * so per-witness numbers are derived from the three places the record does
- * name a transcript: witness cards (`fileName`), contradiction sides
- * (`fileName` + `witness`), and person nodes matched to those witnesses. A
- * graph node "belongs" to a transcript when it is that witness's own node or
- * sits one edge away from it, which is how the model links testimony to the
- * entities it mentions.
+ * Attribution uses explicit transcript names and source-matched quotations.
+ * Graph proximity and a shared surname never establish who gave testimony.
  */
 
 export type Severity = "high" | "medium" | "low";
@@ -79,7 +74,7 @@ export const labelFor =
 
 /** Every name the record uses for the witness behind a transcript column. */
 function witnessNames(analysis: DepAnalysis, col: WitnessCol): string[] {
-  const names = new Set<string>([col.label]);
+  const names = new Set<string>();
   for (const witness of analysis.witnesses) {
     if (witness.fileName === col.fileName && witness.name) names.add(witness.name);
   }
@@ -109,43 +104,17 @@ export function witnessNodeIds(
   return out;
 }
 
-function adjacency(edges: DepGraphEdge[]): Map<string, Set<string>> {
-  const adj = new Map<string, Set<string>>();
-  for (const edge of edges) {
-    if (!adj.has(edge.from)) adj.set(edge.from, new Set());
-    if (!adj.has(edge.to)) adj.set(edge.to, new Set());
-    adj.get(edge.from)!.add(edge.to);
-    adj.get(edge.to)!.add(edge.from);
-  }
-  return adj;
-}
-
-/**
- * Transcripts each graph node is attributed to, in column order: the witness's
- * own node plus everything one edge away from it. Nodes with no path to any
- * witness node are unattributed (empty list).
- */
+/** Source transcripts attributed to each entity, in column order. */
 export function nodeFileMap(
   analysis: DepAnalysis,
   cols: WitnessCol[] = witnessColumns(analysis),
 ): Map<string, string[]> {
-  const owners = witnessNodeIds(analysis, cols);
-  const adj = adjacency(analysis.graph.edges);
-  const files = new Map<string, Set<string>>();
-  const add = (nodeId: string, fileName: string) => {
-    if (!files.has(nodeId)) files.set(nodeId, new Set());
-    files.get(nodeId)!.add(fileName);
-  };
-  for (const col of cols) {
-    for (const witnessId of owners.get(col.fileName) ?? []) {
-      add(witnessId, col.fileName);
-      for (const neighbor of adj.get(witnessId) ?? []) add(neighbor, col.fileName);
-    }
-  }
+  // Direct source evidence only. A neighbour of a deponent is not automatically
+  // evidence that this deponent discussed that entity in their own transcript.
   const order = new Map(cols.map((col, index) => [col.fileName, index]));
   const out = new Map<string, string[]>();
   for (const node of analysis.graph.nodes) {
-    const owned = [...(files.get(node.id) ?? [])].sort(
+    const owned = nodeFileHints(node, analysis).sort(
       (a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0),
     );
     out.set(node.id, owned);
@@ -187,9 +156,9 @@ export function priorityQueue(analysis: DepAnalysis, cap = 40): IntelIssue[] {
       detail: item.summary,
       kind: "gap" as const,
       severity: "medium" as const,
-      files: [],
+      files: item.fileName ? [item.fileName] : [],
       cite: item.cite,
-      fileName: "",
+      fileName: item.fileName ?? "",
     }));
   const conflicts: IntelIssue[] = analysis.contradictions.map((item) => ({
     id: item.id,

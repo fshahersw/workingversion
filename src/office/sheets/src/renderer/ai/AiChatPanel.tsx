@@ -215,6 +215,7 @@ export interface AiChatMessage {
 }
 
 export function AiChatPanel({
+  taskControls,
   swControls,
   swMode = 'write',
   isOpen,
@@ -244,6 +245,7 @@ export function AiChatPanel({
   onCollapse,
 }: {
   readonly swMode?: string
+  readonly taskControls?: React.ReactNode
   readonly swControls?: React.ReactNode
   readonly isOpen: boolean
   /** the workbook has cells with content — empty workbooks get "build me a sheet" copy instead */
@@ -675,6 +677,7 @@ export function AiChatPanel({
 
       <JumpToLatest targetRef={chatRef} followRef={stickToBottomRef}/>
       <div className="ai-composer">
+        {taskControls}
         {!(scopeRange !== null) && <AssistantContext label={assistantScopeLabel('sheets',{})} busy={aiBusy}/>}
         {attachNotice && <div className="ai-attach-notice">{attachNotice}</div>}
         <AiComposer

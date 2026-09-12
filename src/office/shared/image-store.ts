@@ -6,6 +6,14 @@
 
 export const PLATFORM_IMAGE_PREFIX = "platform-image:";
 
+export type DiagramSource = {
+  kind: "mermaid" | "graphviz";
+  source: string;
+  engine?: string;
+  theme?: string;
+  svg?: string;
+};
+
 export type StoredImage = {
   id: string;
   mime: "image/png" | "image/jpeg";
@@ -14,6 +22,7 @@ export type StoredImage = {
   height: number;
   label: string;
   createdAt: number;
+  diagram?: DiagramSource;
 };
 
 const MAX_IMAGES = 40;
@@ -51,6 +60,7 @@ export async function putPlatformImage(input: {
   label: string;
   width?: number;
   height?: number;
+  diagram?: DiagramSource;
 }): Promise<StoredImage> {
   const id = crypto.randomUUID().slice(0, 8);
   const size =
@@ -65,6 +75,7 @@ export async function putPlatformImage(input: {
     height: size.height,
     label: input.label.slice(0, 120),
     createdAt: Date.now(),
+    ...(input.diagram ? { diagram: input.diagram } : {}),
   };
   store.set(id, image);
   // Bound memory: drop the oldest handles first.

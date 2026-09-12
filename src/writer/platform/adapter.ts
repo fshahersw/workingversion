@@ -334,18 +334,7 @@ async function attachmentText(path: string, offset: number, maxChars: number) {
   const ext = file.name.split(".").at(-1)?.toLowerCase() || "";
   let text = "";
   try {
-    if (ext === "docx") {
-      const d = await parseDocx(new Uint8Array(await file.arrayBuffer()));
-      text =
-        "[Main body text; headers and footers are not included in this attachment extraction.]\n" +
-        d.blocks
-          .map((b) =>
-            b.table
-              ? b.table.rows.map((row) => row.map((c) => c.paras.join("\n")).join("\t")).join("\n")
-              : (b.runs ?? []).map((r) => r.text || "").join("") || b.previewText || "",
-          )
-          .join("\n");
-    } else if (OFFICE_LOCAL_TEXT_EXTS.has(ext)) {
+    if (OFFICE_LOCAL_TEXT_EXTS.has(ext)) {
       text = await file.text();
     } else if (OFFICE_EXTRACT_EXTS.has(ext)) {
       let pending = attachmentTextCache.get(path);
@@ -359,7 +348,10 @@ async function attachmentText(path: string, offset: number, maxChars: number) {
     }
   } catch (error) {
     attachmentTextCache.delete(path);
-    return { ok: false, error: error instanceof Error ? error.message : "The attachment could not be read." };
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "The attachment could not be read.",
+    };
   }
   const start = Math.max(0, Math.trunc(offset || 0));
   const length = Math.min(24000, Math.max(1, Math.trunc(maxChars || 24000)));
@@ -675,11 +667,20 @@ export function installPlatformAdapter(options: PlatformAdapterOptions): void {
         const r = await officeImageSearchFn({ data: { query, maxResults: maxResults ?? 8 } });
         if (r.method === "error") return { images: [], method: "error", error: r.error };
         return {
-          images: r.images.map((i) => ({ imageUrl: i.imageUrl, title: i.title, sourceUrl: i.imageUrl, source: "web" })),
+          images: r.images.map((i) => ({
+            imageUrl: i.imageUrl,
+            title: i.title,
+            sourceUrl: i.imageUrl,
+            source: "web",
+          })),
           method: "tavily",
         };
       } catch (error) {
-        return { images: [], method: "error", error: error instanceof Error ? error.message : "Image search failed." };
+        return {
+          images: [],
+          method: "error",
+          error: error instanceof Error ? error.message : "Image search failed.",
+        };
       }
     },
     // Public image URLs download through the platform (SSRF-guarded, bounded);
@@ -695,8 +696,7 @@ export function installPlatformAdapter(options: PlatformAdapterOptions): void {
       }
     },
     aiGenerateImage: async () => ({ error: "Use the assistant's generate_image tool." }),
-    pickAttachments: async () =>
-      addFiles(await pickFiles(OFFICE_ATTACHMENT_ACCEPT, true)),
+    pickAttachments: async () => addFiles(await pickFiles(OFFICE_ATTACHMENT_ACCEPT, true)),
     addAttachmentPaths: async (paths) => {
       const files: File[] = [];
       for (const path of paths) {

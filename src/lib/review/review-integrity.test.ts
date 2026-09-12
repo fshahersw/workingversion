@@ -36,7 +36,9 @@ test("upload and working-set import use the shared fingerprint helper", () => {
     "const useWorkingSet = useCallback(",
   );
   const uploadCalls =
-    upload.match(/fingerprint:\s*documentRowFingerprint\(res\.name,\s*pages\.length\)/g) ?? [];
+    upload.match(
+      /fingerprint:\s*documentRowFingerprint\(\s*res\.name,\s*pages\.length,\s*await evidenceDigest\(pages\),?\s*\)/g,
+    ) ?? [];
   assert.equal(uploadCalls.length, 2);
   assert.doesNotMatch(upload, /fingerprint:\s*`\$\{/);
 
@@ -45,16 +47,17 @@ test("upload and working-set import use the shared fingerprint helper", () => {
     "const useWorkingSet = useCallback(",
     "const removeRow = useCallback(",
   );
-  assert.match(workingSet, /const fingerprint = documentRowFingerprint\(f\.name,\s*f\.pageCount\)/);
+  assert.match(
+    workingSet,
+    /documentRowFingerprint\(\s*f\.name,\s*f\.pageCount,\s*await evidenceDigest\(evidence\),?\s*\)/,
+  );
 });
 
-test("row matching recognizes both legacy fingerprint forms", () => {
+test("both ingest paths use content-aware matching without name-only fallback", () => {
   const contents = source("./use-review-table.ts");
   const matcher = section(contents, "function findDocumentRow(", "async function requestCell(");
-  assert.match(matcher, /row\.fingerprint === fingerprint/);
-  assert.match(matcher, /row\.fingerprint\?\.startsWith\(legacyUploadPrefix\)/);
-  assert.match(matcher, /documentRowFingerprint\(row\.label,\s*row\.pageCount\) === fingerprint/);
-  assert.doesNotMatch(matcher, /row\.label === name/);
+  assert.match(matcher, /sameReviewDocument\(row, fingerprint, docId\)/);
+  assert.doesNotMatch(matcher, /row\.label|legacyUploadPrefix/);
 });
 
 test("row and column deletion cascade exact owned cells and histories", () => {

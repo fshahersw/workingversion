@@ -84,7 +84,12 @@ export function looksLikeTranscript(text: string): boolean {
   return qa >= 8;
 }
 
-export function formatCite(startPage: number, startLine: number, endPage: number, endLine: number): string {
+export function formatCite(
+  startPage: number,
+  startLine: number,
+  endPage: number,
+  endLine: number,
+): string {
   if (startPage === endPage && startLine === endLine) return `${startPage}:${startLine}`;
   return `${startPage}:${startLine}-${endPage}:${endLine}`;
 }
@@ -99,7 +104,11 @@ function classifySpeaker(label: string): TranscriptSpeaker {
   return "OTHER";
 }
 
-function parseSpeaker(rest: string): { speaker: TranscriptSpeaker; speakerLabel: string; text: string } {
+function parseSpeaker(rest: string): {
+  speaker: TranscriptSpeaker;
+  speakerLabel: string;
+  text: string;
+} {
   const cleaned = rest.replace(/^\s+/, "");
   const q = cleaned.match(/^Q\.?\s+(.*)$/i);
   if (q) return { speaker: "Q", speakerLabel: "Q", text: (q[1] ?? "").trim() };
@@ -224,8 +233,16 @@ function captionOf(text: string): string {
 
 function witnessOf(caption: string, fileName: string): string | null {
   const m = caption.match(/deposition of\s+(.+?)(?:\s+taken\b|\s+deposed\b|,|\n|$)/i);
-  if (m) return m[1]!.replace(/\s+/g, " ").trim().slice(0, 80);
-  const base = fileName.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim();
+  if (m)
+    return m[1]!
+      .replace(/\s+(?:page\s+)?\d{1,5}(?:\s+of\s+\d+)?\s*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+  const base = fileName
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .trim();
   return base || null;
 }
 
@@ -254,7 +271,10 @@ function groupBlocks(lines: TranscriptLine[]): TranscriptBlock[] {
     cur = [];
   };
   for (const line of lines) {
-    if (line.speaker === "Q" && cur.some((l) => l.speaker === "A" || (l.speaker !== "Q" && l.text))) {
+    if (
+      line.speaker === "Q" &&
+      cur.some((l) => l.speaker === "A" || (l.speaker !== "Q" && l.text))
+    ) {
       push();
     }
     cur.push(line);
@@ -272,7 +292,11 @@ function fallbackLines(pages: { page: number; text: string }[]): TranscriptLine[
       .filter(Boolean)
       .filter((s) => !shouldSkipLine(s));
     chunks.forEach((text, i) => {
-      const { speaker, speakerLabel, text: body } = parseSpeaker(text.replace(/^\d{1,2}[.)]?\s+/, ""));
+      const {
+        speaker,
+        speakerLabel,
+        text: body,
+      } = parseSpeaker(text.replace(/^\d{1,2}[.)]?\s+/, ""));
       lines.push({ page: p.page, line: i + 1, speaker, speakerLabel, text: body || text });
     });
   }
@@ -310,7 +334,12 @@ export function transcriptFromPages(
     if (!caption) caption = captionOf(p.text);
     const lined = p.text.match(new RegExp(LINED_QA.source, "gim"))?.length ?? 0;
     const part =
-      lined >= 2 ? parseNumbered(`                                                                ${p.page}\n${p.text}`, p.page) : parseQaProse(p.text, p.page);
+      lined >= 2
+        ? parseNumbered(
+            `                                                                ${p.page}\n${p.text}`,
+            p.page,
+          )
+        : parseQaProse(p.text, p.page);
     if (part.length) lines.push(...part);
   }
   const used = lines.length ? lines : fallbackLines(cleaned);
@@ -339,7 +368,11 @@ export function parseTranscript(text: string, fileName = "transcript.txt"): Tran
   };
 }
 
-export function blocksToPages(parsed: TranscriptParse, fileId: string, fileName: string): PilePage[] {
+export function blocksToPages(
+  parsed: TranscriptParse,
+  fileId: string,
+  fileName: string,
+): PilePage[] {
   const byPage = new Map<number, string[]>();
   for (const block of parsed.blocks) {
     const chunk = `Q. ${block.question}\nA. ${block.answer}`.trim();
@@ -410,5 +443,7 @@ export function sampleDigestBlocks(
       add(blocks[Math.round((n / (extra + 1)) * (blocks.length - 1))]);
     }
   }
-  return [...picked.values()].sort((a, b) => a.startPage - b.startPage || a.startLine - b.startLine).slice(0, cap);
+  return [...picked.values()]
+    .sort((a, b) => a.startPage - b.startPage || a.startLine - b.startLine)
+    .slice(0, cap);
 }

@@ -90,14 +90,13 @@ export function askBudget(fileCount: number): AskBudget {
     return { singlePack: 24, perFilePages: 15, fanoutFiles: fileCount, writerPack: 60 };
   if (fileCount <= 12)
     return { singlePack: 24, perFilePages: 8, fanoutFiles: fileCount, writerPack: 88 };
-  if (fileCount <= 30)
-    return { singlePack: 24, perFilePages: 7, fanoutFiles: 24, writerPack: 110 };
+  if (fileCount <= 30) return { singlePack: 24, perFilePages: 7, fanoutFiles: 24, writerPack: 110 };
   return { singlePack: 24, perFilePages: 6, fanoutFiles: 30, writerPack: 128 };
 }
 
-/** Deposition workbench — 5 transcripts, per-file covering windows then cross-check. */
+/** Deposition workbench — bounded bulk intake, covering windows then cross-check. */
 export const DEP_MAX_PAGES = 5000;
-export const DEP_MAX_FILES = 5;
+export const DEP_MAX_FILES = 20;
 export const DEP_MAX_BYTES = 200 * 1024 * 1024;
 export const ANALYZE_PACK = 32;
 /** Covering window — every block/page is analyzed, this many at a time. */

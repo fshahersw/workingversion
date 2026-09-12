@@ -1,0 +1,153 @@
+.office-task-controls {
+  color: #273441;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0 0 9px;
+  border: 1px solid #d9e1e6;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+.office-task-controls__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 9px;
+  font-size: 11px;
+}
+.office-task-controls__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.office-task-controls__state i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #99a6b0;
+}
+.office-task-controls__state i[data-active="true"] {
+  background: #137a65;
+}
+.office-task-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 4px;
+  padding: 4px;
+  color: #334554;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.office-task-controls button:hover {
+  background: #edf3f6;
+  color: #133e56;
+}
+.office-task-controls button:focus-visible,
+.office-task-controls input:focus-visible {
+  outline: 2px solid #0b6e99;
+  outline-offset: 2px;
+}
+.office-task-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.office-task-controls__buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+.office-task-controls__direction {
+  display: flex;
+  align-items: center;
+  margin: 0 8px 8px;
+  border: 1px solid #c4d0d9;
+  border-radius: 5px;
+  background: #f9fbfc;
+}
+.office-task-controls__direction input {
+  min-width: 0;
+  width: 100%;
+  color: #22303c;
+  border: 0;
+  background: transparent;
+  padding: 8px;
+  font: inherit;
+  font-size: 12px;
+}
+.office-task-controls__direction input::placeholder {
+  color: #60717e;
+}
+.office-task-controls__direction button {
+  margin: 3px;
+  background: #e7eff4;
+}
+.office-task-controls__queue {
+  padding: 0 10px 8px;
+  font-size: 11px;
+}
+.office-task-controls__queue > button {
+  float: right;
+  text-decoration: underline;
+}
+.office-task-controls__queue ol {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  max-height: 100px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.office-task-controls__voice {
+  padding: 6px 10px 9px;
+  color: #205f50;
+  font-size: 12px;
+}
+.office-task-controls__voice span {
+  display: block;
+  margin-top: 2px;
+  color: #556673;
+  font-size: 11px;
+}
+.office-task-controls__transcript {
+  font-size: 11px;
+  padding: 0 10px 8px;
+}
+.office-task-controls__transcript summary {
+  cursor: pointer;
+  color: #405966;
+}
+.office-task-controls__transcript > div {
+  max-height: 180px;
+  overflow: auto;
+}
+.office-task-controls__transcript p {
+  margin: 7px 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.office-task-controls__transcript b {
+  display: block;
+  color: #223b4c;
+}
+.office-task-controls__notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 7px 10px;
+  border-top: 1px solid #e2e8ed;
+  color: #475968;
+  font-size: 11px;
+}
+.office-task-controls__notice button {
+  margin-left: auto;
+  flex-shrink: 0;
+}

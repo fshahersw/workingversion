@@ -1,12 +1,6 @@
 import type { DepGraphEdge, DepGraphNode } from "./deposition-analysis.ts";
 
-export const GRAPH_KIND_ORDER: DepGraphNode["kind"][] = [
-  "person",
-  "org",
-  "doc",
-  "theme",
-  "event",
-];
+export const GRAPH_KIND_ORDER: DepGraphNode["kind"][] = ["person", "org", "doc", "theme", "event"];
 export const GRAPH_NODE_WIDTH = 188;
 export const GRAPH_NODE_HEIGHT = 64;
 
@@ -55,6 +49,40 @@ export function fitGraphView(
   };
 }
 
+/** Frame actual card bounds, including negative coordinates and very large groups. */
+export function fitGraphNodes(
+  viewport: { width: number; height: number },
+  nodes: readonly { x: number; y: number }[],
+  padding = 44,
+): GraphView | null {
+  const finite = nodes.filter((n) => Number.isFinite(n.x) && Number.isFinite(n.y));
+  if (
+    !finite.length ||
+    !Number.isFinite(viewport.width) ||
+    !Number.isFinite(viewport.height) ||
+    viewport.width <= 0 ||
+    viewport.height <= 0
+  )
+    return null;
+  // Cards vary by degree: at most 196 × 70. Extra room also covers focus rings.
+  const left = Math.min(...finite.map((n) => n.x)) - 104;
+  const right = Math.max(...finite.map((n) => n.x)) + 104;
+  const top = Math.min(...finite.map((n) => n.y)) - 42;
+  const bottom = Math.max(...finite.map((n) => n.y)) + 42;
+  const inset = Math.max(0, Math.min(padding, viewport.width / 4, viewport.height / 4));
+  // A fixed minimum zoom would clip large selections. Fit must always fit.
+  const k = Math.min(
+    1.15,
+    (viewport.width - inset * 2) / (right - left),
+    (viewport.height - inset * 2) / (bottom - top),
+  );
+  return {
+    k,
+    x: viewport.width / 2 - ((left + right) * k) / 2,
+    y: viewport.height / 2 - ((top + bottom) * k) / 2,
+  };
+}
+
 export function filterKnowledgeGraph(
   graph: { nodes: DepGraphNode[]; edges: DepGraphEdge[] },
   filter: KnowledgeGraphFilter,
@@ -66,9 +94,7 @@ export function filterKnowledgeGraph(
 } {
   const kinds = filter.kinds ? new Set(filter.kinds) : null;
   const kindIds = new Set(
-    graph.nodes
-      .filter((node) => !kinds || kinds.has(node.kind))
-      .map((node) => node.id),
+    graph.nodes.filter((node) => !kinds || kinds.has(node.kind)).map((node) => node.id),
   );
   const candidateEdges = graph.edges.filter(
     (edge) => kindIds.has(edge.from) && kindIds.has(edge.to),
@@ -122,9 +148,7 @@ export function layoutKnowledgeGraph(
   }
   for (const kind of GRAPH_KIND_ORDER) {
     columns[kind].sort(
-      (a, b) =>
-        (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0) ||
-        a.label.localeCompare(b.label),
+      (a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0) || a.label.localeCompare(b.label),
     );
   }
 
@@ -141,9 +165,7 @@ export function layoutKnowledgeGraph(
   used.forEach((kind, column) => {
     const list = columns[kind];
     const spread =
-      list.length > 1
-        ? (height - paddingY * 2 - GRAPH_NODE_HEIGHT) / (list.length - 1)
-        : 0;
+      list.length > 1 ? (height - paddingY * 2 - GRAPH_NODE_HEIGHT) / (list.length - 1) : 0;
     list.forEach((node, row) => {
       items.push({
         id: node.id,
@@ -153,9 +175,7 @@ export function layoutKnowledgeGraph(
         y:
           paddingY +
           GRAPH_NODE_HEIGHT / 2 +
-          (list.length > 1
-            ? spread * row
-            : (height - paddingY * 2 - GRAPH_NODE_HEIGHT) / 2),
+          (list.length > 1 ? spread * row : (height - paddingY * 2 - GRAPH_NODE_HEIGHT) / 2),
       });
     });
   });

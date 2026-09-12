@@ -13,6 +13,12 @@ export type ClassifiedGraphEdge = DepGraphEdge & {
   fileName?: string;
   /** Human title for synthetic edges, e.g. the contradiction headline. */
   title?: string;
+  pairedEvidence?: {
+    fileName: string;
+    cite: string;
+    quote: string;
+    evidenceStatus?: "source_matched" | "needs_review";
+  }[];
 };
 
 export type GraphViewSettings = {
@@ -27,6 +33,7 @@ export type GraphViewSettings = {
   layout: "kind" | "force" | "witness" | "cluster";
   colorBy: "kind" | "witness" | "cluster";
   hops: 1 | 2;
+  evidence: "all" | "source_matched" | "needs_review";
 };
 
 /** Fill colours for node kinds; shared by the card border and the minimap. */
@@ -53,6 +60,7 @@ export const DEFAULT_GRAPH_VIEW: GraphViewSettings = {
   layout: "cluster",
   colorBy: "cluster",
   hops: 1,
+  evidence: "all",
 };
 
 const KIND_KEYS: DepGraphNode["kind"][] = ["person", "org", "doc", "theme", "event"];
@@ -82,7 +90,10 @@ export function edgeClassOf(edge: DepGraphEdge): GraphEdgeClass {
 }
 
 function canonName(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function lastToken(value: string): string {
@@ -91,22 +102,25 @@ function lastToken(value: string): string {
 }
 
 export function personNodeMatchesName(label: string, name: string): boolean {
-  const left = canonName(label);
-  const right = canonName(name);
+  const clean = (s: string) =>
+    canonName(s)
+      .replace(/\b(mr|mrs|ms|dr|esq)\b/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const left = clean(label);
+  const right = clean(name);
   if (!left || !right) return false;
-  if (left === right || left.includes(right) || right.includes(left)) return true;
-  const a = lastToken(left);
-  const b = lastToken(right);
-  return a.length > 2 && a === b;
+  return left === right;
 }
 
 export function witnessNodesForSide(
   nodes: DepGraphNode[],
   side: { witness: string; fileName?: string },
 ): DepGraphNode[] {
-  return nodes.filter(
+  const matches = nodes.filter(
     (node) => node.kind === "person" && personNodeMatchesName(node.label, side.witness),
   );
+  return matches.length === 1 ? matches : [];
 }
 
 export function conflictEdgesFromAnalysis(analysis: DepAnalysis): ClassifiedGraphEdge[] {
@@ -118,7 +132,14 @@ export function conflictEdgesFromAnalysis(analysis: DepAnalysis): ClassifiedGrap
     for (const a of left) {
       for (const b of right) {
         if (a.id === b.id) continue;
-        const key = [a.id, b.id].sort().join("|");
+        const key = JSON.stringify([
+          [a.id, b.id].sort(),
+          item.a.fileName,
+          item.a.cite,
+          item.b.fileName,
+          item.b.cite,
+          item.title,
+        ]);
         if (seen.has(key)) continue;
         seen.add(key);
         out.push({
@@ -129,6 +150,12 @@ export function conflictEdgesFromAnalysis(analysis: DepAnalysis): ClassifiedGrap
           class: "contradicts",
           fileName: item.a.fileName || item.b.fileName || undefined,
           title: item.title,
+          quote: item.a.quote,
+          evidenceStatus:
+            item.a.evidenceStatus === "source_matched" && item.b.evidenceStatus === "source_matched"
+              ? "source_matched"
+              : "needs_review",
+          pairedEvidence: [item.a, item.b],
         });
       }
     }
@@ -146,29 +173,60 @@ export function classifyGraphEdges(
   analysis: DepAnalysis,
   extra: ClassifiedGraphEdge[] = [],
 ): ClassifiedGraphEdge[] {
-  const factual = analysis.graph.edges.map((edge) => ({
+  const factual: ClassifiedGraphEdge[] = analysis.graph.edges.map((edge) => ({
     ...edge,
     class: edgeClassOf(edge),
   }));
-  return [...factual, ...extra];
+  const edges = new Map<string, ClassifiedGraphEdge>();
+  for (const edge of [...factual, ...extra]) {
+    edges.set(
+      JSON.stringify([
+        edge.from,
+        edge.to,
+        edge.label,
+        edge.fileName,
+        edge.cite,
+        edge.quote,
+        edge.title,
+      ]),
+      edge,
+    );
+  }
+  return [...edges.values()];
 }
 
 export function nodeFileHints(node: DepGraphNode, analysis: DepAnalysis): string[] {
   const files = new Set<string>();
+  for (const edge of analysis.graph.edges) {
+    if (
+      (edge.from === node.id || edge.to === node.id) &&
+      edge.evidenceStatus === "source_matched" &&
+      edge.fileName
+    )
+      files.add(edge.fileName);
+  }
+  if (node.kind !== "person") return [...files];
   for (const witness of analysis.witnesses) {
     if (personNodeMatchesName(node.label, witness.name) && witness.fileName) {
       files.add(witness.fileName);
     }
   }
   for (const item of analysis.contradictions) {
-    if (personNodeMatchesName(node.label, item.a.witness) && item.a.fileName) files.add(item.a.fileName);
-    if (personNodeMatchesName(node.label, item.b.witness) && item.b.fileName) files.add(item.b.fileName);
+    if (personNodeMatchesName(node.label, item.a.witness) && item.a.fileName)
+      files.add(item.a.fileName);
+    if (personNodeMatchesName(node.label, item.b.witness) && item.b.fileName)
+      files.add(item.b.fileName);
   }
   return [...files];
 }
 
 export function parseGraphView(raw: unknown): GraphViewSettings {
-  if (!raw || typeof raw !== "object") return { ...DEFAULT_GRAPH_VIEW, kinds: { ...DEFAULT_GRAPH_VIEW.kinds }, edges: { ...DEFAULT_GRAPH_VIEW.edges } };
+  if (!raw || typeof raw !== "object")
+    return {
+      ...DEFAULT_GRAPH_VIEW,
+      kinds: { ...DEFAULT_GRAPH_VIEW.kinds },
+      edges: { ...DEFAULT_GRAPH_VIEW.edges },
+    };
   const value = raw as Partial<GraphViewSettings>;
   const kinds = { ...DEFAULT_GRAPH_VIEW.kinds };
   for (const kind of KIND_KEYS) {
@@ -180,7 +238,9 @@ export function parseGraphView(raw: unknown): GraphViewSettings {
   if (typeof value.edges?.corroborates === "boolean") edges.corroborates = value.edges.corroborates;
   return {
     kinds,
-    files: Array.isArray(value.files) ? value.files.filter((item) => typeof item === "string") : null,
+    files: Array.isArray(value.files)
+      ? value.files.filter((item) => typeof item === "string")
+      : null,
     sharedOnly: Boolean(value.sharedOnly),
     edges,
     hideIsolated: Boolean(value.hideIsolated),
@@ -199,6 +259,10 @@ export function parseGraphView(raw: unknown): GraphViewSettings {
         ? value.colorBy
         : DEFAULT_GRAPH_VIEW.colorBy,
     hops: value.hops === 2 ? 2 : 1,
+    evidence:
+      value.evidence === "source_matched" || value.evidence === "needs_review"
+        ? value.evidence
+        : "all",
   };
 }
 
@@ -275,7 +339,19 @@ export function visibleGraph(
   const allowedKinds = new Set(KIND_KEYS.filter((kind) => view.kinds[kind]));
   const classified = classifyGraphEdges(analysis, synthetic).filter((edge) => {
     if (!view.edges[edge.class]) return false;
-    if ((edge.confidence ?? 100) < view.minConfidence) return false;
+    if (
+      view.minConfidence > 0 &&
+      (edge.confidence === undefined || edge.confidence < view.minConfidence)
+    )
+      return false;
+    if (view.evidence !== "all" && (edge.evidenceStatus ?? "needs_review") !== view.evidence)
+      return false;
+    if (
+      view.files?.length &&
+      !view.files.includes(edge.fileName ?? "") &&
+      !edge.pairedEvidence?.some((e) => view.files!.includes(e.fileName))
+    )
+      return false;
     return true;
   });
 
@@ -334,7 +410,6 @@ export function layoutByCluster(
   clusters: { id: string; nodeIds: string[] }[],
 ): { items: LaidGraphNode[]; width: number; height: number } {
   if (!nodes.length) return { items: [], width: 680, height: 520 };
-  const rand = mulberry32(hashNodeIds(nodes.map((node) => node.id)));
   const assigned = new Map<string, string>();
   for (const cluster of clusters) {
     for (const id of cluster.nodeIds) assigned.set(id, cluster.id);
@@ -342,30 +417,32 @@ export function layoutByCluster(
   const groups = new Map<string, DepGraphNode[]>();
   for (const node of nodes) {
     const id = assigned.get(node.id) ?? "unclustered";
-    const list = groups.get(id) ?? [];
-    list.push(node);
-    groups.set(id, list);
+    const group = groups.get(id) ?? [];
+    group.push(node);
+    groups.set(id, group);
   }
   const keys = [...groups.keys()].sort();
-  const count = Math.max(1, keys.length);
-  const ring = Math.max(220, 90 + count * 42);
-  const cx = 80 + ring;
-  const cy = 80 + ring;
+  // Each card fits within a 196 x 70 rectangle. A 230px neighbour distance
+  // keeps labels apart even at diagonal angles; groups get separate bounds.
+  const radiusFor = (count: number) =>
+    count <= 1 ? 0 : Math.max(150, 115 / Math.sin(Math.PI / count));
+  const radius = Math.max(...keys.map((key) => radiusFor(groups.get(key)!.length)));
+  const spacing = radius * 2 + 280;
+  const columns = Math.max(1, Math.ceil(Math.sqrt(keys.length)));
   const items: LaidGraphNode[] = [];
   keys.forEach((key, index) => {
-    const list = groups.get(key) ?? [];
-    const angle = (index / count) * Math.PI * 2 - Math.PI / 2;
-    const gx = cx + Math.cos(angle) * ring;
-    const gy = cy + Math.sin(angle) * ring;
-    const radius = 28 + list.length * 16;
-    list.forEach((node, nodeIndex) => {
-      const local = (nodeIndex / Math.max(1, list.length)) * Math.PI * 2 + rand() * 0.2;
+    const group = [...groups.get(key)!].sort((a, b) => a.id.localeCompare(b.id));
+    const localRadius = radiusFor(group.length);
+    const cx = (index % columns) * spacing;
+    const cy = Math.floor(index / columns) * spacing;
+    group.forEach((node, i) => {
+      const angle = (i / group.length) * Math.PI * 2 - Math.PI / 2;
       items.push({
         id: node.id,
         label: node.label,
         kind: node.kind,
-        x: gx + Math.cos(local) * (list.length === 1 ? 0 : radius),
-        y: gy + Math.sin(local) * (list.length === 1 ? 0 : radius),
+        x: cx + Math.cos(angle) * localRadius,
+        y: cy + Math.sin(angle) * localRadius,
       });
     });
   });
@@ -398,7 +475,7 @@ export function layoutByWitness(
   const index = new Map<string, number>();
   for (const node of nodes) {
     const owned = files.get(node.id) ?? [];
-    const key = owned.length > 1 ? "shared" : owned[0] ?? "unassigned";
+    const key = owned.length > 1 ? "shared" : (owned[0] ?? "unassigned");
     if (!index.has(key)) {
       index.set(key, groups.length);
       groups.push({ id: key, nodeIds: [] });

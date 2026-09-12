@@ -108,7 +108,10 @@ function converseImageFormat(mediaType: CellPageImage["mediaType"]): "jpeg" | "p
   return mediaType === "image/png" ? "png" : mediaType === "image/webp" ? "webp" : "jpeg";
 }
 
-function childSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
+function childSignal(
+  parent: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; cleanup: () => void } {
   const ctrl = new AbortController();
   if (parent?.aborted) ctrl.abort();
   const onParent = () => ctrl.abort();
@@ -165,9 +168,7 @@ async function converseOnce(req: ModelCall): Promise<string> {
   const json = (await res.json()) as {
     output?: { message?: { content?: { text?: string }[] } };
   };
-  const text = (json.output?.message?.content ?? [])
-    .map((c) => c.text ?? "")
-    .join("");
+  const text = (json.output?.message?.content ?? []).map((c) => c.text ?? "").join("");
   if (!text.trim()) throw new PipelineError(502, req.model, `${req.model} returned no text`);
   return text;
 }
@@ -182,7 +183,10 @@ function statusOf(err: unknown): number {
 }
 
 function isUserAbort(err: unknown, parent?: AbortSignal): boolean {
-  return parent?.aborted === true || (err instanceof DOMException && err.name === "AbortError" && !!parent?.aborted);
+  return (
+    parent?.aborted === true ||
+    (err instanceof DOMException && err.name === "AbortError" && !!parent?.aborted)
+  );
 }
 
 /**
@@ -212,7 +216,8 @@ async function callWithRetry(req: ModelCall): Promise<string> {
       const status = statusOf(wrapped);
       circuit.recordFailure(req.model, status);
       const retryable = timedOut || isRetryableStatus(status);
-      if (!retryable || attempt === CALL_TRIES - 1) throw wrapped instanceof Error ? wrapped : new Error(String(wrapped));
+      if (!retryable || attempt === CALL_TRIES - 1)
+        throw wrapped instanceof Error ? wrapped : new Error(String(wrapped));
       const wait = backoffMs(
         attempt,
         status === 429 ? 800 : 400,
@@ -313,7 +318,10 @@ function parseExtracted(
   // A constrained column never stores a spelling that is not one of its
   // options; the near-miss is kept visible and the cell flagged for a human.
   const status =
-    rawStatus === "needs_review" || verified.length === 0 || confidence === "low" || unmatched.length
+    rawStatus === "needs_review" ||
+    verified.length === 0 ||
+    confidence === "low" ||
+    unmatched.length
       ? "needs_review"
       : "answered";
 
@@ -355,16 +363,14 @@ async function extractWithSonnet(req: CellRequest, signal?: AbortSignal): Promis
   if (!bedrockClaudeEnabled()) {
     throw new PipelineError(401, BEDROCK_PILE_WRITER_MODEL, "Bedrock Claude is not configured");
   }
-  const res = await streamWriter(
-    {
-      model: BEDROCK_PILE_WRITER_MODEL,
-      system: CELL_SYSTEM,
-      messages: [{ role: "user", content: buildCellUser(req) }],
-      maxTokens: 4000,
-      effort: "low",
-      ...(signal ? { signal } : {}),
-    },
-  );
+  const res = await streamWriter({
+    model: BEDROCK_PILE_WRITER_MODEL,
+    system: CELL_SYSTEM,
+    messages: [{ role: "user", content: buildCellUser(req) }],
+    maxTokens: 4000,
+    effort: "low",
+    ...(signal ? { signal } : {}),
+  });
   return parseExtracted(res.text, BEDROCK_PILE_WRITER_MODEL, req);
 }
 
@@ -399,22 +405,20 @@ async function extractFromImages(req: CellRequest, signal?: AbortSignal): Promis
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     if (!bedrockClaudeEnabled()) throw err;
   }
-  const res = await streamWriter(
-    {
-      model: BEDROCK_PILE_WRITER_MODEL,
-      system: CELL_SYSTEM,
-      messages: [
-        {
-          role: "user",
-          content: user,
-          images: images.map((image) => ({ mediaType: image.mediaType, data: image.data })),
-        },
-      ],
-      maxTokens: 4000,
-      effort: "medium",
-      ...(signal ? { signal } : {}),
-    },
-  );
+  const res = await streamWriter({
+    model: BEDROCK_PILE_WRITER_MODEL,
+    system: CELL_SYSTEM,
+    messages: [
+      {
+        role: "user",
+        content: user,
+        images: images.map((image) => ({ mediaType: image.mediaType, data: image.data })),
+      },
+    ],
+    maxTokens: 4000,
+    effort: "medium",
+    ...(signal ? { signal } : {}),
+  });
   return parseExtracted(res.text, BEDROCK_PILE_WRITER_MODEL, req, { imagePages });
 }
 
@@ -447,9 +451,7 @@ function buildVerifyUser(input: {
   pages: { page: number; text: string }[];
 }): string {
   const cites = input.citations.map((c) => `- page ${c.page}: "${c.quote}"`).join("\n");
-  const pages = input.pages
-    .map((p) => `--- page ${p.page} ---\n${p.text.trim().slice(0, 6000)}`)
-    .join("\n\n");
+  const pages = input.pages.map((p) => `--- page ${p.page} ---\n${p.text.trim()}`).join("\n\n");
   return `Question: ${input.question}
 Answer type: ${input.kind}
 Extracted answer: ${input.answer}
@@ -492,7 +494,7 @@ async function verify(
       citations: answer.citations,
       pages: req.pages,
     }),
-    maxTokens: 500,
+    maxTokens: 1200,
     temperature: 0,
     signal,
     timeoutMs: VERIFY_TIMEOUT_MS,
@@ -558,10 +560,10 @@ export async function runCellPipeline(
     return {
       value: null,
       display: "",
-      status: "not_found",
-      confidence: "high",
+      status: "needs_review",
+      confidence: "low",
       citations: [],
-      rationale: "No page in this document matched the question.",
+      rationale: "No source pages were available. Document-wide absence cannot be inferred.",
       extractModel: "none",
       verifyModel: null,
       verified: null,
@@ -616,7 +618,12 @@ export async function runCellPipeline(
     // opinion. Say so rather than fail the cell.
     return escalateIfNeeded(
       req,
-      { ...base, rationale: `${base.rationale} [verification unavailable]`.trim() },
+      {
+        ...base,
+        status: "needs_review",
+        confidence: "low",
+        rationale: `${base.rationale} [verification unavailable; review required]`.trim(),
+      },
       opts,
     );
   }
@@ -625,7 +632,8 @@ export async function runCellPipeline(
   const afterVerify: PipelineAnswer = passed
     ? {
         ...base,
-        confidence: audit.confidence === "high" && base.confidence !== "low" ? "high" : base.confidence,
+        confidence:
+          audit.confidence === "high" && base.confidence !== "low" ? "high" : base.confidence,
         verifyModel: audit.model,
         verified: true,
       }
@@ -657,16 +665,31 @@ async function escalateIfNeeded(
   try {
     const sonnet = await extractWithSonnet(req, opts.signal);
     if (sonnet.status === "answered" && sonnet.citations.length) {
+      // A replacement answer needs its own audit. Never inherit the previous
+      // candidate's verification result or bypass a contradiction by escalation.
+      const audit = opts.skipVerify
+        ? null
+        : await verify(req, sonnet, opts.signal).catch((error) => {
+            if (opts.signal?.aborted) throw error;
+            return null;
+          });
+      const passed =
+        !!audit && audit.supported && !audit.contradiction && audit.confidence !== "low";
       return {
         value: sonnet.value,
         display: sonnet.display,
-        status: "answered",
-        confidence: sonnet.confidence === "low" ? "medium" : sonnet.confidence,
+        status: passed ? "answered" : "needs_review",
+        confidence: passed
+          ? sonnet.confidence === "high" && audit.confidence === "high"
+            ? "high"
+            : "medium"
+          : "low",
         citations: sonnet.citations,
-        rationale: `${sonnet.rationale} [escalated to Sonnet 5]`.trim(),
+        rationale:
+          `${sonnet.rationale} [escalated to Sonnet 5; ${passed ? "replacement independently verified" : `review required: ${audit?.contradiction || audit?.note || "verification unavailable or unsupported"}`} ]`.trim(),
         extractModel: `${current.extractModel}+${sonnet.model}`,
-        verifyModel: current.verifyModel,
-        verified: current.verified,
+        verifyModel: audit?.model ?? null,
+        verified: passed,
       };
     }
     return {

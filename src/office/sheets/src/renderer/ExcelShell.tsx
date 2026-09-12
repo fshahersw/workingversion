@@ -155,6 +155,7 @@ function ToolSymbol({ symbol }: { readonly symbol: string }): React.JSX.Element 
 
 interface ExcelShellProps {
   readonly swMode?: string | undefined
+  readonly taskControls?: React.ReactNode
   readonly swControls?: React.ReactNode
   readonly prompt: string
   readonly preview: ChangePlan | null
@@ -305,6 +306,7 @@ export interface PageLayoutEcho {
 }
 
 export function ExcelShell({
+  taskControls,
   swControls,
   swMode = 'write',
   prompt,
@@ -650,6 +652,7 @@ export function ExcelShell({
       {/* AI panel docks on the left, full height under the ribbon (unified with docs) */}
       <div className="sheet-body">
         <AiChatPanel
+          taskControls={taskControls}
           swControls={swControls}
           swMode={swMode}
           isOpen={isCopilotOpen}

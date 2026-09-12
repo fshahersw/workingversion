@@ -85,7 +85,10 @@ export async function runOfficePython(code: string): Promise<PythonResult> {
   } catch {
     /* artifact listing is best effort */
   }
-  const text = result.text.length > MAX_TOOL_TEXT ? result.text.slice(0, MAX_TOOL_TEXT) + "\n[output truncated]" : result.text;
+  const text =
+    result.text.length > MAX_TOOL_TEXT
+      ? result.text.slice(0, MAX_TOOL_TEXT) + "\n[output truncated]"
+      : result.text;
   return { text, images, files, isError: result.isError };
 }
 
@@ -95,9 +98,13 @@ export const MAX_DIAGRAM_SOURCE = 60_000;
 
 /** Render Graphviz DOT to PNG in the sandbox (graphviz is preinstalled there). */
 export async function renderGraphviz(source: string, engine = "dot"): Promise<ToolImage> {
-  if (typeof source !== "string" || !source.trim()) throw new OfficeToolError(422, "source is required.");
-  if (source.length > MAX_DIAGRAM_SOURCE) throw new OfficeToolError(413, "The diagram source is too long.");
-  const layout = ["dot", "neato", "fdp", "sfdp", "circo", "twopi"].includes(engine) ? engine : "dot";
+  if (typeof source !== "string" || !source.trim())
+    throw new OfficeToolError(422, "source is required.");
+  if (source.length > MAX_DIAGRAM_SOURCE)
+    throw new OfficeToolError(413, "The diagram source is too long.");
+  const layout = ["dot", "neato", "fdp", "sfdp", "circo", "twopi"].includes(engine)
+    ? engine
+    : "dot";
   const name = `sw_diagram_${Date.now().toString(36)}.png`;
   await writeFile("sw_diagram.dot", source);
   const code = [
@@ -130,7 +137,8 @@ export async function renderGraphviz(source: string, engine = "dot"): Promise<To
  */
 export const IMAGE_MODEL = process.env["OFFICE_IMAGE_MODEL"] || "stability.stable-image-core-v1:1";
 const IMAGE_REGION =
-  process.env["OFFICE_IMAGE_REGION"] || (IMAGE_MODEL.startsWith("stability.") ? "us-west-2" : REGION);
+  process.env["OFFICE_IMAGE_REGION"] ||
+  (IMAGE_MODEL.startsWith("stability.") ? "us-west-2" : REGION);
 
 /** Nova Canvas sizes: multiples of 16, 320..4096 per side, at most 4.19M pixels. */
 const IMAGE_SIZES: Record<string, { width: number; height: number }> = {
@@ -160,14 +168,21 @@ export function imageGenerationEnabled(): boolean {
 /** Read PNG/JPEG dimensions from the bytes (Stability does not report them). */
 function imageDimensions(base64: string): { width: number; height: number } | null {
   const b = Buffer.from(base64.slice(0, 200_000), "base64");
-  if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50) return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+  if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50)
+    return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
   if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
     let i = 2;
     while (i + 9 < b.length) {
       if (b[i] !== 0xff) return null;
       const marker = b[i + 1]!;
       const len = b.readUInt16BE(i + 2);
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (
+        marker >= 0xc0 &&
+        marker <= 0xcf &&
+        marker !== 0xc4 &&
+        marker !== 0xc8 &&
+        marker !== 0xcc
+      ) {
         return { height: b.readUInt16BE(i + 5), width: b.readUInt16BE(i + 7) };
       }
       i += 2 + len;
@@ -185,12 +200,15 @@ export async function generateOfficeImage(input: {
   if (!imageGenerationEnabled()) throw new OfficeToolError(501, "Image generation is disabled.");
   const prompt = String(input.prompt ?? "").trim();
   if (!prompt) throw new OfficeToolError(422, "prompt is required.");
-  if (prompt.length > 1024) throw new OfficeToolError(413, "Prompt must be 1024 characters or fewer.");
+  if (prompt.length > 1024)
+    throw new OfficeToolError(413, "Prompt must be 1024 characters or fewer.");
   const ratio = IMAGE_SIZES[input.aspectRatio ?? "1:1"] ? (input.aspectRatio ?? "1:1") : "1:1";
   const size = IMAGE_SIZES[ratio]!;
   // Diffusion models spell badly; keep lettering out of firm artwork by default.
   const negative =
-    String(input.negativePrompt ?? "").trim().slice(0, 1024) ||
+    String(input.negativePrompt ?? "")
+      .trim()
+      .slice(0, 1024) ||
     "text, letters, words, captions, watermark, signature, logo, blurry, low quality";
   const stability = IMAGE_MODEL.startsWith("stability.");
   const body = stability
@@ -233,9 +251,14 @@ export async function generateOfficeImage(input: {
   } catch {
     throw new OfficeToolError(502, "Image generation returned an unreadable response.");
   }
-  if (parsed.error) throw new OfficeToolError(422, `Image generation refused the prompt: ${parsed.error}`);
+  if (parsed.error)
+    throw new OfficeToolError(422, `Image generation refused the prompt: ${parsed.error}`);
   const refused = parsed.finish_reasons?.find((r) => r && r !== "SUCCESS");
-  if (refused) throw new OfficeToolError(422, `Image generation did not complete (${refused}); adjust the prompt.`);
+  if (refused)
+    throw new OfficeToolError(
+      422,
+      `Image generation did not complete (${refused}); adjust the prompt.`,
+    );
   const base64 = parsed.images?.[0];
   if (!base64) throw new OfficeToolError(502, "Image generation returned no image.");
   const dims = imageDimensions(base64) ?? size;
@@ -311,8 +334,12 @@ function clamp01(v: unknown, fallback: number): number {
 }
 
 function stabilityEditBody(input: ImageEditInput): Record<string, unknown> {
-  const prompt = String(input.prompt ?? "").trim().slice(0, 1024);
-  const negative = String(input.negativePrompt ?? "").trim().slice(0, 1024);
+  const prompt = String(input.prompt ?? "")
+    .trim()
+    .slice(0, 1024);
+  const negative = String(input.negativePrompt ?? "")
+    .trim()
+    .slice(0, 1024);
   const withNeg = negative ? { negative_prompt: negative } : {};
   const needPrompt = (): string => {
     if (!prompt) throw new OfficeToolError(422, `${input.operation} needs a prompt.`);
@@ -322,36 +349,85 @@ function stabilityEditBody(input: ImageEditInput): Record<string, unknown> {
     case "remove_background":
       return { image: input.image, output_format: "png" };
     case "search_replace":
-      if (!input.searchPrompt) throw new OfficeToolError(422, "search_replace needs searchPrompt (what to find).");
-      return { image: input.image, prompt: needPrompt(), search_prompt: input.searchPrompt.slice(0, 512), output_format: "png", ...withNeg };
+      if (!input.searchPrompt)
+        throw new OfficeToolError(422, "search_replace needs searchPrompt (what to find).");
+      return {
+        image: input.image,
+        prompt: needPrompt(),
+        search_prompt: input.searchPrompt.slice(0, 512),
+        output_format: "png",
+        ...withNeg,
+      };
     case "recolor":
-      if (!input.searchPrompt) throw new OfficeToolError(422, "recolor needs searchPrompt (what to recolor).");
-      return { image: input.image, prompt: needPrompt(), select_prompt: input.searchPrompt.slice(0, 512), output_format: "png", ...withNeg };
+      if (!input.searchPrompt)
+        throw new OfficeToolError(422, "recolor needs searchPrompt (what to recolor).");
+      return {
+        image: input.image,
+        prompt: needPrompt(),
+        select_prompt: input.searchPrompt.slice(0, 512),
+        output_format: "png",
+        ...withNeg,
+      };
     case "erase":
-      return { image: input.image, ...(input.mask ? { mask: input.mask } : {}), output_format: "png" };
+      return {
+        image: input.image,
+        ...(input.mask ? { mask: input.mask } : {}),
+        output_format: "png",
+      };
     case "inpaint":
-      return { image: input.image, prompt: needPrompt(), ...(input.mask ? { mask: input.mask } : {}), output_format: "png", ...withNeg };
+      return {
+        image: input.image,
+        prompt: needPrompt(),
+        ...(input.mask ? { mask: input.mask } : {}),
+        output_format: "png",
+        ...withNeg,
+      };
     case "outpaint": {
       const side = (v: unknown) => Math.min(2000, Math.max(0, Math.round(Number(v) || 0)));
       const e = input.expand ?? {};
-      const body: Record<string, unknown> = { image: input.image, output_format: "png", ...(prompt ? { prompt } : {}) };
+      const body: Record<string, unknown> = {
+        image: input.image,
+        output_format: "png",
+        ...(prompt ? { prompt } : {}),
+      };
       for (const k of ["left", "right", "up", "down"] as const) {
         const n = side(e[k]);
         if (n > 0) body[k] = n;
       }
       if (!["left", "right", "up", "down"].some((k) => k in body)) {
-        throw new OfficeToolError(422, "outpaint needs at least one side in expand (left/right/up/down pixels).");
+        throw new OfficeToolError(
+          422,
+          "outpaint needs at least one side in expand (left/right/up/down pixels).",
+        );
       }
       return body;
     }
     case "style_guide":
-      return { image: input.image, prompt: needPrompt(), fidelity: clamp01(input.strength, 0.5), output_format: "png", ...withNeg };
+      return {
+        image: input.image,
+        prompt: needPrompt(),
+        fidelity: clamp01(input.strength, 0.5),
+        output_format: "png",
+        ...withNeg,
+      };
     case "style_transfer":
       if (!input.styleImage) throw new OfficeToolError(422, "style_transfer needs styleImage.");
-      return { init_image: input.image, style_image: input.styleImage, ...(prompt ? { prompt } : {}), output_format: "png", ...withNeg };
+      return {
+        init_image: input.image,
+        style_image: input.styleImage,
+        ...(prompt ? { prompt } : {}),
+        output_format: "png",
+        ...withNeg,
+      };
     case "sketch":
     case "structure":
-      return { image: input.image, prompt: needPrompt(), control_strength: clamp01(input.strength, 0.7), output_format: "png", ...withNeg };
+      return {
+        image: input.image,
+        prompt: needPrompt(),
+        control_strength: clamp01(input.strength, 0.7),
+        output_format: "png",
+        ...withNeg,
+      };
     case "upscale_fast":
       return { image: input.image, output_format: "png" };
     case "upscale_conservative":
@@ -363,12 +439,17 @@ function stabilityEditBody(input: ImageEditInput): Record<string, unknown> {
 }
 
 /** Edit, extend, restyle or upscale an image with the Stability suite on Bedrock. */
-export async function editOfficeImage(input: ImageEditInput): Promise<ToolImage & { width: number; height: number }> {
+export async function editOfficeImage(
+  input: ImageEditInput,
+): Promise<ToolImage & { width: number; height: number }> {
   if (!imageGenerationEnabled()) throw new OfficeToolError(501, "Image generation is disabled.");
   const model = IMAGE_EDIT_MODELS[input.operation];
-  if (!model) throw new OfficeToolError(422, `Unknown image operation "${String(input.operation)}".`);
-  if (typeof input.image !== "string" || input.image.length < 64) throw new OfficeToolError(422, "image (base64) is required.");
-  if (input.image.length > MAX_EDIT_IMAGE_B64) throw new OfficeToolError(413, "The source image is too large.");
+  if (!model)
+    throw new OfficeToolError(422, `Unknown image operation "${String(input.operation)}".`);
+  if (typeof input.image !== "string" || input.image.length < 64)
+    throw new OfficeToolError(422, "image (base64) is required.");
+  if (input.image.length > MAX_EDIT_IMAGE_B64)
+    throw new OfficeToolError(413, "The source image is too large.");
   const body = stabilityEditBody(input);
   const url = `https://bedrock-runtime.${IMAGE_EDIT_REGION}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
   const res = await signedBedrockFetch(url, {
@@ -390,9 +471,11 @@ export async function editOfficeImage(input: ImageEditInput): Promise<ToolImage 
   } catch {
     throw new OfficeToolError(502, "Image edit returned an unreadable response.");
   }
-  if (parsed.error) throw new OfficeToolError(422, `Image edit refused the request: ${parsed.error}`);
+  if (parsed.error)
+    throw new OfficeToolError(422, `Image edit refused the request: ${parsed.error}`);
   const refused = parsed.finish_reasons?.find((r) => r && r !== "SUCCESS");
-  if (refused) throw new OfficeToolError(422, `Image edit did not complete (${refused}); adjust the prompt.`);
+  if (refused)
+    throw new OfficeToolError(422, `Image edit did not complete (${refused}); adjust the prompt.`);
   const base64 = parsed.images?.[0];
   if (!base64) throw new OfficeToolError(502, "Image edit returned no image.");
   const dims = imageDimensions(base64) ?? { width: 0, height: 0 };
@@ -410,11 +493,22 @@ const IMAGE_MIMES: Record<string, "image/png" | "image/jpeg" | "image/gif" | "im
   "image/webp": "image/webp",
 };
 
-function sniffMime(bytes: Uint8Array): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | null {
-  if (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e) return "image/png";
+function sniffMime(
+  bytes: Uint8Array,
+): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | null {
+  if (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e)
+    return "image/png";
   if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
-  if (bytes.length > 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
-  if (bytes.length > 12 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
+  if (bytes.length > 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46)
+    return "image/gif";
+  if (
+    bytes.length > 12 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  )
+    return "image/webp";
   return null;
 }
 
@@ -426,7 +520,11 @@ function sniffMime(bytes: Uint8Array): "image/png" | "image/jpeg" | "image/gif" 
 export async function fetchOfficeImage(
   url: string,
   signal?: AbortSignal,
-): Promise<{ base64: string; mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; bytes: number }> {
+): Promise<{
+  base64: string;
+  mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  bytes: number;
+}> {
   const { validateFetchTarget } = await import("@/lib/agents/fetch-page.server");
   let target: URL;
   try {
@@ -451,14 +549,18 @@ export async function fetchOfficeImage(
       }
       continue;
     }
-    if (!res.ok) throw new OfficeToolError(502, `The image could not be downloaded [${res.status}].`);
+    if (!res.ok)
+      throw new OfficeToolError(502, `The image could not be downloaded [${res.status}].`);
     const declared = Number(res.headers.get("content-length") ?? 0);
-    if (declared > MAX_FETCHED_IMAGE_BYTES) throw new OfficeToolError(413, "The image is larger than 12 MB.");
+    if (declared > MAX_FETCHED_IMAGE_BYTES)
+      throw new OfficeToolError(413, "The image is larger than 12 MB.");
     const buf = new Uint8Array(await res.arrayBuffer());
-    if (buf.length > MAX_FETCHED_IMAGE_BYTES) throw new OfficeToolError(413, "The image is larger than 12 MB.");
+    if (buf.length > MAX_FETCHED_IMAGE_BYTES)
+      throw new OfficeToolError(413, "The image is larger than 12 MB.");
     const header = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
     const mime = sniffMime(buf) ?? IMAGE_MIMES[header] ?? null;
-    if (!mime) throw new OfficeToolError(422, "The URL did not return a PNG, JPEG, GIF or WebP image.");
+    if (!mime)
+      throw new OfficeToolError(422, "The URL did not return a PNG, JPEG, GIF or WebP image.");
     return { base64: Buffer.from(buf).toString("base64"), mime, bytes: buf.length };
   }
   throw new OfficeToolError(502, "Too many redirects while downloading the image.");
@@ -490,8 +592,12 @@ export async function searchFirmKnowledge(
   if (!query) throw new OfficeToolError(422, "query is required.");
   const { listWorkspaces, getWorkspace } = await import("@/lib/kb/workspace.server");
   const { searchKb } = await import("@/lib/kb/search.server");
-  const all = (await listWorkspaces(principal)).filter((w) => w.status === "ready" && w.docCount > 0);
-  const wanted = String(input.workspace ?? "").trim().toLowerCase();
+  const all = (await listWorkspaces(principal)).filter(
+    (w) => w.status === "ready" && w.docCount > 0,
+  );
+  const wanted = String(input.workspace ?? "")
+    .trim()
+    .toLowerCase();
   const chosen = wanted
     ? all.filter((w) => w.itemId === input.workspace || w.name.toLowerCase().includes(wanted))
     : all.slice(0, 6);
@@ -526,7 +632,11 @@ export async function searchFirmKnowledge(
     }),
   );
   hits.sort((a, b) => b.score - a.score);
-  return { hits: hits.slice(0, topK), searched: chosen.map((w) => w.name), available: all.map((w) => w.name) };
+  return {
+    hits: hits.slice(0, topK),
+    searched: chosen.map((w) => w.name),
+    available: all.map((w) => w.name),
+  };
 }
 
 export type LibraryHit = OfficeDocSummary & { url: string };
@@ -546,7 +656,10 @@ export async function searchLibrary(
   input: { query?: string; kind?: string; limit?: number },
 ): Promise<LibraryHit[]> {
   const { listOfficeDocs } = await import("./office.server");
-  const kind = input.kind === "docx" || input.kind === "xlsx" || input.kind === "pptx" ? input.kind : undefined;
+  const kind =
+    input.kind === "docx" || input.kind === "xlsx" || input.kind === "pptx"
+      ? input.kind
+      : undefined;
   const docs = await listOfficeDocs(principal, kind);
   const terms = String(input.query ?? "")
     .toLowerCase()
@@ -567,24 +680,30 @@ export async function searchLibrary(
 // --- Citations ------------------------------------------------------------------------------------------
 
 export async function verifyOfficeCitations(text: string): Promise<string> {
-  if (!courtlistenerConfigured()) return "Citation lookup is not configured on this platform (COURTLISTENER_API_TOKEN).";
+  if (!courtlistenerConfigured())
+    return "Citation lookup is not configured on this platform (COURTLISTENER_API_TOKEN).";
   const value = String(text ?? "").trim();
   if (value.length < 3) return "Provide text containing at least one reporter citation.";
   const results = await lookupCitations(value.slice(0, 64_000));
   if (!results.length) return "No recognizable legal citations were found in that text.";
   const lines = results.map((r) => {
-    if (r.found) return `CONFIRMED  ${r.citation} -> ${r.caseName || "(opinion)"}${r.url ? `  ${r.url}` : ""}`;
-    if (r.ambiguous) return `AMBIGUOUS  ${r.citation} (multiple matches; add a pin cite, year or court to narrow it)`;
+    if (r.found)
+      return `CITATION FOUND  ${r.citation} -> ${r.caseName || "(opinion)"}${r.url ? `  ${r.url}` : ""}`;
+    if (r.ambiguous)
+      return `AMBIGUOUS  ${r.citation} (multiple matches; add a pin cite, year or court to narrow it)`;
     return `NOT FOUND  ${r.citation} (status ${r.status}; do not rely on this cite without confirming it elsewhere)`;
   });
   const confirmed = results.filter((r) => r.found).length;
-  return `Citation check: ${confirmed}/${results.length} confirmed against CourtListener.\n${lines.join("\n")}`;
+  return `Citation check: ${confirmed}/${results.length} matched in CourtListener. A match confirms citation existence only, not the quoted language, pin cite, legal proposition, current validity or Bluebook formatting. Read the opinion and independently check treatment before relying on it.\n${lines.join("\n")}`;
 }
 
 // --- Web page -------------------------------------------------------------------------------------------
 
 export async function readOfficePage(url: string, maxChars = 12_000): Promise<string> {
-  const page = await fetchPage(String(url ?? ""), { maxChars: Math.min(Math.max(1000, maxChars), 60_000), timeoutMs: 25_000 });
+  const page = await fetchPage(String(url ?? ""), {
+    maxChars: Math.min(Math.max(1000, maxChars), 60_000),
+    timeoutMs: 25_000,
+  });
   const head = [`Title: ${page.title || "(untitled)"}`, `URL: ${page.finalUrl || page.url}`];
   if (page.note) head.push(`Note: ${page.note}`);
   if (page.truncated) head.push("Note: the page was longer than the limit; this is the beginning.");
@@ -624,15 +743,21 @@ export function outlineFromMarkdown(markdown: string, fallbackTitle: string): Ou
     }
     if (line.trim() && current) current.bullets.push(line.trim());
   }
-  if (!slides.length) slides.push({ title: fallbackTitle, bullets: markdown.trim() ? [markdown.trim().slice(0, 400)] : [] });
-  return slides.slice(0, 60).map((s) => ({ title: s.title.slice(0, 200), bullets: s.bullets.slice(0, 12).map((b) => b.slice(0, 400)) }));
+  if (!slides.length)
+    slides.push({
+      title: fallbackTitle,
+      bullets: markdown.trim() ? [markdown.trim().slice(0, 400)] : [],
+    });
+  return slides.slice(0, 60).map((s) => ({
+    title: s.title.slice(0, 200),
+    bullets: s.bullets.slice(0, 12).map((b) => b.slice(0, 400)),
+  }));
 }
 
 /** Build an editable deck: one 16:9 slide per outline entry, title box + bullet body. */
 async function buildDeck(title: string, markdown: string): Promise<Uint8Array> {
-  const { createBlankPptx, openPptx, savePptx, insertBlankSlide, addElement, deleteSlide } = await import(
-    "@genoffice/pptx-engine"
-  );
+  const { createBlankPptx, openPptx, savePptx, insertBlankSlide, addElement, deleteSlide } =
+    await import("@genoffice/pptx-engine");
   const opened = await openPptx(await createBlankPptx());
   const size = opened.deck.size;
   const margin = Math.round(size.cx * 0.06);
@@ -711,7 +836,8 @@ export function htmlToMarkdown(html: string): string {
       .replace(/[ \t]+/g, " ")
       .trim();
   const out: string[] = [];
-  const blocks = html.match(/<(h[1-6]|p|ul|ol|table|pre|blockquote)\b[^>]*>[\s\S]*?<\/\1>|[^<]+/gi) ?? [];
+  const blocks =
+    html.match(/<(h[1-6]|p|ul|ol|table|pre|blockquote)\b[^>]*>[\s\S]*?<\/\1>|[^<]+/gi) ?? [];
   for (const block of blocks) {
     const tag = /^<(\w+)/.exec(block)?.[1]?.toLowerCase();
     if (!tag) {
@@ -723,13 +849,23 @@ export function htmlToMarkdown(html: string): string {
     if (/^h[1-6]$/.test(tag)) out.push(`${"#".repeat(Number(tag[1]))} ${inline(body)}`);
     else if (tag === "p") out.push(inline(body));
     else if (tag === "pre") out.push("```\n" + decode(body.replace(/<[^>]+>/g, "")) + "\n```");
-    else if (tag === "blockquote") out.push(inline(body).split("\n").map((l) => `> ${l}`).join("\n"));
+    else if (tag === "blockquote")
+      out.push(
+        inline(body)
+          .split("\n")
+          .map((l) => `> ${l}`)
+          .join("\n"),
+      );
     else if (tag === "ul" || tag === "ol") {
       const items = body.match(/<li\b[^>]*>[\s\S]*?<\/li>/gi) ?? [];
-      out.push(items.map((li, i) => `${tag === "ol" ? `${i + 1}.` : "-"} ${inline(li)}`).join("\n"));
+      out.push(
+        items.map((li, i) => `${tag === "ol" ? `${i + 1}.` : "-"} ${inline(li)}`).join("\n"),
+      );
     } else if (tag === "table") {
       const rows = (body.match(/<tr\b[^>]*>[\s\S]*?<\/tr>/gi) ?? []).map((tr) =>
-        (tr.match(/<t[hd]\b[^>]*>[\s\S]*?<\/t[hd]>/gi) ?? []).map((c) => inline(c).replace(/\|/g, "\\|")),
+        (tr.match(/<t[hd]\b[^>]*>[\s\S]*?<\/t[hd]>/gi) ?? []).map((c) =>
+          inline(c).replace(/\|/g, "\\|"),
+        ),
       );
       if (rows.length) {
         const width = Math.max(...rows.map((r) => r.length));
@@ -750,11 +886,20 @@ export function htmlToMarkdown(html: string): string {
  */
 export async function createOfficeDocumentFromMarkdown(
   principal: string,
-  input: { kind: string; title: string; markdown: string; style?: string; format?: "markdown" | "html" },
+  input: {
+    kind: string;
+    title: string;
+    markdown: string;
+    style?: string;
+    format?: "markdown" | "html";
+  },
 ): Promise<CreatedOfficeDocument> {
   const kind = String(input.kind ?? "docx") as "docx" | "xlsx" | "pptx" | "pdf";
-  if (!["docx", "xlsx", "pptx", "pdf"].includes(kind)) throw new OfficeToolError(422, "kind must be docx, xlsx, pptx or pdf.");
-  const title = String(input.title ?? "").trim().slice(0, 160);
+  if (!["docx", "xlsx", "pptx", "pdf"].includes(kind))
+    throw new OfficeToolError(422, "kind must be docx, xlsx, pptx or pdf.");
+  const title = String(input.title ?? "")
+    .trim()
+    .slice(0, 160);
   if (!title) throw new OfficeToolError(422, "title is required.");
   const raw = String(input.markdown ?? "");
   if (!raw.trim()) throw new OfficeToolError(422, "content is required.");
@@ -768,9 +913,15 @@ export async function createOfficeDocumentFromMarkdown(
     return { kind, doc, url: `/office/slides/${doc.draftId}` };
   }
   const generated = await generateDocument(kind, title, markdown, title, input.style ?? "legal");
-  if ("error" in generated) throw new OfficeToolError(502, `Document generation failed: ${generated.error}`);
+  if ("error" in generated)
+    throw new OfficeToolError(502, `Document generation failed: ${generated.error}`);
   const bytes = new Uint8Array(Buffer.from(generated.dataB64, "base64"));
-  if (kind === "pdf") return { kind, name: generated.name, base64: generated.dataB64, size: generated.size };
+  if (kind === "pdf")
+    return { kind, name: generated.name, base64: generated.dataB64, size: generated.size };
   const doc = await createOfficeDoc(principal, { kind, name: generated.name, bytes });
-  return { kind, doc, url: kind === "docx" ? `/office/drafts/${doc.draftId}` : `/office/sheets/${doc.draftId}` };
+  return {
+    kind,
+    doc,
+    url: kind === "docx" ? `/office/drafts/${doc.draftId}` : `/office/sheets/${doc.draftId}`,
+  };
 }

@@ -188,7 +188,7 @@ function CiteStrip({ report }: { report: CiteReport }) {
         {report.filesTotal > report.filesRead ? ` of ${report.filesTotal}` : ""} document
         {report.filesRead === 1 ? "" : "s"}
         {report.cites.length
-          ? ` · ${report.verified} verified cite${report.verified === 1 ? "" : "s"}`
+          ? ` · ${report.verified} source quote${report.verified === 1 ? "" : "s"} matched`
           : ""}
         {report.unverified ? ` · ${report.unverified} unverified` : ""}
       </p>
@@ -379,7 +379,7 @@ export function ResultsPane({
           <div className="border-b border-border bg-surface px-4 py-2 sm:px-6">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10.5px] tabular-nums text-muted-foreground">
               <span>
-                Coverage {coverage.matchedFiles}/{coverage.totalFiles} documents
+                Documents with findings {coverage.matchedFiles}/{coverage.totalFiles}
               </span>
               <span>{coverage.passages} passages</span>
               {coverage.unmatchedFiles.length ? (

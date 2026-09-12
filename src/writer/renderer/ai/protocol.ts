@@ -1,17 +1,17 @@
-import type { Editor } from '@tiptap/core'
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import type { Editor } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import {
   TABLE_HEADER_FILL,
   type Block,
   type CommentInfo,
   type TableCell,
   type TableModel,
-} from '@genoffice/docx-engine'
-import { pmTableToModel, tableModelToPmNode, type PmMark, type PmNode } from '../editor/convert'
-import { equationBlockJson, inlineEquationNodeJson } from '../editor/equation'
-import { inheritFrom, inheritTableFormatting, sameBlockRole } from './inherit-formatting'
-import { collectRevisions, TRACK_IGNORE, type RevisionRange } from '../editor/revisions'
-import { countWords } from '../word-count'
+} from "@genoffice/docx-engine";
+import { pmTableToModel, tableModelToPmNode, type PmMark, type PmNode } from "../editor/convert";
+import { equationBlockJson, inlineEquationNodeJson } from "../editor/equation";
+import { inheritFrom, inheritTableFormatting, sameBlockRole } from "./inherit-formatting";
+import { collectRevisions, TRACK_IGNORE, type RevisionRange } from "../editor/revisions";
+import { countWords } from "../word-count";
 
 /**
  * Agent protocol: the model runs a multi-turn tool-use loop — it reads the document skeleton
@@ -23,10 +23,10 @@ import { countWords } from '../word-count'
 
 // ---- context budgets (characters, ≈4 chars/token) ----
 
-const SELECTION_MAX_CHARS = 48_000
-const DOC_CONTEXT_MAX_CHARS = 24_000
-const PREVIEW_MAX_CHARS = 120
-const PREVIEW_TIGHT_CHARS = 40
+const SELECTION_MAX_CHARS = 48_000;
+const DOC_CONTEXT_MAX_CHARS = 24_000;
+const PREVIEW_MAX_CHARS = 120;
+const PREVIEW_TIGHT_CHARS = 40;
 
 /**
  * Guide for the apply_commands tool: format,
@@ -35,31 +35,31 @@ const PREVIEW_TIGHT_CHARS = 40
  */
 export const COMMANDS_GUIDE = [
   "The command format mimics documents.batchUpdate of the Google Docs API: each command is a single-key object; the fields array has the same semantics as Google's FieldMask — only the listed fields are updated, everything not listed is left untouched. Differences from Google: target uses semantic addressing (node type / text containment / block index), colors are 6-digit hex (no #), lengths are in twips, font sizes are in half-points.",
-  '',
-  'The commands input is an array of commands executed in order. Command schema (TypeScript):',
-  '```',
-  'interface Target {  // all conditions are ANDed; provide at least one',
+  "",
+  "The commands input is an array of commands executed in order. Command schema (TypeScript):",
+  "```",
+  "interface Target {  // all conditions are ANDed; provide at least one",
   "  nodeType?: 'docHeading' | 'docParagraph' | 'docListItem' | 'image'  // image = image block",
   "  headingLevel?: number        // only together with nodeType: 'docHeading'",
-  '  containsText?: string        // block plain text contains this substring',
-  '  matchCase?: boolean          // defaults to true',
+  "  containsText?: string        // block plain text contains this substring",
+  "  matchCase?: boolean          // defaults to true",
   '  blockIndexes?: number[]      // indexes from the "document block list"',
   "  scope?: 'selection' | 'document'  // selection = only blocks covered by the current selection",
-  '}',
+  "}",
   "{ updateTextStyle: { target, style: { color?, highlight?, sizeHalfPoints?, font?, bold?, italic?, underline?, strike?, baselineOffset?: 'SUPERSCRIPT'|'SUBSCRIPT'|'NONE', link?: {url}|null }, fields: string[] } }  // value null = clear that property; font applies only to its own script's slot (an East Asian font keeps the run's Latin font and vice versa)",
   "{ updateParagraphStyle: { target, style: { align?: 'left'|'center'|'right'|'justify', lineSpacing?, indentLeft?, indentRight?, indentFirstLine?, spaceBefore?, spaceAfter?, pageBreakBefore?, shadingFill?, borders?: subset of 'tblr'|null }, fields: string[] } }  // indentFirstLine positive = first-line indent, negative = hanging; a two-character indent for CJK text ≈ font size in pt × 40 twips",
-  '{ setHeadingLevel: { target, level: 0-6 } }  // 0 = demote to body paragraph',
-  "{ replaceAllText: { containsText, replaceText, matchCase?, target? } }  // target narrows the scanned blocks (blockIndexes / scope:'selection' / nodeType); omitted = whole document. The replacement keeps the matched text's formatting — the right tool for small in-place fixes (a few words inside a sentence)",
-  '{ updateMatchedTextStyle: { containsText, matchCase?, target?, style, fields } }  // character-level styling: applies the run style (same style/fields as updateTextStyle) only to the matched text itself, not the whole block',
-  '{ deleteBlocks: { target } }',
-  '{ moveBlocks: { blockIndexes: number[], afterBlockIndex: number } }  // -1 = start of document',
-  '{ createParagraphBullets: { target, bulletPreset? } }  // paragraphs to list; BULLET_* prefix = unordered, NUMBERED_* = ordered (default unordered); heading blocks are not converted',
-  '{ deleteParagraphBullets: { target } }  // list items back to body paragraphs',
+  "{ setHeadingLevel: { target, level: 0-6 } }  // 0 = demote to body paragraph",
+  "{ replaceAllText: { containsText, replaceText, matchCase?, target?, expectedOccurrences? } }  // target narrows the scanned blocks (blockIndexes / scope:'selection' / nodeType); omitted = whole document. Use expectedOccurrences:1 for a single intended edit; a mismatch aborts the envelope. Matching spans formatting runs and table cells without crossing cells or paragraphs. Replacement inherits the first matched run formatting — the right tool for small in-place fixes (a few words inside a sentence)",
+  "{ updateMatchedTextStyle: { containsText, matchCase?, target?, style, fields } }  // character-level styling: applies the run style (same style/fields as updateTextStyle) only to the matched text itself, not the whole block",
+  "{ deleteBlocks: { target } }",
+  "{ moveBlocks: { blockIndexes: number[], afterBlockIndex: number } }  // -1 = start of document",
+  "{ createParagraphBullets: { target, bulletPreset? } }  // paragraphs to list; BULLET_* prefix = unordered, NUMBERED_* = ordered (default unordered); heading blocks are not converted",
+  "{ deleteParagraphBullets: { target } }  // list items back to body paragraphs",
   "{ updateImageProperties: { target, properties: { widthPx?, heightPx?, align?: 'left'|'center'|'right' }, fields } }  // image blocks only; giving one dimension scales proportionally",
-  '{ insertToc: { afterBlockIndex } }  // insert a TOC field after that block index (-1 = start of document); entries come from current headings, Word computes page numbers on open; fails if the document has no headings',
-  '```',
-  '',
-  'Common recipes:',
+  "{ insertToc: { afterBlockIndex } }  // insert a TOC field after that block index (-1 = start of document); entries come from current headings, Word computes page numbers on open; fails if the document has no headings",
+  "```",
+  "",
+  "Common recipes:",
   '- "Make all headings red" → commands: [{"updateTextStyle":{"target":{"nodeType":"docHeading"},"style":{"color":"FF0000"},"fields":["color"]}}]',
   '- "1.5 line spacing for the whole document" → one updateParagraphStyle each for docParagraph / docHeading / docListItem, style {"lineSpacing":1.5}, fields ["lineSpacing"]',
   '- "Demote the \'Risk Notice\' level-2 heading to level 3" → commands: [{"setHeadingLevel":{"target":{"nodeType":"docHeading","headingLevel":2,"containsText":"Risk Notice"},"level":3}}]',
@@ -71,128 +71,128 @@ export const COMMANDS_GUIDE = [
   '- "Two-character first-line indent for the whole document" (11 pt font) → one updateParagraphStyle for docParagraph, style {"indentFirstLine":440}, fields ["indentFirstLine"]',
   '- "Insert a table of contents at the beginning" → commands: [{"insertToc":{"afterBlockIndex":-1}}]; if the user wants the TOC on its own page, also apply updateParagraphStyle to the first body block after the TOC with style {"pageBreakBefore":true}, fields ["pageBreakBefore"]',
   '- Cover page recipe: use insert_content to insert one paragraph each for title/subtitle/date at the start of the document, then updateTextStyle to enlarge the title font (e.g. {"sizeHalfPoints":72}, fields ["sizeHalfPoints"]), updateParagraphStyle to center everything and give the title {"spaceBefore":4800}, and finally set {"pageBreakBefore":true} on the first body block after the cover',
-  '',
-  'Discipline:',
+  "",
+  "Discipline:",
   '- Read the "document block list" before issuing commands; anything like "paragraph N / a certain section" must be addressed with block indexes from the list — never guess;',
-  '- Put only the properties the user explicitly asked for into fields;',
-  '- Protected blocks such as images cannot be modified with style commands (they are skipped); to change table content, use read_blocks to get the <table> and rewrite it wholesale with replace_blocks (the table keeps its column widths, borders, shading and cell formatting; cells whose text you leave unchanged keep their content untouched).',
-  '',
-  'Known error cases (must avoid):',
-  'BC-1 Putting properties the user did not ask for into fields, wiping existing formatting by mistake;',
+  "- Put only the properties the user explicitly asked for into fields;",
+  "- Protected blocks such as images cannot be modified with style commands (they are skipped); to change table content, use read_blocks to get the <table> and rewrite it wholesale with replace_blocks (the table keeps its column widths, borders, shading and cell formatting; cells whose text you leave unchanged keep their content untouched).",
+  "",
+  "Known error cases (must avoid):",
+  "BC-1 Putting properties the user did not ask for into fields, wiping existing formatting by mistake;",
   'BC-2 A "whole document" formatting operation only changed docParagraph and missed docHeading/docListItem;',
-  'BC-3 Addressing by word/character position (no such addressing exists); use block indexes or text containment instead;',
-  'BC-4 Using replaceAllText sentence by sentence for rewrites such as translation/abbreviation; use the replace_blocks tool instead;',
-].join('\n')
+  "BC-3 Addressing by word/character position (no such addressing exists); use block indexes or text containment instead;",
+  "BC-4 Using replaceAllText sentence by sentence for rewrites such as translation/abbreviation; use the replace_blocks tool instead;",
+].join("\n");
 
 const HTML_RULES = [
-  'The html tool input is a restricted HTML fragment. Rules:',
-  '- Only these tags are allowed: h1 h2 h3 h4 h5 h6 p ul ol li strong em u s a br table thead tbody tr th td pre code blockquote',
-  '- Tables: use <th> for the first (header) row; cells contain plain text only (<br> may split lines); nested tables / merged cells are not supported; once inserted the table is protected as a whole, only cell text remains editable. For a table with specific column widths or a banded / header style, use the insert_table tool instead of HTML',
-  '- Use <pre> for code samples (monospace font + shading, line breaks preserved); use <blockquote> for quotations (indent + left bar)',
-  '- Use <formula>LaTeX</formula> for math (produces native Word equations): as a top-level block it becomes its own centered paragraph; placed inside <p>/<li>/<h*> text it is an inline formula flowing with the text, e.g. <p>From <formula>E = mc^2</formula> we know…</p>; supports the common subset of \\frac \\sqrt super/subscripts \\sum \\int \\lim matrix environments Greek letters etc., the align environment is not supported; invalid LaTeX fails the whole call — fix and retry',
-  '- Do not include <html>/<body>, markdown code fences, or explanatory text',
-  '- Organize long content into sections with h2/h3 (unless the user only wants a single paragraph)',
-  '- Keep the same language as the original document / user instruction, unless translation is requested',
-].join('\n')
+  "The html tool input is a restricted HTML fragment. Rules:",
+  "- Only these tags are allowed: h1 h2 h3 h4 h5 h6 p ul ol li strong em u s a br table thead tbody tr th td pre code blockquote",
+  "- Tables: use <th> for the first (header) row; cells contain plain text only (<br> may split lines); nested tables / merged cells are not supported; once inserted the table is protected as a whole, only cell text remains editable. For a table with specific column widths or a banded / header style, use the insert_table tool instead of HTML",
+  "- Use <pre> for code samples (monospace font + shading, line breaks preserved); use <blockquote> for quotations (indent + left bar)",
+  "- Use <formula>LaTeX</formula> for math (produces native Word equations): as a top-level block it becomes its own centered paragraph; placed inside <p>/<li>/<h*> text it is an inline formula flowing with the text, e.g. <p>From <formula>E = mc^2</formula> we know…</p>; supports the common subset of \\frac \\sqrt super/subscripts \\sum \\int \\lim matrix environments Greek letters etc., the align environment is not supported; invalid LaTeX fails the whole call — fix and retry",
+  "- Do not include <html>/<body>, markdown code fences, or explanatory text",
+  "- Organize long content into sections with h2/h3 (unless the user only wants a single paragraph)",
+  "- Keep the same language as the original document / user instruction, unless translation is requested",
+].join("\n");
 
 /**
  * Agent system prompt: document-first, intent resolution, act via tools,
  * answer in chat.
  */
 export const AGENT_SYSTEM_PROMPT = [
-  'You are the document assistant built into the local document editor GenOffice Docs. You read and modify the currently open document exclusively through tools; there is no other modification channel.',
-  '',
-  '# Intent resolution',
-  '- The user asks to modify/generate/translate/format → call the appropriate tools, then summarize what was done in one or two sentences;',
+  "You are the document assistant built into the local document editor GenOffice Docs. You read and modify the currently open document exclusively through tools; there is no other modification channel.",
+  "",
+  "# Intent resolution",
+  "- The user asks to modify/generate/translate/format → call the appropriate tools, then summarize what was done in one or two sentences;",
   '- The user is asking a question or consulting (word count, structure, "what is this about", writing advice, etc.) → answer directly in plain text without calling modification tools;',
   '- For statistics such as word count or block count, quote the "full-text stats" from the "document block list" directly — do not count yourself;',
-  '- When intent is unclear, read the document first (the block list in the message, and read_blocks for full text if needed), then decide.',
-  '',
-  '# Tool usage',
+  "- When intent is unclear, read the document first (the block list in the message, and read_blocks for full text if needed), then decide.",
+  "",
+  "# Tool usage",
   '- Every user message carries the latest "document block list" (index|type|content preview; previews may be truncated); after modifications, call get_document_context if you need the latest state;',
-  '- When a list preview is truncated, read the full content with read_blocks before rewriting; never rewrite based on a truncated preview;',
-  '- Content changes: use insert_content for new content, and replace_blocks to rewrite/replace existing blocks (pass a block index range and the new HTML); replaced blocks pass their paragraph and text formatting (font, size, color, indent, spacing, alignment) on to the new blocks automatically, and a rewritten table keeps its widths, borders, shading and cell formatting, so a rewrite never needs follow-up formatting commands;',
-  '- Formatting, structure, and batch operations (color/font size/line spacing/alignment/indent/heading level/find & replace/delete/move/list conversion) go through apply_commands — do not rewrite whole blocks with replace_blocks;',
+  "- When a list preview is truncated, read the full content with read_blocks before rewriting; never rewrite based on a truncated preview;",
+  "- Content changes: use insert_content for new content, and replace_blocks to rewrite/replace existing blocks (pass a block index range and the new HTML); replaced blocks pass their paragraph and text formatting (font, size, color, indent, spacing, alignment) on to the new blocks automatically, and a rewritten table keeps its widths, borders, shading and cell formatting, so a rewrite never needs follow-up formatting commands;",
+  "- Formatting, structure, and batch operations (color/font size/line spacing/alignment/indent/heading level/find & replace/delete/move/list conversion) go through apply_commands — do not rewrite whole blocks with replace_blocks;",
   '- Small in-place text fixes (changing a few words inside a sentence) go through apply_commands replaceAllText with a target — do not rewrite the whole block; styling every occurrence of a phrase (e.g. bold each "TODO") uses updateMatchedTextStyle;',
-  '- When the user has text selected, the message includes the selection block indexes and content; rewrite-style requests apply to the selection by default;',
-  '- Web search: use web_search when you need up-to-date information/data/fact checking; search before writing about uncertain facts — do not fabricate;',
-  '- Illustrations: when the user wants pictures, first image_search (English keywords work better) → pick a suitable result → insert_image with its imageUrl; when the user asks to generate/draw a picture, or search cannot match the needed illustration, use generate_image with a detailed English prompt; edit_image adjusts an image you produced (background removal, recolor, upscale) before you insert it;',
-  '- Visual check: view_page returns a picture of the rendered page; use it after layout/formatting changes (tables, headings, spacing, cover pages) to confirm the result looks right, and when the user asks how something looks. Fix what you see, then finish;',
-  '- Templates: for a standard deliverable (memo, letter, brief, deposition summary, chronology) call list_templates and apply_template first, then fill the [Bracketed] placeholders from the user\'s facts; save_template keeps the current document as a reusable template when asked;',
+  "- When the user has text selected, the message includes the selection block indexes and content; rewrite-style requests apply to the selection by default;",
+  "- Web search: use web_search when you need up-to-date information/data/fact checking; search before writing about uncertain facts — do not fabricate;",
+  "- Illustrations: when the user wants pictures, first image_search (English keywords work better) → pick a suitable result → insert_image with its imageUrl; when the user asks to generate/draw a picture, or search cannot match the needed illustration, use generate_image with a detailed English prompt; edit_image adjusts an image you produced (background removal, recolor, upscale) before you insert it;",
+  "- Visual check: view_page returns a picture of the rendered page; use it after layout/formatting changes (tables, headings, spacing, cover pages) to confirm the result looks right, and when the user asks how something looks. Fix what you see, then finish;",
+  "- Templates: for a standard deliverable (memo, letter, brief, deposition summary, chronology) call list_templates and apply_template first, then fill the [Bracketed] placeholders from the user's facts; save_template keeps the current document as a reusable template when asked;",
   '- Firm knowledge: when the user refers to case facts, prior work or "our documents", search_firm_knowledge before drafting and cite the document and page in the text;',
-  '- Tracked deletions (struck-through revision text) are not part of the current content and are hidden from the block list/read_blocks/stats; when a [tracked deletion] tag or a skipped-deletion notice appears, that text is already deleted — never try to delete or rewrite it again (the user accepts/rejects revisions in the Review tab);',
-  '- Charts: use insert_chart for data visualization (bar/line/pie; saved as native Word charts); use edit_chart to change the data of an existing chart block in the block list; data must be real, from the document or search results;',
-  '- Tables: use insert_table to create a table (optional header row, body rows, optional column widths, style preset none/lightGrid/zebraBlue/zebraGray/headerDarkBlue/headerOrange/noBorder/fullBorder); use edit_table to change cell text, add or delete a row/column, or restyle an existing table by its block index (one structural add/delete per call); cells hold plain text; a simple inline HTML <table> via insert_content is also fine;',
-  '- New standalone document: when the user asks to put results into a NEW/separate document (a summary, a report, an extraction) instead of this one, use create_document with the full content — do not insert that content into the current document and do not claim you cannot create files;',
-  '- One reply may chain multiple tools; after everything is done, always finish with a short plain-text summary.',
-  '',
-  '# Comments',
-  '- Unresolved comment threads ride along in every user message (id, author, anchored block, quoted anchor text); resolved threads are omitted. read_comments returns the full list including resolved threads and replies.',
-  '- When the user asks to handle/address/resolve the comments, process them one at a time: read the anchored block, apply the requested change with the normal editing tools, then reply_comment with a one-sentence summary of what changed, then resolve_comment. Handle each comment in its own tool sequence — never one giant edit for all of them.',
-  '- A comment that is a question or is ambiguous gets a reply_comment with an answer or a clarifying question, no document change and no resolve.',
+  "- Tracked deletions (struck-through revision text) are not part of the current content and are hidden from the block list/read_blocks/stats; when a [tracked deletion] tag or a skipped-deletion notice appears, that text is already deleted — never try to delete or rewrite it again (the user accepts/rejects revisions in the Review tab);",
+  "- Charts: use insert_chart for data visualization (bar/line/pie; saved as native Word charts); use edit_chart to change the data of an existing chart block in the block list; data must be real, from the document or search results;",
+  "- Tables: use insert_table to create a table (optional header row, body rows, optional column widths, style preset none/lightGrid/zebraBlue/zebraGray/headerDarkBlue/headerOrange/noBorder/fullBorder); use edit_table to change cell text, add or delete a row/column, or restyle an existing table by its block index (one structural add/delete per call); cells hold plain text; a simple inline HTML <table> via insert_content is also fine;",
+  "- New standalone document: when the user asks to put results into a NEW/separate document (a summary, a report, an extraction) instead of this one, use create_document with the full content — do not insert that content into the current document and do not claim you cannot create files;",
+  "- One reply may chain multiple tools; after everything is done, always finish with a short plain-text summary.",
+  "",
+  "# Comments",
+  "- Unresolved comment threads ride along in every user message (id, author, anchored block, quoted anchor text); resolved threads are omitted. read_comments returns the full list including resolved threads and replies.",
+  "- When the user asks to handle/address/resolve the comments, process them one at a time: read the anchored block, apply the requested change with the normal editing tools, then reply_comment with a one-sentence summary of what changed, then resolve_comment. Handle each comment in its own tool sequence — never one giant edit for all of them.",
+  "- A comment that is a question or is ambiguous gets a reply_comment with an answer or a clarifying question, no document change and no resolve.",
   "- Never modify content beyond a comment's anchored passage unless the comment explicitly requires it; skip threads that are already resolved.",
-  '',
-  '# Template filling',
-  '- When the user asks to fill in a template/form, first scan the document for placeholders: [bracketed labels], {{curly names}}, runs of underscores (____), and protected content-control blocks whose label reads as a field.',
+  "",
+  "# Template filling",
+  "- When the user asks to fill in a template/form, first scan the document for placeholders: [bracketed labels], {{curly names}}, runs of underscores (____), and protected content-control blocks whose label reads as a field.",
   "- List every placeholder found (with block indexes). Fill the ones the user's message answers via replaceAllText with a target so the surrounding formatting survives; for the rest, ask for the missing values in one consolidated question — never invent facts to fill a field.",
   "- Dates follow the user's locale; never change text outside the placeholders.",
-  '',
-  '# Headers & footers',
+  "",
+  "# Headers & footers",
   '- The message context lists the current header/footer text. Change them with set_header_footer: plain text, \\n between lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields (e.g. text "{PAGE} / {NUMPAGES}" renders as "3 / 12"); an empty string clears the text.',
   '- view "first" / "even" writes the different-first-page or even-page variant and switches the corresponding Word setting on automatically; omit view for the normal header/footer.',
-  '- Existing per-line alignment and styling are preserved; logos and images in the part are untouched. Headers/footers are not document blocks — never try to reach them via block indexes.',
-  '',
-  '# Answer citations',
-  '- When an answer draws on specific parts of the document, cite them as markdown links: [heading text or a short label](docnav://block/N), where N is a block index from the current block list. The user can click these to jump to the passage.',
-  '- Only cite block indexes that exist in the block list — never guess; prefer heading blocks as citation anchors. Whole-document answers may omit citations.',
-  '',
-  '# Tracked revisions',
-  '- read_revisions lists every pending tracked change (kind, author, date, block index, affected text). Use it when the user asks what changed / to review or summarize the revisions (a redline summary).',
+  "- Existing per-line alignment and styling are preserved; logos and images in the part are untouched. Headers/footers are not document blocks — never try to reach them via block indexes.",
+  "",
+  "# Answer citations",
+  "- When an answer draws on specific parts of the document, cite them as markdown links: [heading text or a short label](docnav://block/N), where N is a block index from the current block list. The user can click these to jump to the passage.",
+  "- Only cite block indexes that exist in the block list — never guess; prefer heading blocks as citation anchors. Whole-document answers may omit citations.",
+  "",
+  "# Tracked revisions",
+  "- read_revisions lists every pending tracked change (kind, author, date, block index, affected text). Use it when the user asks what changed / to review or summarize the revisions (a redline summary).",
   '- Redline summary shape: overall counts first (insertions/deletions, authors, date range), then the changes grouped by document section using the heading structure from the block list, one line each; end with a "Potential concerns" list flagging risky edits (deleted obligations or qualifiers, changed numbers/dates/amounts, weakened commitments). Cite block indexes so the user can locate each change.',
-  '- Summarizing is read-only: do not modify the document, and never try to accept or reject revisions — the user does that in the Review tab.',
-  '',
-  '# HTML fragment rules',
+  "- Summarizing is read-only: do not modify the document, and never try to accept or reject revisions — the user does that in the Review tab.",
+  "",
+  "# HTML fragment rules",
   HTML_RULES,
-  '',
-  '# apply_commands command guide',
+  "",
+  "# apply_commands command guide",
   COMMANDS_GUIDE,
-].join('\n')
+].join("\n");
 
-export { countWords }
+export { countWords };
 
 // ---- selection scope ----
 
 export interface SelectionScope {
   /** top-level child indexes covered by the selection (inclusive) */
-  startIndex: number
-  endIndex: number
+  startIndex: number;
+  endIndex: number;
   /** true when the user has an actual range selected (not just a caret) */
-  isRange: boolean
+  isRange: boolean;
 }
 
 export function getSelectionScope(editor: Editor): SelectionScope {
-  const { from, to, empty } = editor.state.selection
-  const doc = editor.state.doc
-  let startIndex = -1
-  let endIndex = -1
-  let index = 0
+  const { from, to, empty } = editor.state.selection;
+  const doc = editor.state.doc;
+  let startIndex = -1;
+  let endIndex = -1;
+  let index = 0;
   doc.forEach((node, offset) => {
-    const nodeFrom = offset
-    const nodeTo = offset + node.nodeSize
+    const nodeFrom = offset;
+    const nodeTo = offset + node.nodeSize;
     if (nodeTo > from && nodeFrom < to) {
-      if (startIndex === -1) startIndex = index
-      endIndex = index
+      if (startIndex === -1) startIndex = index;
+      endIndex = index;
     } else if (empty && from >= nodeFrom && from <= nodeTo && startIndex === -1) {
-      startIndex = index
-      endIndex = index
+      startIndex = index;
+      endIndex = index;
     }
-    index++
-  })
+    index++;
+  });
   if (startIndex === -1) {
-    startIndex = doc.childCount - 1
-    endIndex = doc.childCount - 1
+    startIndex = doc.childCount - 1;
+    endIndex = doc.childCount - 1;
   }
-  return { startIndex, endIndex, isRange: !empty }
+  return { startIndex, endIndex, isRange: !empty };
 }
 
 /** ProseMirror positions of a top-level child index range */
@@ -201,34 +201,34 @@ export function blockRangePositions(
   startIndex: number,
   endIndex: number,
 ): { from: number; to: number } {
-  const doc = editor.state.doc
-  let from = 0
-  let to = 0
-  let index = 0
+  const doc = editor.state.doc;
+  let from = 0;
+  let to = 0;
+  let index = 0;
   doc.forEach((node, offset) => {
-    if (index === startIndex) from = offset
-    if (index === endIndex) to = offset + node.nodeSize
-    index++
-  })
-  return { from, to }
+    if (index === startIndex) from = offset;
+    if (index === endIndex) to = offset + node.nodeSize;
+    index++;
+  });
+  return { from, to };
 }
 
 // ---- tracked deletions (pending revisions are not current content) ----
 
-const hasDelMark = (node: ProseMirrorNode) => node.marks.some((m) => m.type.name === 'del')
+const hasDelMark = (node: ProseMirrorNode) => node.marks.some((m) => m.type.name === "del");
 
 /** block text as it reads once pending tracked deletions are applied (textContent minus del runs) */
 export function liveText(node: ProseMirrorNode): string {
-  if ((node.attrs?.blockRevision as { kind?: string } | null)?.kind === 'del') return ''
-  let out = ''
+  if ((node.attrs?.blockRevision as { kind?: string } | null)?.kind === "del") return "";
+  let out = "";
   const walk = (child: ProseMirrorNode): void => {
-    if (hasDelMark(child)) return
-    if (child.isText) out += child.text ?? ''
-    else if (child.isLeaf) out += child.type.spec.leafText?.(child) ?? ''
-    else child.forEach(walk)
-  }
-  node.forEach(walk)
-  return out
+    if (hasDelMark(child)) return;
+    if (child.isText) out += child.text ?? "";
+    else if (child.isLeaf) out += child.type.spec.leafText?.(child) ?? "";
+    else child.forEach(walk);
+  };
+  node.forEach(walk);
+  return out;
 }
 
 /**
@@ -237,67 +237,67 @@ export function liveText(node: ProseMirrorNode): string {
  * carry no textContent, so a live formula must still count as live content.
  */
 export function isTrackedDeleted(node: ProseMirrorNode): boolean {
-  if ((node.attrs?.blockRevision as { kind?: string } | null)?.kind === 'del') return true
-  let hasContent = false
-  let hasLive = false
+  if ((node.attrs?.blockRevision as { kind?: string } | null)?.kind === "del") return true;
+  let hasContent = false;
+  let hasLive = false;
   node.descendants((child) => {
     if (child.isText || (child.isInline && child.isLeaf)) {
-      hasContent = true
-      if (!hasDelMark(child)) hasLive = true
+      hasContent = true;
+      if (!hasDelMark(child)) hasLive = true;
     }
-  })
-  return hasContent && !hasLive
+  });
+  return hasContent && !hasLive;
 }
 
 // ---- blocks -> restricted HTML ----
 
 function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function inlineToHtml(content: PmNode[] | undefined): string {
-  if (!content) return ''
-  let html = ''
+  if (!content) return "";
+  let html = "";
   for (const node of content) {
     // del-marked runs are pending deletions, not current content
-    if ((node.marks ?? []).some((m: PmMark) => m.type === 'del')) continue
-    if (node.type === 'hardBreak') {
-      html += '<br>'
-      continue
+    if ((node.marks ?? []).some((m: PmMark) => m.type === "del")) continue;
+    if (node.type === "hardBreak") {
+      html += "<br>";
+      continue;
     }
-    if (node.type === 'docInlineMath') {
+    if (node.type === "docInlineMath") {
       // editor-created formulas round-trip as LaTeX; parsed-from-docx ones
       // degrade to the flat token strip (structure lost if the model rewrites)
-      const source = String(node.attrs?.latex ?? '') || String(node.attrs?.text ?? '')
-      if (source) html += `<formula>${escapeHtml(source)}</formula>`
-      continue
+      const source = String(node.attrs?.latex ?? "") || String(node.attrs?.text ?? "");
+      if (source) html += `<formula>${escapeHtml(source)}</formula>`;
+      continue;
     }
-    if (node.type === 'docRuby') {
-      html += escapeHtml(String(node.attrs?.base ?? ''))
-      continue
+    if (node.type === "docRuby") {
+      html += escapeHtml(String(node.attrs?.base ?? ""));
+      continue;
     }
-    if (node.type !== 'text' || !node.text) continue
-    let text = escapeHtml(node.text)
-    const marks = node.marks ?? []
-    const has = (type: string) => marks.some((m: PmMark) => m.type === type)
-    if (has('bold')) text = `<strong>${text}</strong>`
-    if (has('italic')) text = `<em>${text}</em>`
-    if (has('underline')) text = `<u>${text}</u>`
-    if (has('strike')) text = `<s>${text}</s>`
-    const link = marks.find((m: PmMark) => m.type === 'link')
-    if (link?.attrs?.href) text = `<a href="${escapeHtml(String(link.attrs.href))}">${text}</a>`
-    html += text
+    if (node.type !== "text" || !node.text) continue;
+    let text = escapeHtml(node.text);
+    const marks = node.marks ?? [];
+    const has = (type: string) => marks.some((m: PmMark) => m.type === type);
+    if (has("bold")) text = `<strong>${text}</strong>`;
+    if (has("italic")) text = `<em>${text}</em>`;
+    if (has("underline")) text = `<u>${text}</u>`;
+    if (has("strike")) text = `<s>${text}</s>`;
+    const link = marks.find((m: PmMark) => m.type === "link");
+    if (link?.attrs?.href) text = `<a href="${escapeHtml(String(link.attrs.href))}">${text}</a>`;
+    html += text;
   }
-  return html
+  return html;
 }
 
 /** plain text of a paragraph's inline content, hard breaks as newlines */
 function inlineToPlainText(content: PmNode[] | undefined): string {
-  if (!content) return ''
+  if (!content) return "";
   return content
-    .filter((n) => !(n.marks ?? []).some((m: PmMark) => m.type === 'del'))
-    .map((n) => (n.type === 'hardBreak' ? '\n' : n.type === 'text' ? (n.text ?? '') : ''))
-    .join('')
+    .filter((n) => !(n.marks ?? []).some((m: PmMark) => m.type === "del"))
+    .map((n) => (n.type === "hardBreak" ? "\n" : n.type === "text" ? (n.text ?? "") : ""))
+    .join("");
 }
 
 /** paragraph carries the <pre> preset (see CODE_BLOCK_PRESET) */
@@ -305,26 +305,26 @@ function isCodeParagraph(node: PmNode): boolean {
   return (
     node.attrs?.shadingFill === CODE_BLOCK_PRESET.shadingFill &&
     node.attrs?.borders === CODE_BLOCK_PRESET.borders
-  )
+  );
 }
 
 /** paragraph carries the <blockquote> preset (see QUOTE_BLOCK_PRESET) */
 function isQuoteParagraph(node: PmNode): boolean {
-  return node.attrs?.borders === QUOTE_BLOCK_PRESET.borders && Number(node.attrs?.indentLeft) > 0
+  return node.attrs?.borders === QUOTE_BLOCK_PRESET.borders && Number(node.attrs?.indentLeft) > 0;
 }
 
 /** table block -> restricted <table> HTML so the model can read and rewrite it */
 function tableToHtml(table: TableModel): string {
   const headerRow =
-    table.rows.length > 1 && table.rows[0].every((c) => c.bold || c.fill !== undefined)
+    table.rows.length > 1 && table.rows[0].every((c) => c.bold || c.fill !== undefined);
   const rows = table.rows.map((row, r) => {
-    const tag = headerRow && r === 0 ? 'th' : 'td'
+    const tag = headerRow && r === 0 ? "th" : "td";
     const cells = row
-      .map((cell) => `<${tag}>${cell.paras.map(escapeHtml).join('<br>')}</${tag}>`)
-      .join('')
-    return `<tr>${cells}</tr>`
-  })
-  return `<table>${rows.join('')}</table>`
+      .map((cell) => `<${tag}>${cell.paras.map(escapeHtml).join("<br>")}</${tag}>`)
+      .join("");
+    return `<tr>${cells}</tr>`;
+  });
+  return `<table>${rows.join("")}</table>`;
 }
 
 /**
@@ -332,119 +332,119 @@ function tableToHtml(table: TableModel): string {
  * Consecutive list items of the same kind are grouped into ul/ol.
  */
 export function serializeRangeToHtml(editor: Editor, startIndex: number, endIndex: number): string {
-  const json = editor.getJSON() as PmNode
-  const children = (json.content ?? []).slice(startIndex, endIndex + 1)
-  const parts: string[] = []
-  let listBuffer: { kind: string; items: string[] } | null = null
+  const json = editor.getJSON() as PmNode;
+  const children = (json.content ?? []).slice(startIndex, endIndex + 1);
+  const parts: string[] = [];
+  let listBuffer: { kind: string; items: string[] } | null = null;
 
   const flushList = () => {
-    if (!listBuffer) return
-    const tag = listBuffer.kind === 'ordered' ? 'ol' : 'ul'
-    parts.push(`<${tag}>${listBuffer.items.join('')}</${tag}>`)
-    listBuffer = null
-  }
+    if (!listBuffer) return;
+    const tag = listBuffer.kind === "ordered" ? "ol" : "ul";
+    parts.push(`<${tag}>${listBuffer.items.join("")}</${tag}>`);
+    listBuffer = null;
+  };
 
   for (let i = 0; i < children.length; i++) {
-    const node = children[i]
+    const node = children[i];
     if (isTrackedDeleted(editor.state.doc.child(startIndex + i))) {
       // the deleted block still separates the surrounding lists in the document
-      flushList()
-      continue
+      flushList();
+      continue;
     }
-    if (node.type === 'docHeading') {
-      flushList()
-      const level = Math.min(Math.max(Number(node.attrs?.level) || 1, 1), 6)
-      parts.push(`<h${level}>${inlineToHtml(node.content)}</h${level}>`)
-    } else if (node.type === 'docListItem') {
-      const kind = (node.attrs?.kind as string) ?? 'bullet'
+    if (node.type === "docHeading") {
+      flushList();
+      const level = Math.min(Math.max(Number(node.attrs?.level) || 1, 1), 6);
+      parts.push(`<h${level}>${inlineToHtml(node.content)}</h${level}>`);
+    } else if (node.type === "docListItem") {
+      const kind = (node.attrs?.kind as string) ?? "bullet";
       if (!listBuffer || listBuffer.kind !== kind) {
-        flushList()
-        listBuffer = { kind, items: [] }
+        flushList();
+        listBuffer = { kind, items: [] };
       }
-      listBuffer.items.push(`<li>${inlineToHtml(node.content)}</li>`)
-    } else if (node.type === 'docParagraph') {
-      flushList()
+      listBuffer.items.push(`<li>${inlineToHtml(node.content)}</li>`);
+    } else if (node.type === "docParagraph") {
+      flushList();
       if (isCodeParagraph(node)) {
-        parts.push(`<pre>${escapeHtml(inlineToPlainText(node.content))}</pre>`)
+        parts.push(`<pre>${escapeHtml(inlineToPlainText(node.content))}</pre>`);
       } else if (isQuoteParagraph(node)) {
-        parts.push(`<blockquote>${inlineToHtml(node.content)}</blockquote>`)
+        parts.push(`<blockquote>${inlineToHtml(node.content)}</blockquote>`);
       } else {
-        parts.push(`<p>${inlineToHtml(node.content)}</p>`)
+        parts.push(`<p>${inlineToHtml(node.content)}</p>`);
       }
-    } else if (node.type === 'docTable') {
-      flushList()
-      parts.push(tableToHtml(pmTableToModel(node)))
+    } else if (node.type === "docTable") {
+      flushList();
+      parts.push(tableToHtml(pmTableToModel(node)));
     } else {
-      flushList()
-      const formula = node.attrs?.formulaDisplay as { tokens?: string[]; latex?: string } | null
+      flushList();
+      const formula = node.attrs?.formulaDisplay as { tokens?: string[]; latex?: string } | null;
       if (formula?.latex) {
         // full LaTeX recovered: the model can rewrite the formula losslessly
-        parts.push(`<formula>${escapeHtml(formula.latex)}</formula>`)
+        parts.push(`<formula>${escapeHtml(formula.latex)}</formula>`);
       } else if (formula?.tokens?.length) {
         parts.push(
-          `<p>[Protected formula: ${escapeHtml(formula.tokens.join(' '))}, structure is read-only, kept as is]</p>`,
-        )
+          `<p>[Protected formula: ${escapeHtml(formula.tokens.join(" "))}, structure is read-only, kept as is]</p>`,
+        );
       } else {
-        const label = String(node.attrs?.label ?? node.attrs?.blockType ?? 'content')
+        const label = String(node.attrs?.label ?? node.attrs?.blockType ?? "content");
         // fields (TOC lines, page numbers, dates…) expose their visible result text
-        const preview = String(node.attrs?.previewText ?? '')
-          .replace(/\s+/g, ' ')
-          .trim()
+        const preview = String(node.attrs?.previewText ?? "")
+          .replace(/\s+/g, " ")
+          .trim();
         parts.push(
-          `<p>[Protected content: ${escapeHtml(label)}${preview ? ` — visible text: "${escapeHtml(clip(preview, 300))}"` : ''}, kept as is]</p>`,
-        )
+          `<p>[Protected content: ${escapeHtml(label)}${preview ? ` — visible text: "${escapeHtml(clip(preview, 300))}"` : ""}, kept as is]</p>`,
+        );
       }
     }
   }
-  flushList()
-  return parts.join('\n')
+  flushList();
+  return parts.join("\n");
 }
 
 // ---- document context + layered request builders ----
 
 /** Header/footer snapshot for the AI context; texts use {PAGE}/{NUMPAGES} tokens, null = variant off */
 export interface AiHfState {
-  header: string
-  footer: string
-  headerFirst: string | null
-  footerFirst: string | null
-  headerEven: string | null
-  footerEven: string | null
-  titlePg: boolean
-  evenOddHf: boolean
-  multiSection: boolean
+  header: string;
+  footer: string;
+  headerFirst: string | null;
+  footerFirst: string | null;
+  headerEven: string | null;
+  footerEven: string | null;
+  titlePg: boolean;
+  evenOddHf: boolean;
+  multiSection: boolean;
 }
 
 function hfContextLines(hf: AiHfState): string[] {
-  const fmt = (v: string) => (v ? `"${clip(v.replace(/\n/g, '\\n'), 160)}"` : '(empty)')
+  const fmt = (v: string) => (v ? `"${clip(v.replace(/\n/g, "\\n"), 160)}"` : "(empty)");
   const lines = [
-    'Headers & footers ({PAGE}/{NUMPAGES} are live page-number fields; change with set_header_footer):',
+    "Headers & footers ({PAGE}/{NUMPAGES} are live page-number fields; change with set_header_footer):",
     `- header: ${fmt(hf.header)} | footer: ${fmt(hf.footer)}`,
-  ]
+  ];
   if (hf.titlePg) {
     lines.push(
-      `- first-page variant: header ${fmt(hf.headerFirst ?? '')} | footer ${fmt(hf.footerFirst ?? '')}`,
-    )
+      `- first-page variant: header ${fmt(hf.headerFirst ?? "")} | footer ${fmt(hf.footerFirst ?? "")}`,
+    );
   }
   if (hf.evenOddHf) {
     lines.push(
-      `- even-page variant: header ${fmt(hf.headerEven ?? '')} | footer ${fmt(hf.footerEven ?? '')}`,
-    )
+      `- even-page variant: header ${fmt(hf.headerEven ?? "")} | footer ${fmt(hf.footerEven ?? "")}`,
+    );
   }
   if (hf.multiSection) {
     lines.push(
-      '- the document has multiple sections; header/footer edits apply to the first section (later sections inherit unless they define their own)',
-    )
+      "- the document has multiple sections; header/footer edits apply to the first section (later sections inherit unless they define their own)",
+    );
   }
-  return lines
+  return lines;
 }
 
 interface ContextEntry {
-  index: number
-  type: string
-  preview: string
-  isHeading: boolean
-  deleted: boolean
+  index: number;
+  type: string;
+  preview: string;
+  isHeading: boolean;
+  deleted: boolean;
 }
 
 /**
@@ -457,83 +457,83 @@ export function buildDocumentContext(
   scope?: SelectionScope,
   hf?: AiHfState,
 ): string {
-  const entries: ContextEntry[] = []
-  let index = 0
-  let fullText = ''
-  let hasPendingDeletions = false
+  const entries: ContextEntry[] = [];
+  let index = 0;
+  let fullText = "";
+  let hasPendingDeletions = false;
   editor.state.doc.forEach((node) => {
-    let type: string
-    let preview: string
-    let isHeading = false
-    let deleted: boolean
-    if (node.type.name === 'docProtected') {
+    let type: string;
+    let preview: string;
+    let isHeading = false;
+    let deleted: boolean;
+    if (node.type.name === "docProtected") {
       // protected blocks can only be block-level deletions (blockRevision)
-      deleted = isTrackedDeleted(node)
-      type = String(node.attrs.label || node.attrs.blockType || 'protected')
-      preview = String(node.attrs.previewText ?? '')
-      if (deleted) hasPendingDeletions = true
-      else fullText += node.textContent
+      deleted = isTrackedDeleted(node);
+      type = String(node.attrs.label || node.attrs.blockType || "protected");
+      preview = String(node.attrs.previewText ?? "");
+      if (deleted) hasPendingDeletions = true;
+      else fullText += node.textContent;
     } else {
-      deleted = isTrackedDeleted(node)
-      const live = liveText(node)
+      deleted = isTrackedDeleted(node);
+      const live = liveText(node);
       // deleted blocks show their struck text so the model can talk about the
       // revision, but that text never counts as current content
-      preview = deleted ? node.textContent : live
-      if (!deleted) fullText += live
-      if (deleted || live !== node.textContent) hasPendingDeletions = true
-      if (node.type.name === 'docHeading') {
-        type = `h${Math.min(Math.max(Number(node.attrs.level) || 1, 1), 6)}`
-        isHeading = true
-      } else if (node.type.name === 'docListItem') {
-        type = 'li'
-      } else if (node.type.name === 'docTable') {
-        type = 'table'
+      preview = deleted ? node.textContent : live;
+      if (!deleted) fullText += live;
+      if (deleted || live !== node.textContent) hasPendingDeletions = true;
+      if (node.type.name === "docHeading") {
+        type = `h${Math.min(Math.max(Number(node.attrs.level) || 1, 1), 6)}`;
+        isHeading = true;
+      } else if (node.type.name === "docListItem") {
+        type = "li";
+      } else if (node.type.name === "docTable") {
+        type = "table";
       } else {
-        type = 'p'
+        type = "p";
       }
     }
-    entries.push({ index, type, preview: preview.replace(/\s+/g, ' ').trim(), isHeading, deleted })
-    index++
-  })
+    entries.push({ index, type, preview: preview.replace(/\s+/g, " ").trim(), isHeading, deleted });
+    index++;
+  });
 
   const render = (bodyMax: number) =>
     entries.map((e) => {
-      const body = clip(e.preview, e.isHeading ? PREVIEW_MAX_CHARS : bodyMax)
-      return `${e.index}|${e.type}|${e.deleted ? '[tracked deletion] ' : ''}${body}`
-    })
-  let lines = render(PREVIEW_MAX_CHARS)
-  if (lines.join('\n').length > DOC_CONTEXT_MAX_CHARS) lines = render(PREVIEW_TIGHT_CHARS)
-  if (lines.join('\n').length > DOC_CONTEXT_MAX_CHARS) {
+      const body = clip(e.preview, e.isHeading ? PREVIEW_MAX_CHARS : bodyMax);
+      return `${e.index}|${e.type}|${e.deleted ? "[tracked deletion] " : ""}${body}`;
+    });
+  let lines = render(PREVIEW_MAX_CHARS);
+  if (lines.join("\n").length > DOC_CONTEXT_MAX_CHARS) lines = render(PREVIEW_TIGHT_CHARS);
+  if (lines.join("\n").length > DOC_CONTEXT_MAX_CHARS) {
     // keep both ends (numbering must stay verifiable), elide the middle
-    let dropStart = Math.floor(lines.length / 3)
-    let dropEnd = lines.length - Math.floor(lines.length / 3)
+    let dropStart = Math.floor(lines.length / 3);
+    let dropEnd = lines.length - Math.floor(lines.length / 3);
     while (
       dropStart > 1 &&
       dropEnd < lines.length - 1 &&
-      [...lines.slice(0, dropStart), ...lines.slice(dropEnd)].join('\n').length >
+      [...lines.slice(0, dropStart), ...lines.slice(dropEnd)].join("\n").length >
         DOC_CONTEXT_MAX_CHARS
     ) {
-      dropStart = Math.max(1, dropStart - 10)
-      dropEnd = Math.min(lines.length - 1, dropEnd + 10)
+      dropStart = Math.max(1, dropStart - 10);
+      dropEnd = Math.min(lines.length - 1, dropEnd + 10);
     }
     lines = [
       ...lines.slice(0, dropStart),
-      `…(${dropEnd - dropStart} blocks elided here; numbering is continuous, extrapolate indexes if needed)…`,
+      `…(${dropEnd - dropStart} blocks elided here; use read_document_outline to read these indexes; never extrapolate)…`,
       ...lines.slice(dropEnd),
-    ]
+    ];
   }
 
-  scope ??= getSelectionScope(editor)
+  scope ??= getSelectionScope(editor);
   const selLine = scope.isRange
     ? scope.startIndex === scope.endIndex
       ? `Current selection: block ${scope.startIndex}`
       : `Current selection: blocks ${scope.startIndex}-${scope.endIndex}`
-    : `No selection; cursor is in block ${scope.startIndex}`
+    : `No selection; cursor is in block ${scope.startIndex}`;
 
   // authoritative stats for answer mode (previews above may be clipped)
   const statsLine = `Full-text stats: words ${countWords(fullText)}, characters (no spaces) ${
-    fullText.replace(/\s/g, '').length
-  }, characters (with spaces) ${fullText.length}`
+    fullText.replace(/\s/g, "").length
+  }, characters (with spaces) ${fullText.length}`;
 
   return [
     `The document has ${entries.length} blocks, listed below (index|type|content preview):`,
@@ -541,114 +541,114 @@ export function buildDocumentContext(
     statsLine,
     ...(hasPendingDeletions
       ? [
-          'Tracked changes: blocks tagged [tracked deletion] and struck-through text inside other blocks are pending deletion revisions — that text is already deleted, is excluded from stats/read_blocks, and must never be deleted or rewritten again; the user accepts/rejects revisions in the Review tab.',
+          "Tracked changes: blocks tagged [tracked deletion] and struck-through text inside other blocks are pending deletion revisions — that text is already deleted, is excluded from stats/read_blocks, and must never be deleted or rewritten again; the user accepts/rejects revisions in the Review tab.",
         ]
       : []),
     ...(hf ? hfContextLines(hf) : []),
     selLine,
-  ].join('\n')
+  ].join("\n");
 }
 
 function clip(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max) + '…' : text
+  return text.length > max ? text.slice(0, max) + "…" : text;
 }
 
 // ---- tracked revisions context ----
 
-const REVISIONS_CONTEXT_MAX = 200
+const REVISIONS_CONTEXT_MAX = 200;
 
-const REVISION_KIND_LABEL: Record<RevisionRange['kind'], string> = {
-  ins: 'inserted',
-  del: 'deleted',
+const REVISION_KIND_LABEL: Record<RevisionRange["kind"], string> = {
+  ins: "inserted",
+  del: "deleted",
   // ins+del marks on the same text: added while tracking, then deleted —
   // never part of the base document; both accept and reject remove it
-  both: 'inserted then deleted (not in the base document)',
-  pPrChange: 'paragraph formatting changed',
-  rPrChange: 'text formatting changed',
-  moveFrom: 'moved away',
-  moveTo: 'moved here',
-  rowIns: 'table row inserted',
-  rowDel: 'table row deleted',
-  cellIns: 'table cell inserted',
-  cellDel: 'table cell deleted',
-  blockIns: 'block inserted',
-  blockDel: 'block deleted',
-}
+  both: "inserted then deleted (not in the base document)",
+  pPrChange: "paragraph formatting changed",
+  rPrChange: "text formatting changed",
+  moveFrom: "moved away",
+  moveTo: "moved here",
+  rowIns: "table row inserted",
+  rowDel: "table row deleted",
+  cellIns: "table cell inserted",
+  cellDel: "table cell deleted",
+  blockIns: "block inserted",
+  blockDel: "block deleted",
+};
 
 /** top-level block index containing a document position */
 function blockIndexOfPos(doc: ProseMirrorNode, pos: number): number {
-  let index = 0
-  let result = Math.max(0, doc.childCount - 1)
+  let index = 0;
+  let result = Math.max(0, doc.childCount - 1);
   doc.forEach((node, offset) => {
-    if (pos >= offset && pos <= offset + node.nodeSize) result = index
-    index++
-  })
-  return result
+    if (pos >= offset && pos <= offset + node.nodeSize) result = index;
+    index++;
+  });
+  return result;
 }
 
 /** flat listing of every pending tracked change; backs the read_revisions tool */
 export function buildRevisionsContext(editor: Editor): string {
-  const revisions = collectRevisions(editor.state.doc)
-  if (revisions.length === 0) return '(the document has no tracked revisions)'
-  const doc = editor.state.doc
-  const shown = revisions.slice(0, REVISIONS_CONTEXT_MAX)
+  const revisions = collectRevisions(editor.state.doc);
+  if (revisions.length === 0) return "(the document has no tracked revisions)";
+  const doc = editor.state.doc;
+  const shown = revisions.slice(0, REVISIONS_CONTEXT_MAX);
   const lines = shown.map((rev) => {
-    const text = doc.textBetween(rev.from, rev.to, '\n', ' ').replace(/\s+/g, ' ').trim()
-    const date = rev.date ? ` on ${rev.date.slice(0, 10)}` : ''
-    const excerpt = text ? `: "${clip(text, 200)}"` : ''
-    return `- block ${blockIndexOfPos(doc, rev.from)} | ${REVISION_KIND_LABEL[rev.kind]} by ${rev.author || 'unknown'}${date}${excerpt}`
-  })
-  const header = `Tracked revisions (${revisions.length} pending; deleted text shows what will disappear on accept):`
+    const text = doc.textBetween(rev.from, rev.to, "\n", " ").replace(/\s+/g, " ").trim();
+    const date = rev.date ? ` on ${rev.date.slice(0, 10)}` : "";
+    const excerpt = text ? `: "${clip(text, 200)}"` : "";
+    return `- block ${blockIndexOfPos(doc, rev.from)} | ${REVISION_KIND_LABEL[rev.kind]} by ${rev.author || "unknown"}${date}${excerpt}`;
+  });
+  const header = `Tracked revisions (${revisions.length} pending; deleted text shows what will disappear on accept):`;
   const overflow =
     revisions.length > shown.length
       ? [`…and ${revisions.length - shown.length} more revision(s) not listed.`]
-      : []
-  return [header, ...lines, ...overflow].join('\n')
+      : [];
+  return [header, ...lines, ...overflow].join("\n");
 }
 
 // ---- comments context ----
 
 export interface CommentAnchor {
-  blockIndex: number
-  excerpt: string
+  blockIndex: number;
+  excerpt: string;
 }
 
 /** anchored block + anchor text per comment id (text marks first, block-attr ranges as fallback) */
 export function commentAnchors(editor: Editor): Map<string, CommentAnchor> {
-  const found = new Map<string, { blockIndex: number; text: string }>()
-  let index = 0
+  const found = new Map<string, { blockIndex: number; text: string }>();
+  let index = 0;
   editor.state.doc.forEach((block) => {
     block.descendants((node) => {
-      if (!node.isText) return
-      const mark = node.marks.find((m) => m.type.name === 'comment')
-      if (!mark) return
-      for (const id of String(mark.attrs.ids ?? '')
-        .split(' ')
+      if (!node.isText) return;
+      const mark = node.marks.find((m) => m.type.name === "comment");
+      if (!mark) return;
+      for (const id of String(mark.attrs.ids ?? "")
+        .split(" ")
         .filter(Boolean)) {
-        const entry = found.get(id) ?? { blockIndex: index, text: '' }
-        entry.text += node.text ?? ''
-        found.set(id, entry)
+        const entry = found.get(id) ?? { blockIndex: index, text: "" };
+        entry.text += node.text ?? "";
+        found.set(id, entry);
       }
-    })
+    });
     const starts = Array.isArray(block.attrs?.commentStarts)
       ? (block.attrs.commentStarts as string[])
-      : []
+      : [];
     for (const id of starts) {
-      if (!found.has(id)) found.set(id, { blockIndex: index, text: block.textContent })
+      if (!found.has(id)) found.set(id, { blockIndex: index, text: block.textContent });
     }
-    index++
-  })
-  const anchors = new Map<string, CommentAnchor>()
+    index++;
+  });
+  const anchors = new Map<string, CommentAnchor>();
   for (const [id, entry] of found) {
     anchors.set(id, {
       blockIndex: entry.blockIndex,
-      excerpt: clip(entry.text.replace(/\s+/g, ' ').trim(), 80),
-    })
+      excerpt: clip(entry.text.replace(/\s+/g, " ").trim(), 80),
+    });
   }
-  return anchors
+  return anchors;
 }
 
-const COMMENTS_CONTEXT_MAX = 20
+const COMMENTS_CONTEXT_MAX = 20;
 
 /**
  * Unresolved comment threads for the per-turn context (roots with their
@@ -656,40 +656,40 @@ const COMMENTS_CONTEXT_MAX = 20
  * resolved threads — that variant backs the read_comments tool.
  */
 export function buildCommentsContext(editor: Editor, comments: CommentInfo[], all = false): string {
-  const anchors = commentAnchors(editor)
-  const roots = comments.filter((c) => !c.parentId && (all || c.done !== true))
-  if (roots.length === 0) return all ? '(the document has no comments)' : ''
-  const shown = all ? roots : roots.slice(0, COMMENTS_CONTEXT_MAX)
+  const anchors = commentAnchors(editor);
+  const roots = comments.filter((c) => !c.parentId && (all || c.done !== true));
+  if (roots.length === 0) return all ? "(the document has no comments)" : "";
+  const shown = all ? roots : roots.slice(0, COMMENTS_CONTEXT_MAX);
   const lines: string[] = [
     all
-      ? 'All comment threads (including resolved):'
-      : 'Unresolved comments (address with reply_comment / resolve_comment by id):',
-  ]
+      ? "All comment threads (including resolved):"
+      : "Unresolved comments (address with reply_comment / resolve_comment by id):",
+  ];
   for (const root of shown) {
-    const anchor = anchors.get(root.id)
+    const anchor = anchors.get(root.id);
     const where = anchor
       ? `block ${anchor.blockIndex}, anchored text "${anchor.excerpt}"`
-      : 'anchor missing'
-    const state = all && root.done === true ? ' [resolved]' : ''
-    lines.push(`- id ${root.id} by ${root.author} (${where})${state}: ${clip(root.text, 300)}`)
+      : "anchor missing";
+    const state = all && root.done === true ? " [resolved]" : "";
+    lines.push(`- id ${root.id} by ${root.author} (${where})${state}: ${clip(root.text, 300)}`);
     for (const reply of comments.filter((c) => c.parentId === root.id)) {
-      lines.push(`  - reply id ${reply.id} by ${reply.author}: ${clip(reply.text, 300)}`)
+      lines.push(`  - reply id ${reply.id} by ${reply.author}: ${clip(reply.text, 300)}`);
     }
   }
   if (!all && roots.length > shown.length) {
     lines.push(
       `…and ${roots.length - shown.length} more unresolved thread(s); use read_comments for the full list.`,
-    )
+    );
   }
-  return lines.join('\n')
+  return lines.join("\n");
 }
 
 /** Blank = exactly one empty paragraph; a textContent check would misread image/chart-only documents as blank. */
 export function isBlankDocument(editor: Editor): boolean {
-  const doc = editor.state.doc
-  if (doc.childCount !== 1) return false
-  const first = doc.child(0)
-  return first.type.name === 'docParagraph' && first.content.size === 0
+  const doc = editor.state.doc;
+  if (doc.childCount !== 1) return false;
+  const first = doc.child(0);
+  return first.type.name === "docParagraph" && first.content.size === 0;
 }
 
 /**
@@ -703,31 +703,31 @@ export function buildDocContext(
   comments?: CommentInfo[],
   hf?: AiHfState,
 ): string {
-  const isEmptyDoc = isBlankDocument(editor)
-  scope ??= getSelectionScope(editor)
+  const isEmptyDoc = isBlankDocument(editor);
+  scope ??= getSelectionScope(editor);
   const selectionHtml = scope.isRange
     ? clip(serializeRangeToHtml(editor, scope.startIndex, scope.endIndex), SELECTION_MAX_CHARS)
-    : ''
+    : "";
   return [
     isEmptyDoc
-      ? 'The document is currently blank.'
+      ? "The document is currently blank."
       : `Document block list:\n${buildDocumentContext(editor, scope, hf)}`,
     // a blank body can still carry headers/footers (template setup): keep them visible
-    isEmptyDoc && hf ? hfContextLines(hf).join('\n') : '',
+    isEmptyDoc && hf ? hfContextLines(hf).join("\n") : "",
     selectionHtml
       ? `Content selected by the user (blocks ${scope.startIndex}-${scope.endIndex}):\n${selectionHtml}`
-      : '',
-    comments && comments.length > 0 ? buildCommentsContext(editor, comments) : '',
+      : "",
+    comments && comments.length > 0 ? buildCommentsContext(editor, comments) : "",
   ]
     .filter(Boolean)
-    .join('\n\n')
+    .join("\n\n");
 }
 
 // ---- restricted HTML fragment -> PmNode[] ----
 
 export interface NumIds {
-  bullet: string | null
-  ordered: string | null
+  bullet: string | null;
+  ordered: string | null;
 }
 
 /**
@@ -736,152 +736,152 @@ export interface NumIds {
  * byte-stable through parse -> generate -> parse (no schema/signature change).
  */
 export const CODE_BLOCK_PRESET = {
-  font: 'Consolas',
-  shadingFill: 'F2F2F2',
-  borders: 'tblr',
-} as const
+  font: "Consolas",
+  shadingFill: "F2F2F2",
+  borders: "tblr",
+} as const;
 export const QUOTE_BLOCK_PRESET = {
-  color: '666666',
+  color: "666666",
   indentLeft: 720,
-  borders: 'l',
-} as const
+  borders: "l",
+} as const;
 
 /** pick an existing numbering id of the right kind so new list items join real docx numbering */
-export function findNumId(blocks: Block[], kind: 'bullet' | 'ordered'): string | null {
+export function findNumId(blocks: Block[], kind: "bullet" | "ordered"): string | null {
   for (const block of blocks) {
-    if (block.type === 'listItem' && block.list?.kind === kind) return block.list.numId
+    if (block.type === "listItem" && block.list?.kind === kind) return block.list.numId;
   }
-  return null
+  return null;
 }
 
 const INLINE_MARK_TAGS: Record<string, string> = {
-  strong: 'bold',
-  b: 'bold',
-  em: 'italic',
-  i: 'italic',
-  u: 'underline',
-  s: 'strike',
-  del: 'strike',
-  strike: 'strike',
-}
+  strong: "bold",
+  b: "bold",
+  em: "italic",
+  i: "italic",
+  u: "underline",
+  s: "strike",
+  del: "strike",
+  strike: "strike",
+};
 
 function parseInline(element: Node, marks: PmMark[]): PmNode[] {
-  const nodes: PmNode[] = []
+  const nodes: PmNode[] = [];
   element.childNodes.forEach((child) => {
     if (child.nodeType === Node.TEXT_NODE) {
-      const text = (child.textContent ?? '').replace(/\s+/g, ' ')
+      const text = (child.textContent ?? "").replace(/\s+/g, " ");
       if (text)
-        nodes.push({ type: 'text', text, ...(marks.length > 0 ? { marks: [...marks] } : {}) })
-      return
+        nodes.push({ type: "text", text, ...(marks.length > 0 ? { marks: [...marks] } : {}) });
+      return;
     }
-    if (child.nodeType !== Node.ELEMENT_NODE) return
-    const el = child as Element
-    const tag = el.tagName.toLowerCase()
-    if (tag === 'br') {
-      nodes.push({ type: 'hardBreak' })
-      return
+    if (child.nodeType !== Node.ELEMENT_NODE) return;
+    const el = child as Element;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "br") {
+      nodes.push({ type: "hardBreak" });
+      return;
     }
-    if (tag === 'a') {
-      const href = el.getAttribute('href') ?? ''
-      nodes.push(...parseInline(el, [...marks, { type: 'link', attrs: { href, rId: null } }]))
-      return
+    if (tag === "a") {
+      const href = el.getAttribute("href") ?? "";
+      nodes.push(...parseInline(el, [...marks, { type: "link", attrs: { href, rId: null } }]));
+      return;
     }
-    if (tag === 'formula') {
-      const latex = (el.textContent ?? '').trim()
-      if (!latex) return
+    if (tag === "formula") {
+      const latex = (el.textContent ?? "").trim();
+      if (!latex) return;
       try {
-        nodes.push(inlineEquationNodeJson(latex))
+        nodes.push(inlineEquationNodeJson(latex));
       } catch (e) {
-        const reason = e instanceof Error ? e.message : String(e)
-        throw new Error(`Cannot parse the LaTeX in <formula> (${reason}): ${latex}`, { cause: e })
+        const reason = e instanceof Error ? e.message : String(e);
+        throw new Error(`Cannot parse the LaTeX in <formula> (${reason}): ${latex}`, { cause: e });
       }
-      return
+      return;
     }
-    const markType = INLINE_MARK_TAGS[tag]
+    const markType = INLINE_MARK_TAGS[tag];
     if (markType) {
-      const next = marks.some((m) => m.type === markType) ? marks : [...marks, { type: markType }]
-      nodes.push(...parseInline(el, next))
-      return
+      const next = marks.some((m) => m.type === markType) ? marks : [...marks, { type: markType }];
+      nodes.push(...parseInline(el, next));
+      return;
     }
     // unknown inline tag (span etc.): keep its text content
-    nodes.push(...parseInline(el, marks))
-  })
-  return nodes
+    nodes.push(...parseInline(el, marks));
+  });
+  return nodes;
 }
 
 function blockNode(type: string, attrs: Record<string, unknown>, content: PmNode[]): PmNode {
   const node: PmNode = {
     type,
     attrs: { docxIndex: null, styleId: null, aiChanged: true, ...attrs },
-  }
-  if (content.length > 0) node.content = content
-  return node
+  };
+  if (content.length > 0) node.content = content;
+  return node;
 }
 
 function parseList(
   el: Element,
-  kind: 'bullet' | 'ordered',
+  kind: "bullet" | "ordered",
   ilvl: number,
   numIds: NumIds,
   out: PmNode[],
 ): void {
   el.childNodes.forEach((child) => {
-    if (child.nodeType !== Node.ELEMENT_NODE) return
-    const item = child as Element
-    const tag = item.tagName.toLowerCase()
-    if (tag === 'ul' || tag === 'ol') {
-      parseList(item, tag === 'ol' ? 'ordered' : 'bullet', ilvl + 1, numIds, out)
-      return
+    if (child.nodeType !== Node.ELEMENT_NODE) return;
+    const item = child as Element;
+    const tag = item.tagName.toLowerCase();
+    if (tag === "ul" || tag === "ol") {
+      parseList(item, tag === "ol" ? "ordered" : "bullet", ilvl + 1, numIds, out);
+      return;
     }
-    if (tag !== 'li') return
+    if (tag !== "li") return;
     // extract nested lists first so their items follow this one
-    const nested: Element[] = []
-    item.querySelectorAll(':scope > ul, :scope > ol').forEach((n) => {
-      nested.push(n)
-      n.remove()
-    })
+    const nested: Element[] = [];
+    item.querySelectorAll(":scope > ul, :scope > ol").forEach((n) => {
+      nested.push(n);
+      n.remove();
+    });
     out.push(
       blockNode(
-        'docListItem',
+        "docListItem",
         { kind, numId: numIds[kind], ilvl: Math.min(ilvl, 4) },
         parseInline(item, []),
       ),
-    )
+    );
     for (const n of nested) {
-      parseList(n, n.tagName.toLowerCase() === 'ol' ? 'ordered' : 'bullet', ilvl + 1, numIds, out)
+      parseList(n, n.tagName.toLowerCase() === "ol" ? "ordered" : "bullet", ilvl + 1, numIds, out);
     }
-  })
+  });
 }
 
 /** paragraph texts of one table cell: <br> and nested <p>/<div> split paragraphs */
 function cellParas(cell: Element): string[] {
-  const paras: string[] = []
-  let current = ''
+  const paras: string[] = [];
+  let current = "";
   const push = () => {
-    paras.push(current.replace(/\s+/g, ' ').trim())
-    current = ''
-  }
+    paras.push(current.replace(/\s+/g, " ").trim());
+    current = "";
+  };
   const walk = (node: Node) => {
     node.childNodes.forEach((child) => {
       if (child.nodeType === Node.TEXT_NODE) {
-        current += child.textContent ?? ''
-        return
+        current += child.textContent ?? "";
+        return;
       }
-      if (child.nodeType !== Node.ELEMENT_NODE) return
-      const el = child as Element
-      const tag = el.tagName.toLowerCase()
-      if (tag === 'br') push()
-      else if (tag === 'p' || tag === 'div') {
-        if (current.trim()) push()
-        walk(el)
-        push()
-      } else walk(el)
-    })
-  }
-  walk(cell)
-  if (current.trim()) push()
-  const out = paras.filter((p, i) => p !== '' || (i > 0 && i < paras.length - 1))
-  return out.length > 0 ? out : ['']
+      if (child.nodeType !== Node.ELEMENT_NODE) return;
+      const el = child as Element;
+      const tag = el.tagName.toLowerCase();
+      if (tag === "br") push();
+      else if (tag === "p" || tag === "div") {
+        if (current.trim()) push();
+        walk(el);
+        push();
+      } else walk(el);
+    });
+  };
+  walk(cell);
+  if (current.trim()) push();
+  const out = paras.filter((p, i) => p !== "" || (i > 0 && i < paras.length - 1));
+  return out.length > 0 ? out : [""];
 }
 
 /**
@@ -891,58 +891,60 @@ function cellParas(cell: Element): string[] {
  * model row/col counts must mirror the generated grid.
  */
 function parseTable(el: Element): PmNode | null {
-  const trs = Array.from(el.querySelectorAll('tr'))
-  if (trs.length === 0) return null
-  const rawRows = trs.map((tr) => Array.from(tr.children).filter((c) => /^t[hd]$/i.test(c.tagName)))
-  const cols = Math.max(...rawRows.map((r) => r.length))
-  if (cols === 0) return null
-  const headerRow = rawRows[0].some((c) => c.tagName.toLowerCase() === 'th')
+  const trs = Array.from(el.querySelectorAll("tr"));
+  if (trs.length === 0) return null;
+  const rawRows = trs.map((tr) =>
+    Array.from(tr.children).filter((c) => /^t[hd]$/i.test(c.tagName)),
+  );
+  const cols = Math.max(...rawRows.map((r) => r.length));
+  if (cols === 0) return null;
+  const headerRow = rawRows[0].some((c) => c.tagName.toLowerCase() === "th");
   const rows: TableCell[][] = rawRows.map((cells, r) => {
-    const isHeader = headerRow && r === 0
+    const isHeader = headerRow && r === 0;
     const row: TableCell[] = cells.map((cell) => ({
       paras: cellParas(cell),
       ...(isHeader ? { bold: true, fill: TABLE_HEADER_FILL } : {}),
-    }))
+    }));
     while (row.length < cols)
-      row.push({ paras: [''], ...(isHeader ? { bold: true, fill: TABLE_HEADER_FILL } : {}) })
-    return row
-  })
+      row.push({ paras: [""], ...(isHeader ? { bold: true, fill: TABLE_HEADER_FILL } : {}) });
+    return row;
+  });
   // equal column grid, like the ribbon insert and the save-path backfill
   // (pmTableToModel): without colWidthsPct the table renders with no <colgroup>,
   // leaving the fixed-layout column grid to the browser — fragile against
   // spanning pagination widgets and different from what a save/reload shows
-  const table: TableModel = { rows, colWidthsPct: Array.from({ length: cols }, () => 100 / cols) }
-  return tableModelToPmNode(table)
+  const table: TableModel = { rows, colWidthsPct: Array.from({ length: cols }, () => 100 / cols) };
+  return tableModelToPmNode(table);
 }
 
 /** <pre> -> mono/shaded paragraph; newlines preserved as hard breaks */
 function parseCodeBlock(el: Element): PmNode | null {
-  const text = (el.textContent ?? '').replace(/^\n/, '').replace(/\s+$/, '')
-  if (!text) return null
+  const text = (el.textContent ?? "").replace(/^\n/, "").replace(/\s+$/, "");
+  if (!text) return null;
   // Latin slot only: monospace applies to code text, an inherited CJK font stays intact
-  const mark: PmMark = { type: 'docTextStyle', attrs: { fontAscii: CODE_BLOCK_PRESET.font } }
-  const content: PmNode[] = []
-  text.split('\n').forEach((line, i) => {
-    if (i > 0) content.push({ type: 'hardBreak' })
-    if (line !== '') content.push({ type: 'text', text: line, marks: [mark] })
-  })
+  const mark: PmMark = { type: "docTextStyle", attrs: { fontAscii: CODE_BLOCK_PRESET.font } };
+  const content: PmNode[] = [];
+  text.split("\n").forEach((line, i) => {
+    if (i > 0) content.push({ type: "hardBreak" });
+    if (line !== "") content.push({ type: "text", text: line, marks: [mark] });
+  });
   return blockNode(
-    'docParagraph',
+    "docParagraph",
     { shadingFill: CODE_BLOCK_PRESET.shadingFill, borders: CODE_BLOCK_PRESET.borders },
     content,
-  )
+  );
 }
 
 /** <blockquote> -> indented gray paragraph with a left border */
 function parseBlockquote(el: Element): PmNode | null {
-  const mark: PmMark = { type: 'docTextStyle', attrs: { color: QUOTE_BLOCK_PRESET.color } }
-  const inline = parseInline(el, [mark])
-  if (inline.length === 0) return null
+  const mark: PmMark = { type: "docTextStyle", attrs: { color: QUOTE_BLOCK_PRESET.color } };
+  const inline = parseInline(el, [mark]);
+  if (inline.length === 0) return null;
   return blockNode(
-    'docParagraph',
+    "docParagraph",
     { indentLeft: QUOTE_BLOCK_PRESET.indentLeft, borders: QUOTE_BLOCK_PRESET.borders },
     inline,
-  )
+  );
 }
 
 /**
@@ -950,83 +952,83 @@ function parseBlockquote(el: Element): PmNode | null {
  * Tolerates markdown code fences and plain-text responses.
  */
 export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
-  let text = raw.trim()
-  const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(text)
-  if (fence) text = fence[1].trim()
-  if (!text) return []
+  let text = raw.trim();
+  const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(text);
+  if (fence) text = fence[1].trim();
+  if (!text) return [];
 
   // plain text response (no tags): one paragraph per blank-line-separated chunk
   if (!/<[a-z][\s\S]*>/i.test(text)) {
     return text
       .split(/\n{2,}/)
       .map((para) =>
-        blockNode('docParagraph', {}, [{ type: 'text', text: para.replace(/\s+/g, ' ').trim() }]),
+        blockNode("docParagraph", {}, [{ type: "text", text: para.replace(/\s+/g, " ").trim() }]),
       )
-      .filter((n) => n.content?.[0]?.text)
+      .filter((n) => n.content?.[0]?.text);
   }
 
-  const parsed = new DOMParser().parseFromString(text, 'text/html')
-  const out: PmNode[] = []
+  const parsed = new DOMParser().parseFromString(text, "text/html");
+  const out: PmNode[] = [];
   const pushFormula = (el: Element) => {
-    const latex = (el.textContent ?? '').trim()
-    if (!latex) return
+    const latex = (el.textContent ?? "").trim();
+    if (!latex) return;
     try {
-      out.push(equationBlockJson(latex))
+      out.push(equationBlockJson(latex));
     } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e)
-      throw new Error(`Cannot parse the LaTeX in <formula> (${reason}): ${latex}`, { cause: e })
+      const reason = e instanceof Error ? e.message : String(e);
+      throw new Error(`Cannot parse the LaTeX in <formula> (${reason}): ${latex}`, { cause: e });
     }
-  }
+  };
   parsed.body.childNodes.forEach((child) => {
     if (child.nodeType === Node.TEXT_NODE) {
-      const t = (child.textContent ?? '').trim()
-      if (t) out.push(blockNode('docParagraph', {}, [{ type: 'text', text: t }]))
-      return
+      const t = (child.textContent ?? "").trim();
+      if (t) out.push(blockNode("docParagraph", {}, [{ type: "text", text: t }]));
+      return;
     }
-    if (child.nodeType !== Node.ELEMENT_NODE) return
-    const el = child as Element
-    const tag = el.tagName.toLowerCase()
-    const headingMatch = /^h([1-6])$/.exec(tag)
+    if (child.nodeType !== Node.ELEMENT_NODE) return;
+    const el = child as Element;
+    const tag = el.tagName.toLowerCase();
+    const headingMatch = /^h([1-6])$/.exec(tag);
     if (headingMatch) {
-      out.push(blockNode('docHeading', { level: Number(headingMatch[1]) }, parseInline(el, [])))
-    } else if (tag === 'ul' || tag === 'ol') {
-      parseList(el, tag === 'ol' ? 'ordered' : 'bullet', 0, numIds, out)
-    } else if (tag === 'table') {
-      const node = parseTable(el)
-      if (node) out.push(node)
-    } else if (tag === 'pre') {
-      const node = parseCodeBlock(el)
-      if (node) out.push(node)
-    } else if (tag === 'blockquote') {
-      const node = parseBlockquote(el)
-      if (node) out.push(node)
-    } else if (tag === 'formula') {
-      pushFormula(el)
-    } else if (tag === 'p' || tag === 'div') {
-      const inline = parseInline(el, [])
-      if (inline.length > 0) out.push(blockNode('docParagraph', {}, inline))
+      out.push(blockNode("docHeading", { level: Number(headingMatch[1]) }, parseInline(el, [])));
+    } else if (tag === "ul" || tag === "ol") {
+      parseList(el, tag === "ol" ? "ordered" : "bullet", 0, numIds, out);
+    } else if (tag === "table") {
+      const node = parseTable(el);
+      if (node) out.push(node);
+    } else if (tag === "pre") {
+      const node = parseCodeBlock(el);
+      if (node) out.push(node);
+    } else if (tag === "blockquote") {
+      const node = parseBlockquote(el);
+      if (node) out.push(node);
+    } else if (tag === "formula") {
+      pushFormula(el);
+    } else if (tag === "p" || tag === "div") {
+      const inline = parseInline(el, []);
+      if (inline.length > 0) out.push(blockNode("docParagraph", {}, inline));
     } else {
       // unknown block-ish tag: salvage the text
-      const t = (el.textContent ?? '').trim()
-      if (t) out.push(blockNode('docParagraph', {}, [{ type: 'text', text: t }]))
+      const t = (el.textContent ?? "").trim();
+      if (t) out.push(blockNode("docParagraph", {}, [{ type: "text", text: t }]));
     }
-  })
-  return out
+  });
+  return out;
 }
 
 // ---- applying parsed fragments ----
 
 /** record the AI's content change as tracked revisions under this author */
 export interface AiTrack {
-  author: string
+  author: string;
 }
 
 function revisionDate(): string {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 /** blocks whose content ins/del marks can fully represent (tracked replace) */
-const TRACKABLE_TYPES = new Set(['docParagraph', 'docHeading', 'docListItem'])
+const TRACKABLE_TYPES = new Set(["docParagraph", "docHeading", "docListItem"]);
 
 // ---- formatting inheritance for rewrites ----
 
@@ -1054,50 +1056,50 @@ export function inheritBlockFormatting(
   nodes: PmNode[],
   anchors: boolean,
 ): PmNode[] {
-  const doc = editor.state.doc
-  const templates: Array<{ node: ProseMirrorNode; at: number }> = []
-  const tables: Array<{ node: ProseMirrorNode; at: number }> = []
+  const doc = editor.state.doc;
+  const templates: Array<{ node: ProseMirrorNode; at: number }> = [];
+  const tables: Array<{ node: ProseMirrorNode; at: number }> = [];
   for (let i = startIndex; i <= Math.min(endIndex, doc.childCount - 1); i++) {
-    const node = doc.child(i)
-    if (isTrackedDeleted(node)) continue
-    if (TRACKABLE_TYPES.has(node.type.name)) templates.push({ node, at: i })
-    else if (node.type.name === 'docTable') tables.push({ node, at: i })
+    const node = doc.child(i);
+    if (isTrackedDeleted(node)) continue;
+    if (TRACKABLE_TYPES.has(node.type.name)) templates.push({ node, at: i });
+    else if (node.type.name === "docTable") tables.push({ node, at: i });
   }
-  if (templates.length === 0 && tables.length === 0) return nodes
-  let cursor = 0
-  let tableCursor = 0
+  if (templates.length === 0 && tables.length === 0) return nodes;
+  let cursor = 0;
+  let tableCursor = 0;
   // document index of the last block whose docxIndex was lent
-  let lastAnchored = -1
-  const used = new Set<number>()
+  let lastAnchored = -1;
+  const used = new Set<number>();
   return nodes.map((next) => {
-    if (next.type === 'docTable') {
-      const table = tables[tableCursor]
-      if (!table) return next
-      tableCursor++
-      const anchor = anchors && table.at > lastAnchored
-      if (anchor) lastAnchored = table.at
-      return inheritTableFormatting(table.node, next, { anchor })
+    if (next.type === "docTable") {
+      const table = tables[tableCursor];
+      if (!table) return next;
+      tableCursor++;
+      const anchor = anchors && table.at > lastAnchored;
+      if (anchor) lastAnchored = table.at;
+      return inheritTableFormatting(table.node, next, { anchor });
     }
-    if (!TRACKABLE_TYPES.has(next.type)) return next
-    let j = templates.findIndex((t, k) => k >= cursor && sameBlockRole(t.node, next))
-    if (j !== -1) cursor = j + 1
+    if (!TRACKABLE_TYPES.has(next.type)) return next;
+    let j = templates.findIndex((t, k) => k >= cursor && sameBlockRole(t.node, next));
+    if (j !== -1) cursor = j + 1;
     else {
       for (let k = Math.min(cursor, templates.length) - 1; k >= 0; k--) {
         if (sameBlockRole(templates[k].node, next)) {
-          j = k
-          break
+          j = k;
+          break;
         }
       }
     }
-    if (j === -1) return next
-    const first = !used.has(j)
-    used.add(j)
+    if (j === -1) return next;
+    const first = !used.has(j);
+    used.add(j);
     // anchors additionally keep document order: a template reused out of
     // order lends its formatting but not its docxIndex
-    const anchor = anchors && templates[j].at > lastAnchored
-    if (anchor) lastAnchored = templates[j].at
-    return inheritFrom(templates[j].node, next, { anchor, first })
-  })
+    const anchor = anchors && templates[j].at > lastAnchored;
+    if (anchor) lastAnchored = templates[j].at;
+    return inheritFrom(templates[j].node, next, { anchor, first });
+  });
 }
 
 /**
@@ -1114,44 +1116,44 @@ export function replaceBlockRange(
   parsed: PmNode[],
   track?: AiTrack,
 ): boolean {
-  if (parsed.length === 0) return false
+  if (parsed.length === 0) return false;
   // a tracked rewrite keeps the old blocks (struck through) next to the new
   // ones, so the anchors stay with the old blocks until the user accepts
-  const nodes = inheritBlockFormatting(editor, startIndex, endIndex, parsed, !track)
-  const { from, to } = blockRangePositions(editor, startIndex, endIndex)
-  const pmNodes = nodes.map((n) => editor.schema.nodeFromJSON(n))
+  const nodes = inheritBlockFormatting(editor, startIndex, endIndex, parsed, !track);
+  const { from, to } = blockRangePositions(editor, startIndex, endIndex);
+  const pmNodes = nodes.map((n) => editor.schema.nodeFromJSON(n));
 
-  let oldTrackable = true
+  let oldTrackable = true;
   editor.state.doc.nodesBetween(from, to, (node, _pos, parent) => {
-    if (parent === editor.state.doc && !TRACKABLE_TYPES.has(node.type.name)) oldTrackable = false
-    return false
-  })
-  const newTrackable = nodes.every((n) => TRACKABLE_TYPES.has(n.type))
+    if (parent === editor.state.doc && !TRACKABLE_TYPES.has(node.type.name)) oldTrackable = false;
+    return false;
+  });
+  const newTrackable = nodes.every((n) => TRACKABLE_TYPES.has(n.type));
   if (track && oldTrackable && newTrackable) {
-    const { ins, del } = editor.schema.marks
-    const date = revisionDate()
+    const { ins, del } = editor.schema.marks;
+    const date = revisionDate();
     // revision marks are the change indicator; no yellow aiChanged on top
     const tracked = nodes.map((n) =>
       editor.schema.nodeFromJSON({ ...n, attrs: { ...n.attrs, aiChanged: false } }),
-    )
-    const inserted = tracked.reduce((size, n) => size + n.nodeSize, 0)
-    const tr = editor.state.tr
-    tr.setMeta(TRACK_IGNORE, true)
-    if (editor.state.doc.textBetween(from, to, '\n').trim() === '') {
+    );
+    const inserted = tracked.reduce((size, n) => size + n.nodeSize, 0);
+    const tr = editor.state.tr;
+    tr.setMeta(TRACK_IGNORE, true);
+    if (editor.state.doc.textBetween(from, to, "\n").trim() === "") {
       // nothing to strike through (blank paragraphs): replace outright
-      tr.replaceWith(from, to, tracked)
-      tr.addMark(from, from + inserted, ins.create({ author: track.author, date }))
+      tr.replaceWith(from, to, tracked);
+      tr.addMark(from, from + inserted, ins.create({ author: track.author, date }));
     } else {
-      tr.insert(to, tracked)
-      tr.addMark(to, to + inserted, ins.create({ author: track.author, date }))
-      tr.addMark(from, to, del.create({ author: track.author, date }))
+      tr.insert(to, tracked);
+      tr.addMark(to, to + inserted, ins.create({ author: track.author, date }));
+      tr.addMark(from, to, del.create({ author: track.author, date }));
     }
-    editor.view.dispatch(tr)
-    return true
+    editor.view.dispatch(tr);
+    return true;
   }
   if (track) {
-    const date = revisionDate()
-    const oldNodes: ProseMirrorNode[] = []
+    const date = revisionDate();
+    const oldNodes: ProseMirrorNode[] = [];
     editor.state.doc.nodesBetween(from, to, (node, _pos, parent) => {
       if (parent === editor.state.doc) {
         oldNodes.push(
@@ -1159,33 +1161,33 @@ export function replaceBlockRange(
             {
               ...node.attrs,
               aiChanged: false,
-              blockRevision: { kind: 'del', author: track.author, date },
+              blockRevision: { kind: "del", author: track.author, date },
             },
             node.content,
             node.marks,
           ),
-        )
+        );
       }
-      return false
-    })
+      return false;
+    });
     const inserted = pmNodes.map((node) =>
       node.type.create(
         {
           ...node.attrs,
           aiChanged: false,
-          blockRevision: { kind: 'ins', author: track.author, date },
+          blockRevision: { kind: "ins", author: track.author, date },
         },
         node.content,
         node.marks,
       ),
-    )
-    const tr = editor.state.tr.replaceWith(from, to, [...oldNodes, ...inserted])
-    tr.setMeta(TRACK_IGNORE, true)
-    editor.view.dispatch(tr)
-    return true
+    );
+    const tr = editor.state.tr.replaceWith(from, to, [...oldNodes, ...inserted]);
+    tr.setMeta(TRACK_IGNORE, true);
+    editor.view.dispatch(tr);
+    return true;
   }
-  editor.view.dispatch(editor.state.tr.replaceWith(from, to, pmNodes))
-  return true
+  editor.view.dispatch(editor.state.tr.replaceWith(from, to, pmNodes));
+  return true;
 }
 
 /** insert the parsed nodes after the given top-level block index */
@@ -1195,32 +1197,32 @@ export function insertBlocksAfter(
   nodes: PmNode[],
   track?: AiTrack,
 ): boolean {
-  if (nodes.length === 0) return false
-  const { to } = blockRangePositions(editor, index, index)
+  if (nodes.length === 0) return false;
+  const { to } = blockRangePositions(editor, index, index);
   const pmNodes = nodes.map((n) =>
     editor.schema.nodeFromJSON(track ? { ...n, attrs: { ...n.attrs, aiChanged: false } } : n),
-  )
-  const tr = editor.state.tr.insert(to, pmNodes)
+  );
+  const tr = editor.state.tr.insert(to, pmNodes);
   if (track) {
-    const date = revisionDate()
-    let offset = to
+    const date = revisionDate();
+    let offset = to;
     for (const node of pmNodes) {
       if (TRACKABLE_TYPES.has(node.type.name)) {
         tr.addMark(
           offset,
           offset + node.nodeSize,
           editor.schema.marks.ins.create({ author: track.author, date }),
-        )
+        );
       } else {
         tr.setNodeMarkup(offset, undefined, {
           ...node.attrs,
-          blockRevision: { kind: 'ins', author: track.author, date },
-        })
+          blockRevision: { kind: "ins", author: track.author, date },
+        });
       }
-      offset += node.nodeSize
+      offset += node.nodeSize;
     }
-    tr.setMeta(TRACK_IGNORE, true)
+    tr.setMeta(TRACK_IGNORE, true);
   }
-  editor.view.dispatch(tr)
-  return true
+  editor.view.dispatch(tr);
+  return true;
 }

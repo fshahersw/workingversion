@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { validateSaveByteSize } from "./ingest-state.ts";
 import { test } from "node:test";
 
 import {
@@ -28,8 +29,14 @@ test("save lane plan never produces a request the server would reject", () => {
     "sync",
   );
   // No text and no bytes: nothing can be indexed, so the document is left out.
-  assert.equal(planSaveLane({ readablePages: 0, totalChars: 0, lowQuality: true, hasBytes: false }), "skip");
-  assert.equal(planSaveLane({ readablePages: 0, totalChars: 0, lowQuality: true, hasBytes: true }), "async");
+  assert.equal(
+    planSaveLane({ readablePages: 0, totalChars: 0, lowQuality: true, hasBytes: false }),
+    "skip",
+  );
+  assert.equal(
+    planSaveLane({ readablePages: 0, totalChars: 0, lowQuality: true, hasBytes: true }),
+    "async",
+  );
   // Over the synchronous limit behaves like "no text": async or skip.
   assert.equal(
     planSaveLane({
@@ -43,7 +50,8 @@ test("save lane plan never produces a request the server would reject", () => {
   // Every non-skip plan is accepted by the server-side lane check.
   assert.equal(selectIngestLane({ readablePages: 40, totalChars: 90_000 }).lane, "sync");
   assert.equal(
-    selectIngestLane({ readablePages: 0, totalChars: 0, bytesKey: "k", sha256: "a".repeat(64) }).lane,
+    selectIngestLane({ readablePages: 0, totalChars: 0, bytesKey: "k", sha256: "a".repeat(64) })
+      .lane,
     "async",
   );
 });
@@ -106,4 +114,10 @@ test("terminal summaries are generic, bounded, and contain no raw error input", 
     assert.doesNotMatch(summary, /arn:|uploads\/|exception|stack/i);
   }
   assert.equal(isTerminalErrorKind("AccessDeniedException"), false);
+});
+test("large searchable source can be preserved without inheriting the conversion size limit", () => {
+  assert.doesNotThrow(() => validateSaveByteSize(64 * 1024 * 1024, "sync"));
+  assert.throws(() => validateSaveByteSize(64 * 1024 * 1024, "async"), /background conversion/);
+  assert.throws(() => validateSaveByteSize(201 * 1024 * 1024, "sync"), /200 MiB/);
+  assert.throws(() => validateSaveByteSize(-1, "sync"));
 });

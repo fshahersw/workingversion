@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  runDocumentScan,
+  type DiscoveryScope,
+  type ScanCoverage,
+  type ScanWindowResult,
+} from "@/lib/pile/discovery-scan";
 
 import { extractFile, fileKind } from "@/lib/extract-text";
 import { streamSSE } from "@/lib/orchestrate";
@@ -120,6 +126,7 @@ export type PileState = {
   citePages: CitePage[];
   hasPack: boolean;
   kbSave: KbSaveState;
+  scanCoverage?: ScanCoverage | null;
 };
 
 const EMPTY: PileState = {
@@ -145,6 +152,7 @@ const EMPTY: PileState = {
 };
 
 export type AskOpts = {
+  scope?: DiscoveryScope;
   followUp?: boolean;
   fileIds?: string[];
   job?: PileJobId | null;
@@ -404,6 +412,23 @@ async function refreshStructure(
         pages: sample.pages,
       }),
     });
+    if (
+      !structure ||
+      !Array.isArray(structure.inventory) ||
+      ![structure.parties, structure.dates, structure.issues].every(
+        (items) => Array.isArray(items) && items.every((item) => typeof item === "string"),
+      ) ||
+      structure.inventory.some(
+        (row) =>
+          !row ||
+          typeof row.file !== "string" ||
+          typeof row.docType !== "string" ||
+          !Number.isFinite(row.pages),
+      )
+    )
+      throw new Error(
+        "Document classification returned incomplete metadata; source documents remain available.",
+      );
     apply(structure);
     step({ id: "structure", label: "Structure rail", status: "done" });
   } catch (e) {
@@ -430,6 +455,11 @@ export function usePile() {
   const askAbort = useRef<AbortController | null>(null);
   const saveAbort = useRef<AbortController | null>(null);
   const pagesRef = useRef<PilePage[]>([]);
+  const scanCache = useRef(new Map<string, ScanWindowResult>());
+  const lastScan = useRef<{ query: string; opts: AskOpts } | null>(null);
+  useEffect(() => {
+    scanCache.current.clear();
+  }, [user?.sub]);
   const sessionRef = useRef<PileSession | null>(null);
   const structureRef = useRef<PileStructure | null>(null);
   const pileRef = useRef<PileClient | null>(null);
@@ -501,6 +531,8 @@ export function usePile() {
   }, []);
 
   const reset = useCallback(() => {
+    scanCache.current.clear();
+    lastScan.current = null;
     ingestAbort.current?.abort();
     askAbort.current?.abort();
     saveAbort.current?.abort();
@@ -972,6 +1004,7 @@ export function usePile() {
         answer: "",
         error: null,
         citeReport: null,
+        scanCoverage: null,
         turns:
           s.answer.trim() && s.query.trim()
             ? [
@@ -988,6 +1021,85 @@ export function usePile() {
       step({ id: "ask", label: "Retrieving pages and drafting", status: "running" });
       try {
         const sess = sessionRef.current;
+        if (opts.scope === "full") {
+          lastScan.current = {
+            query: q,
+            opts: { ...opts, fileIds: opts.fileIds ? [...opts.fileIds] : undefined },
+          };
+          const selectedFiles = (sess?.files ?? []).filter(
+            (file) => !opts.fileIds || opts.fileIds.includes(file.id),
+          );
+          if (!selectedFiles.length) throw new Error("Select at least one document to scan");
+          lastPackRef.current = null;
+          const result = await runDocumentScan({
+            query: q,
+            instructions: [sess?.instructions, job?.instructions].filter(Boolean).join("\n\n"),
+            pages: pagesRef.current,
+            files: selectedFiles,
+            signal: controller.signal,
+            cache: scanCache.current,
+            onProgress: (scanCoverage) => {
+              if (!controller.signal.aborted) setState((s) => ({ ...s, scanCoverage }));
+            },
+          });
+          controller.signal.throwIfAborted();
+          const sourcePages = new Map(pagesRef.current.map((p) => [`${p.fileId}:${p.page}`, p]));
+          const citePages: CitePage[] = result.evidence.map((e) => ({
+            ref: e.ref,
+            fileId: e.fileId,
+            fileName: e.fileName,
+            page: e.page,
+            text: sourcePages.get(`${e.fileId}:${e.page}`)?.text ?? e.quote,
+            ocr: sourcePages.get(`${e.fileId}:${e.page}`)?.ocr ?? false,
+          }));
+          const hits: PileHit[] = result.evidence.map((e) => ({
+            fileId: e.fileId,
+            fileName: e.fileName,
+            page: e.page,
+            score: 1,
+            snippet: e.quote,
+          }));
+          const groups = selectedFiles.map((f) => ({
+            fileId: f.id,
+            fileName: f.name,
+            pageCount: f.pageCount,
+            matched: hits.some((h) => h.fileId === f.id),
+            topScore: 1,
+            hits: hits.filter((h) => h.fileId === f.id),
+          }));
+          setState((s) => ({
+            ...s,
+            answer: result.answer,
+            phase: "ready",
+            scanCoverage: result.coverage,
+            citePages,
+            hits,
+            groups,
+            hasPack: false,
+            citeReport: {
+              ...verifyAnswerCites(result.answer, citePages),
+              cites: result.evidence.map((e) => ({
+                ref: e.ref,
+                fileId: e.fileId,
+                fileName: e.fileName,
+                page: e.page,
+                label: `${e.fileName} p. ${e.page}`,
+                quote: e.quote,
+                match: "normalized" as const,
+                ocr: sourcePages.get(`${e.fileId}:${e.page}`)?.ocr ?? false,
+                garbled: false,
+              })),
+              verified: result.evidence.length,
+              unverified: 0,
+              pagesRead: result.coverage.files.reduce((sum, file) => sum + file.readPages, 0),
+              filesRead: result.coverage.files.filter((file) => file.readPages > 0).length,
+              filesTotal: selectedFiles.length,
+            },
+            pageTexts: Object.fromEntries(citePages.map((p) => [`${p.fileId}:${p.page}`, p.text])),
+          }));
+          step({ id: "ask", label: "Full text scan finished", status: "done" });
+          return;
+        }
         const fileCount = sess?.files.length ?? 0;
         const budget = askBudget(Math.max(fileCount, 1));
 
@@ -1315,6 +1427,7 @@ export function usePile() {
           .filter(Boolean)
           .join("\n\n");
 
+        let localDone = false;
         await streamSSE(
           "/api/pile/ask",
           {
@@ -1405,6 +1518,7 @@ export function usePile() {
               });
               setState((s) => ({ ...s, phase: "error", error: msg }));
             } else if (evt.event === "done") {
+              localDone = true;
               if (packs.length > 1) {
                 step({ id: "synthesis", label: "Cross-analyzing the documents", status: "done" });
               }
@@ -1421,6 +1535,8 @@ export function usePile() {
           },
           controller.signal,
         );
+        if (!localDone)
+          throw new Error("The answer stream ended before completion. Retry your question.");
       } catch (e) {
         if (controller.signal.aborted) {
           setState((s) => (s.phase === "asking" ? { ...s, phase: "ready" } : s));
@@ -1428,7 +1544,12 @@ export function usePile() {
         }
         const msg = e instanceof Error ? e.message : "Ask failed";
         step({ id: "ask", label: "Retrieving pages and drafting", status: "error", detail: msg });
-        setState((s) => ({ ...s, phase: "error", error: msg }));
+        setState((s) => ({
+          ...s,
+          phase: "error",
+          error: msg,
+          scanCoverage: s.scanCoverage ? { ...s.scanCoverage, running: false } : null,
+        }));
         return;
       }
       setState((s) => {
@@ -1829,6 +1950,18 @@ export function usePile() {
 
   return {
     state,
+    retryScan: () => {
+      const previous = lastScan.current;
+      if (previous) void ask(previous.query, previous.opts);
+    },
+    cancelAsk: () => {
+      askAbort.current?.abort();
+      setState((s) => ({
+        ...s,
+        phase: s.phase === "asking" ? "ready" : s.phase,
+        scanCoverage: s.scanCoverage ? { ...s.scanCoverage, running: false } : null,
+      }));
+    },
     start,
     addFiles,
     ingestPages,

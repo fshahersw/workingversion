@@ -166,7 +166,7 @@ function FindingCard({
         </blockquote>
       ) : null}
       <div className="mt-2.5 flex items-center gap-3">
-        <CiteButton cite={item.cite} onCite={onCite} />
+        <CiteButton cite={item.cite} fileName={item.fileName} onCite={onCite} />
         <CopyCite cite={item.cite} />
       </div>
     </article>
@@ -189,7 +189,7 @@ function ProfileRow({
         </p>
       ) : null}
       <div className="mt-1.5 flex items-center gap-2">
-        <CiteButton cite={item.cite} onCite={onCite} />
+        <CiteButton cite={item.cite} fileName={item.fileName} onCite={onCite} />
         <Check className="h-3.5 w-3.5 text-emerald-600" />
       </div>
     </li>
@@ -220,7 +220,7 @@ function ChronologyItem({
         </blockquote>
       ) : null}
       <div className="mt-2">
-        <CiteButton cite={item.cite} onCite={onCite} />
+        <CiteButton cite={item.cite} fileName={item.fileName} onCite={onCite} />
       </div>
     </li>
   );
@@ -243,7 +243,7 @@ function ExhibitCard({
         <p className="mt-2 text-[13px] italic text-muted-foreground">“{item.quote}”</p>
       ) : null}
       <div className="mt-2">
-        <CiteButton cite={item.cite} onCite={onCite} />
+        <CiteButton cite={item.cite} fileName={item.fileName} onCite={onCite} />
       </div>
     </article>
   );

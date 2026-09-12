@@ -45,7 +45,12 @@ export async function extractFile(
   file: File,
   onProgress?: Progress,
   signal?: AbortSignal,
-  opts?: { maxPages?: number; maxBytes?: number; layout?: "flow" | "transcript" },
+  opts?: {
+    maxPages?: number;
+    maxBytes?: number;
+    layout?: "flow" | "transcript";
+    requireComplete?: boolean;
+  },
 ): Promise<ExtractedFile> {
   const kind = fileKind(file);
   const pageCap = Math.min(FILE_PAGE_CAP, opts?.maxPages ?? FILE_PAGE_CAP);
@@ -53,15 +58,18 @@ export async function extractFile(
   if (!kind) {
     const n = file.name.toLowerCase();
     if (n.endsWith(".ppt") || n.endsWith(".xls")) {
-      throw new Error(`${file.name}: use .pptx / .xlsx (legacy binary Office files are not supported)`);
+      throw new Error(
+        `${file.name}: use .pptx / .xlsx (legacy binary Office files are not supported)`,
+      );
     }
     throw new Error(`${file.name}: unsupported type (PDF, Word, Excel, PowerPoint or TXT)`);
   }
-  if (file.size > byteCap) throw new Error(`${file.name}: over the ${Math.round(byteCap / 1024 / 1024)} MB limit`);
+  if (file.size > byteCap)
+    throw new Error(`${file.name}: over the ${Math.round(byteCap / 1024 / 1024)} MB limit`);
 
   if (kind === "txt") {
     const text = await file.text();
-    return paginateText(file.name, "txt", text, pageCap);
+    return paginateText(file.name, "txt", text, pageCap, opts?.requireComplete);
   }
   if (kind === "docx") {
     const mammoth = await import("mammoth/mammoth.browser");
@@ -70,12 +78,13 @@ export async function extractFile(
     try {
       const html = await mammoth.convertToHtml({ arrayBuffer: buf });
       const sections = htmlToSections(html.value ?? "");
-      if (sections.length) return paginateSections(file.name, "docx", sections, pageCap);
+      if (sections.length)
+        return paginateSections(file.name, "docx", sections, pageCap, opts?.requireComplete);
     } catch {
       /* fall through to raw text */
     }
     const res = await mammoth.extractRawText({ arrayBuffer: buf });
-    return paginateText(file.name, "docx", res.value ?? "", pageCap);
+    return paginateText(file.name, "docx", res.value ?? "", pageCap, opts?.requireComplete);
   }
   if (kind === "xlsx") {
     const { extractXlsx } = await import("./office-text");
@@ -124,6 +133,13 @@ export async function extractFile(
           : `${file.name}: ${msg}`,
     );
   }
+  if (opts?.requireComplete && doc.numPages > pageCap) {
+    const count = doc.numPages;
+    await doc.destroy();
+    throw new Error(
+      `${file.name}: ${count} pages exceeds the ${pageCap}-page per-file limit. Split the transcript before analysis so no testimony is omitted.`,
+    );
+  }
   const total = Math.min(doc.numPages, pageCap);
   const pages: PageText[] = new Array(total);
   let done = 0;
@@ -136,7 +152,9 @@ export async function extractFile(
       const page = await doc.getPage(n);
       const content = await page.getTextContent();
       const text =
-        opts?.layout === "transcript" ? pdfItemsToTranscriptText(content.items) : pdfItemsToText(content.items);
+        opts?.layout === "transcript"
+          ? pdfItemsToTranscriptText(content.items)
+          : pdfItemsToText(content.items);
       page.cleanup();
       pages[n - 1] = { page: n, text };
       done += 1;
@@ -200,7 +218,10 @@ function pdfItemsToText(items: unknown[]): string {
     lastH = h;
     if (it.hasEOL) out += "\n";
   }
-  return out.replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+  return out
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim();
 }
 
 function pdfItemsToTranscriptText(items: unknown[]): string {
@@ -259,10 +280,17 @@ function paginateSections(
   kind: "docx",
   sections: { heading: string; text: string }[],
   maxPages = FILE_PAGE_CAP,
+  requireComplete = false,
 ): ExtractedFile {
   const pages: PageText[] = [];
   for (const section of sections) {
-    if (pages.length >= maxPages) break;
+    if (pages.length >= maxPages) {
+      if (requireComplete)
+        throw new Error(
+          `${name}: text exceeds ${maxPages} extracted pages. Split the document before analysis.`,
+        );
+      break;
+    }
     const head = section.heading ? `${section.heading}\n\n` : "";
     const body = section.text;
     if (head.length + body.length <= DOC_CHARS_PER_PAGE) {
@@ -273,7 +301,14 @@ function paginateSections(
     let buf: string[] = [];
     let size = 0;
     const flush = () => {
-      if (!buf.length || pages.length >= maxPages) return;
+      if (!buf.length) return;
+      if (pages.length >= maxPages) {
+        if (requireComplete)
+          throw new Error(
+            `${name}: text exceeds ${maxPages} extracted pages. Split the document before analysis.`,
+          );
+        return;
+      }
       pages.push({ page: pages.length + 1, text: `${head}${buf.join("\n\n")}`.trim() });
       buf = [];
       size = 0;
@@ -295,7 +330,13 @@ function paginateSections(
   };
 }
 
-function paginateText(name: string, kind: "docx" | "txt", raw: string, maxPages = FILE_PAGE_CAP): ExtractedFile {
+function paginateText(
+  name: string,
+  kind: "docx" | "txt",
+  raw: string,
+  maxPages = FILE_PAGE_CAP,
+  requireComplete = false,
+): ExtractedFile {
   const text = raw.replace(/\r\n/g, "\n").trim();
   const paras = text.split(/\n{2,}/);
   const pages: PageText[] = [];
@@ -309,9 +350,16 @@ function paginateText(name: string, kind: "docx" | "txt", raw: string, maxPages 
     }
     buf.push(p);
     size += p.length + 2;
-    if (pages.length >= maxPages) break;
+    if (pages.length >= maxPages) {
+      if (requireComplete)
+        throw new Error(
+          `${name}: text exceeds ${maxPages} extracted pages. Split the document before analysis.`,
+        );
+      break;
+    }
   }
-  if (buf.length && pages.length < maxPages) pages.push({ page: pages.length + 1, text: buf.join("\n\n") });
+  if (buf.length && pages.length < maxPages)
+    pages.push({ page: pages.length + 1, text: buf.join("\n\n") });
   return {
     name,
     kind,

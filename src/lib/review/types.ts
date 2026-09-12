@@ -24,7 +24,7 @@ export const REVIEW_PIPELINE_ENABLED = true;
  * Goes into every cell's cache key so flipping the pipeline on (or changing
  * its prompts/chains) invalidates cells produced by the previous model.
  */
-export const REVIEW_PIPELINE_VERSION = "nemotron-v3";
+export const REVIEW_PIPELINE_VERSION = "evidence-v4";
 
 /** Page images sent for a vision re-read of a flagged cell (scanned pages). */
 export const REVIEW_VISION_MAX_PAGES = 3;
@@ -59,7 +59,13 @@ export const REVIEW_CELL_PAGES = REVIEW_PIPELINE_ENABLED ? 16 : 8;
 
 /** JSON-serializable cell value — crosses the server-fn RPC boundary, so it
  *  must not be `unknown` (the serializer generic rejects that). */
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 export type ColumnKind =
   | "text"
@@ -148,12 +154,16 @@ export type ReviewSource = {
 };
 
 /**
- * Stable document evidence shared by direct uploads and imported working sets.
- * File ids and extracted character counts are intentionally excluded because
- * they can change when the same document is re-opened or OCR is retried.
+ * Fresh uploads and working-set imports supply a digest of all extracted pages,
+ * including OCR repairs. The two-argument form reads legacy identity only; it
+ * must never authorize reusing results for a newly uploaded document.
  */
-export function documentRowFingerprint(name: string, pageCount: number): string {
-  return `${name}|${pageCount}`;
+export function documentRowFingerprint(
+  name: string,
+  pageCount: number,
+  contentHash?: string,
+): string {
+  return `${name}|${pageCount}${contentHash ? `|sha256:${contentHash}` : ""}`;
 }
 
 export type ReviewCell = {
@@ -196,6 +206,7 @@ export type CellAnswer = {
 };
 
 export type CellRequest = {
+  documentContext?: string;
   columnName: string;
   question: string;
   kind: ColumnKind;

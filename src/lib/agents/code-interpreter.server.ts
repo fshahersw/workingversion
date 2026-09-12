@@ -1,19 +1,11 @@
-// ============================================================================
-// AgentCore Code Interpreter client (server-only).
-//
-// A secure Python sandbox (pandas/numpy/matplotlib/dateutil preinstalled, NO
-// network egress) for exact CALCULATIONS the answer must not get wrong:
-// settlement allocation, limitations/repose date math, data aggregation.
-//
-// One module-level session is reused across calls (cold start ~2s, then
-// sub-second). Executions run with clearContext=false so the sandbox FILESYSTEM
-// (and state) persist across calls within a session — that is what lets an
-// uploaded file be written, then read/processed by a later run_python, then its
-// output file (xlsx/docx/pdf/png) read back for download. Single-instance only —
-// a second server process gets its own session (fine for dev; the seam to a
-// per-actor pool is ensureSession()). The session is recreated before its
-// absolute TTL and on any error.
-// ============================================================================
+// Authenticated per-owner workspaces; Office adds a per-task scope.
+import { officeExtractionPython, extractedPagePython } from "./office-extraction";
+import { interpreterState, withInterpreterOperation } from "./interpreter-context.server";
+import { workspaceUnavailable } from "./interpreter-registry";
+import {
+  drainInterpreterStream,
+  type InterpreterContentItem as ContentItem,
+} from "./code-interpreter-stream";
 import {
   BedrockAgentCoreClient,
   StartCodeInterpreterSessionCommand,
@@ -25,24 +17,24 @@ import {
 const REGION = process.env["BEDROCK_REGION"] ?? process.env["AWS_REGION"] ?? "us-east-1";
 const INTERPRETER_ID = process.env["CODE_INTERPRETER_ID"] || "aws.codeinterpreter.v1";
 const SESSION_TTL_S = 1800; // 30 min absolute TTL
-const TTL_MARGIN_MS = 120_000; // recreate 2 min before the absolute TTL
+const TTL_MARGIN_MS = 120_000; // report expiry before the absolute TTL
 const MAX_INLINE_BYTES = 4 * 1024 * 1024; // cap base64-in-SSE payload at ~4MB
 
 // Files the caller already knows about (uploads written via writeFile, plus
 // outputs already surfaced) — so collectNewArtifacts() only ever reports files
 // the sandbox NEWLY created. Cleared whenever a fresh session is started.
-const seenFiles = new Set<string>();
+
 const norm = (p: string) => p.replace(/^\.\//, "").replace(/^\/+/, "");
 // The sandbox image ships with files in the working dir (package.json, etc).
 // Snapshot them into seenFiles before any user code runs so collectNewArtifacts
 // only ever reports files the user's run_python actually created.
-let baselinedFor: string | null = null;
+
 async function baseline(): Promise<void> {
+  const s = await ensureSession();
+  if (interpreterState().baselinedFor === s.id) return;
   try {
-    const s = await ensureSession();
-    if (baselinedFor === s.id) return;
-    for (const f of await listArtifacts()) seenFiles.add(norm(f.name));
-    baselinedFor = s.id;
+    for (const f of await listArtifacts()) interpreterState().seenFiles.add(norm(f.name));
+    interpreterState().baselinedFor = s.id;
   } catch {
     /* best effort — if this fails the tool still works, env files may surface once */
   }
@@ -50,78 +42,117 @@ async function baseline(): Promise<void> {
 
 let _client: BedrockAgentCoreClient | null = null;
 function client(): BedrockAgentCoreClient {
-  return (_client ??= new BedrockAgentCoreClient({ region: REGION }));
+  // Even a transport failure can follow an executed mutation. SDK retries must
+  // not replay executeCode/writeFiles implicitly.
+  return (_client ??= new BedrockAgentCoreClient({ region: REGION, maxAttempts: 1 }));
 }
 
-let session: { id: string; startedAt: number } | null = null;
-let starting: Promise<{ id: string; startedAt: number }> | null = null;
+export async function stopInterpreterSession(id: string): Promise<void> {
+  await client().send(
+    new StopCodeInterpreterSessionCommand({
+      codeInterpreterIdentifier: INTERPRETER_ID,
+      sessionId: id,
+    }),
+  );
+}
 
 async function ensureSession(): Promise<{ id: string; startedAt: number }> {
-  if (session && Date.now() - session.startedAt < SESSION_TTL_S * 1000 - TTL_MARGIN_MS) return session;
-  if (starting) return starting;
-  starting = (async () => {
-    if (session) {
-      const old = session.id;
-      try {
-        await client().send(new StopCodeInterpreterSessionCommand({ codeInterpreterIdentifier: INTERPRETER_ID, sessionId: old }));
-      } catch {
-        /* best effort */
+  const state = interpreterState();
+  if (state.session) {
+    if (Date.now() - state.session.startedAt >= SESSION_TTL_S * 1000 - TTL_MARGIN_MS) {
+      if (state.checkpoint) {
+        state.blockedReason = "expired";
+        throw workspaceUnavailable(state.blockedReason);
       }
+      state.session = null;
+      state.seenFiles.clear();
+      state.baselinedFor = null;
+      void state.dispose?.().catch(() => {});
+      throw new Error(
+        "Python workspace expired. Start a new task and reattach required files; previous variables and files are no longer safe to assume.",
+      );
     }
+    return state.session;
+  }
+  if (state.starting) return state.starting;
+  state.starting = (async () => {
+    await state.checkpoint?.();
     const res = await client().send(
       new StartCodeInterpreterSessionCommand({
         codeInterpreterIdentifier: INTERPRETER_ID,
-        name: "lit-ai",
+        name: "office-agent",
         sessionTimeoutSeconds: SESSION_TTL_S,
       }),
     );
-    session = { id: res.sessionId ?? "", startedAt: Date.now() };
-    seenFiles.clear();
-    baselinedFor = null; // re-snapshot the new sandbox's shipped files on next use
-    return session;
+    if (!res.sessionId) throw new Error("Python service did not return a session ID.");
+    state.session = { id: res.sessionId, startedAt: Date.now() };
+    state.seenFiles.clear();
+    state.baselinedFor = null;
+    const id = res.sessionId;
+    state.dispose = async () => {
+      await client().send(
+        new StopCodeInterpreterSessionCommand({
+          codeInterpreterIdentifier: INTERPRETER_ID,
+          sessionId: id,
+        }),
+      );
+    };
+    // Another Lambda must know this session ID before any file or code operation.
+    await state.checkpoint?.();
+    return state.session;
   })();
   try {
-    return await starting;
+    return await state.starting;
+  } catch (error) {
+    if (state.checkpoint) state.blockedReason = "could not confirm session creation";
+    throw error;
   } finally {
-    starting = null;
+    state.starting = null;
   }
 }
 
 export type CodeResult = { text: string; images: string[]; isError: boolean };
 
-type ContentItem = { type?: string; text?: string; data?: string; source?: { data?: string }; name?: string; path?: string };
-
-/** Drain the InvokeCodeInterpreter event stream into its content items + error flag. */
-async function drain(resp: unknown): Promise<{ content: ContentItem[]; isError: boolean }> {
-  const content: ContentItem[] = [];
-  let isError = false;
-  const stream = (resp as { stream?: AsyncIterable<unknown> }).stream;
-  if (stream) {
-    for await (const ev of stream) {
-      const r = (ev as { result?: { content?: ContentItem[]; isError?: boolean } }).result;
-      if (!r) continue;
-      if (r.isError) isError = true;
-      for (const c of r.content ?? []) content.push(c);
+async function invoke(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ content: ContentItem[]; isError: boolean }> {
+  return withInterpreterOperation(async () => {
+    const state = interpreterState();
+    const previous = state.rpcTail ?? Promise.resolve();
+    let release!: () => void;
+    state.rpcTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      await state.checkpoint?.();
+      const sess = await ensureSession();
+      const resp = await client().send(
+        new InvokeCodeInterpreterCommand({
+          codeInterpreterIdentifier: INTERPRETER_ID,
+          sessionId: sess.id,
+          name: name as InvokeCodeInterpreterCommandInput["name"],
+          arguments: args,
+        }),
+      );
+      return await drainInterpreterStream(resp);
+    } catch (error) {
+      if (state.checkpoint)
+        state.blockedReason ??= "could not confirm whether its last operation completed";
+      throw error;
+    } finally {
+      release();
     }
-  }
-  return { content, isError };
-}
-
-async function invoke(name: string, args: Record<string, unknown>): Promise<{ content: ContentItem[]; isError: boolean }> {
-  const sess = await ensureSession();
-  const resp = await client().send(
-    new InvokeCodeInterpreterCommand({
-      codeInterpreterIdentifier: INTERPRETER_ID,
-      sessionId: sess.id,
-      name: name as InvokeCodeInterpreterCommandInput["name"],
-      arguments: args,
-    }),
-  );
-  return drain(resp);
+  });
 }
 
 async function invokeOnce(code: string): Promise<CodeResult> {
-  const { content, isError } = await invoke("executeCode", { code, language: "python", clearContext: false });
+  const { content, isError } = await invoke("executeCode", {
+    code,
+    language: "python",
+    clearContext: false,
+  });
   let text = "";
   const images: string[] = [];
   for (const c of content) {
@@ -134,15 +165,14 @@ async function invokeOnce(code: string): Promise<CodeResult> {
   return { text, images, isError };
 }
 
-/** Run a snippet of Python in the sandbox. Retries once on a dead session. */
+/** Run Python once. Never replay an ambiguous execution failure. */
 export async function runPython(code: string): Promise<CodeResult> {
-  await baseline();
-  try {
-    return await invokeOnce(code);
-  } catch {
-    session = null; // session may have expired/died — recreate and retry once
-    return await invokeOnce(code);
-  }
+  return withInterpreterOperation(async () => {
+    await baseline();
+    // An interrupted execution may already have changed files. Never replay it
+    // automatically into a fresh sandbox or silently lose the prior context.
+    return invokeOnce(code);
+  });
 }
 
 /** Write a text file into the sandbox (an upload the model / run_python can read).
@@ -150,8 +180,14 @@ export async function runPython(code: string): Promise<CodeResult> {
 export async function writeFile(path: string, text: string): Promise<void> {
   await baseline();
   const { isError, content } = await invoke("writeFiles", { content: [{ path, text }] });
-  if (isError) throw new Error(`writeFile failed: ${content.map((c) => c.text ?? "").join("").slice(0, 200)}`);
-  seenFiles.add(norm(path)); // an upload, not a run_python output — don't surface it
+  if (isError)
+    throw new Error(
+      `writeFile failed: ${content
+        .map((c) => c.text ?? "")
+        .join("")
+        .slice(0, 200)}`,
+    );
+  interpreterState().seenFiles.add(norm(path)); // an upload, not a run_python output — don't surface it
 }
 
 /** Write a BINARY file (base64 payload) into the sandbox. The writeFiles tool
@@ -160,11 +196,16 @@ export async function writeFile(path: string, text: string): Promise<void> {
 export async function writeFileB64(path: string, b64: string): Promise<void> {
   await baseline();
   const p = norm(path);
-  // base64 has no quotes/newlines from btoa, so a triple-quoted literal is safe.
-  const code = `import base64\nopen(${JSON.stringify(p)},'wb').write(base64.b64decode("""${b64}"""))\nprint('WROTE',${JSON.stringify(p)})`;
-  const { text, isError } = await invokeOnce(code);
-  if (isError) throw new Error(`writeFileB64 failed: ${text.slice(0, 200)}`);
-  seenFiles.add(p); // an upload, not an output
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64) || b64.length % 4 !== 0)
+    throw new Error("Invalid base64 attachment.");
+  const chunkSize = 512 * 1024; // divisible by four, safe to decode independently
+  for (let offset = 0; offset < b64.length; offset += chunkSize) {
+    const chunk = b64.slice(offset, offset + chunkSize);
+    const code = `import base64\nwith open(${JSON.stringify(p)}, '${offset === 0 ? "wb" : "ab"}') as f: f.write(base64.b64decode(${JSON.stringify(chunk)}, validate=True))\nprint('WROTE')`;
+    const { text, isError } = await invokeOnce(code);
+    if (isError) throw new Error(`writeFileB64 failed: ${text.slice(0, 200)}`);
+  }
+  interpreterState().seenFiles.add(p); // an upload, not an output
 }
 
 export type ExtractedDoc = {
@@ -244,20 +285,52 @@ except Exception as e:
 print('<<DOC>>'+json.dumps(out)+'<<END>>')
 `;
 
-export async function extractDocument(name: string): Promise<ExtractedDoc> {
+export async function extractDocument(
+  name: string,
+  options?: { complete?: boolean },
+): Promise<ExtractedDoc> {
   await baseline();
-  const { text, isError } = await invokeOnce(EXTRACT_PY(norm(name)));
-  seenFiles.add(norm(name) + ".extracted.txt"); // sidecar, not a user-facing output
+  const { text, isError } = await invokeOnce(
+    options?.complete ? officeExtractionPython(norm(name)) : EXTRACT_PY(norm(name)),
+  );
+  interpreterState().seenFiles.add(norm(name) + ".extracted.txt"); // sidecar, not a user-facing output
   const m = text.match(/<<DOC>>([\s\S]*?)<<END>>/);
   if (!m || !m[1]) {
-    return { kind: "text", meta: {}, text: "", chars: 0, error: isError ? text.slice(0, 300) : "no extractor output" };
+    return {
+      kind: "text",
+      meta: {},
+      text: "",
+      chars: 0,
+      error: isError ? text.slice(0, 300) : "no extractor output",
+    };
   }
   try {
     const doc = JSON.parse(m[1]) as ExtractedDoc;
-    return { kind: doc.kind ?? "text", meta: doc.meta ?? {}, text: doc.text ?? "", chars: doc.chars ?? (doc.text?.length ?? 0), ...(doc.error ? { error: doc.error } : {}) };
+    return {
+      kind: doc.kind ?? "text",
+      meta: doc.meta ?? {},
+      text: doc.text ?? "",
+      chars: doc.chars ?? doc.text?.length ?? 0,
+      ...(doc.error ? { error: doc.error } : {}),
+    };
   } catch {
     return { kind: "text", meta: {}, text: "", chars: 0, error: "extractor JSON parse failed" };
   }
+}
+
+/** Page the complete native extraction by UTF-8 byte offset without re-reading the entire file. */
+export async function readExtractedPage(
+  name: string,
+  offset: number,
+): Promise<{ text: string; nextOffset: number | null }> {
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid extraction offset");
+  const result = await invokeOnce(extractedPagePython(norm(name), offset));
+  const match = result.text.match(/<<PAGE>>([\s\S]*?)<<END>>/);
+  if (result.isError || !match) throw new Error("Could not read the complete extracted text.");
+  const page = JSON.parse(match[1]) as { text: string; nextOffset: number | null };
+  if (!page.text || (page.nextOffset !== null && page.nextOffset <= offset))
+    throw new Error("Incomplete extraction page. Retry extraction.");
+  return page;
 }
 
 /** Retrieve passages from a previously-extracted document's sidecar text. With a
@@ -302,8 +375,15 @@ else:
   const m = text.match(/<<DOCR>>([\s\S]*?)<<END>>/);
   if (!m || !m[1]) return `Could not read "${name}".`;
   try {
-    const r = JSON.parse(m[1]) as { missing?: boolean; nohits?: boolean; text?: string; truncated?: boolean; matches?: number };
-    if (r.missing) return `"${name}" is no longer in the sandbox (session may have rotated — ask the attorney to re-upload).`;
+    const r = JSON.parse(m[1]) as {
+      missing?: boolean;
+      nohits?: boolean;
+      text?: string;
+      truncated?: boolean;
+      matches?: number;
+    };
+    if (r.missing)
+      return `"${name}" is no longer in the sandbox (session may have rotated — ask the attorney to re-upload).`;
     if (r.nohits) return `No passages in "${name}" matched "${query}".`;
     return (r.text || "").trim() || `(empty result for "${name}")`;
   } catch {
@@ -340,7 +420,7 @@ export async function listArtifacts(): Promise<Artifact[]> {
 /** Mark a filename as already-handled so collectNewArtifacts won't re-surface
  *  it (e.g. a file returned directly as an artifact by create_document). */
 export function markSeen(path: string): void {
-  seenFiles.add(norm(path));
+  interpreterState().seenFiles.add(norm(path));
 }
 
 export type NewArtifact = { name: string; size: number; dataB64: string | null };
@@ -356,12 +436,12 @@ export async function collectNewArtifacts(): Promise<NewArtifact[]> {
   const out: NewArtifact[] = [];
   for (const f of files) {
     const name = norm(f.name);
-    if (seenFiles.has(name)) continue;
+    if (interpreterState().seenFiles.has(name)) continue;
     if (name.startsWith(".") || name.startsWith("__")) {
-      seenFiles.add(name); // skip dotfiles / __pycache__ etc, but don't re-scan them
+      interpreterState().seenFiles.add(name); // skip dotfiles / __pycache__ etc, but don't re-scan them
       continue;
     }
-    seenFiles.add(name);
+    interpreterState().seenFiles.add(name);
     if (f.size > MAX_INLINE_BYTES) {
       out.push({ name, size: f.size, dataB64: null });
       continue;

@@ -1,3 +1,4 @@
+import { searchWindow } from "./search-window";
 // ============================================================================
 // Research tools available to the Claude/Nemotron sub-agent (server-only).
 //
@@ -43,7 +44,6 @@ import {
   type RankedResult,
 } from "./web-rank";
 import { semanticRerank } from "./web-rerank.server";
-
 
 /** Assigns S1..Sn refs and dedupes sources across the whole run. */
 export class SourceBook {
@@ -188,23 +188,108 @@ const trunc = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : 
 type Category = { key: GatewayKey; sourceType: string; blurb: string };
 
 const CATEGORIES: Category[] = [
-  { key: "federal_case_law", sourceType: "case_law", blurb: "federal opinions, dockets, appellate & Supreme Court decisions, free-law databases — precedent, holdings, posture" },
-  { key: "state_case_law", sourceType: "case_law", blurb: "STATE courts & opinions incl. coordinated proceedings (CA JCCP, NJ MCL) — the state track federal PACER misses" },
-  { key: "mdl_class_action", sourceType: "case_law", blurb: "JPML, MDL & class-action tracking, settlement administrators, class-action press — aggregation posture & settlements" },
-  { key: "statutes_legislation", sourceType: "regulation", blurb: "federal & state statutes, codes, and bills — the text of a law and its legislative status" },
-  { key: "congressional", sourceType: "regulation", blurb: "hearings, committee reports, GAO/CRS/CBO, oversight — congressional activity on an industry or defendant" },
-  { key: "federal_regulations", sourceType: "regulation", blurb: "Federal Register, CFR/eCFR, regulations.gov, OIRA — the text and status of a federal rule" },
-  { key: "state_ag_regulatory", sourceType: "regulation", blurb: "state AGs, state agencies (Prop 65/OEHHA, health & enviro depts), NCSL — state enforcement & regulation" },
-  { key: "sec_securities", sourceType: "sec", blurb: "SEC/EDGAR, PCAOB, FINRA, Stanford SCAC — a public defendant's disclosures & securities suits" },
-  { key: "fda_drug_device", sourceType: "enforcement", blurb: "FDA (recalls, warning letters, labels, MAUDE), EMA, DailyMed, pharma trade press — drug/device regulatory history" },
-  { key: "agency_enforcement", sourceType: "enforcement", blurb: "FTC/CPSC/NHTSA/EPA/OSHA/CFPB/DOJ enforcement — recalls, consent decrees, violations, a defendant's compliance history" },
-  { key: "scientific_medical", sourceType: "science", blurb: "peer-reviewed medicine & epidemiology (PubMed/PMC, top journals, Cochrane) — general & specific causation, study quality" },
-  { key: "clinical_trials_safety", sourceType: "science", blurb: "ClinicalTrials.gov, EMA, FAERS/VAERS — trial records, sponsors, and drug-safety signals" },
-  { key: "environmental_tox", sourceType: "technical", blurb: "EPA/ATSDR/IARC/NTP/NIEHS + engineering standards (ASTM/ANSI/UL/NIST) — toxicology, exposure, product/environmental science" },
-  { key: "company_business", sourceType: "directory", blurb: "corporate background, SEC filings, business registries, financial press — a defendant's identity, structure & finances" },
-  { key: "judges_attorneys", sourceType: "directory", blurb: "judge & attorney professional records (CourtListener, FJC, state bars, Ballotpedia) — background on the bench and counsel" },
-  { key: "legal_news", sourceType: "news", blurb: "legal & industry trade press (Law360, Bloomberg Law, Reuters, Law.com, HarrisMartin) — current developments primaries haven't captured" },
-  { key: "general_web", sourceType: "web", blurb: "OPEN web search (junk domains excluded) — ONLY when no category above fits: general current events, entity discovery, an obscure source" },
+  {
+    key: "federal_case_law",
+    sourceType: "case_law",
+    blurb:
+      "federal opinions, dockets, appellate & Supreme Court decisions, free-law databases — precedent, holdings, posture",
+  },
+  {
+    key: "state_case_law",
+    sourceType: "case_law",
+    blurb:
+      "STATE courts & opinions incl. coordinated proceedings (CA JCCP, NJ MCL) — the state track federal PACER misses",
+  },
+  {
+    key: "mdl_class_action",
+    sourceType: "case_law",
+    blurb:
+      "JPML, MDL & class-action tracking, settlement administrators, class-action press — aggregation posture & settlements",
+  },
+  {
+    key: "statutes_legislation",
+    sourceType: "regulation",
+    blurb:
+      "federal & state statutes, codes, and bills — the text of a law and its legislative status",
+  },
+  {
+    key: "congressional",
+    sourceType: "regulation",
+    blurb:
+      "hearings, committee reports, GAO/CRS/CBO, oversight — congressional activity on an industry or defendant",
+  },
+  {
+    key: "federal_regulations",
+    sourceType: "regulation",
+    blurb:
+      "Federal Register, CFR/eCFR, regulations.gov, OIRA — the text and status of a federal rule",
+  },
+  {
+    key: "state_ag_regulatory",
+    sourceType: "regulation",
+    blurb:
+      "state AGs, state agencies (Prop 65/OEHHA, health & enviro depts), NCSL — state enforcement & regulation",
+  },
+  {
+    key: "sec_securities",
+    sourceType: "sec",
+    blurb:
+      "SEC/EDGAR, PCAOB, FINRA, Stanford SCAC — a public defendant's disclosures & securities suits",
+  },
+  {
+    key: "fda_drug_device",
+    sourceType: "enforcement",
+    blurb:
+      "FDA (recalls, warning letters, labels, MAUDE), EMA, DailyMed, pharma trade press — drug/device regulatory history",
+  },
+  {
+    key: "agency_enforcement",
+    sourceType: "enforcement",
+    blurb:
+      "FTC/CPSC/NHTSA/EPA/OSHA/CFPB/DOJ enforcement — recalls, consent decrees, violations, a defendant's compliance history",
+  },
+  {
+    key: "scientific_medical",
+    sourceType: "science",
+    blurb:
+      "peer-reviewed medicine & epidemiology (PubMed/PMC, top journals, Cochrane) — general & specific causation, study quality",
+  },
+  {
+    key: "clinical_trials_safety",
+    sourceType: "science",
+    blurb:
+      "ClinicalTrials.gov, EMA, FAERS/VAERS — trial records, sponsors, and drug-safety signals",
+  },
+  {
+    key: "environmental_tox",
+    sourceType: "technical",
+    blurb:
+      "EPA/ATSDR/IARC/NTP/NIEHS + engineering standards (ASTM/ANSI/UL/NIST) — toxicology, exposure, product/environmental science",
+  },
+  {
+    key: "company_business",
+    sourceType: "directory",
+    blurb:
+      "corporate background, SEC filings, business registries, financial press — a defendant's identity, structure & finances",
+  },
+  {
+    key: "judges_attorneys",
+    sourceType: "directory",
+    blurb:
+      "judge & attorney professional records (CourtListener, FJC, state bars, Ballotpedia) — background on the bench and counsel",
+  },
+  {
+    key: "legal_news",
+    sourceType: "news",
+    blurb:
+      "legal & industry trade press (Law360, Bloomberg Law, Reuters, Law.com, HarrisMartin) — current developments primaries haven't captured",
+  },
+  {
+    key: "general_web",
+    sourceType: "web",
+    blurb:
+      "OPEN web search (junk domains excluded) — ONLY when no category above fits: general current events, entity discovery, an obscure source",
+  },
 ];
 
 const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
@@ -227,7 +312,8 @@ const WEB_SEARCH_TOOL: ToolDef = {
       categories: {
         type: "array",
         items: { type: "string", enum: CATEGORY_KEYS },
-        description: "1-4 category keys to search in parallel (see the list in the tool description). Use the smallest set that fits.",
+        description:
+          "1-4 category keys to search in parallel (see the list in the tool description). Use the smallest set that fits.",
       },
       queries: {
         type: "array",
@@ -248,9 +334,6 @@ const WEB_SEARCH_TOOL: ToolDef = {
 
 const CATEGORY_TOOL_DEFS: ToolDef[] = [WEB_SEARCH_TOOL];
 
-
-
-
 // --- DocketBird tools (federal docket & filings) ---------------------------
 
 const DOCKET_TOOL_DEFS: ToolDef[] = [
@@ -261,8 +344,15 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
     input_schema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "A case name or a case number. Distinctive terms beat a full caption." },
-        court_id: { type: "string", description: "Optional court filter: slug ('njd','nysd'), abbreviation ('D.N.J.'), or full name." },
+        query: {
+          type: "string",
+          description: "A case name or a case number. Distinctive terms beat a full caption.",
+        },
+        court_id: {
+          type: "string",
+          description:
+            "Optional court filter: slug ('njd','nysd'), abbreviation ('D.N.J.'), or full name.",
+        },
         limit: { type: "number", description: "Max results (default 10)." },
       },
       required: ["query"],
@@ -275,8 +365,16 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
     input_schema: {
       type: "object",
       properties: {
-        case_id: { type: "string", description: "DocketBird case id from db_find_case, e.g. 'jpml-0:2023-md-03080'." },
-        sort: { type: "string", enum: ["recent", "chronological"], description: "'recent' = newest entries first (best for latest activity); 'chronological' = docket order. Default 'recent'." },
+        case_id: {
+          type: "string",
+          description: "DocketBird case id from db_find_case, e.g. 'jpml-0:2023-md-03080'.",
+        },
+        sort: {
+          type: "string",
+          enum: ["recent", "chronological"],
+          description:
+            "'recent' = newest entries first (best for latest activity); 'chronological' = docket order. Default 'recent'.",
+        },
         limit: { type: "number", description: "Max entries to return (default 40, hard cap 80)." },
       },
       required: ["case_id"],
@@ -289,12 +387,27 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
     input_schema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Distinctive terms or a \"quoted phrase\" — a party, doctrine, motion type, or docket/citation number. Words are ANDed; see the syntax in the description." },
-        court_id: { type: "string", description: "Scope to a court: slug ('txwd','cand','nysd'), abbreviation ('S.D.N.Y.'), or full name; comma-separate several." },
-        case_id: { type: "string", description: "Scope to one DocketBird case id, e.g. 'txwd-6:2021-cv-00672'." },
+        query: {
+          type: "string",
+          description:
+            'Distinctive terms or a "quoted phrase" — a party, doctrine, motion type, or docket/citation number. Words are ANDed; see the syntax in the description.',
+        },
+        court_id: {
+          type: "string",
+          description:
+            "Scope to a court: slug ('txwd','cand','nysd'), abbreviation ('S.D.N.Y.'), or full name; comma-separate several.",
+        },
+        case_id: {
+          type: "string",
+          description: "Scope to one DocketBird case id, e.g. 'txwd-6:2021-cv-00672'.",
+        },
         filed_after: { type: "string", description: "YYYY-MM-DD, inclusive." },
         filed_before: { type: "string", description: "YYYY-MM-DD, inclusive." },
-        sort: { type: "string", enum: ["relevance", "recency"], description: "'relevance' (default) or 'recency' (most recently filed first)." },
+        sort: {
+          type: "string",
+          enum: ["relevance", "recency"],
+          description: "'relevance' (default) or 'recency' (most recently filed first).",
+        },
         limit: { type: "number", description: "Max results (default 8, hard cap 15)." },
       },
       required: ["query"],
@@ -306,7 +419,12 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
       "Read the full extracted text of a specific filing by its document_id (from a db_search_filings result). Full text is available for the firm's own/followed matters; for other cases it returns access-limited and you should rely on the search snippets instead.",
     input_schema: {
       type: "object",
-      properties: { document_id: { type: "string", description: "DocketBird document id, e.g. 'txwd-6:2021-cv-00672-00172-001'." } },
+      properties: {
+        document_id: {
+          type: "string",
+          description: "DocketBird document id, e.g. 'txwd-6:2021-cv-00672-00172-001'.",
+        },
+      },
       required: ["document_id"],
     },
   },
@@ -316,7 +434,12 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
       "Get a case's metadata by DocketBird case id (e.g. 'txwd-6:2021-cv-00672'): title, court, filing info, and the complaint's document id. Use to confirm a matter's identity and court once you have its case_id from db_find_case.",
     input_schema: {
       type: "object",
-      properties: { case_id: { type: "string", description: "DocketBird case id, e.g. 'txwd-6:2021-cv-00672'." } },
+      properties: {
+        case_id: {
+          type: "string",
+          description: "DocketBird case id, e.g. 'txwd-6:2021-cv-00672'.",
+        },
+      },
       required: ["case_id"],
     },
   },
@@ -326,7 +449,9 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
       "Get upcoming deadlines, hearings, and conferences for a case by case_id — the tool for scheduling/bellwether-timeline questions. Sourced from the firm's calendars, so it is richest for the firm's own/followed matters and may be empty for a case the firm does not track (say so rather than implying there are no deadlines).",
     input_schema: {
       type: "object",
-      properties: { case_id: { type: "string", description: "DocketBird case id from db_find_case." } },
+      properties: {
+        case_id: { type: "string", description: "DocketBird case id from db_find_case." },
+      },
       required: ["case_id"],
     },
   },
@@ -336,7 +461,13 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
       "Ask a natural-language question about litigation RELATIONSHIPS — which attorneys/firms appeared for a party, which judges a firm has appeared before, opposing-counsel patterns. Covers FEDERAL CIVIL cases only, ~30% coverage since mid-2025, and can take 10-25 seconds. Zero records means 'not in the graph', NOT that no such cases exist — say exactly that. Use only for relationship questions, not for docket posture or precedent.",
     input_schema: {
       type: "object",
-      properties: { question: { type: "string", description: "One clear relationship question, e.g. 'What judges has Quinn Emanuel appeared before in the District of New Jersey?'" } },
+      properties: {
+        question: {
+          type: "string",
+          description:
+            "One clear relationship question, e.g. 'What judges has Quinn Emanuel appeared before in the District of New Jersey?'",
+        },
+      },
       required: ["question"],
     },
   },
@@ -353,7 +484,7 @@ export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   book: SourceBook,
-  opts?: { brave?: boolean },
+  opts?: { brave?: boolean; unrestrictedDates?: boolean },
 ): Promise<ToolOutcome> {
   if (name === "web_search") return webSearch(input, book, opts);
 
@@ -416,7 +547,7 @@ async function categorySearch(
   cfg: Category,
   input: Record<string, unknown>,
   book: SourceBook,
-  opts?: { brave?: boolean },
+  opts?: { brave?: boolean; unrestrictedDates?: boolean },
 ): Promise<ToolOutcome> {
   if (!agentCoreConfigured())
     return {
@@ -437,20 +568,12 @@ async function categorySearch(
   // the recency-sensitive gateways (news, case law, enforcement) so the newest
   // orders and coverage surface. Static text (CFR, statutes, science) is left
   // alone — dating those queries only adds noise.
-  const dateSensitive = RECENCY_GATEWAYS.has(cfg.key);
-  const hasDate = /\b(19|20)\d{2}\b|\b(last|past|recent|latest|today|this (week|month|year))\b/i.test(query);
+  const dateSensitive = !opts?.unrestrictedDates && RECENCY_GATEWAYS.has(cfg.key);
+  const hasDate =
+    /\b(19|20)\d{2}\b|\b(last|past|recent|latest|today|this (week|month|year))\b/i.test(query);
   const effectiveQuery = dateSensitive && !hasDate ? `${query} ${currentMonthYear()}` : query;
   const recency = dateSensitive || wantsRecency(query);
-  // HARD 30-DAY DEFAULT (both modes): every web_search is limited to the last 30
-  // days unless the MODEL passes an explicit published_after to widen it. This is
-  // the deliberate anti-stale rule — omitting a date yields ONLY fresh results. To
-  // reach older material (case law, statutes, precedent, historical filings,
-  // background) the model MUST pass published_after with an earlier date; the tool
-  // description + prompts say so loudly.
-  const RECENCY_DEFAULT_DAYS = 30;
-  const effectiveAfter =
-    publishedAfter ??
-    new Date(Date.now() - RECENCY_DEFAULT_DAYS * 86_400_000).toISOString().slice(0, 10);
+  const effectiveAfter = searchWindow({ unrestricted: opts?.unrestrictedDates, publishedAfter });
 
   // Query fan-out: the model's own reformulations plus a date-anchored variant
   // run CONCURRENTLY and merge into one candidate pool before ranking. More
@@ -463,7 +586,12 @@ async function categorySearch(
     if (q.length >= 3 && q.toLowerCase() !== effectiveQuery.toLowerCase()) variants.push(q);
     if (variants.length >= 3) break;
   }
-  if (dateSensitive && hasDate && !effectiveQuery.includes(currentMonthYear()) && variants.length < 3) {
+  if (
+    dateSensitive &&
+    hasDate &&
+    !effectiveQuery.includes(currentMonthYear()) &&
+    variants.length < 3
+  ) {
     const anchored = `${query} ${currentMonthYear()}`;
     if (!variants.some((v) => v.toLowerCase() === anchored.toLowerCase())) variants.push(anchored);
   }
@@ -476,7 +604,10 @@ async function categorySearch(
   // precise anchor; combo B drops the bare year for a broader, date-relaxed angle.
   // Ranking still scores against the full original query, so this only broadens
   // recall, never loosens precision. Already-lean or duplicate combos are skipped.
-  for (const combo of [distinctiveTerms(query, 4), distinctiveTerms(query, 4, { dropYears: true })]) {
+  for (const combo of [
+    distinctiveTerms(query, 4),
+    distinctiveTerms(query, 4, { dropYears: true }),
+  ]) {
     const leanQuery = combo.join(" ");
     if (combo.length >= 3 && !variants.some((v) => v.toLowerCase() === leanQuery.toLowerCase())) {
       variants.push(leanQuery);
@@ -515,7 +646,12 @@ async function categorySearch(
       // same category+query within the window reuses one upstream call, and
       // SourceBook still assigns this run's own refs below. `brave` is in the key so
       // research (merged) and writer (AgentCore-only) never share a cache entry.
-      toolCacheKey(`ac:${cfg.key}`, { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "", brave }),
+      toolCacheKey(`ac:${cfg.key}`, {
+        query: q,
+        limit: CANDIDATE_POOL,
+        after: effectiveAfter ?? "",
+        brave,
+      }),
       TOOL_CACHE_TTL_MS,
       () => merged(q, effectiveAfter ? { publishedAfter: effectiveAfter } : undefined),
     );
@@ -530,16 +666,27 @@ async function categorySearch(
     // call is memoized for the run (Brave/Tavily keys are category-agnostic).
     const afterOpt = effectiveAfter ? { publishedAfter: effectiveAfter } : undefined;
     const leanQueries: string[] = [];
-    for (const combo of [distinctiveTerms(query, 4), distinctiveTerms(query, 4, { dropYears: true })]) {
+    for (const combo of [
+      distinctiveTerms(query, 4),
+      distinctiveTerms(query, 4, { dropYears: true }),
+    ]) {
       const lq = combo.join(" ");
-      if (combo.length >= 3 && lq.toLowerCase() !== effectiveQuery.toLowerCase() && !leanQueries.includes(lq)) {
+      if (
+        combo.length >= 3 &&
+        lq.toLowerCase() !== effectiveQuery.toLowerCase() &&
+        !leanQueries.includes(lq)
+      ) {
         leanQueries.push(lq);
       }
     }
     const paidQueries = [effectiveQuery, ...leanQueries];
     const jobs: Promise<GatewayResult[]>[] = [
       memoTTL(
-        toolCacheKey(`ac:${cfg.key}`, { query: effectiveQuery, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }),
+        toolCacheKey(`ac:${cfg.key}`, {
+          query: effectiveQuery,
+          limit: CANDIDATE_POOL,
+          after: effectiveAfter ?? "",
+        }),
         TOOL_CACHE_TTL_MS,
         () => agentCoreSearch(cfg.key, effectiveQuery, CANDIDATE_POOL, afterOpt),
       ).catch(() => [] as GatewayResult[]),
@@ -547,14 +694,22 @@ async function categorySearch(
     for (const q of paidQueries) {
       if (brave)
         jobs.push(
-          memoTTL(toolCacheKey("brave", { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }), TOOL_CACHE_TTL_MS, () =>
-            braveSearch(q, CANDIDATE_POOL, afterOpt),
+          memoTTL(
+            toolCacheKey("brave", { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }),
+            TOOL_CACHE_TTL_MS,
+            () => braveSearch(q, CANDIDATE_POOL, afterOpt),
           ).catch(() => [] as GatewayResult[]),
         );
       if (tavily)
         jobs.push(
-          memoTTL(toolCacheKey("tavily", { query: q, limit: CANDIDATE_POOL, after: effectiveAfter ?? "" }), TOOL_CACHE_TTL_MS, () =>
-            tavilySearch(q, CANDIDATE_POOL, afterOpt),
+          memoTTL(
+            toolCacheKey("tavily", {
+              query: q,
+              limit: CANDIDATE_POOL,
+              after: effectiveAfter ?? "",
+            }),
+            TOOL_CACHE_TTL_MS,
+            () => tavilySearch(q, CANDIDATE_POOL, afterOpt),
           ).catch(() => [] as GatewayResult[]),
         );
     }
@@ -707,7 +862,9 @@ async function categorySearch(
     );
     refs.push(src.ref);
     const stamp = date ? `as of ${date}` : "date: unknown";
-    const flag = superseded ? " [SUPERSEDED — a newer source on this subject is in this list; prefer it]" : "";
+    const flag = superseded
+      ? " [SUPERSEDED — a newer source on this subject is in this list; prefer it]"
+      : "";
     return `[${src.ref}] ${r.title ?? ""} — ${r.url ?? ""} (${stamp})${flag}\n${evidence}`;
   });
 
@@ -718,7 +875,7 @@ async function categorySearch(
 async function webSearch(
   input: Record<string, unknown>,
   book: SourceBook,
-  opts?: { brave?: boolean },
+  opts?: { brave?: boolean; unrestrictedDates?: boolean },
 ): Promise<ToolOutcome> {
   const query = str(input["query"]);
   if (query.length < 3) return { text: "query must be at least 3 characters.", hits: 0, refs: [] };
@@ -749,14 +906,20 @@ async function webSearch(
   };
 }
 
-
 // --- DocketBird execution --------------------------------------------------
 
 const stripEm = (s: string) => s.replace(/<\/?em>/gi, "");
 
-async function dbSearchFilings(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+async function dbSearchFilings(
+  input: Record<string, unknown>,
+  book: SourceBook,
+): Promise<ToolOutcome> {
   if (!docketbirdConfigured())
-    return { text: "DocketBird is not configured (DOCKETBIRD_API_KEY missing).", hits: 0, refs: [] };
+    return {
+      text: "DocketBird is not configured (DOCKETBIRD_API_KEY missing).",
+      hits: 0,
+      refs: [],
+    };
   const query = str(input["query"]);
   if (query.length < 3) return { text: "Query must be at least 3 characters.", hits: 0, refs: [] };
 
@@ -777,7 +940,11 @@ async function dbSearchFilings(input: Record<string, unknown>, book: SourceBook)
       () => searchFilings(searchArgs),
     );
   } catch (err) {
-    return { text: `DocketBird search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+    return {
+      text: `DocketBird search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
+      hits: 0,
+      refs: [],
+    };
   }
   if (!rows.length)
     return {
@@ -810,23 +977,33 @@ async function dbSearchFilings(input: Record<string, unknown>, book: SourceBook)
   return { text: lines.join("\n\n"), hits: rows.length, refs };
 }
 
-async function dbReadFiling(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+async function dbReadFiling(
+  input: Record<string, unknown>,
+  book: SourceBook,
+): Promise<ToolOutcome> {
   if (!docketbirdConfigured())
-    return { text: "DocketBird is not configured (DOCKETBIRD_API_KEY missing).", hits: 0, refs: [] };
+    return {
+      text: "DocketBird is not configured (DOCKETBIRD_API_KEY missing).",
+      hits: 0,
+      refs: [],
+    };
   const id = str(input["document_id"]);
   if (!id) return { text: "document_id is required.", hits: 0, refs: [] };
 
   let doc: { id: string; title: string; text: string };
   try {
-    doc = await memoTTL(
-      toolCacheKey("db_read", { id }),
-      TOOL_CACHE_TTL_MS,
-      () => getFilingText(id),
+    doc = await memoTTL(toolCacheKey("db_read", { id }), TOOL_CACHE_TTL_MS, () =>
+      getFilingText(id),
     );
   } catch (err) {
-    return { text: `Could not read filing ${id}: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+    return {
+      text: `Could not read filing ${id}: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
+      hits: 0,
+      refs: [],
+    };
   }
-  if (!doc.text.trim()) return { text: `No extracted text available for document ${id}.`, hits: 0, refs: [] };
+  if (!doc.text.trim())
+    return { text: `No extracted text available for document ${id}.`, hits: 0, refs: [] };
 
   const content = trunc(doc.text, 6000);
   const src = book.add(
@@ -844,19 +1021,25 @@ async function dbReadFiling(input: Record<string, unknown>, book: SourceBook): P
 
 async function dbGetCase(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
   if (!docketbirdConfigured())
-    return { text: "DocketBird is not configured (DOCKETBIRD_API_KEY missing).", hits: 0, refs: [] };
+    return {
+      text: "DocketBird is not configured (DOCKETBIRD_API_KEY missing).",
+      hits: 0,
+      refs: [],
+    };
   const id = str(input["case_id"]);
   if (!id) return { text: "case_id is required.", hits: 0, refs: [] };
 
   let c: DbCase | null;
   try {
-    c = await memoTTL<DbCase | null>(
-      toolCacheKey("db_case", { id }),
-      TOOL_CACHE_TTL_MS,
-      () => dbGetCaseApi(id),
+    c = await memoTTL<DbCase | null>(toolCacheKey("db_case", { id }), TOOL_CACHE_TTL_MS, () =>
+      dbGetCaseApi(id),
     );
   } catch (err) {
-    return { text: `Could not load case ${id}: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+    return {
+      text: `Could not load case ${id}: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
+      hits: 0,
+      refs: [],
+    };
   }
   if (!c) return { text: `No case with id "${id}".`, hits: 0, refs: [] };
 
@@ -864,7 +1047,9 @@ async function dbGetCase(input: Record<string, unknown>, book: SourceBook): Prom
     `${c.title} — ${c.court_id}`,
     c.case_number ? `Case no. ${c.case_number}` : "",
     c.date_filed ? `Filed ${c.date_filed}` : "",
-    c.complaint_document_id ? `Complaint document_id: ${c.complaint_document_id} (${c.complaint_status ?? "?"})` : "",
+    c.complaint_document_id
+      ? `Complaint document_id: ${c.complaint_document_id} (${c.complaint_status ?? "?"})`
+      : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -885,7 +1070,8 @@ const DB_NOT_CONFIGURED: ToolOutcome = {
   hits: 0,
   refs: [],
 };
-const dbCaseUrl = (id: string) => `https://www.docketbird.com/cases?case_id=${encodeURIComponent(id)}`;
+const dbCaseUrl = (id: string) =>
+  `https://www.docketbird.com/cases?case_id=${encodeURIComponent(id)}`;
 
 /** DocketBird's case search is strict-AND on the CAPTION (every token must be in
  *  the "In re ..." title), not party/firm names. Strip corporate suffixes, "In re",
@@ -918,7 +1104,8 @@ function caseQueryCandidates(q: string): string[] {
     /^.*\b(?:inc|llc|l\.l\.c|corp|corporation|co|ltd|plc|lp|n\.a|company)\b\.?/i,
     "",
   );
-  if (afterSuffix.trim() && afterSuffix.trim().length < q.trim().length) push(cleanCaseQuery(afterSuffix));
+  if (afterSuffix.trim() && afterSuffix.trim().length < q.trim().length)
+    push(cleanCaseQuery(afterSuffix));
   const toks = cleaned.split(" ");
   if (toks.length > 3) push(toks.slice(2).join(" "));
   return out.filter((c) => c.toLowerCase() !== q.toLowerCase());
@@ -939,7 +1126,11 @@ async function dbFindCase(input: Record<string, unknown>, book: SourceBook): Pro
       () => searchCases({ q: query, courtId, size }),
     );
   } catch (err) {
-    return { text: `Case search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+    return {
+      text: `Case search failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
+      hits: 0,
+      refs: [],
+    };
   }
   // DocketBird case search is strict-AND on the caption, so any extra token (a
   // party name, "glyphosate", "litigation") that isn't in the caption zeroes the
@@ -972,7 +1163,9 @@ async function dbFindCase(input: Record<string, unknown>, book: SourceBook): Pro
     const content = [
       cite,
       c.date_filed ? `Filed ${c.date_filed}` : c.year_filed ? `Filed ${c.year_filed}` : "",
-      c.complaint_document_id ? `Complaint document_id: ${c.complaint_document_id} (${c.complaint_status ?? "?"})` : "",
+      c.complaint_document_id
+        ? `Complaint document_id: ${c.complaint_document_id} (${c.complaint_status ?? "?"})`
+        : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -1011,19 +1204,25 @@ async function dbFindCase(input: Record<string, unknown>, book: SourceBook): Pro
   };
 }
 
-async function dbDocketSheet(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
+async function dbDocketSheet(
+  input: Record<string, unknown>,
+  book: SourceBook,
+): Promise<ToolOutcome> {
   if (!docketbirdConfigured()) return DB_NOT_CONFIGURED;
   const caseId = str(input["case_id"]);
-  if (!caseId) return { text: "case_id is required — resolve the case with db_find_case first.", hits: 0, refs: [] };
+  if (!caseId)
+    return {
+      text: "case_id is required — resolve the case with db_find_case first.",
+      hits: 0,
+      refs: [],
+    };
   const sort = str(input["sort"]) === "chronological" ? "chronological" : "recent";
   const limit = clamp(input["limit"], 20, 40);
 
   let rows;
   try {
-    rows = await memoTTL(
-      toolCacheKey("db_docket", { case: caseId, sort }),
-      TOOL_CACHE_TTL_MS,
-      () => getDocketSheet(caseId, sort as "chronological" | "recent"),
+    rows = await memoTTL(toolCacheKey("db_docket", { case: caseId, sort }), TOOL_CACHE_TTL_MS, () =>
+      getDocketSheet(caseId, sort as "chronological" | "recent"),
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : "error";
@@ -1040,7 +1239,10 @@ async function dbDocketSheet(input: Record<string, unknown>, book: SourceBook): 
 
   const shown = rows.slice(0, limit);
   const list = shown
-    .map((e) => `- ${e.date_filed ?? "(no date)"} — ${e.title || "(untitled entry)"} [document_id=${e.id}]`)
+    .map(
+      (e) =>
+        `- ${e.date_filed ?? "(no date)"} — ${e.title || "(untitled entry)"} [document_id=${e.id}]`,
+    )
     .join("\n");
   const src = book.add({
     citation: `Docket sheet — ${caseId}`,
@@ -1060,17 +1262,24 @@ async function dbDocketSheet(input: Record<string, unknown>, book: SourceBook): 
 async function dbCalendar(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
   if (!docketbirdConfigured()) return DB_NOT_CONFIGURED;
   const caseId = str(input["case_id"]);
-  if (!caseId) return { text: "case_id is required — resolve the case with db_find_case first.", hits: 0, refs: [] };
+  if (!caseId)
+    return {
+      text: "case_id is required — resolve the case with db_find_case first.",
+      hits: 0,
+      refs: [],
+    };
 
   let entries;
   try {
-    entries = await memoTTL(
-      toolCacheKey("db_cal", { case: caseId }),
-      TOOL_CACHE_TTL_MS,
-      () => getCalendar(caseId),
+    entries = await memoTTL(toolCacheKey("db_cal", { case: caseId }), TOOL_CACHE_TTL_MS, () =>
+      getCalendar(caseId),
     );
   } catch (err) {
-    return { text: `Could not load the calendar for ${caseId}: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+    return {
+      text: `Could not load the calendar for ${caseId}: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
+      hits: 0,
+      refs: [],
+    };
   }
   if (!entries.length)
     return {
@@ -1103,7 +1312,11 @@ async function dbCalendar(input: Record<string, unknown>, book: SourceBook): Pro
     source_url: dbCaseUrl(caseId),
     content: trunc(list, 4000),
   });
-  return { text: `[${src.ref}] Calendar entries for ${caseId}:\n${list}`, hits: entries.length, refs: [src.ref] };
+  return {
+    text: `[${src.ref}] Calendar entries for ${caseId}:\n${list}`,
+    hits: entries.length,
+    refs: [src.ref],
+  };
 }
 
 async function dbGraphAsk(input: Record<string, unknown>, book: SourceBook): Promise<ToolOutcome> {
@@ -1113,13 +1326,15 @@ async function dbGraphAsk(input: Record<string, unknown>, book: SourceBook): Pro
 
   let r;
   try {
-    r = await memoTTL(
-      toolCacheKey("db_graph", { q: question }),
-      TOOL_CACHE_TTL_MS,
-      () => graphAsk(question),
+    r = await memoTTL(toolCacheKey("db_graph", { q: question }), TOOL_CACHE_TTL_MS, () =>
+      graphAsk(question),
     );
   } catch (err) {
-    return { text: `Litigation graph query failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`, hits: 0, refs: [] };
+    return {
+      text: `Litigation graph query failed: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
+      hits: 0,
+      refs: [],
+    };
   }
   if (r.message) return { text: `${r.message} ${r.coverage_note}`.trim(), hits: 0, refs: [] };
   if (!r.num_records)

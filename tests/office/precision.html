@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Office precision verification</title>
+  </head>
+  <body>
+    <h1>Office precision verification</h1>
+    <p>Local test harness for the production Writer command engine.</p>
+    <script type="module">
+      import RefreshRuntime from "/@react-refresh";
+      RefreshRuntime.injectIntoGlobalHook(window);
+      window.$RefreshReg$ = () => {};
+      window.$RefreshSig$ = () => (type) => type;
+      window.__vite_plugin_react_preamble_installed__ = true;
+    </script>
+    <script type="module" src="/tests/office/precision.harness.ts"></script>
+  </body>
+</html>

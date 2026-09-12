@@ -121,7 +121,8 @@ const MAX_TOKENS: Record<WriterProfile, number> = {
 
 /** Known hard output ceilings; unknown models start from the profile budget and back off on 400. */
 function modelOutputCap(model: string): number {
-  if (/claude-haiku-4-5|claude-sonnet-4|claude-sonnet-5|claude-opus-5|claude-fable/i.test(model)) return 65_536;
+  if (/claude-haiku-4-5|claude-sonnet-4|claude-sonnet-5|claude-opus-5|claude-fable/i.test(model))
+    return 65_536;
   if (/claude-3/i.test(model)) return 8_192;
   if (/nemotron/i.test(model)) return envInt("OFFICE_NEMOTRON_MAX_TOKENS", 32_768);
   return 65_536;
@@ -185,11 +186,13 @@ export function isOfficeApp(v: unknown): v is OfficeApp {
 // return a handle; placing the image is the editor's own (write) tool.
 const PLATFORM_READ = [
   "run_python",
+  "load_attachment_for_python",
   "verify_citations",
   "fetch_page",
   "load_firm_guide",
   "ask_clarification",
   "render_diagram",
+  "get_diagram_source",
   "generate_image",
   "edit_image",
   "search_firm_knowledge",
@@ -202,6 +205,8 @@ const WRITER_READ = [
   ...PLATFORM_READ.filter((n) => n !== "generate_image"),
   "get_document_context",
   "read_blocks",
+  "read_document_outline",
+  "search_document",
   "read_revisions",
   "read_comments",
   "read_attachment",
@@ -290,6 +295,7 @@ const RESEARCH_TOOLS = [
   "search_library",
   "verify_citations",
   "run_python",
+  "load_attachment_for_python",
   "ask_clarification",
 ];
 
@@ -572,12 +578,28 @@ function heuristicClass(instruction: string): TaskClass | null {
   const head = instruction.split("\n")[0]?.trim().toLowerCase() ?? "";
   if (!head) return null;
   if (head.length > 600) return null;
-  if (/^(what|which|where|who|how many|how much|is there|are there|does|do|did|can you tell|tell me|explain|summari[sz]e|list|find|show me|check|verify|count|compare)\b/.test(head) && head.length < 200)
+  if (
+    /^(what|which|where|who|how many|how much|is there|are there|does|do|did|can you tell|tell me|explain|summari[sz]e|list|find|show me|check|verify|count|compare)\b/.test(
+      head,
+    ) &&
+    head.length < 200
+  )
     return "inspect";
   if (/^(fix|correct) (the |a |this )?(typo|spelling|grammar)/.test(head)) return "short_edit";
-  if (/^(bold|italici[sz]e|underline|center|align|indent|change (the )?font|set (the )?font|make (it|this|the (title|heading)s?) (bold|bigger|smaller|larger|red|blue|centered))/.test(head))
+  if (
+    /^(bold|italici[sz]e|underline|center|align|indent|change (the )?font|set (the )?font|make (it|this|the (title|heading)s?) (bold|bigger|smaller|larger|red|blue|centered))/.test(
+      head,
+    )
+  )
     return "format";
-  if (/\b(memo|brief|motion|letter|deck|presentation|report|draft|write|compose|generate|create|build|prepare)\b/.test(head) && /\b(memo|brief|motion|letter|deck|presentation|report|slides|sections?|pages?|chapters?|outline)\b/.test(head))
+  if (
+    /\b(memo|brief|motion|letter|deck|presentation|report|draft|write|compose|generate|create|build|prepare)\b/.test(
+      head,
+    ) &&
+    /\b(memo|brief|motion|letter|deck|presentation|report|slides|sections?|pages?|chapters?|outline)\b/.test(
+      head,
+    )
+  )
     return "draft";
   return null;
 }
@@ -611,7 +633,12 @@ export async function classifyTask(
       {
         body: JSON.stringify({
           system: [{ text: ROUTER_SYSTEM }],
-          messages: [{ role: "user", content: [{ text: `Editor: ${app}\nRequest:\n${text.slice(0, 3_000)}` }] }],
+          messages: [
+            {
+              role: "user",
+              content: [{ text: `Editor: ${app}\nRequest:\n${text.slice(0, 3_000)}` }],
+            },
+          ],
           inferenceConfig: { maxTokens: 8, temperature: 0 },
         }),
         signal: controller.signal,
@@ -679,7 +706,12 @@ export type WriterStreamCallbacks = {
   onReasoning(text: string): void;
   onToolCall(call: AgentToolCall): void;
   onStopReason(reason: string): void;
-  onStatus?(status: { text: string; model: string; tier: ModelTier; taskClass: TaskClass | null }): void;
+  onStatus?(status: {
+    text: string;
+    model: string;
+    tier: ModelTier;
+    taskClass: TaskClass | null;
+  }): void;
   onUsage?(usage: WriterUsage & { model: string; tier: ModelTier; ttfbMs: number }): void;
 };
 
@@ -713,10 +745,18 @@ export async function streamWriterTurn(
   const model = route.model;
   const anthropic = isAnthropic(model);
   const cache = PROMPT_CACHE && anthropic;
-  cb.onStatus?.({ text: TIER_LABEL[route.tier], model, tier: route.tier, taskClass: route.taskClass });
+  cb.onStatus?.({
+    text: TIER_LABEL[route.tier],
+    model,
+    tier: route.tier,
+    taskClass: route.taskClass,
+  });
 
   const allowed = new Set(req.tools.map((t) => t.name));
-  const messages = converseMessages(req.messages, model) as Array<{ role: string; content: unknown[] }>;
+  const messages = converseMessages(req.messages, model) as Array<{
+    role: string;
+    content: unknown[];
+  }>;
   if (cache && messages.length) {
     // Checkpoint the whole conversation prefix at the newest message: the next
     // round appends the assistant turn and tool results after this point.
@@ -764,7 +804,8 @@ export async function streamWriterTurn(
         body: JSON.stringify(buildBody(effort, maxTokens)),
         signal: req.signal,
       });
-      if (res.ok || !isRetryableBedrockStatus(res.status) || attempt >= BEDROCK_MAX_RETRIES) return res;
+      if (res.ok || !isRetryableBedrockStatus(res.status) || attempt >= BEDROCK_MAX_RETRIES)
+        return res;
       const delay = bedrockRetryDelayMs(attempt, retryAfterMsFrom(res));
       await res.text().catch(() => "");
       await new Promise<void>((resolve, reject) => {
@@ -790,13 +831,20 @@ export async function streamWriterTurn(
     if (/max_tokens|maxTokens|max tokens|output tokens/i.test(detail) && maxTokens > 8_192) {
       // The model's output ceiling is lower than the profile budget: back off.
       maxTokens = Math.max(8_192, Math.floor(maxTokens / 2));
-      console.warn(`[office] ${model} rejected maxTokens; retrying with ${maxTokens}: ${detail.slice(0, 160)}`);
+      console.warn(
+        `[office] ${model} rejected maxTokens; retrying with ${maxTokens}: ${detail.slice(0, 160)}`,
+      );
     } else if (effort) {
       // The model does not accept adaptive thinking (or this effort value).
-      console.warn(`[office] adaptive thinking rejected by ${model}; retrying without it: ${detail.slice(0, 160)}`);
+      console.warn(
+        `[office] adaptive thinking rejected by ${model}; retrying without it: ${detail.slice(0, 160)}`,
+      );
       effort = "";
     } else {
-      throw new BedrockClaudeError(400, `Bedrock Converse request failed [400] (${model}): ${detail.slice(0, 400)}`);
+      throw new BedrockClaudeError(
+        400,
+        `Bedrock Converse request failed [400] (${model}): ${detail.slice(0, 400)}`,
+      );
     }
     res = await request(effort, maxTokens);
   }

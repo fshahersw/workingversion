@@ -6,6 +6,7 @@
 // uses a fresh SourceBook: Writer findings never enter the Research agent's
 // memory or source numbering.
 // ============================================================================
+import { asksForRecentSources } from "@/lib/agents/search-window";
 import { SourceBook, executeTool } from "@/lib/agents/tools.server";
 
 export type WriterSearchResult = {
@@ -14,9 +15,6 @@ export type WriterSearchResult = {
   method: string;
   error?: string;
 };
-
-const RECENCY =
-  /\b(latest|recent|recently|today|this (week|month|year)|last (week|month|year)|current|news|breaking|update[sd]?)\b/i;
 
 /** Pick 1-4 curated categories from the query; general web + legal news by default. */
 function categoriesFor(query: string): string[] {
@@ -68,9 +66,11 @@ export async function writerWebSearch(query: string, maxResults = 6): Promise<Wr
   };
   // The platform default is the last 30 days. Drafting usually needs authority
   // regardless of age, so widen the window unless the query asks for recency.
-  if (!RECENCY.test(q)) input["published_after"] = "2000-01-01";
+
   try {
-    const out = await executeTool("web_search", input, book);
+    const out = await executeTool("web_search", input, book, {
+      unrestrictedDates: !asksForRecentSources(q),
+    });
     const results = book.all().flatMap((s) => {
       const url = s.source_url ?? "";
       if (!/^https?:\/\//i.test(url)) return [];

@@ -54,6 +54,7 @@ export const Route = createFileRoute("/api/review/cell")({
         const user = await getUserFromRequest(request);
         if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
         let body: {
+          documentContext?: string;
           columnName?: string;
           question?: string;
           kind?: string;
@@ -69,24 +70,53 @@ export const Route = createFileRoute("/api/review/cell")({
           /* empty */
         }
 
-        const question = (body.question ?? "").trim();
+        if (
+          typeof body.question !== "string" ||
+          !Array.isArray(body.pages) ||
+          body.pages.some(
+            (p) =>
+              !p || !Number.isInteger(p.page) || Number(p.page) < 1 || typeof p.text !== "string",
+          ) ||
+          (body.instructions != null && typeof body.instructions !== "string")
+        )
+          return Response.json({ error: "Invalid cell question or source pages" }, { status: 400 });
+        if (
+          body.documentContext != null &&
+          (typeof body.documentContext !== "string" || body.documentContext.length > 6000)
+        )
+          return Response.json({ error: "Invalid document orientation" }, { status: 400 });
+        const question = body.question.trim();
         if (!question) return Response.json({ error: "question required" }, { status: 400 });
+        if (
+          question.length > 2000 ||
+          (body.instructions?.length ?? 0) > 16000 ||
+          body.pages.length > 24 ||
+          body.pages.some((p) => p.text!.length > 32_000) ||
+          body.pages.reduce((sum, p) => sum + p.text!.length, 0) > 120_000
+        )
+          return Response.json(
+            {
+              error:
+                "Cell context exceeds its supported window. Use a full text scan to cover the document in bounded sections.",
+            },
+            { status: 413 },
+          );
 
         const kind = (KINDS as string[]).includes(body.kind ?? "")
           ? (body.kind as ColumnKind)
           : "text";
         const pages = (body.pages ?? [])
           .filter((p) => Number.isFinite(Number(p.page)) && typeof p.text === "string")
-          .slice(0, 24)
           .map((p) => ({
             page: Number(p.page),
-            text: String(p.text).slice(0, 24000),
+            text: String(p.text),
             ocr: !!p.ocr,
           }));
 
         const req = {
+          documentContext: body.documentContext,
           columnName: (body.columnName ?? "Field").slice(0, 120),
-          question: question.slice(0, 2000),
+          question,
           kind,
           options: Array.isArray(body.options)
             ? body.options.map((o) => String(o)).slice(0, 40)
@@ -99,12 +129,12 @@ export const Route = createFileRoute("/api/review/cell")({
 
         try {
           if (REVIEW_PIPELINE_ENABLED) {
-            const { pipelineModel, runCellPipeline } = await import(
-              "@/lib/review/cell-pipeline.server"
-            );
+            const { pipelineModel, runCellPipeline } =
+              await import("@/lib/review/cell-pipeline.server");
             const answer = await runCellPipeline(req, {
               skipVerify: REVIEW_SKIP_VERIFY,
               skipEscalate: !REVIEW_ESCALATE_LOW_CONFIDENCE,
+              signal: request.signal,
             });
             return Response.json({
               ...answer,

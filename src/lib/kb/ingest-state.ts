@@ -33,6 +33,18 @@ export const ASYNC_INGEST_MAX_PAGES = 3_000;
 export const ASYNC_INGEST_MAX_MARKDOWN_CHARS = 12_000_000;
 export const ASYNC_INGEST_MAX_CHUNKS = 1_500;
 export const ASYNC_INGEST_MAX_BYTES = 50 * 1024 * 1024;
+/** Original-file preservation and conversion are different limits. */
+export const SOURCE_FILE_MAX_BYTES = 200 * 1024 * 1024;
+
+export function validateSaveByteSize(size: number | undefined, lane: "sync" | "async"): void {
+  if (size === undefined) return;
+  if (!Number.isSafeInteger(size) || size < 1 || size > SOURCE_FILE_MAX_BYTES)
+    throw new Error("File size must be between 1 byte and 200 MiB.");
+  if (lane === "async" && size > ASYNC_INGEST_MAX_BYTES)
+    throw new Error(
+      "This file requires background conversion, which supports up to 50 MiB. Split the original file or upload a searchable transcript. Your analysis remains available in this tab.",
+    );
+}
 
 export function isSha256(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);

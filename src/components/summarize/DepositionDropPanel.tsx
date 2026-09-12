@@ -161,9 +161,8 @@ export function DepositionDropPanel({
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-semibold text-foreground">Transcript intake</p>
           <p className="mt-1 text-[11.5px] leading-[1.55] text-muted-foreground">
-            PDF, DOCX, or TXT. Up to {DEP_MAX_FILES} transcripts,{" "}
-            {DEP_MAX_PAGES.toLocaleString()} pages, and {bytes(DEP_MAX_BYTES)} total. Select or drop
-            files here.
+            PDF, DOCX, or TXT. Up to {DEP_MAX_FILES} transcripts, {DEP_MAX_PAGES.toLocaleString()}{" "}
+            pages, and {bytes(DEP_MAX_BYTES)} total. Select or drop files here.
           </p>
         </div>
       </div>
@@ -202,7 +201,9 @@ export function DepositionDropPanel({
                 <button
                   type="button"
                   aria-label={`Remove ${file.name}`}
-                  onClick={() => setPicked((current) => current.filter((_, item) => item !== index))}
+                  onClick={() =>
+                    setPicked((current) => current.filter((_, item) => item !== index))
+                  }
                   className="p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <X className="h-3.5 w-3.5" />
@@ -231,7 +232,7 @@ export function DepositionDropPanel({
 
       <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-4 py-3 sm:px-5">
         <span className="text-[11px] text-muted-foreground">
-          Files remain in this browser session.
+          Reading saves transcripts and analysis to your Library.
         </span>
         <Button
           disabled={!picked.length}

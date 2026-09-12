@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DiscoveryScopeControl } from "@/components/docs/DiscoveryCoverage";
+import { ColumnSuggestionsDialog } from "./ColumnSuggestionsDialog";
 import {
   AlertCircle,
   Check,
@@ -64,7 +66,11 @@ function DocSaveBadge({ state, hydrating }: { state: DocSaveState; hydrating: bo
   if (state.status === "idle") return null;
   if (state.status === "saving" || state.status === "indexing") {
     return (
-      <Badge variant="outline" className="gap-1 text-[11px] text-muted-foreground" title={state.message ?? undefined}>
+      <Badge
+        variant="outline"
+        className="gap-1 text-[11px] text-muted-foreground"
+        title={state.message ?? undefined}
+      >
         <CloudUpload className="h-3 w-3" />
         {state.status === "saving" ? "Saving documents…" : "Indexing documents…"}
       </Badge>
@@ -125,7 +131,10 @@ export function ReviewTablesTab() {
   const [newName, setNewName] = useState("");
   const [dragging, setDragging] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [density, setDensity] = useState<GridDensity>("compact");
+  const [rowSearch, setRowSearch] = useState("");
+  const [rowStatus, setRowStatus] = useState("all");
 
   useEffect(() => {
     const saved = window.localStorage.getItem("review.density");
@@ -157,6 +166,28 @@ export function ReviewTablesTab() {
     pending,
   } = review;
 
+  const visibleRows = useMemo(
+    () =>
+      rows.filter((row) => {
+        const values = columns.map((column) => cellAt(row.id, column.id));
+        const needle = rowSearch.trim().toLowerCase();
+        if (
+          needle &&
+          ![row.label, ...values.map((c) => c?.display ?? "")]
+            .join(" ")
+            .toLowerCase()
+            .includes(needle)
+        )
+          return false;
+        if (rowStatus === "review")
+          return values.some((c) => c?.status === "needs_review" || c?.status === "error");
+        if (rowStatus === "pending") return values.some((c) => !c || c.status === "pending");
+        if (rowStatus === "verified") return values.some((c) => Boolean(c?.verifiedAt));
+        return true;
+      }),
+    [rows, columns, cellAt, rowSearch, rowStatus],
+  );
+
   const drawer = useMemo(() => {
     if (!openCell) return { cell: null, row: null, column: null };
     return {
@@ -187,9 +218,21 @@ export function ReviewTablesTab() {
   // ---- table picker -----------------------------------------------------------
   if (!table) {
     const steps = [
-      { n: "1", title: "Add documents", body: "Drop files or bring in a saved Working Set. Each becomes a row." },
-      { n: "2", title: "Ask columns", body: "Each column is one question, typed: text, date, yes/no, options." },
-      { n: "3", title: "Fill and verify", body: "Every cell is answered from its own document and cites the page." },
+      {
+        n: "1",
+        title: "Add documents",
+        body: "Drop files or bring in a saved Working Set. Each becomes a row.",
+      },
+      {
+        n: "2",
+        title: "Ask columns",
+        body: "Each column is one question, typed: text, date, yes/no, options.",
+      },
+      {
+        n: "3",
+        title: "Fill and verify",
+        body: "Every cell is answered from its own document and cites the page.",
+      },
     ];
     const createTable = () => {
       if (!newName.trim() || busy) return;
@@ -199,7 +242,9 @@ export function ReviewTablesTab() {
       <div className="flex h-full min-h-0 flex-col overflow-y-auto">
         <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-4">
           <div className="min-w-0">
-            <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-foreground">Tabular Review</h2>
+            <h2 className="text-[16px] font-semibold tracking-[-0.01em] text-foreground">
+              Tabular Review
+            </h2>
             <p className="mt-1 max-w-xl text-[12.5px] leading-relaxed text-muted-foreground">
               A spreadsheet over a document set. Tables and their documents are saved to your
               account and reopen ready to run.
@@ -293,7 +338,11 @@ export function ReviewTablesTab() {
                       aria-label={`Delete ${t.name}`}
                       title="Delete table and its saved document sets"
                       onClick={() => {
-                        if (window.confirm(`Delete “${t.name}”? Its saved document sets are removed too.`)) {
+                        if (
+                          window.confirm(
+                            `Delete “${t.name}”? Its saved document sets are removed too.`,
+                          )
+                        ) {
                           void review.removeTable(t.id);
                         }
                       }}
@@ -313,7 +362,9 @@ export function ReviewTablesTab() {
             <div key={step.n} className="rounded-sm border border-border bg-surface px-3.5 py-3">
               <p className="font-mono text-[10px] text-brand-orange">{step.n}</p>
               <p className="mt-1 text-[12.5px] font-semibold text-foreground">{step.title}</p>
-              <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">{step.body}</p>
+              <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                {step.body}
+              </p>
             </div>
           ))}
         </section>
@@ -459,8 +510,27 @@ export function ReviewTablesTab() {
           >
             <Rows3 className="h-3.5 w-3.5" strokeWidth={1.75} />
           </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={
+              !rows.length ||
+              run.running ||
+              busy ||
+              review.hydrating ||
+              columns.length >= REVIEW_MAX_COLUMNS
+            }
+            onClick={() => setSuggestionsOpen(true)}
+          >
+            Suggest columns
+          </Button>
           {run.running ? (
-            <Button size="sm" variant="destructive" className="gap-1.5 text-[12.5px]" onClick={review.cancel}>
+            <Button
+              size="sm"
+              variant="destructive"
+              className="gap-1.5 text-[12.5px]"
+              onClick={review.cancel}
+            >
               <StopCircle className="h-3.5 w-3.5" strokeWidth={1.75} />
               Stop
             </Button>
@@ -495,16 +565,50 @@ export function ReviewTablesTab() {
         </div>
       </div>
 
+      <ColumnSuggestionsDialog
+        key={table.id}
+        open={suggestionsOpen}
+        onOpenChange={setSuggestionsOpen}
+        remaining={REVIEW_MAX_COLUMNS - columns.length}
+        onGenerate={review.suggestColumns}
+        onAdd={review.addColumns}
+      />
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+        <DiscoveryScopeControl
+          scope={review.queryScope}
+          onChange={review.setQueryScope}
+          disabled={run.running}
+          count={rows.length}
+        />
+        {stats.errors > 0 && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={run.running}
+            onClick={() => void review.runCells({ onlyFailed: true })}
+          >
+            Retry {stats.errors} failed cells
+          </Button>
+        )}
+        <p className="w-full text-[11px] text-slate-500">
+          Verified and manually edited cells stay protected. Weak passage results automatically
+          widen to a full text scan. Each cell records its coverage and source quotes.
+        </p>
+      </div>
       {run.running || run.label ? (
         <div className="flex items-center gap-3 rounded-md border bg-muted/25 px-3 py-2">
-          {run.running ? <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" /> : null}
+          {run.running ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          ) : null}
           <span className="text-[12px] text-muted-foreground">
             {run.label}
             {run.total ? ` · ${run.done + run.failed}/${run.total} cells` : ""}
             {run.skipped ? ` · ${run.skipped} kept` : ""}
             {run.running && pending.size ? ` · ${pending.size} in flight` : ""}
           </span>
-          {run.running ? <Progress value={progressPct} className="h-1.5 max-w-[240px] flex-1" /> : null}
+          {run.running ? (
+            <Progress value={progressPct} className="h-1.5 max-w-[240px] flex-1" />
+          ) : null}
         </div>
       ) : null}
 
@@ -513,12 +617,68 @@ export function ReviewTablesTab() {
           {error}
         </p>
       ) : null}
+      {review.unsavedCount > 0 && !run.running ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950"
+        >
+          <p>
+            {review.unsavedCount} computed results are waiting to save. Keep this tab open; retry
+            saves these answers without running AI again.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 bg-white text-xs"
+            disabled={review.retryingSave}
+            onClick={() => void review.retryCellSave()}
+          >
+            {review.retryingSave ? "Saving…" : "Retry saving results"}
+          </Button>
+        </div>
+      ) : null}
       {docSave.status === "error" && docSave.message ? (
         <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[12.5px] text-amber-800">
           {docSave.message}
         </p>
       ) : null}
 
+      {rows.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Input
+            aria-label="Search review documents and results"
+            placeholder="Search documents or results"
+            className="h-8 max-w-xs text-xs"
+            value={rowSearch}
+            onChange={(e) => setRowSearch(e.target.value)}
+          />
+          <select
+            aria-label="Filter review rows"
+            className="h-8 rounded-md border border-input bg-card px-2"
+            value={rowStatus}
+            onChange={(e) => setRowStatus(e.target.value)}
+          >
+            <option value="all">All rows</option>
+            <option value="review">Needs review or failed</option>
+            <option value="pending">Not run</option>
+            <option value="verified">Has verified answers</option>
+          </select>
+          <span className="text-muted-foreground">
+            {visibleRows.length} of {rows.length} documents
+          </span>
+          {rowSearch || rowStatus !== "all" ? (
+            <button
+              className="font-medium text-brand-navy hover:underline"
+              onClick={() => {
+                setRowSearch("");
+                setRowStatus("all");
+              }}
+            >
+              Clear filters
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {rows.length === 0 ? (
         <div
           className={`flex min-h-0 flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed ${
@@ -532,7 +692,12 @@ export function ReviewTablesTab() {
             row; add columns for the questions you want answered about every document.
           </p>
           <div className="mt-1 flex items-center gap-2">
-            <Button size="sm" variant="outline" className="text-[12.5px]" onClick={() => inputRef.current?.click()}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-[12.5px]"
+              onClick={() => inputRef.current?.click()}
+            >
               Choose files
             </Button>
             {workingFiles.length ? (
@@ -550,7 +715,7 @@ export function ReviewTablesTab() {
         </div>
       ) : (
         <ReviewGrid
-          rows={rows}
+          rows={visibleRows}
           columns={columns}
           cellAt={cellAt}
           linkedRowIds={linkedRowIds}
