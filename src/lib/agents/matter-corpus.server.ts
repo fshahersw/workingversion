@@ -97,8 +97,11 @@ export async function retrieveMatterCorpus(
 ): Promise<CorpusPassage[]> {
   const body = JSON.stringify({
     retrievalQuery: { text: query.slice(0, 2000) },
+    // These are Bedrock MANAGED knowledge bases (fully-managed vector store) —
+    // they reject vectorSearchConfiguration with a ValidationException; the
+    // managed variant is required.
     retrievalConfiguration: {
-      vectorSearchConfiguration: { numberOfResults: Math.min(Math.max(k, 1), 25) },
+      managedSearchConfiguration: { numberOfResults: Math.min(Math.max(k, 1), 25) },
     },
   });
   const res = await signedAwsFetch(

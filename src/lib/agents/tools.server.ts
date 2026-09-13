@@ -1436,24 +1436,35 @@ async function matterCorpusSearch(
       ? `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
       : "";
   };
+  const num = (v: unknown): number => {
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
   const refs: string[] = [];
   const lines = passages.map((p, i) => {
+    // Managed-KB chunk metadata: docket_number, entry_number, attachment_number,
+    // doc_type, date_filed (YYYYMMDD number), _document_title (filename). No
+    // free-text title on supabase-sourced docs, so build a docket-style label.
     const md = p.metadata ?? {};
-    const title = str(md["title"]);
     const docketNo = str(md["docket_number"]);
+    const entry = num(md["entry_number"]);
+    const attach = num(md["attachment_number"]);
     const docType = str(md["doc_type"]);
     const dateFiled = fmtFiled(md["date_filed"]);
-    const cite =
-      [matter.title, title || docType || undefined, docketNo ? `No. ${docketNo}` : undefined]
+    const docTitle = str(md["_document_title"]);
+    const ecf = entry > 0 ? `ECF ${entry}${attach > 0 ? `-${attach}` : ""}` : "";
+    const label =
+      [docketNo ? `Dkt. ${docketNo}` : "", ecf, docType && docType !== "other" ? docType : ""]
         .filter(Boolean)
-        .join(" — ") || `${matter.title} filing`;
-    const dbId = str(md["docketbird_document_id"]);
+        .join(", ") || docTitle;
+    const cite =
+      [matter.title, label || undefined].filter(Boolean).join(" — ") || `${matter.title} filing`;
     const src = book.add(
       {
         citation: cite,
         authority: "registry",
         source_type: "filing",
-        section_path: `${dbId || p.location || matter.kbId}#${i}`,
+        section_path: `${p.location || matter.kbId}#${i}`,
         ...(dateFiled ? { effective_date: dateFiled } : {}),
         content: trunc(p.text, 1500),
       },
