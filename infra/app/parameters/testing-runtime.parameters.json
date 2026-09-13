@@ -125,11 +125,15 @@
   },
   {
     "ParameterKey": "OfficeInspectModel",
-    "ParameterValue": "nvidia.nemotron-super-3-120b"
+    "ParameterValue": ""
   },
   {
     "ParameterKey": "OfficeTiering",
     "ParameterValue": "on"
+  },
+  {
+    "ParameterKey": "OfficeThoroughModel",
+    "ParameterValue": "us.anthropic.claude-opus-4-8"
   },
   {
     "ParameterKey": "BdaProjectArn",

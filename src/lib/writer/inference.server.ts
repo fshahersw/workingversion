@@ -52,6 +52,15 @@ export const WRITER_MODEL =
   env("BEDROCK_RESEARCH_MODEL") ||
   "us.anthropic.claude-sonnet-5";
 
+/**
+ * Premium tier for the Thorough profile (e.g. Opus 4.8). Falls back to the main
+ * model when unset, so standard runs stay on the everyday workhorse (Sonnet 5)
+ * and only the Thorough profile pays for the heavier model. Reasoning model:
+ * no temperature is ever sent (see streamWriterTurn) and adaptive thinking is
+ * applied via thinkingEffort.
+ */
+export const OFFICE_THOROUGH_MODEL = env("OFFICE_THOROUGH_MODEL") || WRITER_MODEL;
+
 /** Fast tier: inspect, format and short-edit rounds. Vision-capable. */
 export const OFFICE_FAST_MODEL =
   env("OFFICE_FAST_MODEL") || "us.anthropic.claude-haiku-4-5-20251001-v1:0";
@@ -121,7 +130,7 @@ const MAX_TOKENS: Record<WriterProfile, number> = {
 
 /** Known hard output ceilings; unknown models start from the profile budget and back off on 400. */
 function modelOutputCap(model: string): number {
-  if (/claude-haiku-4-5|claude-sonnet-4|claude-sonnet-5|claude-opus-5|claude-fable/i.test(model))
+  if (/claude-haiku-4-5|claude-sonnet-4|claude-sonnet-5|claude-opus/i.test(model))
     return 65_536;
   if (/claude-3/i.test(model)) return 8_192;
   if (/nemotron/i.test(model)) return envInt("OFFICE_NEMOTRON_MAX_TOKENS", 32_768);
@@ -673,7 +682,10 @@ export async function routeTurn(req: {
   messages: readonly AgentMessage[];
   signal?: AbortSignal;
 }): Promise<RouteDecision> {
-  if (!TIERING_ON || req.profile === "thorough") {
+  if (req.profile === "thorough") {
+    return { model: OFFICE_THOROUGH_MODEL, tier: "main", taskClass: null };
+  }
+  if (!TIERING_ON) {
     return { model: WRITER_MODEL, tier: "main", taskClass: null };
   }
   const taskClass = await classifyTask(req.app, currentInstruction(req.messages), req.signal);

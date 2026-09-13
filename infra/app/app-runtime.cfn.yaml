@@ -86,6 +86,7 @@ Metadata:
           - OfficeModel
           - OfficeFastModel
           - OfficeInspectModel
+          - OfficeThoroughModel
           - OfficeTiering
       - Label:
           default: API, edge, and WAF controls
@@ -457,11 +458,20 @@ Parameters:
 
   OfficeInspectModel:
     Type: String
-    Default: nvidia.nemotron-super-3-120b
+    Default: ""
     MaxLength: 128
     Description: >
-      Optional text-only inspect/format tier (e.g. nvidia.nemotron-super-3-120b).
-      Empty routes those rounds to the fast tier.
+      Optional text-only inspect/format tier. Empty (default) routes inspect and
+      format rounds to the fast tier (Haiku), the reliable default.
+
+  OfficeThoroughModel:
+    Type: String
+    Default: ""
+    MaxLength: 128
+    Description: >
+      Optional premium tier used only by the Thorough profile (e.g.
+      us.anthropic.claude-opus-4-8). Empty keeps Thorough on the main tier.
+      Must be in the foundation policy's Bedrock allow-list.
 
   OfficeTiering:
     Type: String
@@ -732,6 +742,10 @@ Conditions:
     - !Equals
       - !Ref OfficeInspectModel
       - ""
+  HasOfficeThoroughModel: !Not
+    - !Equals
+      - !Ref OfficeThoroughModel
+      - ""
   UseBlueDeployment: !Equals
     - !Ref ApiDeploymentSlot
     - blue
@@ -991,6 +1005,7 @@ Resources:
           OFFICE_MODEL: !Ref OfficeModel
           OFFICE_FAST_MODEL: !Ref OfficeFastModel
           OFFICE_INSPECT_MODEL: !If [HasOfficeInspectModel, !Ref OfficeInspectModel, !Ref AWS::NoValue]
+          OFFICE_THOROUGH_MODEL: !If [HasOfficeThoroughModel, !Ref OfficeThoroughModel, !Ref AWS::NoValue]
           OFFICE_TIERING: !Ref OfficeTiering
           # Workflows subsystem (src/lib/workflows). Dark unless SW_WORKFLOWS_ENABLED
           # is "true"; queued/scheduled runs need SW_WORKFLOWS_QUEUE_URL (the workflows
