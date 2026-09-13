@@ -21,7 +21,6 @@ import { type ComponentType, type ReactNode, useEffect, useState } from "react";
 // Lovable `.asset.json` CDN url (/__l5e/…), which 404s on localhost dev.
 import logoUrl from "@/assets/sw-logo.png";
 import logoMarkUrl from "@/assets/sw-logo-mark.png";
-import { MatterSelector } from "@/components/matters/MatterSelector";
 import { useAuth } from "@/lib/use-auth";
 
 type NavItem = {
@@ -92,7 +91,6 @@ function SidebarInner({
   showToggle,
   onSignOut,
   email,
-  onOpenSelector,
 }: {
   expanded: boolean;
   pathname: string;
@@ -101,7 +99,6 @@ function SidebarInner({
   showToggle: boolean;
   onSignOut?: () => void;
   email?: string | null;
-  onOpenSelector?: () => void;
 }) {
   const mattersActive = pathname.startsWith("/matters");
   return (
@@ -162,33 +159,13 @@ function SidebarInner({
           onClick={onNavigate}
         />
 
-        {/* Matters picker */}
-        <button
-          type="button"
-          onClick={() => {
-            onNavigate?.();
-            onOpenSelector?.();
-          }}
-          aria-label="Select a matter"
-          title={expanded ? undefined : "Select a matter"}
-          className={[
-            "group flex items-center transition-colors",
-            expanded
-              ? "h-9 w-full gap-3 rounded-lg px-3"
-              : "mx-auto mt-1 h-10 w-10 justify-center rounded-xl",
-            mattersActive
-              ? "bg-brand-blue-soft text-brand-navy"
-              : "text-brand-navy/60 hover:bg-brand-blue-soft/60 hover:text-brand-navy",
-          ].join(" ")}
-        >
-          <Briefcase
-            className={expanded ? "h-4 w-4 shrink-0" : "h-[18px] w-[18px] shrink-0"}
-            strokeWidth={2}
-          />
-          {expanded && (
-            <span className="truncate text-[12.5px] font-medium tracking-[-0.005em]">Matters</span>
-          )}
-        </button>
+        {/* Matters */}
+        <NavRow
+          item={{ icon: Briefcase, label: "Matters", to: "/matters" }}
+          active={mattersActive}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
 
         {/* Research */}
         <NavRow
@@ -293,7 +270,6 @@ export function AppShell({ children }: { showHeaderLogo?: boolean; children?: Re
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [expanded, setExpanded] = useState<boolean>(false);
-  const [selectorOpen, setSelectorOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   useEffect(() => {
     try {
@@ -358,7 +334,6 @@ export function AppShell({ children }: { showHeaderLogo?: boolean; children?: Re
               void handleSignOut();
             }}
             email={user?.email ?? null}
-            onOpenSelector={() => setSelectorOpen(true)}
           />
         </div>
       </aside>
@@ -382,11 +357,8 @@ export function AppShell({ children }: { showHeaderLogo?: boolean; children?: Re
             void handleSignOut();
           }}
           email={user?.email ?? null}
-          onOpenSelector={() => setSelectorOpen(true)}
         />
       </aside>
-
-      <MatterSelector open={selectorOpen} onOpenChange={setSelectorOpen} />
 
       <div
         className="flex h-full min-h-0 flex-col transition-[padding-left] duration-300 md:pl-[var(--wr-sidebar-w)]"

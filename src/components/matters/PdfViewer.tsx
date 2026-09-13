@@ -12,24 +12,37 @@ import { documentViewUrlQueryOptions } from "@/lib/workspace";
  * Pages rasterize progressively as they approach the viewport so long
  * filings stay fast.
  */
-export function PdfViewer({ documentId, title }: { documentId: string; title?: string }) {
+export function PdfViewer({
+  documentId,
+  title,
+  fill = false,
+}: {
+  documentId: string;
+  title?: string;
+  /** Fill the parent's height instead of the default 70vh pane. */
+  fill?: boolean;
+}) {
   const { data, isLoading, error } = useQuery(documentViewUrlQueryOptions(documentId));
 
   if (isLoading) {
     return (
-      <div className="flex h-[70vh] items-center justify-center rounded-lg border bg-muted/30">
+      <div
+        className={`flex ${fill ? "h-full" : "h-[70vh]"} items-center justify-center rounded-lg border bg-muted/30`}
+      >
         <Loader2 className="h-5 w-5 animate-spin text-brand-blue" />
       </div>
     );
   }
   if (error || !data?.url) {
     return (
-      <div className="flex h-32 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
+      <div
+        className={`flex ${fill ? "h-full" : "h-32"} items-center justify-center rounded-lg border border-dashed px-6 text-center text-xs text-muted-foreground`}
+      >
         {data?.error ?? "Could not load the PDF."}
       </div>
     );
   }
-  return <CanvasViewer url={data.url} title={title} />;
+  return <CanvasViewer url={data.url} title={title} fill={fill} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -38,7 +51,7 @@ type Zoom = "fit" | number;
 const ZOOM_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
 const FIT_PADDING = 48; // horizontal breathing room around the paper
 
-function CanvasViewer({ url, title }: { url: string; title?: string }) {
+function CanvasViewer({ url, title, fill }: { url: string; title?: string; fill: boolean }) {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [baseWidth, setBaseWidth] = useState(612); // letter width until page 1 loads
@@ -91,7 +104,8 @@ function CanvasViewer({ url, title }: { url: string; title?: string }) {
           setPdf(doc);
         }
       } catch (err) {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : "Could not render the PDF.");
+        if (!cancelled)
+          setLoadError(err instanceof Error ? err.message : "Could not render the PDF.");
       }
     })();
 
@@ -119,7 +133,10 @@ function CanvasViewer({ url, title }: { url: string; title?: string }) {
   const pageCount = pdf?.numPages ?? 0;
 
   const stepZoom = (dir: 1 | -1) => {
-    const target = dir === 1 ? ZOOM_STEPS.find((s) => s > scale + 0.01) : [...ZOOM_STEPS].reverse().find((s) => s < scale - 0.01);
+    const target =
+      dir === 1
+        ? ZOOM_STEPS.find((s) => s > scale + 0.01)
+        : [...ZOOM_STEPS].reverse().find((s) => s < scale - 0.01);
     setZoom(target ?? scale);
   };
 
@@ -152,14 +169,18 @@ function CanvasViewer({ url, title }: { url: string; title?: string }) {
 
   if (loadError) {
     return (
-      <div className="flex h-32 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
+      <div
+        className={`flex ${fill ? "h-full" : "h-32"} items-center justify-center rounded-lg border border-dashed px-6 text-center text-xs text-muted-foreground`}
+      >
         {loadError}
       </div>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-card shadow-sm">
+    <div
+      className={`overflow-hidden rounded-lg border bg-card shadow-sm ${fill ? "flex h-full min-h-0 flex-col" : ""}`}
+    >
       {/* Toolbar */}
       <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5">
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
@@ -167,7 +188,13 @@ function CanvasViewer({ url, title }: { url: string; title?: string }) {
         </span>
         {pdf && (
           <div className="flex shrink-0 items-center gap-1">
-            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={currentPage <= 1} onClick={() => goToPage(currentPage - 1)}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              disabled={currentPage <= 1}
+              onClick={() => goToPage(currentPage - 1)}
+            >
               <ChevronLeft className="h-3.5 w-3.5" />
             </Button>
             <span className="flex items-center gap-1 text-[11px] tabular-nums text-muted-foreground">
@@ -183,17 +210,37 @@ function CanvasViewer({ url, title }: { url: string; title?: string }) {
               />
               / {pageCount}
             </span>
-            <Button variant="ghost" size="icon" className="h-6 w-6" disabled={currentPage >= pageCount} onClick={() => goToPage(currentPage + 1)}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              disabled={currentPage >= pageCount}
+              onClick={() => goToPage(currentPage + 1)}
+            >
               <ChevronRight className="h-3.5 w-3.5" />
             </Button>
 
             <span className="mx-1 h-4 w-px bg-border" />
 
-            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => stepZoom(-1)} disabled={zoomPct <= 50}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => stepZoom(-1)}
+              disabled={zoomPct <= 50}
+            >
               <ZoomOut className="h-3.5 w-3.5" />
             </Button>
-            <span className="w-10 text-center text-[11px] tabular-nums text-muted-foreground">{zoomPct}%</span>
-            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => stepZoom(1)} disabled={zoomPct >= 300}>
+            <span className="w-10 text-center text-[11px] tabular-nums text-muted-foreground">
+              {zoomPct}%
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => stepZoom(1)}
+              disabled={zoomPct >= 300}
+            >
               <ZoomIn className="h-3.5 w-3.5" />
             </Button>
             <Button
@@ -214,7 +261,7 @@ function CanvasViewer({ url, title }: { url: string; title?: string }) {
         ref={paneRef}
         tabIndex={0}
         onKeyDown={onKeyDown}
-        className="h-[70vh] overflow-y-auto bg-muted/50 px-4 py-4 outline-none focus-visible:ring-1 focus-visible:ring-brand-blue/40"
+        className={`${fill ? "min-h-0 flex-1" : "h-[70vh]"} overflow-y-auto bg-muted/50 px-4 py-4 outline-none focus-visible:ring-1 focus-visible:ring-brand-blue/40`}
       >
         {!pdf ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-muted-foreground">
@@ -311,7 +358,8 @@ function PdfPage({
           if (entry.isIntersecting) void render();
           if (entry.isIntersecting && entry.boundingClientRect.top >= 0) {
             const paneTop = paneRef.current?.getBoundingClientRect().top ?? 0;
-            if (entry.boundingClientRect.top - paneTop < entry.boundingClientRect.height) onBecomeCurrent();
+            if (entry.boundingClientRect.top - paneTop < entry.boundingClientRect.height)
+              onBecomeCurrent();
           }
         }
       },
@@ -331,7 +379,11 @@ function PdfPage({
         registerRef(el);
       }}
       className="shrink-0 overflow-hidden rounded-[2px] bg-white shadow-md ring-1 ring-black/5"
-      style={size ? { width: size.w, height: size.h } : { width: Math.round(612 * scale), height: Math.round(792 * scale) }}
+      style={
+        size
+          ? { width: size.w, height: size.h }
+          : { width: Math.round(612 * scale), height: Math.round(792 * scale) }
+      }
     >
       <canvas ref={canvasRef} className="block" />
     </div>

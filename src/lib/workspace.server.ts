@@ -1,315 +1,545 @@
-// Server-only readers for the corpus v2 workspace. Queries the public-schema
-// bridge views (public.corpus_*) on the corpus project with the service key.
-import { corpusUrl, MATTERS_BUCKET } from "@/lib/corpus";
-import type {
-  DocumentQuery,
-  DocumentsPage,
-  EntriesPage,
-  EntryQuery,
-  MatterListItem,
-  MatterWorkspace,
-  PipelineRun,
-  WorkspaceCounsel,
-  WorkspaceDocument,
-  WorkspaceEntry,
-  WorkspaceParty,
+// Server-only readers for the matters workspace. Reads the firm's Aurora corpus
+// (corpus.* schema in the sw-kb-kb / kb cluster) through the RDS Data API; no
+// Supabase. Dockets carry a scope (federal transferee, JPML, member case, state,
+// appellate); files are grouped into a docket-entry ledger. PDFs are presigned
+// from the matters corpus bucket.
+//
+// The Data API costs ~1s per round trip regardless of query cost, so every
+// reader issues as few statements as possible and runs count + page in parallel.
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import type { SqlParameter } from "@aws-sdk/client-rds-data";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+import { courtInfo } from "@/lib/courts";
+import { kbConfigured, listCast, listParam, param, queryJson } from "@/lib/kb/aurora.server";
+
+import {
+  DOCKET_SCOPES,
+  type DocketScope,
+  type DocumentQuery,
+  type DocumentsPage,
+  type EntriesPage,
+  type EntryQuery,
+  type LedgerFilter,
+  type MatterListItem,
+  type MatterWorkspace,
+  type PipelineRun,
+  type ScopeCounts,
+  type WorkspaceDocket,
+  type WorkspaceDocument,
 } from "./workspace-types";
 
-type Row = Record<string, unknown>;
+const CORPUS_BUCKET =
+  process.env["MATTERS_CORPUS_BUCKET"] ||
+  process.env["CORPUS_BUCKET"] ||
+  "sw-matters-corpus-475976462949";
+const REGION = process.env["AWS_REGION"] || "us-east-1";
 
-function key(): string {
-  const k = process.env["CORPUS_SERVICE_KEY"];
-  if (!k) throw new Error("Corpus key not configured");
-  return k;
+let _s3: S3Client | undefined;
+function s3(): S3Client {
+  // WHEN_REQUIRED keeps the SDK from injecting a default CRC32 checksum that a
+  // browser presigned PUT cannot supply (see src/lib/data/s3.server.ts).
+  return (_s3 ??= new S3Client({ region: REGION, requestChecksumCalculation: "WHEN_REQUIRED" }));
 }
 
-async function request(
-  table: string,
-  params: Record<string, string>,
-  range?: [number, number],
-  exactCount = false,
-): Promise<{ rows: Row[]; total: number | null }> {
-  const k = key();
-  const qs = new URLSearchParams(params).toString();
-  const headers: Record<string, string> = {
-    apikey: k,
-    Authorization: `Bearer ${k}`,
-  };
-  if (range) headers["Range"] = `${range[0]}-${range[1]}`;
-  if (exactCount) headers["Prefer"] = "count=exact";
-  const res = await fetch(`${corpusUrl()}/rest/v1/${table}?${qs}`, { headers });
-  if (!res.ok) throw new Error(`Corpus ${table}: ${res.status} ${await res.text()}`);
-  const cr = res.headers.get("content-range");
-  const total = cr && cr.includes("/") ? Number(cr.split("/")[1]) : null;
-  return { rows: (await res.json()) as Row[], total: Number.isFinite(total) ? total : null };
-}
-
-async function selectAll(table: string, params: Record<string, string>): Promise<Row[]> {
-  const PAGE = 1000;
-  const first = await request(table, params, [0, PAGE - 1], true);
-  const total = first.total ?? first.rows.length;
-  if (total <= PAGE) return first.rows;
-  const pages: Promise<{ rows: Row[] }>[] = [];
-  for (let off = PAGE; off < total; off += PAGE) {
-    pages.push(request(table, params, [off, off + PAGE - 1]));
+function ensure(): void {
+  if (!kbConfigured()) {
+    throw new Error(
+      "Corpus DB is not configured (set KB_CLUSTER_ARN, KB_SECRET_ARN, KB_DATABASE).",
+    );
   }
-  const rest = await Promise.all(pages);
-  return first.rows.concat(...rest.map((r) => r.rows));
 }
 
-async function countOf(table: string, params: Record<string, string>): Promise<number> {
-  const { total } = await request(table, { select: "*", ...params }, [0, 0], true);
-  return total ?? 0;
+const num = (v: unknown): number => (v == null ? 0 : Number(v)) || 0;
+const numOrNull = (v: unknown): number | null => (v == null ? null : Number(v));
+const iso = (v: unknown): string | null => {
+  if (v == null) return null;
+  const s = String(v);
+  // Data API returns timestamps as "YYYY-MM-DD HH:MM:SS.ffffff"; normalise to ISO.
+  return s.includes(" ") && !s.includes("T") ? `${s.replace(" ", "T")}Z` : s;
+};
+const scopeOf = (v: unknown): DocketScope =>
+  (DOCKET_SCOPES as string[]).includes(String(v)) ? (String(v) as DocketScope) : "federal";
+
+function parseScopeCounts(raw: unknown): ScopeCounts {
+  const empty = (): ScopeCounts =>
+    Object.fromEntries(DOCKET_SCOPES.map((s) => [s, { dockets: 0, files: 0 }])) as ScopeCounts;
+  const out = empty();
+  let obj: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return out;
+    }
+  }
+  if (!obj || typeof obj !== "object") return out;
+  for (const [k, v] of Object.entries(
+    obj as Record<string, { dockets?: unknown; files?: unknown }>,
+  )) {
+    if ((DOCKET_SCOPES as string[]).includes(k)) {
+      out[k as DocketScope] = { dockets: num(v?.dockets), files: num(v?.files) };
+    }
+  }
+  return out;
 }
 
-const s = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
-const sn = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
-const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
-const bool = (v: unknown): boolean => v === true;
+// --- matters ------------------------------------------------------------------
 
-function toMatterItem(m: Row, counts: { entries: number; documents: number; withPdf: number }): MatterListItem {
+type MatterRow = {
+  slug: string;
+  title: string | null;
+  mdlNumber: string | null;
+  courtId: string | null;
+  docketNumber: string | null;
+  entries: number;
+  documents: number;
+  withPdf: number;
+  sealed: number;
+  scopeCounts: unknown;
+  lastSyncedAt: string | null;
+};
+
+// The lead docket is corpus.matters.lead_case_id when set, else the first
+// federal docket flagged is_lead, else the first federal docket.
+const MATTER_SELECT = `
+  SELECT m.matter_id AS "slug", m.title AS "title", m.mdl_number AS "mdlNumber",
+    ld.court_id AS "courtId", ld.docket_number AS "docketNumber",
+    agg.entries AS "entries", agg.documents AS "documents", agg.with_pdf AS "withPdf", agg.sealed AS "sealed",
+    sc.counts AS "scopeCounts",
+    (SELECT max(d.last_synced_at) FROM corpus.dockets d WHERE d.matter_id = m.matter_id) AS "lastSyncedAt"
+  FROM corpus.matters m
+  LEFT JOIN LATERAL (
+    SELECT d.court_id, d.docket_number FROM corpus.dockets d
+    WHERE d.matter_id = m.matter_id
+    ORDER BY (d.docket_id = m.lead_case_id) DESC,
+             CASE d.scope WHEN 'federal' THEN 0 WHEN 'jpml' THEN 1 WHEN 'state' THEN 2 ELSE 3 END,
+             d.is_lead DESC
+    LIMIT 1
+  ) ld ON true
+  LEFT JOIN LATERAL (
+    SELECT count(DISTINCT (f.docket_id, f.entry_number)) AS entries,
+           count(*) AS documents,
+           count(*) FILTER (WHERE f.s3_key IS NOT NULL) AS with_pdf,
+           count(*) FILTER (WHERE f.is_sealed) AS sealed
+    FROM corpus.docket_files f WHERE f.matter_id = m.matter_id
+  ) agg ON true
+  LEFT JOIN LATERAL (
+    SELECT jsonb_object_agg(s.scope, jsonb_build_object('dockets', s.dockets, 'files', s.files)) AS counts
+    FROM (
+      SELECT d.scope, count(DISTINCT d.docket_id) AS dockets, count(f.file_id) AS files
+      FROM corpus.dockets d LEFT JOIN corpus.docket_files f ON f.docket_id = d.docket_id
+      WHERE d.matter_id = m.matter_id GROUP BY d.scope
+    ) s
+  ) sc ON true
+`;
+
+function toMatterItem(r: MatterRow): MatterListItem {
+  const name = r.title ?? r.slug;
+  const court = courtInfo(r.courtId);
   return {
-    matterId: s(m["matter_id"]),
-    slug: s(m["slug"]),
-    shortName: sn(m["short_name"]) ?? s(m["case_name"]),
-    caseName: s(m["case_name"]),
-    docketNumber: s(m["docket_number"]),
-    courtId: s(m["court_id"]),
-    courtName: sn(m["court_name"]),
-    judge: sn(m["judge"]),
-    status: sn(m["status"]),
-    stage: sn(m["stage"]),
-    mdlNumber: sn(m["mdl_number"]),
-    pipelineStage: s(m["pipeline_stage"]) || "new",
-    verifiedAt: sn(m["verified_at"]),
-    ...counts,
+    matterId: r.slug,
+    slug: r.slug,
+    shortName: name.replace(/^In re:?\s*/i, ""),
+    caseName: name,
+    mdlNumber: r.mdlNumber,
+    docketNumber: r.docketNumber ?? "",
+    courtId: r.courtId ?? "",
+    courtName: r.courtId ? court.label : null,
+    judge: null,
+    entries: num(r.entries),
+    documents: num(r.documents),
+    withPdf: num(r.withPdf),
+    sealed: num(r.sealed),
+    scopeCounts: parseScopeCounts(r.scopeCounts),
+    lastSyncedAt: iso(r.lastSyncedAt),
   };
-}
-
-async function matterCounts(matterId: string) {
-  const eq = `eq.${matterId}`;
-  const [entries, documents, withPdf] = await Promise.all([
-    countOf("corpus_docket_entries", { matter_id: eq }),
-    countOf("corpus_documents", { matter_id: eq }),
-    countOf("corpus_documents", { matter_id: eq, s3_key: "not.is.null" }),
-  ]);
-  return { entries, documents, withPdf };
 }
 
 export async function listMatters(): Promise<MatterListItem[]> {
-  const rows = await selectAll("corpus_matters", {
-    select: "matter_id,slug,short_name,case_name,docket_number,court_id,court_name,judge,status,stage,mdl_number,pipeline_stage,verified_at",
-    order: "short_name.asc",
-  });
-  return Promise.all(rows.map(async (m) => toMatterItem(m, await matterCounts(s(m["matter_id"])))));
+  ensure();
+  const rows = await queryJson<MatterRow>(`${MATTER_SELECT} ORDER BY m.title`);
+  return rows.map(toMatterItem);
+}
+
+type DocketRow = {
+  docketId: string;
+  scope: string;
+  courtId: string | null;
+  docketNumber: string | null;
+  title: string | null;
+  isLead: boolean | null;
+  entryCount: number | null;
+  filesPresent: number | null;
+  pdfAvailable: number | null;
+  sealedCount: number | null;
+  missingCount: number | null;
+  completionPct: number | string | null;
+  followed: boolean | null;
+  lastSyncedAt: string | null;
+};
+
+function toDocket(r: DocketRow): WorkspaceDocket {
+  return {
+    docketId: r.docketId,
+    scope: scopeOf(r.scope),
+    courtId: r.courtId ?? "",
+    docketNumber: r.docketNumber ?? "",
+    title: r.title,
+    isLead: !!r.isLead,
+    entryCount: num(r.entryCount),
+    filesPresent: num(r.filesPresent),
+    pdfAvailable: num(r.pdfAvailable),
+    sealedCount: num(r.sealedCount),
+    missingCount: num(r.missingCount),
+    completionPct: r.completionPct == null ? null : Number(r.completionPct),
+    followed: !!r.followed,
+    lastSyncedAt: iso(r.lastSyncedAt),
+  };
 }
 
 export async function loadWorkspace(slug: string): Promise<MatterWorkspace | null> {
-  const { rows } = await request("corpus_matters", {
-    select: "*",
-    slug: `eq.${slug}`,
-  }, [0, 0]);
-  const m = rows[0];
-  if (!m) return null;
-  const matterId = s(m["matter_id"]);
-  const eq = `eq.${matterId}`;
-
-  const [counts, parties, counsel, docTypes, firstDate, lastDate] = await Promise.all([
-    matterCounts(matterId),
-    selectAll("corpus_parties", { select: "party_id,name,party_type", matter_id: eq, order: "name.asc" }),
-    selectAll("corpus_counsel", { select: "counsel_id,attorney,firm,role,party_name", matter_id: eq, order: "attorney.asc" }),
-    selectAll("corpus_documents", { select: "doc_type", matter_id: eq }),
-    request("corpus_docket_entries", { select: "date_filed", matter_id: eq, date_filed: "not.is.null", order: "date_filed.asc" }, [0, 0]),
-    request("corpus_docket_entries", { select: "date_filed", matter_id: eq, date_filed: "not.is.null", order: "date_filed.desc" }, [0, 0]),
+  ensure();
+  const [matterRows, docketRows, facets, range] = await Promise.all([
+    queryJson<MatterRow>(`${MATTER_SELECT} WHERE m.matter_id = :slug LIMIT 1`, [
+      param("slug", slug),
+    ]),
+    queryJson<DocketRow>(
+      `SELECT d.docket_id AS "docketId", d.scope AS "scope", d.court_id AS "courtId",
+              d.docket_number AS "docketNumber", d.title AS "title", d.is_lead AS "isLead",
+              d.entry_count AS "entryCount",
+              (SELECT count(*) FROM corpus.docket_files f WHERE f.docket_id = d.docket_id) AS "filesPresent",
+              (SELECT count(*) FROM corpus.docket_files f WHERE f.docket_id = d.docket_id AND f.s3_key IS NOT NULL) AS "pdfAvailable",
+              d.sealed_count AS "sealedCount", d.missing_count AS "missingCount",
+              d.completion_pct AS "completionPct", d.followed_in_db AS "followed", d.last_synced_at AS "lastSyncedAt"
+       FROM corpus.dockets d
+       WHERE d.matter_id = :slug
+       ORDER BY CASE d.scope WHEN 'federal' THEN 0 WHEN 'jpml' THEN 1 WHEN 'appellate' THEN 2 WHEN 'state' THEN 3 ELSE 4 END,
+                d.is_lead DESC, "filesPresent" DESC, d.docket_number`,
+      [param("slug", slug)],
+    ),
+    queryJson<{ type: string; count: number }>(
+      `SELECT COALESCE(doc_type, 'other') AS "type", count(*) AS "count"
+       FROM corpus.docket_files WHERE matter_id = :slug
+       GROUP BY COALESCE(doc_type, 'other') ORDER BY "count" DESC`,
+      [param("slug", slug)],
+    ),
+    queryJson<{ first: string | null; last: string | null }>(
+      `SELECT min(date_filed) AS "first", max(date_filed) AS "last"
+       FROM corpus.docket_files WHERE matter_id = :slug AND date_filed IS NOT NULL`,
+      [param("slug", slug)],
+    ),
   ]);
-
-  const facetMap = new Map<string, number>();
-  for (const d of docTypes) {
-    const t = s(d["doc_type"]) || "other";
-    facetMap.set(t, (facetMap.get(t) ?? 0) + 1);
-  }
+  const m = matterRows[0];
+  if (!m) return null;
 
   return {
-    matter: toMatterItem(m, counts),
-    parties: parties.map((p): WorkspaceParty => ({
-      id: s(p["party_id"]),
-      name: s(p["name"]),
-      partyType: sn(p["party_type"]),
-    })),
-    counsel: counsel.map((c): WorkspaceCounsel => ({
-      id: s(c["counsel_id"]),
-      attorney: s(c["attorney"]),
-      firm: sn(c["firm"]),
-      role: sn(c["role"]),
-      partyName: sn(c["party_name"]),
-    })),
-    typeFacets: [...facetMap.entries()]
-      .map(([type, count]) => ({ type, count }))
-      .sort((a, b) => b.count - a.count),
-    dateRange: {
-      first: sn(firstDate.rows[0]?.["date_filed"]),
-      last: sn(lastDate.rows[0]?.["date_filed"]),
-    },
+    matter: toMatterItem(m),
+    dockets: docketRows.map(toDocket),
+    parties: [], // Parties / counsel are not modeled in Aurora yet (CourtListener scrape pending).
+    counsel: [],
+    typeFacets: facets.map((f) => ({ type: f.type, count: num(f.count) })),
+    dateRange: { first: range[0]?.first ?? null, last: range[0]?.last ?? null },
   };
 }
 
-const ENTRY_SORT: Record<string, string> = {
-  "entry-desc": "docket_source.asc,sort_seq.desc.nullslast,entry_number.desc",
-  "entry-asc": "docket_source.asc,sort_seq.asc.nullslast,entry_number.asc",
-  "date-desc": "date_filed.desc.nullslast,sort_seq.desc.nullslast",
-  "date-asc": "date_filed.asc.nullslast,sort_seq.asc.nullslast",
+// --- ledger + documents ------------------------------------------------------
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function buildFilters(q: LedgerFilter): { where: string; params: SqlParameter[] } {
+  const where = ["f.matter_id = :slug"];
+  const params: SqlParameter[] = [param("slug", q.slug)];
+  const search = q.search?.trim();
+  if (search) {
+    params.push(param("q", search));
+    if (/^\d{1,6}$/.test(search)) {
+      params.push(param("qnum", Number(search)));
+      where.push("(f.title ILIKE '%' || :q || '%' OR f.entry_number = :qnum)");
+    } else {
+      where.push("f.title ILIKE '%' || :q || '%'");
+    }
+  }
+  if (q.types?.length) {
+    params.push(listParam("types", q.types));
+    where.push(`COALESCE(f.doc_type, 'other') = ANY(${listCast("types", "text")})`);
+  }
+  if (q.docketId) {
+    params.push(param("docketId", q.docketId));
+    where.push("d.docket_id = :docketId");
+  } else if (q.scope && (DOCKET_SCOPES as string[]).includes(q.scope)) {
+    params.push(param("scope", q.scope));
+    where.push("d.scope = :scope");
+  }
+  if (q.dateFrom && DATE_RE.test(q.dateFrom)) {
+    params.push(param("dateFrom", q.dateFrom));
+    where.push("f.date_filed >= CAST(:dateFrom AS date)");
+  }
+  if (q.dateTo && DATE_RE.test(q.dateTo)) {
+    params.push(param("dateTo", q.dateTo));
+    where.push("f.date_filed <= CAST(:dateTo AS date)");
+  }
+  if (q.onlyWithPdf) where.push("f.s3_key IS NOT NULL");
+  if (q.hideSealed) where.push("COALESCE(f.is_sealed, false) = false");
+  return { where: where.join(" AND "), params };
+}
+
+// Ledger rows are (docket, entry) groups; keep the docket order stable inside
+// a date so JPML and transferee entries filed the same day do not interleave.
+const ENTRY_ORDER: Record<string, string> = {
+  "date-desc": `min(f.date_filed) DESC NULLS LAST, d.docket_id, f.entry_number DESC NULLS LAST`,
+  "date-asc": `min(f.date_filed) ASC NULLS LAST, d.docket_id, f.entry_number ASC NULLS LAST`,
+  "entry-desc": `d.docket_id, f.entry_number DESC NULLS LAST`,
+  "entry-asc": `d.docket_id, f.entry_number ASC NULLS LAST`,
 };
 
-const ENTRY_COLS =
-  "docket_entry_id,entry_number,entry_label,display_label_pretty,docket_source,date_filed,description,entry_type,page_count,document_count,has_pdf";
-const DOC_COLS =
-  "document_id,entry_number,entry_label,display_label_pretty,docket_source,attachment_number,title,doc_type,byte_count,page_count,is_sealed,text_status,s3_key";
+const DOC_ORDER: Record<string, string> = {
+  "date-desc": `f.date_filed DESC NULLS LAST, d.docket_id, f.entry_number DESC NULLS LAST, f.attachment_number ASC`,
+  "date-asc": `f.date_filed ASC NULLS LAST, d.docket_id, f.entry_number ASC NULLS LAST, f.attachment_number ASC`,
+  "entry-desc": `d.docket_id, f.entry_number DESC NULLS LAST, f.attachment_number ASC`,
+  "entry-asc": `d.docket_id, f.entry_number ASC NULLS LAST, f.attachment_number ASC`,
+};
 
-const source = (v: unknown): "main" | "jpml" => (v === "jpml" ? "jpml" : "main");
+type EntryRow = {
+  id: string;
+  docketId: string;
+  scope: string;
+  courtId: string | null;
+  docketNumber: string | null;
+  entryNumber: number | null;
+  dateFiled: string | null;
+  dateApprox: boolean | null;
+  description: string | null;
+  entryType: string | null;
+  pageCount: number | null;
+  documentCount: number;
+  pdfCount: number;
+  sealedCount: number;
+};
 
 export async function loadEntries(q: EntryQuery): Promise<EntriesPage> {
-  const matterId = await matterIdFor(q.slug);
-  const params: Record<string, string> = {
-    select: ENTRY_COLS,
-    matter_id: `eq.${matterId}`,
-    order: ENTRY_SORT[q.sort ?? "entry-desc"],
-  };
-  if (q.search?.trim()) params["description"] = `ilike.*${q.search.trim()}*`;
-  if (q.types?.length) params["entry_type"] = `in.(${q.types.join(",")})`;
-  if (q.onlyWithPdf) params["has_pdf"] = "eq.true";
-  if (q.docket) params["docket_source"] = `eq.${q.docket}`;
-  const { rows, total } = await request(params && "corpus_docket_entries", params,
-    [q.offset ?? 0, (q.offset ?? 0) + (q.limit ?? 50) - 1], true);
+  ensure();
+  const { where, params } = buildFilters(q);
+  const order = ENTRY_ORDER[q.sort ?? "date-desc"] ?? ENTRY_ORDER["date-desc"];
+  const limit = Math.min(Math.max(q.limit ?? 50, 1), 200);
+  const offset = Math.max(q.offset ?? 0, 0);
+  const groupBy = `d.docket_id, d.scope, d.court_id, d.docket_number, f.entry_number`;
+  const [rows, totals] = await Promise.all([
+    queryJson<EntryRow>(
+      `SELECT d.docket_id || ':' || COALESCE(f.entry_number, 0) AS "id",
+              d.docket_id AS "docketId", d.scope AS "scope", d.court_id AS "courtId", d.docket_number AS "docketNumber",
+              f.entry_number AS "entryNumber",
+              min(f.date_filed) AS "dateFiled",
+              bool_and(f.source = 'courtlistener_recap') AS "dateApprox",
+              (array_agg(f.title ORDER BY COALESCE(f.attachment_number, 0)))[1] AS "description",
+              (array_agg(f.doc_type ORDER BY COALESCE(f.attachment_number, 0)))[1] AS "entryType",
+              sum(f.page_count) AS "pageCount",
+              count(*) AS "documentCount",
+              count(*) FILTER (WHERE f.s3_key IS NOT NULL) AS "pdfCount",
+              count(*) FILTER (WHERE f.is_sealed) AS "sealedCount"
+       FROM corpus.docket_files f JOIN corpus.dockets d ON d.docket_id = f.docket_id
+       WHERE ${where}
+       GROUP BY ${groupBy}
+       ORDER BY ${order}
+       LIMIT :lim OFFSET :off`,
+      [...params, param("lim", limit), param("off", offset)],
+    ),
+    queryJson<{ count: number }>(
+      `SELECT count(*) AS "count" FROM (
+         SELECT 1 FROM corpus.docket_files f JOIN corpus.dockets d ON d.docket_id = f.docket_id
+         WHERE ${where} GROUP BY ${groupBy}
+       ) t`,
+      params,
+    ),
+  ]);
   return {
-    total: total ?? rows.length,
-    rows: rows.map((r): WorkspaceEntry => ({
-      id: s(r["docket_entry_id"]),
-      entryNumber: num(r["entry_number"]) ?? 0,
-      entryLabel: sn(r["display_label_pretty"]) ?? sn(r["entry_label"]) ?? s(r["entry_number"]),
-      docketSource: source(r["docket_source"]),
-      dateFiled: sn(r["date_filed"]),
-      description: s(r["description"]),
-      entryType: sn(r["entry_type"]),
-      pageCount: num(r["page_count"]),
-      documentCount: num(r["document_count"]) ?? 0,
-      hasPdf: bool(r["has_pdf"]),
+    total: num(totals[0]?.count),
+    rows: rows.map((r) => ({
+      id: r.id,
+      docketId: r.docketId,
+      scope: scopeOf(r.scope),
+      courtId: r.courtId ?? "",
+      docketNumber: r.docketNumber ?? "",
+      entryNumber: num(r.entryNumber),
+      entryLabel: r.entryNumber == null ? "—" : String(r.entryNumber),
+      dateFiled: r.dateFiled ?? null,
+      dateApprox: !!r.dateApprox,
+      description: r.description ?? "",
+      entryType: r.entryType ?? null,
+      pageCount: numOrNull(r.pageCount),
+      documentCount: num(r.documentCount),
+      pdfCount: num(r.pdfCount),
+      sealedCount: num(r.sealedCount),
+      hasPdf: num(r.pdfCount) > 0,
     })),
+  };
+}
+
+const DOC_SELECT = `
+  SELECT f.file_id AS "id", d.docket_id AS "docketId", d.scope AS "scope", d.court_id AS "courtId",
+         d.docket_number AS "docketNumber", f.entry_number AS "entryNumber",
+         COALESCE(f.attachment_number, 0) AS "attachmentNumber", f.title AS "title", f.doc_type AS "docType",
+         f.date_filed AS "dateFiled", (f.source = 'courtlistener_recap') AS "dateApprox",
+         f.byte_count AS "byteCount", f.page_count AS "pageCount", (f.s3_key IS NOT NULL) AS "hasPdf",
+         COALESCE(f.is_sealed, false) AS "isSealed", f.source AS "source"
+  FROM corpus.docket_files f JOIN corpus.dockets d ON d.docket_id = f.docket_id
+`;
+
+type DocRow = {
+  id: string;
+  docketId: string;
+  scope: string;
+  courtId: string | null;
+  docketNumber: string | null;
+  entryNumber: number | null;
+  attachmentNumber: number;
+  title: string | null;
+  docType: string | null;
+  dateFiled: string | null;
+  dateApprox: boolean | null;
+  byteCount: number | null;
+  pageCount: number | null;
+  hasPdf: boolean;
+  isSealed: boolean;
+  source: string | null;
+};
+
+function toDocument(r: DocRow): WorkspaceDocument {
+  return {
+    id: r.id,
+    docketId: r.docketId,
+    scope: scopeOf(r.scope),
+    courtId: r.courtId ?? "",
+    docketNumber: r.docketNumber ?? "",
+    entryNumber: r.entryNumber == null ? null : Number(r.entryNumber),
+    entryLabel: r.entryNumber == null ? "—" : String(r.entryNumber),
+    attachmentNumber: num(r.attachmentNumber),
+    title: r.title ?? "",
+    docType: r.docType ?? null,
+    dateFiled: r.dateFiled ?? null,
+    dateApprox: !!r.dateApprox,
+    byteCount: numOrNull(r.byteCount),
+    pageCount: numOrNull(r.pageCount),
+    hasPdf: !!r.hasPdf,
+    isSealed: !!r.isSealed,
+    source: r.source ?? null,
   };
 }
 
 export async function loadDocuments(q: DocumentQuery): Promise<DocumentsPage> {
-  const matterId = await matterIdFor(q.slug);
-  const params: Record<string, string> = {
-    select: DOC_COLS,
-    matter_id: `eq.${matterId}`,
-    order:
-      q.sort === "entry-asc"
-        ? "docket_source.asc,sort_seq.asc.nullslast,attachment_number.asc"
-        : "docket_source.asc,sort_seq.desc.nullslast,attachment_number.asc",
-  };
-  if (q.search?.trim()) params["title"] = `ilike.*${q.search.trim()}*`;
-  if (q.types?.length) params["doc_type"] = `in.(${q.types.join(",")})`;
-  if (q.onlyWithPdf) params["s3_key"] = "not.is.null";
-  if (q.docket) params["docket_source"] = `eq.${q.docket}`;
-  const { rows, total } = await request("corpus_documents", params,
-    [q.offset ?? 0, (q.offset ?? 0) + (q.limit ?? 50) - 1], true);
-  return {
-    total: total ?? rows.length,
-    rows: rows.map(mapDocument),
-  };
+  ensure();
+  const { where, params } = buildFilters(q);
+  const order = DOC_ORDER[q.sort ?? "date-desc"] ?? DOC_ORDER["date-desc"];
+  const limit = Math.min(Math.max(q.limit ?? 50, 1), 200);
+  const offset = Math.max(q.offset ?? 0, 0);
+  const [rows, totals] = await Promise.all([
+    queryJson<DocRow>(`${DOC_SELECT} WHERE ${where} ORDER BY ${order} LIMIT :lim OFFSET :off`, [
+      ...params,
+      param("lim", limit),
+      param("off", offset),
+    ]),
+    queryJson<{ count: number }>(
+      `SELECT count(*) AS "count" FROM corpus.docket_files f JOIN corpus.dockets d ON d.docket_id = f.docket_id WHERE ${where}`,
+      params,
+    ),
+  ]);
+  return { total: num(totals[0]?.count), rows: rows.map(toDocument) };
 }
 
-function mapDocument(r: Record<string, unknown>): WorkspaceDocument {
-  return {
-    id: s(r["document_id"]),
-    entryNumber: num(r["entry_number"]),
-    entryLabel: sn(r["display_label_pretty"]) ?? sn(r["entry_label"]) ?? s(r["entry_number"]),
-    docketSource: source(r["docket_source"]),
-    attachmentNumber: num(r["attachment_number"]) ?? 0,
-    title: s(r["title"]),
-    docType: sn(r["doc_type"]),
-    byteCount: num(r["byte_count"]),
-    pageCount: num(r["page_count"]),
-    hasPdf: !!sn(r["s3_key"]),
-    isSealed: bool(r["is_sealed"]),
-    textStatus: s(r["text_status"]) || "no_pdf",
-  };
+/** Documents attached to one ledger entry (id = "<docket_id>:<entry_number>"). */
+export async function loadEntryDocuments(
+  slug: string,
+  entryId: string,
+): Promise<WorkspaceDocument[]> {
+  ensure();
+  const sep = entryId.lastIndexOf(":");
+  if (sep < 0) return [];
+  const docketId = entryId.slice(0, sep);
+  const entryNumber = Number(entryId.slice(sep + 1));
+  const rows = await queryJson<DocRow>(
+    `${DOC_SELECT} WHERE f.matter_id = :slug AND f.docket_id = :docketId AND COALESCE(f.entry_number, 0) = :entry
+     ORDER BY COALESCE(f.attachment_number, 0) ASC`,
+    [
+      param("slug", slug),
+      param("docketId", docketId),
+      param("entry", Number.isFinite(entryNumber) ? entryNumber : 0),
+    ],
+  );
+  return rows.map(toDocument);
 }
 
-/**
- * Documents attached to one docket entry (for the inline viewer).
- * Keyed by docket_entry_id: entry numbers repeat across docket sources
- * (main #1 and JPML #1 both exist) since the v2.4 docket-source normalization.
- */
-export async function loadEntryDocuments(slug: string, entryId: string): Promise<WorkspaceDocument[]> {
-  const matterId = await matterIdFor(slug);
-  const rows = await selectAll("corpus_documents", {
-    select: DOC_COLS,
-    matter_id: `eq.${matterId}`,
-    docket_entry_id: `eq.${entryId}`,
-    order: "attachment_number.asc",
-  });
-  return rows.map(mapDocument);
-}
-
-
-export async function documentViewUrl(documentId: string): Promise<{ url: string | null; error?: string }> {
-  const { rows } = await request("corpus_documents", {
-    select: "s3_key",
-    document_id: `eq.${documentId}`,
-  }, [0, 0]);
-  const key0 = sn(rows[0]?.["s3_key"]);
-  if (!key0) return { url: null, error: "No PDF stored for this document yet" };
+export async function documentViewUrl(
+  documentId: string,
+): Promise<{ url: string | null; error?: string }> {
+  ensure();
+  if (!/^[0-9a-f-]{36}$/i.test(documentId)) return { url: null, error: "invalid document id" };
+  const rows = await queryJson<{
+    bucket: string | null;
+    key: string | null;
+    title: string | null;
+    sealed: boolean | null;
+  }>(
+    `SELECT s3_bucket AS "bucket", s3_key AS "key", title AS "title", is_sealed AS "sealed"
+     FROM corpus.docket_files WHERE file_id = CAST(:id AS uuid) LIMIT 1`,
+    [param("id", documentId)],
+  );
+  const r = rows[0];
+  if (!r) return { url: null, error: "Document not found" };
+  if (!r.key) {
+    return {
+      url: null,
+      error: r.sealed
+        ? "This filing is sealed; no PDF is available."
+        : "No PDF is stored for this entry (text-only docket entry).",
+    };
+  }
   try {
-    const { presignS3Get } = await import("./s3.server");
-    return { url: await presignS3Get(MATTERS_BUCKET, key0, 1800) };
+    const safe = (r.title ?? "document").replace(/["\r\n\\]/g, "_").slice(0, 180);
+    const url = await getSignedUrl(
+      s3(),
+      new GetObjectCommand({
+        Bucket: r.bucket || CORPUS_BUCKET,
+        Key: r.key,
+        ResponseContentDisposition: `inline; filename="${safe}.pdf"`,
+        ResponseContentType: "application/pdf",
+      }),
+      { expiresIn: 1800 },
+    );
+    return { url };
   } catch (e) {
     return { url: null, error: e instanceof Error ? e.message : "Presign failed" };
   }
 }
 
-/** Presign PUT URLs for browser-direct uploads into <slug>/incoming/. */
+/** Presign PUT URLs for browser-direct uploads into <slug>/incoming/ on the corpus bucket. */
 export async function uploadUrls(
   slug: string,
   files: { name: string; size: number }[],
   namespace?: string,
 ): Promise<{ name: string; key: string; url: string }[]> {
+  ensure();
   const safe = (n: string) => n.replace(/[^A-Za-z0-9._()\- ]/g, "_").replace(/^\/+/, "");
-  const ns = namespace?.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const ns = namespace
+    ?.trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "");
   const prefix = `${slug}/incoming/${ns ? `${ns}/` : ""}`;
-  const { presignS3Put } = await import("./s3.server");
-  const out = [];
+  const out: { name: string; key: string; url: string }[] = [];
   for (const f of files.slice(0, 1000)) {
     const key0 = `${prefix}${Date.now()}-${safe(f.name)}`;
-    out.push({ name: f.name, key: key0, url: await presignS3Put(MATTERS_BUCKET, key0, 3600) });
+    const url = await getSignedUrl(
+      s3(),
+      new PutObjectCommand({ Bucket: CORPUS_BUCKET, Key: key0 }),
+      {
+        expiresIn: 3600,
+      },
+    );
+    out.push({ name: f.name, key: key0, url });
   }
   return out;
 }
 
-export async function loadPipelineRuns(limit = 20): Promise<PipelineRun[]> {
-  const rows = await selectAll("corpus_ingest_runs", {
-    select: "run_id,slug,stage,status,detail,started_at,finished_at",
-    order: "started_at.desc",
-  });
-  return rows.slice(0, limit).map((r): PipelineRun => ({
-    id: s(r["run_id"]),
-    slug: s(r["slug"]),
-    stage: s(r["stage"]),
-    status: s(r["status"]),
-    startedAt: sn(r["started_at"]),
-    finishedAt: sn(r["finished_at"]),
-    detail: r["detail"] == null ? null : JSON.stringify(r["detail"]),
-  }));
-}
-
-const matterIdCache = new Map<string, { id: string; at: number }>();
-
-async function matterIdFor(slug: string): Promise<string> {
-  const hit = matterIdCache.get(slug);
-  if (hit && Date.now() - hit.at < 60_000) return hit.id;
-  const { rows } = await request("corpus_matters", { select: "matter_id", slug: `eq.${slug}` }, [0, 0]);
-  const id = sn(rows[0]?.["matter_id"]);
-  if (!id) throw new Error(`Unknown matter: ${slug}`);
-  matterIdCache.set(slug, { id, at: Date.now() });
-  return id;
+/** No pipeline-runs table in the Aurora corpus; the ingest history lives elsewhere. */
+export async function loadPipelineRuns(_limit = 20): Promise<PipelineRun[]> {
+  return [];
 }

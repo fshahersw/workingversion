@@ -1,16 +1,24 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 
-import { getMatters } from "@/lib/workspace.functions";
+import { AppShell } from "@/components/app-shell";
+import { MattersIndex } from "@/components/matters/MattersIndex";
 
-// /matters redirects straight into the first matter's workspace; the MDL
-// selector in the sidebar is the real navigation surface.
+// /matters is a real page: a browsable list of the firm's active matters.
 export const Route = createFileRoute("/_authenticated/matters/")({
   ssr: false,
-  beforeLoad: async () => {
-    const matters = await getMatters();
-    if (matters.length > 0) {
-      throw redirect({ to: "/matters/$slug", params: { slug: matters[0].slug }, replace: true });
-    }
-  },
-  component: () => null,
+  component: MattersIndexPage,
+  head: () => ({
+    meta: [
+      { title: "Matters | Seeger Weiss" },
+      { name: "description", content: "The firm's active MDL litigation matters." },
+    ],
+  }),
 });
+
+function MattersIndexPage() {
+  return (
+    <AppShell>
+      <MattersIndex />
+    </AppShell>
+  );
+}

@@ -60,6 +60,7 @@ import { Route as AuthenticatedOfficeDraftsIndexRouteImport } from './routes/_au
 import { Route as ApiPublicWebhooksDocketbirdRouteImport } from './routes/api/public/webhooks/docketbird'
 import { Route as ApiPublicWebhooksCourtlistenerRouteImport } from './routes/api/public/webhooks/courtlistener'
 import { Route as ApiPublicOfficeJwksRouteImport } from './routes/api/public/office/jwks'
+import { Route as ApiPublicMattersSyncRouteImport } from './routes/api/public/matters/sync'
 import { Route as ApiPublicIntelRunRouteImport } from './routes/api/public/intel/run'
 import { Route as ApiPublicIngestIntelRouteImport } from './routes/api/public/ingest/intel'
 import { Route as ApiPublicIngestBatchesRouteImport } from './routes/api/public/ingest/batches'
@@ -341,6 +342,11 @@ const ApiPublicOfficeJwksRoute = ApiPublicOfficeJwksRouteImport.update({
   path: '/api/public/office/jwks',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicMattersSyncRoute = ApiPublicMattersSyncRouteImport.update({
+  id: '/api/public/matters/sync',
+  path: '/api/public/matters/sync',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicIntelRunRoute = ApiPublicIntelRunRouteImport.update({
   id: '/api/public/intel/run',
   path: '/api/public/intel/run',
@@ -480,6 +486,7 @@ export interface FileRoutesByFullPath {
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
+  '/api/public/matters/sync': typeof ApiPublicMattersSyncRoute
   '/api/public/office/jwks': typeof ApiPublicOfficeJwksRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
@@ -547,6 +554,7 @@ export interface FileRoutesByTo {
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
+  '/api/public/matters/sync': typeof ApiPublicMattersSyncRoute
   '/api/public/office/jwks': typeof ApiPublicOfficeJwksRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
@@ -616,6 +624,7 @@ export interface FileRoutesById {
   '/api/public/ingest/batches': typeof ApiPublicIngestBatchesRouteWithChildren
   '/api/public/ingest/intel': typeof ApiPublicIngestIntelRoute
   '/api/public/intel/run': typeof ApiPublicIntelRunRoute
+  '/api/public/matters/sync': typeof ApiPublicMattersSyncRoute
   '/api/public/office/jwks': typeof ApiPublicOfficeJwksRoute
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
@@ -685,6 +694,7 @@ export interface FileRouteTypes {
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
+    | '/api/public/matters/sync'
     | '/api/public/office/jwks'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
@@ -752,6 +762,7 @@ export interface FileRouteTypes {
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
+    | '/api/public/matters/sync'
     | '/api/public/office/jwks'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
@@ -820,6 +831,7 @@ export interface FileRouteTypes {
     | '/api/public/ingest/batches'
     | '/api/public/ingest/intel'
     | '/api/public/intel/run'
+    | '/api/public/matters/sync'
     | '/api/public/office/jwks'
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
@@ -867,6 +879,7 @@ export interface RootRouteChildren {
   ApiPublicIngestBatchesRoute: typeof ApiPublicIngestBatchesRouteWithChildren
   ApiPublicIngestIntelRoute: typeof ApiPublicIngestIntelRoute
   ApiPublicIntelRunRoute: typeof ApiPublicIntelRunRoute
+  ApiPublicMattersSyncRoute: typeof ApiPublicMattersSyncRoute
   ApiPublicOfficeJwksRoute: typeof ApiPublicOfficeJwksRoute
   ApiPublicWebhooksCourtlistenerRoute: typeof ApiPublicWebhooksCourtlistenerRoute
   ApiPublicWebhooksDocketbirdRoute: typeof ApiPublicWebhooksDocketbirdRoute
@@ -1232,6 +1245,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicOfficeJwksRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/matters/sync': {
+      id: '/api/public/matters/sync'
+      path: '/api/public/matters/sync'
+      fullPath: '/api/public/matters/sync'
+      preLoaderRoute: typeof ApiPublicMattersSyncRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/intel/run': {
       id: '/api/public/intel/run'
       path: '/api/public/intel/run'
@@ -1497,6 +1517,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicIngestBatchesRoute: ApiPublicIngestBatchesRouteWithChildren,
   ApiPublicIngestIntelRoute: ApiPublicIngestIntelRoute,
   ApiPublicIntelRunRoute: ApiPublicIntelRunRoute,
+  ApiPublicMattersSyncRoute: ApiPublicMattersSyncRoute,
   ApiPublicOfficeJwksRoute: ApiPublicOfficeJwksRoute,
   ApiPublicWebhooksCourtlistenerRoute: ApiPublicWebhooksCourtlistenerRoute,
   ApiPublicWebhooksDocketbirdRoute: ApiPublicWebhooksDocketbirdRoute,

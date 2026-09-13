@@ -1,306 +1,195 @@
-import { memo, useCallback, useMemo, useState } from "react";
+// Matter workspace: dockets grouped by scope in a left rail, a filterable docket
+// ledger in the middle, and an inline PDF pane on the right. No modals. Every
+// label comes from the Aurora corpus plus the court reference table; nothing is
+// inferred or decorative.
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { AnimatePresence, motion } from "framer-motion";
 import {
-  ArrowDownUp,
-  Building2,
+  ArrowLeft,
+  Calendar,
+  Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   FileText,
   Filter,
-  Gavel,
-  Loader2,
-  PanelRightClose,
-  PanelRightOpen,
+  Lock,
+  Paperclip,
   Search,
-  Users,
   X,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Toggle } from "@/components/ui/toggle";
-import { PdfViewer } from "@/components/matters/PdfViewer";
+import { courtInfo } from "@/lib/courts";
 import {
+  SCOPE_LABEL,
   docTypeLabel,
   documentsQueryOptions,
   entriesQueryOptions,
   entryDocumentsQueryOptions,
   formatBytes,
   formatCorpusDate,
+  formatCount,
+  formatRelative,
   workspaceQueryOptions,
 } from "@/lib/workspace";
-import type { MatterWorkspace as Workspace, WorkspaceDocument, WorkspaceEntry } from "@/lib/workspace-types";
+import {
+  DOCKET_SCOPES,
+  type DocketScope,
+  type LedgerFilter,
+  type LedgerSort,
+  type MatterWorkspace as Workspace,
+  type WorkspaceDocket,
+  type WorkspaceDocument,
+  type WorkspaceEntry,
+} from "@/lib/workspace-types";
 
-const PAGE_SIZE = 50;
+import { PdfViewer } from "./PdfViewer";
 
-type SearchState = {
-  tab: "ledger" | "documents";
+export type WorkspaceSearch = {
+  view?: "ledger" | "documents";
   q?: string;
   types?: string[];
-  withPdf?: boolean;
-  docket?: "main" | "jpml";
-  sort?: "entry-desc" | "entry-asc";
+  scope?: DocketScope;
+  docket?: string;
+  from?: string;
+  to?: string;
+  pdf?: true;
+  hideSealed?: true;
+  sort?: LedgerSort;
   entry?: string;
+  doc?: string;
   page?: number;
 };
 
-/** Entry numbers repeat across docket sources, so the expanded row is keyed by both. */
-const entryKey = (e: WorkspaceEntry) => `${e.docketSource}:${e.entryNumber}`;
+type Patch = Partial<Record<keyof WorkspaceSearch, unknown>>;
 
-type Props = {
-  slug: string;
-  search: SearchState;
-  onSearch: (patch: Partial<SearchState>) => void;
+const PAGE_SIZE = 50;
+
+const SCOPE_DOT: Record<DocketScope, string> = {
+  federal: "bg-brand-navy",
+  jpml: "bg-brand-blue",
+  member: "bg-teal-600",
+  state: "bg-brand-orange",
+  appellate: "bg-violet-600",
 };
 
-export function MatterWorkspace({ slug, search, onSearch }: Props) {
-  const { data: ws } = useQuery(workspaceQueryOptions(slug));
-  const [railOpen, setRailOpen] = useState(true);
+const SORT_OPTIONS: { value: LedgerSort; label: string }[] = [
+  { value: "date-desc", label: "Newest filed" },
+  { value: "date-asc", label: "Oldest filed" },
+  { value: "entry-desc", label: "Entry, high to low" },
+  { value: "entry-asc", label: "Entry, low to high" },
+];
 
-  if (!ws) {
+export function MatterWorkspace({
+  slug,
+  search,
+  onSearch,
+}: {
+  slug: string;
+  search: WorkspaceSearch;
+  onSearch: (patch: Patch) => void;
+}) {
+  const { data: ws, isLoading, error } = useQuery(workspaceQueryOptions(slug));
+  const [openDoc, setOpenDoc] = useState<WorkspaceDocument | null>(null);
+
+  // Keep the pane's metadata in sync with the URL so a reload still shows a title.
+  useEffect(() => {
+    if (!search.doc) setOpenDoc(null);
+    else if (openDoc && openDoc.id !== search.doc) setOpenDoc(null);
+  }, [search.doc, openDoc]);
+
+  const view = search.view ?? "ledger";
+
+  const filter: LedgerFilter = useMemo(
+    () => ({
+      slug,
+      search: search.q,
+      types: search.types,
+      scope: search.docket ? undefined : search.scope,
+      docketId: search.docket,
+      dateFrom: search.from,
+      dateTo: search.to,
+      onlyWithPdf: search.pdf,
+      hideSealed: search.hideSealed,
+      sort: search.sort ?? "date-desc",
+      offset: ((search.page ?? 1) - 1) * PAGE_SIZE,
+      limit: PAGE_SIZE,
+    }),
+    [slug, search],
+  );
+
+  const selectedDocket = useMemo(
+    () => ws?.dockets.find((d) => d.docketId === search.docket) ?? null,
+    [ws, search.docket],
+  );
+
+  const openDocument = (doc: WorkspaceDocument) => {
+    setOpenDoc(doc);
+    onSearch({ doc: doc.id });
+  };
+  const closeDocument = () => {
+    setOpenDoc(null);
+    onSearch({ doc: undefined });
+  };
+
+  if (error) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-brand-blue" />
+      <div className="flex h-full items-center justify-center p-10 text-sm text-muted-foreground">
+        {error instanceof Error ? error.message : "The matter could not be loaded."}
       </div>
     );
   }
+  if (isLoading || !ws) return <WorkspaceSkeleton />;
 
   return (
-    <div className="flex h-full flex-col">
-      <WorkspaceHeader ws={ws} railOpen={railOpen} onToggleRail={() => setRailOpen((v) => !v)} />
+    <div className="flex h-full min-h-0 flex-col bg-surface">
+      <MatterHeader ws={ws} />
       <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <WorkspaceToolbar ws={ws} search={search} onSearch={onSearch} />
-          <div className="min-h-0 flex-1">
-            {search.tab === "ledger" ? (
-              <LedgerTable slug={slug} ws={ws} search={search} onSearch={onSearch} />
-            ) : (
-              <DocumentsTable slug={slug} search={search} onSearch={onSearch} />
-            )}
-          </div>
-        </div>
-        <AnimatePresence initial={false}>
-          {railOpen && (
-            <motion.aside
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 272, opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
-              transition={{ duration: 0.25, ease: [0.32, 0.72, 0, 1] }}
-              className="hidden shrink-0 overflow-hidden border-l bg-card lg:block"
-            >
-              <RightRail ws={ws} />
-            </motion.aside>
-          )}
-        </AnimatePresence>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-
-function WorkspaceHeader({
-  ws,
-  railOpen,
-  onToggleRail,
-}: {
-  ws: Workspace;
-  railOpen: boolean;
-  onToggleRail: () => void;
-}) {
-  const m = ws.matter;
-  return (
-    <div className="shrink-0 border-b bg-card px-4 py-3 md:px-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-lg font-bold tracking-tight text-foreground">{m.shortName}</h1>
-            {m.stage && (
-              <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
-                {m.stage}
-              </Badge>
-            )}
-            {m.status && (
-              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
-                {m.status}
-              </Badge>
-            )}
-          </div>
-          <p className="mt-0.5 truncate text-sm text-muted-foreground">{m.caseName}</p>
-          <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <Gavel className="h-3 w-3" /> {m.docketNumber}
-              {m.mdlNumber ? ` · MDL No. ${m.mdlNumber}` : ""}
-            </span>
-            <span className="flex items-center gap-1">
-              <Building2 className="h-3 w-3" /> {m.courtName ?? m.courtId}
-            </span>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button variant="ghost" size="icon" className="hidden lg:inline-flex" onClick={onToggleRail}>
-            {railOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-
-function WorkspaceToolbar({ ws, search, onSearch }: { ws: Workspace; search: SearchState; onSearch: Props["onSearch"] }) {
-  const [input, setInput] = useState(search.q ?? "");
-  const submitSearch = useCallback(
-    (value: string) => onSearch({ q: value.trim() || undefined, page: 0 }),
-    [onSearch],
-  );
-
-  const toggleType = (t: string) => {
-    const cur = new Set(search.types ?? []);
-    if (cur.has(t)) cur.delete(t);
-    else cur.add(t);
-    onSearch({ types: cur.size ? [...cur] : undefined, page: 0 });
-  };
-
-  return (
-    <div className="shrink-0 space-y-2 border-b bg-card px-4 py-2.5 md:px-6">
-      <div className="flex items-center gap-2">
-        <Tabs value={search.tab} onValueChange={(v) => onSearch({ tab: v as SearchState["tab"], page: 0, entry: undefined })}>
-          <TabsList className="h-8">
-            <TabsTrigger value="ledger" className="h-6 px-3 text-xs">
-              Docket Ledger
-              <span className="ml-1.5 rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                {ws.matter.entries.toLocaleString()}
-              </span>
-            </TabsTrigger>
-            <TabsTrigger value="documents" className="h-6 px-3 text-xs">
-              Documents
-              <span className="ml-1.5 rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                {ws.matter.documents.toLocaleString()}
-              </span>
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
-        <div className="relative min-w-0 flex-1">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submitSearch(input)}
-            onBlur={() => submitSearch(input)}
-            placeholder={search.tab === "ledger" ? "Search docket text… (Enter)" : "Search document titles… (Enter)"}
-            className="h-8 pl-8 text-xs"
+        <DocketRail
+          ws={ws}
+          activeScope={search.docket ? undefined : search.scope}
+          activeDocket={search.docket}
+          onSelect={(patch) => onSearch({ ...patch, page: undefined, entry: undefined })}
+        />
+        <main className="flex min-w-0 flex-1 flex-col border-l border-border bg-card">
+          <ContextBar
+            ws={ws}
+            scope={search.scope}
+            docket={selectedDocket}
+            onClear={() => onSearch({ scope: undefined, docket: undefined, page: undefined })}
           />
-          {input && (
-            <button
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              onClick={() => {
-                setInput("");
-                submitSearch("");
-              }}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+          <Toolbar ws={ws} search={search} onSearch={(p) => onSearch({ ...p, page: undefined })} />
+          {view === "documents" ? (
+            <DocumentsTable
+              filter={filter}
+              showDocket={!search.docket}
+              page={search.page ?? 1}
+              openId={search.doc}
+              onOpen={openDocument}
+              onPage={(page) => onSearch({ page: page > 1 ? page : undefined })}
+            />
+          ) : (
+            <LedgerTable
+              slug={slug}
+              filter={filter}
+              showDocket={!search.docket}
+              page={search.page ?? 1}
+              expandedEntry={search.entry}
+              openId={search.doc}
+              onExpand={(id) => onSearch({ entry: id })}
+              onOpen={openDocument}
+              onPage={(page) => onSearch({ page: page > 1 ? page : undefined })}
+            />
           )}
-        </div>
-        <div className="hidden shrink-0 items-center rounded-md border bg-muted/40 p-0.5 sm:flex">
-          {([
-            ["", "All"],
-            ["main", "Main docket"],
-            ["jpml", "JPML"],
-          ] as const).map(([value, label]) => {
-            const active = (search.docket ?? "") === value;
-            return (
-              <button
-                key={label}
-                type="button"
-                onClick={() => onSearch({ docket: value || undefined, page: 0, entry: undefined })}
-                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
-                  active ? "bg-card text-brand-navy shadow-sm" : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-        <Toggle
-
-          size="sm"
-          pressed={!!search.withPdf}
-          onPressedChange={(v) => onSearch({ withPdf: v || undefined, page: 0 })}
-          className="h-8 gap-1 px-2.5 text-xs data-[state=on]:bg-brand-blue-soft data-[state=on]:text-brand-navy"
-        >
-          <FileText className="h-3.5 w-3.5" /> PDF
-        </Toggle>
-        <Toggle
-          size="sm"
-          pressed={search.sort === "entry-asc"}
-          onPressedChange={(v) => onSearch({ sort: v ? "entry-asc" : undefined, page: 0 })}
-          className="h-8 gap-1 px-2.5 text-xs"
-          title="Toggle oldest/newest first"
-        >
-          <ArrowDownUp className="h-3.5 w-3.5" />
-          {search.sort === "entry-asc" ? "Oldest" : "Newest"}
-        </Toggle>
-        {ws.typeFacets.length > 0 && (
-          <Popover>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                className={`h-8 shrink-0 gap-1.5 px-2.5 text-xs ${
-                  search.types?.length ? "border-brand-navy/40 bg-brand-blue-soft text-brand-navy" : ""
-                }`}
-              >
-                <Filter className="h-3.5 w-3.5" />
-                Type
-                {search.types?.length ? (
-                  <span className="rounded bg-brand-navy px-1 text-[10px] font-semibold text-white">
-                    {search.types.length}
-                  </span>
-                ) : null}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="end" className="w-56 p-1.5">
-              <p className="px-2 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Filing type
-              </p>
-              <div className="max-h-64 overflow-y-auto">
-                {ws.typeFacets.map((f) => {
-                  const active = !!search.types?.includes(f.type);
-                  return (
-                    <label
-                      key={f.type}
-                      className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs capitalize transition-colors hover:bg-muted"
-                    >
-                      <Checkbox checked={active} onCheckedChange={() => toggleType(f.type)} className="h-3.5 w-3.5" />
-                      <span className="min-w-0 flex-1 truncate">{docTypeLabel(f.type)}</span>
-                      <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{f.count}</span>
-                    </label>
-                  );
-                })}
-              </div>
-              {search.types?.length ? (
-                <button
-                  type="button"
-                  onClick={() => onSearch({ types: undefined, page: 0 })}
-                  className="mt-1 w-full rounded-md px-2 py-1.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                >
-                  Clear type filters
-                </button>
-              ) : null}
-            </PopoverContent>
-          </Popover>
+        </main>
+        {search.doc && (
+          <DocumentPane documentId={search.doc} doc={openDoc} onClose={closeDocument} />
         )}
       </div>
     </div>
@@ -308,407 +197,1161 @@ function WorkspaceToolbar({ ws, search, onSearch }: { ws: Workspace; search: Sea
 }
 
 // ---------------------------------------------------------------------------
+// Header
 
-function LedgerTable({ slug, ws, search, onSearch }: { slug: string; ws: Workspace; search: SearchState; onSearch: Props["onSearch"] }) {
-  const q = useMemo(
-    () => ({
-      slug,
-      search: search.q,
-      types: search.types,
-      onlyWithPdf: search.withPdf,
-      docket: search.docket,
-      sort: search.sort ?? "entry-desc",
-      offset: (search.page ?? 0) * PAGE_SIZE,
-      limit: PAGE_SIZE,
-    }),
-    [slug, search],
+function MatterHeader({ ws }: { ws: Workspace }) {
+  const m = ws.matter;
+  const court = courtInfo(m.courtId);
+  return (
+    <header className="shrink-0 border-b border-border bg-card px-6 pb-4 pt-4">
+      <Link
+        to="/matters"
+        className="inline-flex items-center gap-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-brand-navy"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} />
+        Matters
+      </Link>
+      <div className="mt-2 flex flex-wrap items-start justify-between gap-x-8 gap-y-3">
+        <div className="min-w-0">
+          <h1 className="font-display text-[26px] font-semibold leading-tight tracking-[-0.01em] text-brand-navy">
+            {m.caseName}
+          </h1>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[13px] text-muted-foreground">
+            {m.mdlNumber && (
+              <span className="rounded-md bg-brand-navy px-2 py-0.5 text-[11.5px] font-semibold tracking-wide text-white">
+                MDL {m.mdlNumber}
+              </span>
+            )}
+            <span className="font-medium text-foreground">{court.label}</span>
+            <span className="text-border">|</span>
+            <span className="font-mono text-[12.5px]">{m.docketNumber}</span>
+            {court.circuit && (
+              <>
+                <span className="text-border">|</span>
+                <span>{court.circuit}</span>
+              </>
+            )}
+            <span className="text-border">|</span>
+            <span title={m.lastSyncedAt ?? undefined}>Synced {formatRelative(m.lastSyncedAt)}</span>
+          </div>
+        </div>
+        <dl className="flex shrink-0 items-stretch divide-x divide-border rounded-lg border border-border bg-surface">
+          <Stat label="Entries" value={m.entries} />
+          <Stat label="Documents" value={m.documents} />
+          <Stat label="PDFs" value={m.withPdf} />
+          <Stat label="Sealed" value={m.sealed} />
+        </dl>
+      </div>
+    </header>
   );
-  const { data, isFetching, isLoading } = useQuery({ ...entriesQueryOptions(q), placeholderData: (p) => p });
-  const rows = data?.rows ?? [];
-  const total = data?.total ?? 0;
-  const page = search.page ?? 0;
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="px-4 py-2 text-center">
+      <dd className="font-display text-[19px] font-semibold leading-none tabular-nums text-brand-navy">
+        {formatCount(value)}
+      </dd>
+      <dt className="mt-1 text-[10.5px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+        {label}
+      </dt>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Docket rail
+
+function DocketRail({
+  ws,
+  activeScope,
+  activeDocket,
+  onSelect,
+}: {
+  ws: Workspace;
+  activeScope?: DocketScope;
+  activeDocket?: string;
+  onSelect: (patch: Patch) => void;
+}) {
+  const groups = useMemo(() => {
+    const by = new Map<DocketScope, WorkspaceDocket[]>();
+    for (const d of ws.dockets) {
+      const arr = by.get(d.scope) ?? [];
+      arr.push(d);
+      by.set(d.scope, arr);
+    }
+    return DOCKET_SCOPES.filter((s) => by.has(s)).map((s) => ({ scope: s, dockets: by.get(s)! }));
+  }, [ws.dockets]);
+
+  const allActive = !activeScope && !activeDocket;
 
   return (
-    <div className="flex h-full flex-col">
-      <div className={`h-0.5 shrink-0 bg-brand-blue/50 transition-opacity duration-300 ${isFetching && !isLoading ? "animate-pulse opacity-100" : "opacity-0"}`} />
-      <ScrollArea className="min-h-0 flex-1">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 z-10 bg-muted/80 text-left text-[11px] uppercase tracking-wide text-muted-foreground backdrop-blur">
-            <tr>
-              <th className="w-14 px-3 py-2 font-medium">#</th>
-              <th className="w-28 px-3 py-2 font-medium">Filed</th>
-              <th className="px-3 py-2 font-medium">Description</th>
-              <th className="hidden w-32 px-3 py-2 font-medium md:table-cell">Type</th>
-              <th className="w-16 px-3 py-2 text-right font-medium">Pages</th>
-              <th className="w-14 px-3 py-2 text-right font-medium">Docs</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading && <TableSkeleton cols={6} />}
-            {rows.length === 0 && !isFetching && (
-              <tr>
-                <td colSpan={6} className="px-4 py-16 text-center">
-                  <FileText className="mx-auto mb-3 h-8 w-8 text-muted-foreground/40" />
-                  <p className="text-sm font-medium text-foreground">No docket entries yet</p>
-                  <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
-                    {ws.matter.documents === 0
-                      ? "Docket entries will appear here once the ingest pipeline processes this matter's filings."
-                      : "No entries match the current filters."}
-                  </p>
-                </td>
-              </tr>
-            )}
-            {rows.map((e, i) => (
-              <LedgerRow
-                key={e.id}
-                slug={slug}
-                entry={e}
-                zebra={i % 2 === 1}
-                expanded={search.entry === entryKey(e)}
-                onToggle={() => onSearch({ entry: search.entry === entryKey(e) ? undefined : entryKey(e) })}
-              />
-            ))}
-          </tbody>
-        </table>
-      </ScrollArea>
-      {total > 0 && (
-        <Pager
-          page={page}
-          pages={pages}
-          total={total}
-          label="entries"
-          onPage={(p) => onSearch({ page: p })}
+    <aside className="flex w-[280px] shrink-0 flex-col overflow-hidden bg-surface">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-6 pt-4">
+        <RailRow
+          active={allActive}
+          onClick={() => onSelect({ scope: undefined, docket: undefined })}
+          title="All dockets"
+          meta={formatCount(ws.matter.documents)}
         />
+        {groups.map((g) => (
+          <RailGroup
+            key={g.scope}
+            scope={g.scope}
+            dockets={g.dockets}
+            files={ws.matter.scopeCounts[g.scope]?.files ?? 0}
+            activeScope={activeScope}
+            activeDocket={activeDocket}
+            onSelect={onSelect}
+          />
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function RailGroup({
+  scope,
+  dockets,
+  files,
+  activeScope,
+  activeDocket,
+  onSelect,
+}: {
+  scope: DocketScope;
+  dockets: WorkspaceDocket[];
+  files: number;
+  activeScope?: DocketScope;
+  activeDocket?: string;
+  onSelect: (patch: Patch) => void;
+}) {
+  const many = dockets.length > 8;
+  const [expanded, setExpanded] = useState(!many);
+  const [q, setQ] = useState("");
+  const label = SCOPE_LABEL[scope];
+
+  const visible = useMemo(() => {
+    const sorted = [...dockets].sort(
+      (a, b) => Number(b.isLead) - Number(a.isLead) || b.filesPresent - a.filesPresent,
+    );
+    const t = q.trim().toLowerCase();
+    const filtered = t
+      ? sorted.filter((d) =>
+          `${d.docketNumber} ${d.title ?? ""} ${courtInfo(d.courtId).short} ${courtInfo(d.courtId).label}`
+            .toLowerCase()
+            .includes(t),
+        )
+      : sorted;
+    return expanded ? filtered : filtered.slice(0, 8);
+  }, [dockets, expanded, q]);
+
+  const groupActive = activeScope === scope && !activeDocket;
+
+  return (
+    <section className="mt-5">
+      <button
+        type="button"
+        onClick={() => onSelect({ scope, docket: undefined })}
+        title={label.hint}
+        className={[
+          "group flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
+          groupActive ? "bg-brand-blue-soft" : "hover:bg-card",
+        ].join(" ")}
+      >
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${SCOPE_DOT[scope]}`} />
+        <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground group-hover:text-brand-navy">
+          {scope === "member" ? "Member cases" : scope === "jpml" ? "JPML" : label.title}
+        </span>
+        <span className="shrink-0 text-[10.5px] tabular-nums text-muted-foreground">
+          {dockets.length > 1 ? `${formatCount(dockets.length)} · ` : ""}
+          {formatCount(files)}
+        </span>
+      </button>
+      {many && (
+        <div className="relative mt-1 px-2">
+          <Search className="pointer-events-none absolute left-4 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              if (e.target.value) setExpanded(true);
+            }}
+            placeholder={`Find among ${formatCount(dockets.length)} ${label.short.toLowerCase()}…`}
+            className="h-7 w-full rounded-md border border-border bg-card pl-7 pr-2 text-[12px] outline-none placeholder:text-muted-foreground/70 focus:border-brand-blue"
+          />
+        </div>
+      )}
+      <ul className="mt-1">
+        {visible.map((d) => (
+          <DocketRow
+            key={d.docketId}
+            docket={d}
+            active={activeDocket === d.docketId}
+            onClick={() => onSelect({ docket: d.docketId, scope: undefined })}
+          />
+        ))}
+      </ul>
+      {many && !q && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 flex w-full items-center gap-1 rounded-md px-2 py-1 text-[11.5px] font-medium text-brand-blue hover:bg-card"
+        >
+          <ChevronDown
+            className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
+          />
+          {expanded ? "Show fewer" : `Show all ${formatCount(dockets.length)}`}
+        </button>
+      )}
+    </section>
+  );
+}
+
+function DocketRow({
+  docket: d,
+  active,
+  onClick,
+}: {
+  docket: WorkspaceDocket;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const court = courtInfo(d.courtId);
+  const member = d.scope === "member";
+  const tooltip = [
+    court.name,
+    d.title ? cleanTitle(d.title) : null,
+    d.entryCount > 0
+      ? `${formatCount(d.pdfAvailable)} of ${formatCount(d.entryCount)} entries on file`
+      : null,
+    d.followed ? "Auto-updating from DocketBird" : "Manual backfill",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={onClick}
+        title={tooltip}
+        className={[
+          "flex w-full items-center gap-2 rounded-md px-2 py-[5px] text-left transition-colors",
+          active ? "bg-card shadow-sm ring-1 ring-border" : "hover:bg-card/70",
+        ].join(" ")}
+      >
+        <span className="w-[62px] shrink-0 truncate font-mono text-[10.5px] font-semibold text-brand-navy/80">
+          {court.short}
+        </span>
+        {member ? (
+          <span className="min-w-0 flex-1 truncate text-[12px] text-foreground">
+            {d.title ? cleanTitle(d.title) : d.docketNumber}
+          </span>
+        ) : (
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground">
+            {d.docketNumber}
+          </span>
+        )}
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {formatCount(d.filesPresent)}
+        </span>
+      </button>
+    </li>
+  );
+}
+
+function RailRow({
+  active,
+  onClick,
+  title,
+  meta,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title: string;
+  meta: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        "flex w-full items-center gap-2 rounded-md px-2 py-[5px] text-left transition-colors",
+        active ? "bg-card shadow-sm ring-1 ring-border" : "hover:bg-card/70",
+      ].join(" ")}
+    >
+      <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-brand-navy">
+        {title}
+      </span>
+      <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{meta}</span>
+    </button>
+  );
+}
+
+function cleanTitle(t: string): string {
+  return t
+    .replace(/\s*DO NOT DOCKET.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
+// Context bar (what is being shown)
+
+function ContextBar({
+  ws,
+  scope,
+  docket,
+  onClear,
+}: {
+  ws: Workspace;
+  scope?: DocketScope;
+  docket: WorkspaceDocket | null;
+  onClear: () => void;
+}) {
+  if (!docket && !scope) return null;
+  if (docket) {
+    const court = courtInfo(docket.courtId);
+    const label = SCOPE_LABEL[docket.scope];
+    return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border bg-surface px-5 py-2.5 text-[12.5px]">
+        <span className={`h-2 w-2 rounded-full ${SCOPE_DOT[docket.scope]}`} />
+        <span className="font-semibold text-brand-navy">{label.short}</span>
+        <span className="text-muted-foreground">{court.name}</span>
+        <span className="font-mono text-foreground">{docket.docketNumber}</span>
+        {docket.title && docket.scope === "member" && (
+          <span className="truncate text-muted-foreground">{cleanTitle(docket.title)}</span>
+        )}
+        <span className="ml-auto flex items-center gap-3 text-muted-foreground">
+          {docket.entryCount > 0 && (
+            <span>
+              {formatCount(docket.pdfAvailable)} of {formatCount(docket.entryCount)} entries on file
+              {docket.sealedCount > 0 ? ` · ${formatCount(docket.sealedCount)} sealed` : ""}
+            </span>
+          )}
+          <span
+            className={
+              docket.followed
+                ? "rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200"
+                : "rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground ring-1 ring-border"
+            }
+            title={
+              docket.followed
+                ? "Followed in DocketBird; new filings sync automatically."
+                : "Not followed in DocketBird; updated by manual backfill only."
+            }
+          >
+            {docket.followed ? "Auto-updating" : "Manual"}
+          </span>
+          <span title={docket.lastSyncedAt ?? undefined}>
+            Synced {formatRelative(docket.lastSyncedAt)}
+          </span>
+          <button
+            type="button"
+            onClick={onClear}
+            className="rounded p-0.5 hover:bg-card"
+            aria-label="Show all dockets"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </span>
+      </div>
+    );
+  }
+  const label = SCOPE_LABEL[scope!];
+  const counts = ws.matter.scopeCounts[scope!];
+  return (
+    <div className="flex items-center gap-3 border-b border-border bg-surface px-5 py-2.5 text-[12.5px]">
+      <span className={`h-2 w-2 rounded-full ${SCOPE_DOT[scope!]}`} />
+      <span className="font-semibold text-brand-navy">{label.title}</span>
+      <span className="text-muted-foreground">{label.hint}</span>
+      <span className="ml-auto flex items-center gap-3 text-muted-foreground">
+        <span>
+          {formatCount(counts?.dockets ?? 0)} {counts?.dockets === 1 ? "docket" : "dockets"} ·{" "}
+          {formatCount(counts?.files ?? 0)} documents
+        </span>
+        <button
+          type="button"
+          onClick={onClear}
+          className="rounded p-0.5 hover:bg-card"
+          aria-label="Show all dockets"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar
+
+function Toolbar({
+  ws,
+  search,
+  onSearch,
+}: {
+  ws: Workspace;
+  search: WorkspaceSearch;
+  onSearch: (p: Patch) => void;
+}) {
+  const [q, setQ] = useState(search.q ?? "");
+  useEffect(() => setQ(search.q ?? ""), [search.q]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if ((q.trim() || undefined) !== search.q) onSearch({ q: q.trim() || undefined });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q, search.q, onSearch]);
+
+  const activeCount =
+    (search.types?.length ?? 0) +
+    (search.from || search.to ? 1 : 0) +
+    (search.pdf ? 1 : 0) +
+    (search.hideSealed ? 1 : 0);
+  const view = search.view ?? "ledger";
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-border px-5 py-3">
+      <div className="inline-flex rounded-md border border-border bg-surface p-0.5 text-[12.5px] font-medium">
+        {(["ledger", "documents"] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            onClick={() => onSearch({ view: v === "ledger" ? undefined : v, entry: undefined })}
+            className={[
+              "rounded px-3 py-1 transition-colors",
+              view === v
+                ? "bg-card text-brand-navy shadow-sm"
+                : "text-muted-foreground hover:text-brand-navy",
+            ].join(" ")}
+          >
+            {v === "ledger" ? "Docket entries" : "Documents"}
+          </button>
+        ))}
+      </div>
+
+      <div className="relative min-w-[220px] flex-1 max-w-md">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search filings by title or entry number"
+          className="h-8 pl-8 text-[13px]"
+        />
+        {q && (
+          <button
+            type="button"
+            onClick={() => setQ("")}
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+            aria-label="Clear search"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      <TypeFilter
+        facets={ws.typeFacets}
+        value={search.types ?? []}
+        onChange={(types) => onSearch({ types: types.length ? types : undefined })}
+      />
+
+      <DateFilter
+        from={search.from}
+        to={search.to}
+        range={ws.dateRange}
+        onChange={(from, to) => onSearch({ from, to })}
+      />
+
+      <ToggleChip
+        active={!!search.pdf}
+        onClick={() => onSearch({ pdf: search.pdf ? undefined : true })}
+        icon={<FileText className="h-3.5 w-3.5" />}
+      >
+        PDF on file
+      </ToggleChip>
+      <ToggleChip
+        active={!!search.hideSealed}
+        onClick={() => onSearch({ hideSealed: search.hideSealed ? undefined : true })}
+        icon={<Lock className="h-3.5 w-3.5" />}
+      >
+        Hide sealed
+      </ToggleChip>
+
+      <select
+        value={search.sort ?? "date-desc"}
+        onChange={(e) => onSearch({ sort: e.target.value as LedgerSort })}
+        aria-label="Sort"
+        className="ml-auto h-8 rounded-md border border-border bg-card px-2 text-[12.5px] text-foreground outline-none focus:border-brand-blue"
+      >
+        {SORT_OPTIONS.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+
+      {activeCount > 0 && (
+        <button
+          type="button"
+          onClick={() =>
+            onSearch({
+              types: undefined,
+              from: undefined,
+              to: undefined,
+              pdf: undefined,
+              hideSealed: undefined,
+            })
+          }
+          className="text-[12px] font-medium text-brand-blue hover:underline"
+        >
+          Clear filters
+        </button>
       )}
     </div>
   );
 }
 
-const LedgerRow = memo(function LedgerRow({
+function ToggleChip({
+  active,
+  onClick,
+  icon,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={[
+        "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[12.5px] font-medium transition-colors",
+        active
+          ? "border-brand-navy/30 bg-brand-blue-soft text-brand-navy"
+          : "border-border bg-card text-muted-foreground hover:text-brand-navy",
+      ].join(" ")}
+    >
+      {icon}
+      {children}
+      {active && <Check className="h-3 w-3" />}
+    </button>
+  );
+}
+
+function TypeFilter({
+  facets,
+  value,
+  onChange,
+}: {
+  facets: { type: string; count: number }[];
+  value: string[];
+  onChange: (v: string[]) => void;
+}) {
+  const toggle = (t: string) =>
+    onChange(value.includes(t) ? value.filter((x) => x !== t) : [...value, t]);
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={[
+            "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[12.5px] font-medium transition-colors",
+            value.length
+              ? "border-brand-navy/30 bg-brand-blue-soft text-brand-navy"
+              : "border-border bg-card text-muted-foreground hover:text-brand-navy",
+          ].join(" ")}
+        >
+          <Filter className="h-3.5 w-3.5" />
+          {value.length ? `${value.length} ${value.length === 1 ? "type" : "types"}` : "Type"}
+          <ChevronDown className="h-3 w-3" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-64 p-2">
+        <div className="px-2 pb-1.5 pt-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+          Document type
+        </div>
+        <ul className="max-h-72 overflow-y-auto">
+          {facets.map((f) => {
+            const on = value.includes(f.type);
+            return (
+              <li key={f.type}>
+                <label className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] hover:bg-muted">
+                  <Checkbox
+                    checked={on}
+                    onCheckedChange={() => toggle(f.type)}
+                    className="h-3.5 w-3.5"
+                  />
+                  <span className="min-w-0 flex-1 truncate">{docTypeLabel(f.type)}</span>
+                  <span className="text-[11px] tabular-nums text-muted-foreground">
+                    {formatCount(f.count)}
+                  </span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+        {value.length > 0 && (
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            className="mt-1 w-full rounded-md px-2 py-1.5 text-left text-[12px] font-medium text-brand-blue hover:bg-muted"
+          >
+            Clear types
+          </button>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function DateFilter({
+  from,
+  to,
+  range,
+  onChange,
+}: {
+  from?: string;
+  to?: string;
+  range: { first: string | null; last: string | null };
+  onChange: (from: string | undefined, to: string | undefined) => void;
+}) {
+  const active = !!(from || to);
+  const label = active
+    ? `${from ? formatCorpusDate(from) : "…"} – ${to ? formatCorpusDate(to) : "…"}`
+    : "Filed date";
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={[
+            "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[12.5px] font-medium transition-colors",
+            active
+              ? "border-brand-navy/30 bg-brand-blue-soft text-brand-navy"
+              : "border-border bg-card text-muted-foreground hover:text-brand-navy",
+          ].join(" ")}
+        >
+          <Calendar className="h-3.5 w-3.5" />
+          {label}
+          <ChevronDown className="h-3 w-3" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-3">
+        <div className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+          Filed between
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <label className="text-[11.5px] text-muted-foreground">
+            From
+            <input
+              type="date"
+              value={from ?? ""}
+              min={range.first ?? undefined}
+              max={to ?? range.last ?? undefined}
+              onChange={(e) => onChange(e.target.value || undefined, to)}
+              className="mt-1 h-8 w-full rounded-md border border-border bg-card px-2 text-[12.5px] text-foreground outline-none focus:border-brand-blue"
+            />
+          </label>
+          <label className="text-[11.5px] text-muted-foreground">
+            To
+            <input
+              type="date"
+              value={to ?? ""}
+              min={from ?? range.first ?? undefined}
+              max={range.last ?? undefined}
+              onChange={(e) => onChange(from, e.target.value || undefined)}
+              className="mt-1 h-8 w-full rounded-md border border-border bg-card px-2 text-[12.5px] text-foreground outline-none focus:border-brand-blue"
+            />
+          </label>
+        </div>
+        <div className="mt-2 text-[11px] text-muted-foreground">
+          Filings on record: {formatCorpusDate(range.first)} – {formatCorpusDate(range.last)}
+        </div>
+        {active && (
+          <button
+            type="button"
+            onClick={() => onChange(undefined, undefined)}
+            className="mt-2 text-[12px] font-medium text-brand-blue hover:underline"
+          >
+            Clear dates
+          </button>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ledger (docket entries)
+
+function LedgerTable({
   slug,
-  entry,
+  filter,
+  showDocket,
+  page,
+  expandedEntry,
+  openId,
+  onExpand,
+  onOpen,
+  onPage,
+}: {
+  slug: string;
+  filter: LedgerFilter;
+  showDocket: boolean;
+  page: number;
+  expandedEntry?: string;
+  openId?: string;
+  onExpand: (id: string | undefined) => void;
+  onOpen: (doc: WorkspaceDocument) => void;
+  onPage: (page: number) => void;
+}) {
+  const { data, isLoading, isFetching } = useQuery(entriesQueryOptions(filter));
+  const rows = data?.rows ?? [];
+  const total = data?.total ?? 0;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <table className="w-full table-fixed border-collapse text-[13px]">
+          <colgroup>
+            <col className="w-[72px]" />
+            <col className="w-[118px]" />
+            <col />
+            <col className="w-[150px]" />
+            <col className="w-[64px]" />
+            <col className="w-[110px]" />
+          </colgroup>
+          <thead className="sticky top-0 z-10 bg-card">
+            <tr className="border-b border-border text-left text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+              <th className="px-3 py-2 pl-5">Entry</th>
+              <th className="px-3 py-2">Filed</th>
+              <th className="px-3 py-2">Description</th>
+              <th className="px-3 py-2">Type</th>
+              <th className="px-3 py-2 text-right">Docs</th>
+              <th className="px-3 py-2 pr-5">Status</th>
+            </tr>
+          </thead>
+          <tbody className={isFetching && !isLoading ? "opacity-60 transition-opacity" : ""}>
+            {isLoading ? (
+              Array.from({ length: 12 }).map((_, i) => (
+                <tr key={i} className="border-b border-border/60">
+                  <td colSpan={6} className="px-5 py-3">
+                    <Skeleton className="h-4 w-full" />
+                  </td>
+                </tr>
+              ))
+            ) : rows.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={6}
+                  className="px-5 py-16 text-center text-[13px] text-muted-foreground"
+                >
+                  No docket entries match these filters.
+                </td>
+              </tr>
+            ) : (
+              rows.map((e) => (
+                <EntryRow
+                  key={e.id}
+                  slug={slug}
+                  entry={e}
+                  showDocket={showDocket}
+                  expanded={expandedEntry === e.id}
+                  openId={openId}
+                  onToggle={() => onExpand(expandedEntry === e.id ? undefined : e.id)}
+                  onOpen={onOpen}
+                />
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager page={page} total={total} unit="entries" onPage={onPage} />
+    </div>
+  );
+}
+
+function EntryRow({
+  slug,
+  entry: e,
+  showDocket,
   expanded,
-  zebra,
+  openId,
   onToggle,
+  onOpen,
 }: {
   slug: string;
   entry: WorkspaceEntry;
+  showDocket: boolean;
   expanded: boolean;
-  zebra: boolean;
+  openId?: string;
   onToggle: () => void;
+  onOpen: (doc: WorkspaceDocument) => void;
 }) {
+  const court = courtInfo(e.courtId);
   return (
     <>
       <tr
         onClick={onToggle}
-        className={`cursor-pointer border-b text-[13px] transition-colors ${
-          expanded ? "bg-brand-blue-soft/60" : `${zebra ? "bg-muted/25" : ""} hover:bg-muted/50`
-        }`}
+        className={[
+          "cursor-pointer border-b border-border/60 align-top transition-colors",
+          expanded ? "bg-brand-blue-soft/40" : "hover:bg-surface",
+        ].join(" ")}
       >
-        <td className="px-3 py-2.5 font-mono text-xs font-semibold text-brand-navy">{entry.entryLabel}</td>
-        <td className="whitespace-nowrap px-3 py-2.5 text-xs text-muted-foreground">{formatCorpusDate(entry.dateFiled)}</td>
-        <td className="max-w-0 px-3 py-2.5">
-          <span className={`block text-foreground ${expanded ? "" : "truncate"}`}>{entry.description}</span>
+        <td className="px-3 py-2.5 pl-5 font-mono text-[12.5px] font-semibold tabular-nums text-brand-navy">
+          {e.entryLabel}
         </td>
-        <td className="hidden px-3 py-2.5 md:table-cell">
-          {entry.entryType && (
-            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] capitalize text-muted-foreground">
-              {docTypeLabel(entry.entryType)}
-            </span>
+        <td className="px-3 py-2.5">
+          <DateCell date={e.dateFiled} approx={e.dateApprox} />
+        </td>
+        <td className="px-3 py-2.5">
+          <div className="line-clamp-2 leading-snug text-foreground">
+            {e.description || <span className="text-muted-foreground">Untitled entry</span>}
+          </div>
+          {showDocket && (
+            <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span className={`h-1.5 w-1.5 rounded-full ${SCOPE_DOT[e.scope]}`} />
+              <span className="font-medium">{court.short}</span>
+              <span className="font-mono">{e.docketNumber}</span>
+            </div>
           )}
         </td>
-        <td className="px-3 py-2.5 text-right text-xs tabular-nums text-muted-foreground">{entry.pageCount ?? "—"}</td>
-        <td className="px-3 py-2.5 text-right">
-          {entry.documentCount > 0 && (
-            <span
-              className={`inline-flex items-center gap-0.5 text-xs ${entry.hasPdf ? "text-brand-blue" : "text-muted-foreground/50"}`}
-            >
-              <FileText className="h-3 w-3" />
-              {entry.documentCount}
-            </span>
-          )}
+        <td className="px-3 py-2.5">
+          <TypeBadge type={e.entryType} />
+        </td>
+        <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
+          {e.documentCount}
+        </td>
+        <td className="px-3 py-2.5 pr-5">
+          <StatusCell
+            pdfCount={e.pdfCount}
+            docCount={e.documentCount}
+            sealedCount={e.sealedCount}
+          />
         </td>
       </tr>
       {expanded && (
-        <tr>
-          <td colSpan={6} className="border-b bg-muted/20 p-0">
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              transition={{ duration: 0.25, ease: [0.32, 0.72, 0, 1] }}
-              className="overflow-hidden"
-            >
-              <EntryViewer slug={slug} entryId={entry.id} />
-            </motion.div>
+        <tr className="border-b border-border/60 bg-brand-blue-soft/25">
+          <td colSpan={6} className="px-5 py-2">
+            <AttachmentList slug={slug} entryId={e.id} openId={openId} onOpen={onOpen} />
           </td>
         </tr>
       )}
     </>
   );
-});
+}
 
-function EntryViewer({ slug, entryId }: { slug: string; entryId: string }) {
-  const { data: docs, isLoading } = useQuery(entryDocumentsQueryOptions(slug, entryId));
-  const [docId, setDocId] = useState<string | null>(null);
-  const selected = docId ?? docs?.find((d) => d.hasPdf)?.id ?? null;
-
+function AttachmentList({
+  slug,
+  entryId,
+  openId,
+  onOpen,
+}: {
+  slug: string;
+  entryId: string;
+  openId?: string;
+  onOpen: (doc: WorkspaceDocument) => void;
+}) {
+  const { data, isLoading } = useQuery(entryDocumentsQueryOptions(slug, entryId));
+  if (isLoading) return <Skeleton className="my-1 h-4 w-1/2" />;
+  const docs = data ?? [];
+  if (!docs.length)
+    return (
+      <div className="py-1 text-[12px] text-muted-foreground">
+        No documents recorded for this entry.
+      </div>
+    );
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      className="flex flex-col gap-3 p-3 md:flex-row"
+    <ul className="divide-y divide-border/50 rounded-md border border-border bg-card">
+      {docs.map((d) => (
+        <li key={d.id}>
+          <DocumentLine doc={d} active={openId === d.id} onOpen={() => onOpen(d)} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function DocumentLine({
+  doc: d,
+  active,
+  onOpen,
+}: {
+  doc: WorkspaceDocument;
+  active: boolean;
+  onOpen: () => void;
+}) {
+  const openable = d.hasPdf && !d.isSealed;
+  return (
+    <button
+      type="button"
+      onClick={openable ? onOpen : undefined}
+      disabled={!openable}
+      className={[
+        "flex w-full items-center gap-3 px-3 py-2 text-left text-[12.5px] transition-colors",
+        active ? "bg-brand-blue-soft" : openable ? "hover:bg-surface" : "cursor-default",
+      ].join(" ")}
     >
-      <div className="w-full shrink-0 md:w-72">
-        <p className="mb-1.5 px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-          Documents on this entry
-        </p>
-        {isLoading ? (
-          <div className="flex items-center gap-2 px-1 py-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
-          </div>
-        ) : docs && docs.length > 0 ? (
-          <ul className="space-y-1">
-            {docs.map((d) => (
-              <li key={d.id}>
-                <button
-                  onClick={() => d.hasPdf && setDocId(d.id)}
-                  disabled={!d.hasPdf}
-                  className={`flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
-                    selected === d.id
-                      ? "border-brand-navy bg-brand-blue-soft text-brand-navy"
-                      : d.hasPdf
-                        ? "border-border bg-card text-foreground hover:border-brand-blue/50"
-                        : "cursor-not-allowed border-border/50 bg-muted/30 text-muted-foreground/60"
-                  }`}
-                >
-                  <FileText className="h-3.5 w-3.5 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">
-                    {d.attachmentNumber > 0 ? `Attachment ${d.attachmentNumber} — ` : ""}
-                    {d.title || "Main document"}
-                  </span>
-                  {d.pageCount != null && <span className="shrink-0 text-[10px] text-muted-foreground">{d.pageCount}p</span>}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="px-1 py-2 text-xs text-muted-foreground">No documents recorded for this entry.</p>
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        {selected ? (
-          <PdfViewer key={selected} documentId={selected} />
-        ) : (
-          <div className="flex h-full min-h-64 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
-            Select a document to preview the PDF
-          </div>
-        )}
-      </div>
-    </motion.div>
+      <span className="w-14 shrink-0 font-mono text-[11.5px] text-muted-foreground">
+        {d.attachmentNumber > 0 ? `Att. ${d.attachmentNumber}` : "Main"}
+      </span>
+      {d.isSealed ? (
+        <Lock className="h-3.5 w-3.5 shrink-0 text-brand-orange" />
+      ) : d.hasPdf ? (
+        <FileText className="h-3.5 w-3.5 shrink-0 text-brand-blue" />
+      ) : (
+        <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+      )}
+      <span
+        className={`min-w-0 flex-1 truncate ${openable ? "text-foreground" : "text-muted-foreground"}`}
+      >
+        {d.title || "Untitled document"}
+      </span>
+      <TypeBadge type={d.docType} />
+      <span className="w-16 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
+        {d.isSealed ? "Sealed" : d.hasPdf ? formatBytes(d.byteCount) : "Text only"}
+      </span>
+    </button>
   );
 }
 
 // ---------------------------------------------------------------------------
+// Documents view
 
-function DocumentsTable({ slug, search, onSearch }: { slug: string; search: SearchState; onSearch: Props["onSearch"] }) {
-  const q = useMemo(
-    () => ({
-      slug,
-      search: search.q,
-      types: search.types,
-      onlyWithPdf: search.withPdf,
-      docket: search.docket,
-      sort: search.sort ?? "entry-desc",
-      offset: (search.page ?? 0) * PAGE_SIZE,
-      limit: PAGE_SIZE,
-    }),
-    [slug, search],
-  );
-  const { data, isFetching, isLoading } = useQuery({ ...documentsQueryOptions(q), placeholderData: (p) => p });
+function DocumentsTable({
+  filter,
+  showDocket,
+  page,
+  openId,
+  onOpen,
+  onPage,
+}: {
+  filter: LedgerFilter;
+  showDocket: boolean;
+  page: number;
+  openId?: string;
+  onOpen: (doc: WorkspaceDocument) => void;
+  onPage: (page: number) => void;
+}) {
+  const { data, isLoading, isFetching } = useQuery(documentsQueryOptions(filter));
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
-  const page = search.page ?? 0;
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const [docId, setDocId] = useState<string | null>(null);
-
   return (
-    <div className="flex h-full flex-col">
-      <div className={`h-0.5 shrink-0 bg-brand-blue/50 transition-opacity duration-300 ${isFetching && !isLoading ? "animate-pulse opacity-100" : "opacity-0"}`} />
-      <ScrollArea className="min-h-0 flex-1">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 z-10 bg-muted/80 text-left text-[11px] uppercase tracking-wide text-muted-foreground backdrop-blur">
-            <tr>
-              <th className="w-20 px-3 py-2 font-medium">Entry</th>
-              <th className="w-12 px-3 py-2 font-medium">Att.</th>
-              <th className="px-3 py-2 font-medium">Title</th>
-              <th className="hidden w-32 px-3 py-2 font-medium md:table-cell">Type</th>
-              <th className="hidden w-16 px-3 py-2 text-right font-medium sm:table-cell">Pages</th>
-              <th className="w-20 px-3 py-2 text-right font-medium">Size</th>
-              <th className="hidden w-24 px-3 py-2 text-right font-medium lg:table-cell">Text</th>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <table className="w-full table-fixed border-collapse text-[13px]">
+          <colgroup>
+            <col className="w-[92px]" />
+            <col className="w-[118px]" />
+            <col />
+            <col className="w-[150px]" />
+            <col className="w-[72px]" />
+            <col className="w-[110px]" />
+          </colgroup>
+          <thead className="sticky top-0 z-10 bg-card">
+            <tr className="border-b border-border text-left text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+              <th className="px-3 py-2 pl-5">Entry</th>
+              <th className="px-3 py-2">Filed</th>
+              <th className="px-3 py-2">Document</th>
+              <th className="px-3 py-2">Type</th>
+              <th className="px-3 py-2 text-right">Size</th>
+              <th className="px-3 py-2 pr-5">Status</th>
             </tr>
           </thead>
-          <tbody>
-            {isLoading && <TableSkeleton cols={7} />}
-            {rows.length === 0 && !isFetching && (
+          <tbody className={isFetching && !isLoading ? "opacity-60 transition-opacity" : ""}>
+            {isLoading ? (
+              Array.from({ length: 12 }).map((_, i) => (
+                <tr key={i} className="border-b border-border/60">
+                  <td colSpan={6} className="px-5 py-3">
+                    <Skeleton className="h-4 w-full" />
+                  </td>
+                </tr>
+              ))
+            ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-16 text-center">
-                  <FileText className="mx-auto mb-3 h-8 w-8 text-muted-foreground/40" />
-                  <p className="text-sm font-medium text-foreground">No documents yet</p>
-                  <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
-                    Documents will appear here once the ingest pipeline processes this matter's filings.
-                  </p>
+                <td
+                  colSpan={6}
+                  className="px-5 py-16 text-center text-[13px] text-muted-foreground"
+                >
+                  No documents match these filters.
                 </td>
               </tr>
+            ) : (
+              rows.map((d) => {
+                const court = courtInfo(d.courtId);
+                const openable = d.hasPdf && !d.isSealed;
+                return (
+                  <tr
+                    key={d.id}
+                    onClick={openable ? () => onOpen(d) : undefined}
+                    className={[
+                      "border-b border-border/60 align-top transition-colors",
+                      openId === d.id
+                        ? "bg-brand-blue-soft/40"
+                        : openable
+                          ? "cursor-pointer hover:bg-surface"
+                          : "",
+                    ].join(" ")}
+                  >
+                    <td className="px-3 py-2.5 pl-5 font-mono text-[12.5px] tabular-nums">
+                      <span className="font-semibold text-brand-navy">{d.entryLabel}</span>
+                      {d.attachmentNumber > 0 && (
+                        <span className="text-muted-foreground">-{d.attachmentNumber}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <DateCell date={d.dateFiled} approx={d.dateApprox} />
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <div
+                        className={`line-clamp-2 leading-snug ${openable ? "text-foreground" : "text-muted-foreground"}`}
+                      >
+                        {d.title || "Untitled document"}
+                      </div>
+                      {showDocket && (
+                        <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <span className={`h-1.5 w-1.5 rounded-full ${SCOPE_DOT[d.scope]}`} />
+                          <span className="font-medium">{court.short}</span>
+                          <span className="font-mono">{d.docketNumber}</span>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <TypeBadge type={d.docType} />
+                    </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
+                      {d.hasPdf ? formatBytes(d.byteCount) : "—"}
+                    </td>
+                    <td className="px-3 py-2.5 pr-5">
+                      <StatusCell
+                        pdfCount={d.hasPdf ? 1 : 0}
+                        docCount={1}
+                        sealedCount={d.isSealed ? 1 : 0}
+                      />
+                    </td>
+                  </tr>
+                );
+              })
             )}
-            {rows.map((d, i) => (
-              <DocRow
-                key={d.id}
-                doc={d}
-                zebra={i % 2 === 1}
-                expanded={docId === d.id}
-                onToggle={() => setDocId(docId === d.id ? null : d.id)}
-              />
-            ))}
           </tbody>
         </table>
-      </ScrollArea>
-      {total > 0 && (
-        <Pager page={page} pages={pages} total={total} label="documents" onPage={(p) => onSearch({ page: p })} />
-      )}
+      </div>
+      <Pager page={page} total={total} unit="documents" onPage={onPage} />
     </div>
   );
 }
 
-const DocRow = memo(function DocRow({
-  doc,
-  expanded,
-  zebra,
-  onToggle,
-}: {
-  doc: WorkspaceDocument;
-  expanded: boolean;
-  zebra: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <>
-      <tr
-        onClick={() => doc.hasPdf && onToggle()}
-        className={`border-b text-[13px] transition-colors ${
-          doc.hasPdf ? "cursor-pointer" : "cursor-default"
-        } ${expanded ? "bg-brand-blue-soft/60" : `${zebra ? "bg-muted/25" : ""} ${doc.hasPdf ? "hover:bg-muted/50" : ""}`}`}
-      >
-        <td className="px-3 py-2.5 font-mono text-xs font-semibold text-brand-navy">{doc.entryLabel || "—"}</td>
-        <td className="px-3 py-2.5 text-xs text-muted-foreground">{doc.attachmentNumber || ""}</td>
-        <td className="max-w-0 px-3 py-2.5">
-          <span className="flex items-center gap-1.5">
-            {doc.hasPdf ? (
-              <FileText className="h-3.5 w-3.5 shrink-0 text-brand-blue" />
-            ) : (
-              <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
-            )}
-            <span className={`block truncate ${doc.hasPdf ? "text-foreground" : "text-muted-foreground/70"}`}>
-              {doc.title}
-            </span>
-            {doc.isSealed && (
-              <span className="shrink-0 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-800">
-                Sealed
-              </span>
-            )}
-          </span>
-        </td>
-        <td className="hidden px-3 py-2.5 md:table-cell">
-          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] capitalize text-muted-foreground">
-            {docTypeLabel(doc.docType)}
-          </span>
-        </td>
-        <td className="hidden px-3 py-2.5 text-right text-xs tabular-nums text-muted-foreground sm:table-cell">
-          {doc.pageCount ?? "—"}
-        </td>
-        <td className="px-3 py-2.5 text-right text-xs tabular-nums text-muted-foreground">{formatBytes(doc.byteCount)}</td>
-        <td className="hidden px-3 py-2.5 text-right lg:table-cell">
-          <span
-            className={`text-[10px] font-medium ${
-              doc.textStatus === "done"
-                ? "text-emerald-600"
-                : doc.textStatus === "pending"
-                  ? "text-amber-600"
-                  : "text-muted-foreground/50"
-            }`}
-          >
-            {doc.textStatus === "done" ? "extracted" : doc.textStatus === "pending" ? "pending" : "—"}
-          </span>
-        </td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td colSpan={7} className="border-b bg-muted/20 p-0">
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              transition={{ duration: 0.25, ease: [0.32, 0.72, 0, 1] }}
-              className="overflow-hidden"
-            >
-              <div className="p-3">
-                <PdfViewer documentId={doc.id} title={doc.title} />
-              </div>
-            </motion.div>
-          </td>
-        </tr>
-      )}
-    </>
-  );
-});
-
 // ---------------------------------------------------------------------------
+// Cells
 
-function TableSkeleton({ cols }: { cols: number }) {
+function DateCell({ date, approx }: { date: string | null; approx: boolean }) {
+  if (!date) return <span className="text-muted-foreground">—</span>;
   return (
-    <>
-      {Array.from({ length: 8 }, (_, i) => (
-        <tr key={i} className="border-b">
-          {Array.from({ length: cols }, (_, j) => (
-            <td key={j} className="px-3 py-3">
-              <Skeleton className="h-3.5 w-full max-w-36" />
-            </td>
-          ))}
-        </tr>
-      ))}
-    </>
+    <span
+      className={`whitespace-nowrap tabular-nums ${approx ? "text-muted-foreground" : "text-foreground"}`}
+      title={
+        approx
+          ? "Docket filing date; this document's own date has not been captured yet."
+          : undefined
+      }
+    >
+      {approx ? "≈ " : ""}
+      {formatCorpusDate(date)}
+    </span>
   );
 }
 
-// ---------------------------------------------------------------------------
+function TypeBadge({ type }: { type: string | null }) {
+  const key = (type || "other").toLowerCase();
+  const tone =
+    key === "order" || key === "cmo" || key === "opinion" || key === "transfer_order"
+      ? "bg-brand-navy/[0.07] text-brand-navy"
+      : key === "complaint"
+        ? "bg-brand-orange-soft text-brand-orange"
+        : key === "motion" || key === "brief"
+          ? "bg-brand-blue-soft text-brand-blue"
+          : "bg-muted text-muted-foreground";
+  return (
+    <span
+      className={`inline-block max-w-full truncate rounded px-1.5 py-0.5 text-[11px] font-medium ${tone}`}
+    >
+      {docTypeLabel(type)}
+    </span>
+  );
+}
+
+function StatusCell({
+  pdfCount,
+  docCount,
+  sealedCount,
+}: {
+  pdfCount: number;
+  docCount: number;
+  sealedCount: number;
+}) {
+  if (sealedCount > 0 && pdfCount === 0) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-brand-orange">
+        <Lock className="h-3.5 w-3.5" /> Sealed
+      </span>
+    );
+  }
+  if (pdfCount === 0) return <span className="text-[11.5px] text-muted-foreground">Text only</span>;
+  return (
+    <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-brand-blue">
+      <FileText className="h-3.5 w-3.5" />
+      {pdfCount === docCount ? "PDF" : `${pdfCount}/${docCount} PDF`}
+      {sealedCount > 0 && <Lock className="ml-1 h-3 w-3 text-brand-orange" />}
+    </span>
+  );
+}
 
 function Pager({
   page,
-  pages,
   total,
-  label,
+  unit,
   onPage,
 }: {
   page: number;
-  pages: number;
   total: number;
-  label: string;
+  unit: string;
   onPage: (p: number) => void;
 }) {
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const start = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const end = Math.min(page * PAGE_SIZE, total);
   return (
-    <div className="flex shrink-0 items-center justify-between border-t bg-card px-4 py-1.5 text-xs text-muted-foreground md:px-6">
-      <span>
-        {total.toLocaleString()} {label} · page {page + 1} of {pages}
+    <div className="flex shrink-0 items-center justify-between border-t border-border px-5 py-2 text-[12px] text-muted-foreground">
+      <span className="tabular-nums">
+        {total === 0
+          ? `0 ${unit}`
+          : `${formatCount(start)}–${formatCount(end)} of ${formatCount(total)} ${unit}`}
       </span>
       <div className="flex items-center gap-1">
-        <Button variant="ghost" size="icon" className="h-7 w-7" disabled={page <= 0} onClick={() => onPage(page - 1)}>
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
         <Button
           variant="ghost"
           size="icon"
           className="h-7 w-7"
-          disabled={page >= pages - 1}
+          disabled={page <= 1}
+          onClick={() => onPage(page - 1)}
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+        <span className="tabular-nums">
+          Page {formatCount(page)} of {formatCount(pages)}
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          disabled={page >= pages}
           onClick={() => onPage(page + 1)}
+          aria-label="Next page"
         >
           <ChevronRight className="h-4 w-4" />
         </Button>
@@ -718,98 +1361,81 @@ function Pager({
 }
 
 // ---------------------------------------------------------------------------
+// Document pane
 
-function RightRail({ ws }: { ws: Workspace }) {
-  const m = ws.matter;
+function DocumentPane({
+  documentId,
+  doc,
+  onClose,
+}: {
+  documentId: string;
+  doc: WorkspaceDocument | null;
+  onClose: () => void;
+}) {
+  const court = doc ? courtInfo(doc.courtId) : null;
   return (
-    <ScrollArea className="h-full w-[272px]">
-      <div className="w-[272px] space-y-5 p-3.5">
-        <section>
-          <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Matter</h3>
-          <dl className="space-y-1.5 text-xs">
-            <Field label="Court" value={m.courtName ?? m.courtId} />
-            <Field label="Docket" value={m.docketNumber} />
-            {m.mdlNumber && <Field label="MDL" value={`No. ${m.mdlNumber}`} />}
-            {m.judge && <Field label="Judge" value={m.judge} />}
-            {m.status && <Field label="Status" value={m.status} />}
-            {m.stage && <Field label="Stage" value={m.stage} />}
-            <Field label="Pipeline" value={m.pipelineStage} />
-          </dl>
-          <Separator className="my-3" />
-          <div className="grid min-w-0 grid-cols-3 gap-1.5 text-center">
-            <Stat label="Entries" value={m.entries} />
-            <Stat label="Docs" value={m.documents} />
-            <Stat label="With PDF" value={m.withPdf} />
+    <aside className="flex w-[46%] min-w-[420px] shrink-0 flex-col border-l border-border bg-surface">
+      <div className="flex items-start gap-3 border-b border-border bg-card px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13.5px] font-semibold text-brand-navy">
+            {doc?.title || "Document"}
           </div>
-        </section>
-
-        <section>
-          <h3 className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            <Users className="h-3 w-3 shrink-0" /> Parties ({ws.parties.length})
-          </h3>
-          {ws.parties.length === 0 ? (
-            <p className="text-xs text-muted-foreground/60">Populated by the write stage.</p>
-          ) : (
-            <ul className="space-y-1">
-              {ws.parties.slice(0, 30).map((p) => (
-                <li key={p.id} className="min-w-0 text-xs">
-                  <span className="truncate text-foreground">{p.name}</span>
-                  {p.partyType && <span className="ml-1 capitalize text-muted-foreground">· {docTypeLabel(p.partyType)}</span>}
-                </li>
-              ))}
-              {ws.parties.length > 30 && (
-                <li className="text-[11px] text-muted-foreground">+ {ws.parties.length - 30} more</li>
+          {doc && (
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11.5px] text-muted-foreground">
+              {court && <span className="font-medium">{court.short}</span>}
+              <span className="font-mono">{doc.docketNumber}</span>
+              <span>
+                Entry {doc.entryLabel}
+                {doc.attachmentNumber > 0 ? `-${doc.attachmentNumber}` : ""}
+              </span>
+              {doc.dateFiled && (
+                <span>
+                  {doc.dateApprox ? "≈ " : ""}
+                  {formatCorpusDate(doc.dateFiled)}
+                </span>
               )}
-            </ul>
+              <TypeBadge type={doc.docType} />
+            </div>
           )}
-        </section>
-
-        <section>
-          <h3 className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            <Gavel className="h-3 w-3 shrink-0" /> Counsel ({ws.counsel.length})
-          </h3>
-          {ws.counsel.length === 0 ? (
-            <p className="text-xs text-muted-foreground/60">Populated by the write stage.</p>
-          ) : (
-            <ul className="space-y-1.5">
-              {ws.counsel.slice(0, 30).map((c) => (
-                <li key={c.id} className="min-w-0 text-xs">
-                  <span className="block truncate font-medium text-foreground">{c.attorney}</span>
-                  {c.firm && <span className="block truncate text-muted-foreground">{c.firm}</span>}
-                  {(c.role || c.partyName) && (
-                    <span className="block truncate text-[11px] text-muted-foreground/70">
-                      {c.role}
-                      {c.role && c.partyName ? " · " : ""}
-                      {c.partyName}
-                    </span>
-                  )}
-                </li>
-              ))}
-              {ws.counsel.length > 30 && (
-                <li className="text-[11px] text-muted-foreground">+ {ws.counsel.length - 30} more</li>
-              )}
-            </ul>
-          )}
-        </section>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded p-1 text-muted-foreground hover:bg-surface hover:text-foreground"
+          aria-label="Close document"
+        >
+          <X className="h-4 w-4" />
+        </button>
       </div>
-    </ScrollArea>
+      <div className="min-h-0 flex-1 p-3">
+        <PdfViewer documentId={documentId} title={doc?.title} fill />
+      </div>
+    </aside>
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3">
-      <dt className="shrink-0 text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 truncate text-right font-medium text-foreground">{value}</dd>
-    </div>
-  );
-}
+// ---------------------------------------------------------------------------
 
-function Stat({ label, value }: { label: string; value: number }) {
+function WorkspaceSkeleton() {
   return (
-    <div className="min-w-0 rounded-md border bg-muted/30 px-1 py-1.5">
-      <div className="truncate text-[13px] font-bold tabular-nums text-brand-navy">{value.toLocaleString()}</div>
-      <div className="truncate text-[9px] uppercase tracking-wide text-muted-foreground">{label}</div>
+    <div className="flex h-full flex-col bg-surface">
+      <div className="border-b border-border bg-card px-6 py-5">
+        <Skeleton className="h-3 w-16" />
+        <Skeleton className="mt-3 h-7 w-2/3" />
+        <Skeleton className="mt-3 h-4 w-1/2" />
+      </div>
+      <div className="flex flex-1">
+        <div className="w-[300px] space-y-2 p-4">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <Skeleton key={i} className="h-8 w-full" />
+          ))}
+        </div>
+        <div className="flex-1 space-y-3 border-l border-border bg-card p-5">
+          {Array.from({ length: 12 }).map((_, i) => (
+            <Skeleton key={i} className="h-5 w-full" />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
