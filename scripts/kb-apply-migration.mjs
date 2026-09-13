@@ -30,7 +30,11 @@ const dryRun = args.includes("--dry-run");
 const fileIdx = args.indexOf("--file");
 const explicitFile = fileIdx >= 0 ? args[fileIdx + 1] : undefined;
 const REGION = process.env.AWS_REGION ?? "us-east-1";
-const ORDERED_MIGRATIONS = ["db/kb/0001_kb_init.sql", "db/kb/0002_kb_async_ingest.sql"];
+const ORDERED_MIGRATIONS = [
+  "db/kb/0001_kb_init.sql",
+  "db/kb/0002_kb_async_ingest.sql",
+  "db/kb/0003_reference_courts.sql",
+];
 
 function migrationFiles() {
   if (fileIdx >= 0 && (!explicitFile || explicitFile.startsWith("--"))) {
@@ -39,7 +43,7 @@ function migrationFiles() {
   if (!explicitFile) return [...ORDERED_MIGRATIONS];
   const normalized = explicitFile.replaceAll("\\", "/");
   if (!ORDERED_MIGRATIONS.includes(normalized)) {
-    throw new Error("--file must select 0001_kb_init.sql or 0002_kb_async_ingest.sql");
+    throw new Error(`--file must select one of: ${ORDERED_MIGRATIONS.join(", ")}`);
   }
   return [normalized];
 }

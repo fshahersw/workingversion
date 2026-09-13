@@ -68,7 +68,7 @@ Note the outputs: `ClusterArn`, `ClusterEndpoint`, `KbAppSecretArn`,
 
 **Recommended — apply over the Data API (no VPC / psql / CloudShell).**
 `scripts/kb-apply-migration.mjs` applies the reviewed fixed sequence
-`0001_kb_init.sql`, then `0002_kb_async_ingest.sql`, and splits each file into single statements
+`0001_kb_init.sql`, `0002_kb_async_ingest.sql`, then `0003_reference_courts.sql`, and splits each file into single statements
 (dollar-quote + comment aware; the Data API forbids multi-statement calls) and runs
 each with the RDS-managed master secret, then sets the `kb_app` password from its
 secret and runs a smoke query. Runs from anywhere with your AWS creds:
@@ -101,6 +101,7 @@ and do NOT enable public accessibility (Security Hub RDS.2).
    ```bash
    psql "host=<ClusterEndpoint> port=5432 dbname=kb user=kbmaster password=<MASTER_PW> sslmode=require" -f db/kb/0001_kb_init.sql
    psql "host=<ClusterEndpoint> port=5432 dbname=kb user=kbmaster password=<MASTER_PW> sslmode=require" -f db/kb/0002_kb_async_ingest.sql
+   psql "host=<ClusterEndpoint> port=5432 dbname=kb user=kbmaster password=<MASTER_PW> sslmode=require" -f db/kb/0003_reference_courts.sql
    ```
 4. Set the `kb_app` role's password to the generated secret value so the Data API
    can authenticate as it (read `<KbAppSecretArn>` for `<KBAPP_PW>`):
@@ -174,6 +175,10 @@ to the functions (belt and suspenders).
 - `0002_kb_async_ingest.sql` — additive async BDA metadata, status constraints,
   owned-prefix and client-correlation constraints, indexes, and
   FORCE-RLS/grant reassertion.
+- `0003_reference_courts.sql` — firm-global court reference library
+  (`reference.courts` / `judges` / `court_documents`), no RLS, `kb_app` SELECT
+  only, plus the `corpus.dockets.assigned_judge` / `referred_judge` columns the
+  matters court layer reads.
 
 For this phase, only parse the ordered sequence:
 
