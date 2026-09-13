@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { DiscoveryCoverage, DiscoveryScopeControl } from "@/components/docs/DiscoveryCoverage";
+import { DiscoveryCoverage } from "@/components/docs/DiscoveryCoverage";
 import type { DiscoveryScope } from "@/lib/pile/discovery-scan";
 import {
   AlertCircle,
@@ -91,7 +91,10 @@ export function SummarizeView() {
   const [formats, setFormats] = useState<Set<string>>(new Set());
   const [restrictIds, setRestrictIds] = useState<Set<string>>(new Set());
   const [followUp, setFollowUp] = useState(false);
-  const [scope, setScope] = useState<DiscoveryScope>("full");
+  // Discovery Ask always runs a full text scan; the relevant-passages mode was
+  // removed at the firm's request. Fixed to "full" but kept as the union type so
+  // the (now inert) relevant-passages branches below still type-check.
+  const scope = "full" as DiscoveryScope;
   const [refineOpen, setRefineOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
@@ -540,13 +543,12 @@ export function SummarizeView() {
                   </div>
 
                   {mode === "ask" && (
-                    <div className="mt-2">
-                      <DiscoveryScopeControl
-                        scope={scope}
-                        onChange={setScope}
-                        disabled={busy}
-                        count={fileIds?.length ?? files.length}
-                      />
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                      <span className="font-medium text-slate-800">Full text scan</span>
+                      <span>
+                        · every available text page across {fileIds?.length ?? files.length} document
+                        {(fileIds?.length ?? files.length) === 1 ? "" : "s"}
+                      </span>
                     </div>
                   )}
                   <form
