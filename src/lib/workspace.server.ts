@@ -12,6 +12,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import { courtInfo, courtReferenceKeys } from "@/lib/courts";
 import { kbConfigured, listCast, listParam, param, queryJson } from "@/lib/kb/aurora.server";
+import { repairMojibake, repairMojibakeOrNull } from "@/lib/mojibake";
 
 import {
   COURT_RESOURCE_KINDS,
@@ -312,16 +313,19 @@ async function loadCourtLayer(
     ? {
         key: c.key,
         keys,
-        name: c.name,
-        level: c.level,
-        jurisdiction: c.jurisdiction,
+        // The reference rows were loaded out-of-band by a pipeline that read the
+        // corpus JSON as Windows-1252, so em dashes arrive double-encoded.
+        // Repairing on read keeps names legible whatever the loader writes next.
+        name: repairMojibake(c.name),
+        level: repairMojibake(c.level),
+        jurisdiction: repairMojibake(c.jurisdiction),
         website: c.website,
         formsPages: Array.isArray(c.formsPages) ? c.formsPages : safeJsonArray(c.formsPages),
         logoUrl: await presign(c.logoKey),
         logoKind: c.logoKind,
         logoBackground: c.logoBackground === "dark" ? "dark" : c.logoBackground === "light" ? "light" : null,
-        fallbackText: c.fallbackText,
-        reuseNote: c.reuseNote,
+        fallbackText: repairMojibake(c.fallbackText),
+        reuseNote: repairMojibakeOrNull(c.reuseNote),
         resourceCounts: counts,
       }
     : null;
@@ -415,7 +419,9 @@ export async function listCourtResources(q: CourtResourceQuery): Promise<CourtRe
   const portraitCache = new Map<string, Promise<string | null>>();
   const items: CourtResource[] = await Promise.all(
     rows.map(async (r) => {
-      const hit = r.judgeName ? judgeRows.find((j) => judgeMatches(r.judgeName!, j)) : undefined;
+      // Repaired before matching, not after, so a mangled name still finds its judge.
+      const judgeName = repairMojibakeOrNull(r.judgeName);
+      const hit = judgeName ? judgeRows.find((j) => judgeMatches(judgeName, j)) : undefined;
       let judgePortraitUrl: string | null = null;
       if (hit?.portraitKey) {
         if (!portraitCache.has(hit.portraitKey)) portraitCache.set(hit.portraitKey, presign(hit.portraitKey));
@@ -423,7 +429,7 @@ export async function listCourtResources(q: CourtResourceQuery): Promise<CourtRe
       }
       return {
         sha256: r.sha256,
-        title: r.title,
+        title: repairMojibake(r.title),
         kind: (COURT_RESOURCE_KINDS as string[]).includes(r.kind) ? (r.kind as CourtResourceKind) : "other",
         format: (WORD_FORMATS.includes(r.format) || r.format === "pdf" ? r.format : "pdf") as CourtResource["format"],
         bytes: r.bytes == null ? null : num(r.bytes),
@@ -433,7 +439,7 @@ export async function listCourtResources(q: CourtResourceQuery): Promise<CourtRe
         sourceDateKind: r.sourceDateKind,
         reviewStatus: r.reviewStatus,
         fillable: !!r.fillable,
-        judgeName: r.judgeName,
+        judgeName,
         judgePortraitUrl,
         courtKey: r.courtKey,
       };
@@ -453,7 +459,7 @@ export async function courtResourceUrl(sha256: string): Promise<{ url: string; t
   const r = rows[0];
   if (!r) return null;
   const url = await presign(r.s3Key, 1800);
-  return url ? { url, title: r.title, format: r.format } : null;
+  return url ? { url, title: repairMojibake(r.title), format: r.format } : null;
 }
 
 export async function loadWorkspace(slug: string): Promise<MatterWorkspace | null> {
