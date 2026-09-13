@@ -96,6 +96,25 @@ export async function runOfficePython(code: string): Promise<PythonResult> {
 
 export const MAX_DIAGRAM_SOURCE = 60_000;
 
+/**
+ * Firm look for Graphviz output, matching the Mermaid "firm" theme
+ * (src/office/shared/mermaid-render.ts): soft blue rounded nodes with navy
+ * text, slate edges, Calibri, 192 dpi for print. The defaults are inserted
+ * right after the opening brace, so any graph/node/edge attributes the model
+ * writes later in the source still take precedence.
+ */
+const GRAPHVIZ_FIRM_DEFAULTS = [
+  'graph [bgcolor="white", fontname="Calibri", fontsize=14, fontcolor="#172E4C", pad=0.3, nodesep=0.45, ranksep=0.6, dpi=192];',
+  'node [shape=box, style="rounded,filled", fillcolor="#EAF5FF", color="#1D6294", fontcolor="#050F2C", fontname="Calibri", fontsize=13, penwidth=1.2, margin="0.20,0.10"];',
+  'edge [color="#5F6A7B", fontname="Calibri", fontsize=11, fontcolor="#5F6A7B", arrowsize=0.8, penwidth=1.1];',
+].join("\n");
+
+export function withGraphvizFirmDefaults(source: string): string {
+  const open = source.indexOf("{");
+  if (open < 0) return source;
+  return `${source.slice(0, open + 1)}\n${GRAPHVIZ_FIRM_DEFAULTS}\n${source.slice(open + 1)}`;
+}
+
 /** Render Graphviz DOT to PNG in the sandbox (graphviz is preinstalled there). */
 export async function renderGraphviz(source: string, engine = "dot"): Promise<ToolImage> {
   if (typeof source !== "string" || !source.trim())
@@ -106,7 +125,7 @@ export async function renderGraphviz(source: string, engine = "dot"): Promise<To
     ? engine
     : "dot";
   const name = `sw_diagram_${Date.now().toString(36)}.png`;
-  await writeFile("sw_diagram.dot", source);
+  await writeFile("sw_diagram.dot", withGraphvizFirmDefaults(source));
   const code = [
     "import graphviz",
     `src = graphviz.Source(open('sw_diagram.dot', encoding='utf-8').read(), engine=${JSON.stringify(layout)}, format='png')`,

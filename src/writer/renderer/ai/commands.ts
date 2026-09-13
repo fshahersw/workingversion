@@ -290,6 +290,25 @@ function validateTarget(target: unknown, where: string): string | null {
   return null;
 }
 
+/**
+ * FieldMask fallback: when the model supplies a style/properties object but
+ * omits (or empties) `fields`, treat every supplied key as the mask. Models
+ * routinely forget the mask on single-property edits such as
+ * {"pageBreakBefore": true}; a hard error there just costs a retry and, when
+ * the retry also forgets, the page break silently never lands.
+ */
+function fillFieldsFromKeys(
+  payload: Record<string, unknown>,
+  valuesKey: "style" | "properties",
+  allowedKeys: readonly string[],
+): void {
+  if (Array.isArray(payload.fields) && payload.fields.length > 0) return;
+  const values = payload[valuesKey];
+  if (!values || typeof values !== "object") return;
+  const keys = Object.keys(values as Record<string, unknown>).filter((k) => allowedKeys.includes(k));
+  if (keys.length > 0) payload.fields = keys;
+}
+
 function validateStyleCommand(
   payload: { target?: unknown; style?: unknown; fields?: unknown },
   allowedKeys: readonly string[],
@@ -298,6 +317,7 @@ function validateStyleCommand(
   const targetError = validateTarget(payload.target, where);
   if (targetError) return targetError;
   if (!payload.style || typeof payload.style !== "object") return `${where}: missing style`;
+  fillFieldsFromKeys(payload as Record<string, unknown>, "style", allowedKeys);
   if (!Array.isArray(payload.fields) || payload.fields.length === 0) {
     return `${where}: fields must not be empty`;
   }
@@ -379,6 +399,9 @@ export function validateEnvelope(envelope: unknown): string | null {
           error = validateTarget(payload.target, where);
           if (error) break;
         }
+        if (payload.style && typeof payload.style === "object") {
+          fillFieldsFromKeys(payload, "style", TEXT_STYLE_KEYS);
+        }
         if (!payload.style || typeof payload.style !== "object") {
           error = `${where}: missing style`;
         } else if (!Array.isArray(payload.fields) || payload.fields.length === 0) {
@@ -427,6 +450,9 @@ export function validateEnvelope(envelope: unknown): string | null {
       case "updateImageProperties": {
         error = validateTarget(payload.target, where);
         if (!error) {
+          if (payload.properties && typeof payload.properties === "object") {
+            fillFieldsFromKeys(payload, "properties", IMAGE_PROP_KEYS);
+          }
           if (!payload.properties || typeof payload.properties !== "object") {
             error = `${where}: missing properties`;
           } else if (!Array.isArray(payload.fields) || payload.fields.length === 0) {

@@ -394,7 +394,11 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
     {
       name: "render_diagram",
       description:
-        "Render a diagram to an image: kind 'mermaid' (flowchart, sequence, timeline, gantt, mindmap, quadrant, pie, xychart, sankey, state, journey, class/ER; rendered in the browser) or 'graphviz' (DOT; org charts, dependency and relationship graphs, chronologies with rankdir=LR). Returns an image handle to place with the editor's insert tool and shows you the rendering so you can check labels and layout. Keep labels short; one diagram per call.",
+        "Render a diagram to an image in the firm's palette (navy/blue/bronze on white). kind 'mermaid' (rendered in the browser) or 'graphviz' (DOT, rendered in the sandbox). " +
+        "Pick the form from the content: procedural history or key dates -> mermaid timeline (or gantt when durations matter); a process, decision tree or filing workflow -> mermaid flowchart LR/TD; who-did-what-when between parties -> mermaid sequence; " +
+        "parties, counsel, entities and their relationships or an org chart -> graphviz dot (rankdir=LR for chronologies, TB for hierarchies); shares or a simple breakdown -> mermaid pie; a 2x2 assessment -> mermaid quadrant. " +
+        "A table beats a diagram when the reader needs exact values or more than ~12 items. Limits that keep it legible on a page: <= 12 nodes, labels <= 40 characters (break long labels with <br/> in Mermaid, \\n in DOT), no more than 3 lanes/actors deep, one idea per diagram. " +
+        "Returns an image handle to place with the editor's insert tool and shows you the rendering: read every label, fix overlaps or clipped text with another call before inserting. One diagram per call.",
       inputSchema: {
         type: "object",
         properties: {
@@ -408,8 +412,9 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
           },
           theme: {
             type: "string",
-            enum: ["default", "neutral", "forest", "dark", "base"],
-            description: "Mermaid theme, default neutral",
+            enum: ["firm", "default", "neutral", "forest", "dark", "base"],
+            description:
+              "Mermaid theme; default firm (Seeger Weiss palette). Only change it when the user asks.",
           },
         },
         required: ["kind", "source"],
@@ -903,10 +908,9 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
             });
             return imageResult(image, `Diagram: ${title}`, app);
           }
-          const { renderMermaidPng } = await import("./mermaid-render");
-          const r = await renderMermaidPng(source, {
-            theme: input["theme"] ? String(input["theme"]) : undefined,
-          });
+          const { renderMermaidPng, DEFAULT_MERMAID_THEME } = await import("./mermaid-render");
+          const theme = input["theme"] ? String(input["theme"]) : DEFAULT_MERMAID_THEME;
+          const r = await renderMermaidPng(source, { theme });
           const image = await putPlatformImage({
             mime: "image/png",
             base64: r.base64,
@@ -916,7 +920,7 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
             diagram: {
               kind: "mermaid",
               source,
-              theme: String(input["theme"] ?? "neutral"),
+              theme,
               svg: r.svg,
             },
           });

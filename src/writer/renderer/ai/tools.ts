@@ -22,6 +22,7 @@ import { createPlatformSkill } from "@/office/shared/platform-skill";
 import { captureElement } from "@/office/shared/capture";
 import { getPlatformImage, isPlatformImage } from "@/office/shared/image-store";
 import { t } from "../i18n/locale";
+import { FIRM_PALETTE } from "../../shared/design";
 import { executeCommands, type Command, type CommandEnvelope } from "./commands";
 import {
   blockRangePositions,
@@ -369,6 +370,10 @@ export const AGENT_TOOLS: AgentToolDef[] = [
         stylePreset: {
           type: "string",
           enum: [
+            "firmNavy",
+            "firmBlue",
+            "firmAccent",
+            "firmMinimal",
             "none",
             "lightGrid",
             "zebraBlue",
@@ -378,7 +383,8 @@ export const AGENT_TOOLS: AgentToolDef[] = [
             "noBorder",
             "fullBorder",
           ],
-          description: "optional visual style (default: plain single-border grid)",
+          description:
+            "visual style; default firmNavy (navy header, white bold header text, soft navy bands). firmBlue for schedules/chronologies, firmAccent for one spotlight table, firmMinimal (no fills, light rules) for court filings and dense financials",
         },
         afterBlockIndex: {
           type: "integer",
@@ -387,6 +393,25 @@ export const AGENT_TOOLS: AgentToolDef[] = [
         },
       },
       required: ["rows"],
+    },
+  },
+  {
+    name: "insert_page_break",
+    description:
+      "Start a new page at a block boundary. beforeBlockIndex is the block that must begin the new page (use indexes from the document block list); the break is stored as a native Word page break on that block, or as an empty break paragraph when the block is a table or image. beforeBlockIndex equal to the block count appends a new empty page at the end. remove:true clears an existing break before that block instead. Use this for cover pages, tables of contents, exhibits, appendices and signature pages rather than blank lines.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        beforeBlockIndex: {
+          type: "integer",
+          description:
+            "0-based index of the block that should start the new page; omitted = the block after the cursor",
+        },
+        remove: {
+          type: "boolean",
+          description: "true removes the page break before that block instead of adding one",
+        },
+      },
     },
   },
   {
@@ -436,6 +461,10 @@ export const AGENT_TOOLS: AgentToolDef[] = [
         restyle: {
           type: "string",
           enum: [
+            "firmNavy",
+            "firmBlue",
+            "firmAccent",
+            "firmMinimal",
             "none",
             "lightGrid",
             "zebraBlue",
@@ -670,6 +699,7 @@ const INDEX_WRITE_SUMMARIES: Record<string, () => string> = {
   insert_chart: () => t("aiSumInsertChart"),
   edit_chart: () => t("aiSumEditChart"),
   insert_table: () => t("aiSumInsertContent"),
+  insert_page_break: () => t("aiSumInsertContent"),
   edit_table: () => t("aiSumInsertContent"),
 };
 
@@ -693,6 +723,39 @@ type TablePresetSpec = {
   border: boolean;
 };
 const TABLE_PRESETS: Record<string, TablePresetSpec> = {
+  // Firm presets (src/writer/shared/design.ts palette). firmNavy is the default.
+  firmNavy: {
+    headerFill: FIRM_PALETTE.navy,
+    headerText: FIRM_PALETTE.paper,
+    band1Fill: FIRM_PALETTE.navyTint,
+    band2Fill: FIRM_PALETTE.paper,
+    borderColor: FIRM_PALETTE.rule,
+    border: true,
+  },
+  firmBlue: {
+    headerFill: FIRM_PALETTE.blue,
+    headerText: FIRM_PALETTE.paper,
+    band1Fill: FIRM_PALETTE.blueSoft,
+    band2Fill: FIRM_PALETTE.paper,
+    borderColor: FIRM_PALETTE.rule,
+    border: true,
+  },
+  firmAccent: {
+    headerFill: FIRM_PALETTE.bronze,
+    headerText: FIRM_PALETTE.paper,
+    band1Fill: FIRM_PALETTE.bronzeTint,
+    band2Fill: FIRM_PALETTE.paper,
+    borderColor: FIRM_PALETTE.rule,
+    border: true,
+  },
+  firmMinimal: {
+    headerFill: null,
+    headerText: FIRM_PALETTE.navy,
+    band1Fill: null,
+    band2Fill: null,
+    borderColor: FIRM_PALETTE.rule,
+    border: true,
+  },
   none: {
     headerFill: TABLE_HEADER_FILL,
     headerText: null,
@@ -1449,6 +1512,106 @@ function executeSyncTool(
       };
     }
 
+    case "insert_page_break": {
+      const count = editor.state.doc.childCount;
+      const requested = call.input.beforeBlockIndex;
+      const before =
+        requested === undefined || requested === null
+          ? getCursorBlockIndex(editor, scope) + 1
+          : Number(requested);
+      if (!Number.isInteger(before) || before < 0 || before > count) {
+        return fail(t("aiSumInsertContent"), `beforeBlockIndex must be between 0 and ${count}`);
+      }
+      const remove = call.input.remove === true;
+      if (before === count) {
+        if (remove) return fail(t("aiSumInsertContent"), "there is no block after the last one");
+        insertBlocksAfter(
+          editor,
+          count - 1,
+          [{ type: "docParagraph", attrs: { pageBreakBefore: true } }],
+          track,
+        );
+        return {
+          output: `Appended a new page at the end of the document (block ${count}).`,
+          mutated: true,
+          summary: t("aiSumInsertContent"),
+        };
+      }
+      const node = editor.state.doc.child(before);
+      const carriesBreak = node.isTextblock && "pageBreakBefore" in node.attrs;
+      const { from } = blockRangePositions(editor, before, before);
+      if (remove) {
+        if (carriesBreak && node.attrs.pageBreakBefore === true) {
+          editor.view.dispatch(
+            editor.state.tr.setNodeMarkup(from, undefined, {
+              ...node.attrs,
+              pageBreakBefore: false,
+              aiChanged: true,
+            }),
+          );
+          return {
+            output: `Removed the page break before block ${before}.`,
+            mutated: true,
+            summary: t("aiSumInsertContent"),
+          };
+        }
+        const prev = before > 0 ? editor.state.doc.child(before - 1) : null;
+        if (
+          prev &&
+          prev.type.name === "docParagraph" &&
+          prev.childCount === 0 &&
+          prev.attrs.pageBreakBefore === true
+        ) {
+          const range = blockRangePositions(editor, before - 1, before - 1);
+          editor.view.dispatch(editor.state.tr.delete(range.from, range.to));
+          return {
+            output: `Removed the break paragraph before block ${before}. Subsequent block indexes shifted by -1.`,
+            mutated: true,
+            summary: t("aiSumInsertContent"),
+          };
+        }
+        return {
+          output: `Block ${before} does not start a new page; nothing to remove.`,
+          mutated: false,
+          summary: t("aiSumInsertContent"),
+        };
+      }
+      if (carriesBreak) {
+        if (node.attrs.pageBreakBefore === true) {
+          return {
+            output: `Block ${before} already starts a new page.`,
+            mutated: false,
+            summary: t("aiSumInsertContent"),
+          };
+        }
+        editor.view.dispatch(
+          editor.state.tr.setNodeMarkup(from, undefined, {
+            ...node.attrs,
+            pageBreakBefore: true,
+            aiChanged: true,
+          }),
+        );
+        return {
+          output: `Block ${before} now starts a new page (Word page break before it). Block indexes are unchanged.`,
+          mutated: true,
+          summary: t("aiSumInsertContent"),
+        };
+      }
+      // Tables, images and other protected blocks cannot carry the attribute:
+      // give them Word's explicit break paragraph instead.
+      insertBlocksAfter(
+        editor,
+        before - 1,
+        [{ type: "docParagraph", attrs: { pageBreakBefore: true } }],
+        track,
+      );
+      return {
+        output: `Inserted a page break before block ${before} (it is now block ${before + 1}; later indexes shifted by +1).`,
+        mutated: true,
+        summary: t("aiSumInsertContent"),
+      };
+    }
+
     case "insert_table": {
       const headers = Array.isArray(call.input.headers)
         ? (call.input.headers as unknown[]).map((h) => String(h ?? ""))
@@ -1462,7 +1625,7 @@ function executeSyncTool(
         return fail(t("aiSumInsertContent"), "rows must not be empty");
       const cols = Math.max(headers.length, ...bodyRows.map((r) => r.length), 1);
       const preset =
-        TABLE_PRESETS[String(call.input.stylePreset ?? "none")] ?? TABLE_PRESETS["none"]!;
+        TABLE_PRESETS[String(call.input.stylePreset ?? "firmNavy")] ?? TABLE_PRESETS["firmNavy"]!;
       const widthsIn = Array.isArray(call.input.colWidths)
         ? (call.input.colWidths as unknown[]).map((w) => Number(w))
         : [];

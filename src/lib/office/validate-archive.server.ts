@@ -80,6 +80,7 @@ export function validateOfficeArchive(
   input: Uint8Array,
   kind: OfficeKind,
   budget: { expanded: number } = { expanded: 0 },
+  depth = 0,
 ): ArchiveReport {
   const fmt = FORMATS[kind];
   const b = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
@@ -157,10 +158,27 @@ export function validateOfficeArchive(
     budget.expanded += expanded;
     ensure(budget.expanded <= MAX_EXPANDED, "The package exceeds expanded-size limits.");
 
-    const embedded = name.toLowerCase().includes("embeddings/");
+    // Always block macros, ActiveX controls, and digital signatures.
     ensure(
-      !/(?:vbaProject|activeX|_xmlsignatures\/)/i.test(name) && !embedded,
+      !/(?:vbaProject|activeX|_xmlsignatures\/)/i.test(name),
+      "Macro, ActiveX, or digitally signed parts are not supported. Save the file without them and upload again.",
+    );
+    // Embedded parts: permit ONLY an Excel chart-data workbook (.xlsx), which is
+    // recursively validated (below) with the shared expansion budget and a
+    // one-level depth cap. Everything else under embeddings/ — OLE .bin objects,
+    // legacy .xls binaries, nested packages — stays blocked. A charted Word/PPTX
+    // doc stores its data workbook at word/embeddings/*.xlsx, so this is what
+    // makes those documents saveable without weakening the macro/OLE gate.
+    const lower = name.toLowerCase();
+    const embedded = lower.includes("embeddings/");
+    const embeddedXlsx = embedded && lower.endsWith(".xlsx");
+    ensure(
+      !embedded || embeddedXlsx,
       "Macro, ActiveX, embedded-object or digitally signed parts are not supported. Save the file without them and upload again.",
+    );
+    ensure(
+      !embeddedXlsx || depth < 1,
+      "Nested embedded objects are not supported. Save the file without them and upload again.",
     );
 
     ensure(
@@ -195,6 +213,13 @@ export function validateOfficeArchive(
       decoded.length === expanded && crc32(decoded) === crc,
       "Part length or checksum mismatch.",
     );
+
+    if (embeddedXlsx) {
+      // A permitted embedded chart-data workbook: validate it as a full xlsx,
+      // sharing the expansion budget so nesting cannot bypass size limits and
+      // recursing exactly one level (depth guard above blocks deeper nesting).
+      validateOfficeArchive(decoded, "xlsx", budget, depth + 1);
+    }
 
     if (/\.(xml|rels)$/i.test(name)) {
       const parsed = parseXml(decoded, name);

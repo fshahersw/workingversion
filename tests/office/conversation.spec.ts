@@ -63,14 +63,13 @@ test("shared controls let the user queue and remove a direction during work", as
   await expect(page.getByText("1 queued")).toHaveCount(0);
 });
 
-test("unconfigured live voice stays disabled without starting a microphone session", async ({
+test("unconfigured live voice hides the Voice control without starting a microphone session", async ({
   page,
 }) => {
-  await expect(page.getByRole("button", { name: "Voice", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Voice", exact: true })).toHaveAttribute(
-    "title",
-    /disabled until the gateway is verified/,
-  );
+  // The entry point is rendered only once the gateway is provisioned and
+  // OFFICE_VOICE_ENABLED is set; until then no Voice button exists at all.
+  await expect(page.getByRole("button", { name: "Voice", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Office task and voice controls" })).toBeVisible();
 });
 
 test("voice releases audio when the gateway is not configured", async ({ page }) => {

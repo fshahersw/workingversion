@@ -174,21 +174,24 @@ export function OfficeTaskControls(props: {
             </button>
           )}
           {!active ? (
-            <button
-              type="button"
-              onClick={() => void startVoice()}
-              disabled={!voiceAvailable || props.mode === "research"}
-              title={
-                !voiceAvailable
-                  ? "Live voice is disabled until the gateway is verified"
-                  : props.mode === "research"
+            // Persistent-voice entry point is hidden until the voice gateway is
+            // provisioned and OFFICE_VOICE_ENABLED is set (voiceAvailable). This
+            // keeps a non-functional Voice button off the toolbar for now.
+            voiceAvailable ? (
+              <button
+                type="button"
+                onClick={() => void startVoice()}
+                disabled={props.mode === "research"}
+                title={
+                  props.mode === "research"
                     ? "Switch to Write, Ask, or Review to use voice"
                     : "Start a live voice conversation with the Office assistant"
-              }
-            >
-              <Mic size={14} />
-              Voice
-            </button>
+                }
+              >
+                <Mic size={14} />
+                Voice
+              </button>
+            ) : null
           ) : (
             <>
               {state === "listening" || state === "muted" ? (

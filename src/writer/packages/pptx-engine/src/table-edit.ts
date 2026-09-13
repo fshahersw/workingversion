@@ -85,6 +85,12 @@ const ID_ZEBRA_GRAY = '{A10FF1CE-0000-4000-9000-000000000002}'
 const ID_HEADER_DARKBLUE = '{A10FF1CE-0000-4000-9000-000000000003}'
 const ID_HEADER_ORANGE = '{A10FF1CE-0000-4000-9000-000000000004}'
 const ID_NO_BORDER = '{A10FF1CE-0000-4000-9000-000000000005}'
+// Seeger Weiss firm palette (mirrors src/writer/shared/design.ts): navy 172E4C,
+// blue 1D6294, bronze A77D4B; tints E2ECF9 / EAF5FF / FCF2E4; rules DDE0E4.
+const ID_FIRM_NAVY = '{A10FF1CE-0000-4000-9000-000000000006}'
+const ID_FIRM_BLUE = '{A10FF1CE-0000-4000-9000-000000000007}'
+const ID_FIRM_ACCENT = '{A10FF1CE-0000-4000-9000-000000000008}'
+const ID_FIRM_MINIMAL = '{A10FF1CE-0000-4000-9000-000000000009}'
 
 export interface TableStylePreset {
   tblPrXml: string
@@ -101,8 +107,52 @@ const tblPr = (styleId: string, flags = '') =>
 // Official "No Style, No Grid" GUID (we previously misused a made-up ...307D; the read side stays compatible with it)
 const NO_STYLE = '{2D5ABB26-0587-4C30-8999-92F81FD0307C}'
 
-/** The 8 preset styles (keys map to the ribbon style gallery). */
+/** Preset styles (keys map to the ribbon style gallery); the firm* presets share
+ *  names with the Writer's insert_table presets so the assistants speak one vocabulary. */
 export const TABLE_STYLE_PRESETS: Record<string, TableStylePreset> = {
+  firmNavy: {
+    tblPrXml: tblPr(ID_FIRM_NAVY, ' firstRow="1" bandRow="1"'),
+    description: 'Firm navy',
+    styleId: ID_FIRM_NAVY,
+    styleDefXml: customStyle(ID_FIRM_NAVY, 'Firm navy', {
+      whole: 'FFFFFF',
+      insideH: 'DDE0E4',
+      band: 'E2ECF9',
+      header: { fill: '172E4C', text: 'FFFFFF' },
+    }),
+  },
+  firmBlue: {
+    tblPrXml: tblPr(ID_FIRM_BLUE, ' firstRow="1" bandRow="1"'),
+    description: 'Firm blue',
+    styleId: ID_FIRM_BLUE,
+    styleDefXml: customStyle(ID_FIRM_BLUE, 'Firm blue', {
+      whole: 'FFFFFF',
+      insideH: 'DDE0E4',
+      band: 'EAF5FF',
+      header: { fill: '1D6294', text: 'FFFFFF' },
+    }),
+  },
+  firmAccent: {
+    tblPrXml: tblPr(ID_FIRM_ACCENT, ' firstRow="1" bandRow="1"'),
+    description: 'Firm accent',
+    styleId: ID_FIRM_ACCENT,
+    styleDefXml: customStyle(ID_FIRM_ACCENT, 'Firm accent', {
+      whole: 'FFFFFF',
+      insideH: 'DDE0E4',
+      band: 'FCF2E4',
+      header: { fill: 'A77D4B', text: 'FFFFFF' },
+    }),
+  },
+  firmMinimal: {
+    tblPrXml: tblPr(ID_FIRM_MINIMAL, ' firstRow="1"'),
+    description: 'Firm minimal',
+    styleId: ID_FIRM_MINIMAL,
+    styleDefXml: customStyle(ID_FIRM_MINIMAL, 'Firm minimal', {
+      whole: 'FFFFFF',
+      insideH: 'DDE0E4',
+      header: { fill: 'FFFFFF', text: '172E4C' },
+    }),
+  },
   none: { tblPrXml: tblPr(NO_STYLE), description: 'No style' },
   lightGrid: {
     tblPrXml: tblPr(NO_STYLE),

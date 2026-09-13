@@ -224,15 +224,14 @@ test("completed deposition survives an analysis-save outage and retries without 
     .click();
   await page.getByRole("button", { name: "Open 1:4" }).click();
   await page.screenshot({ path: ".discovery.local/deposition-graph-native.png" });
-  await expect(page.getByRole("combobox", { name: "Query coverage" })).toHaveValue("full");
+  // The deposition tab always asks over the whole record; the scan-scope
+  // control and coverage bar live only on the Working Set tab now.
+  await expect(page.getByRole("combobox", { name: "Query coverage" })).toHaveCount(0);
   await page
     .getByRole("textbox", { name: "Ask", exact: true })
     .fill("When did Smith review the memorandum?");
   await page.locator("form").getByRole("button", { name: "Ask", exact: true }).click();
-  await expect(page.getByText("Text scan complete", { exact: true })).toBeVisible();
   await expect(page.getByText("Draft synthesis", { exact: true })).toBeVisible();
-  await page.getByText("Text scan complete", { exact: true }).click();
-  await expect(page.getByText("1/1", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Admissions/ }).click();
   await page.getByRole("button", { name: "Export", exact: true }).click();
   await expect(page.getByRole("checkbox", { name: "Admissions", exact: true })).toBeChecked();

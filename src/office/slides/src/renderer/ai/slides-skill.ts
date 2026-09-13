@@ -710,7 +710,7 @@ const TOOLS: AgentToolDef[] = [
   {
     name: 'edit_table_style',
     description:
-      'Modify table styling: apply a preset (styleName) or individually change header row/banding/shading/borders. styleName options: none/lightGrid/zebraBlue/zebraGray/headerDarkBlue/headerOrange/noBorder/fullBorder.',
+      'Modify table styling: apply a preset (styleName) or individually change header row/banding/shading/borders. styleName options: firmNavy (default choice: navy header, white bold text, soft navy bands) / firmBlue (schedules, chronologies) / firmAccent (one spotlight table) / firmMinimal (no fills, light rules) or the legacy none/lightGrid/zebraBlue/zebraGray/headerDarkBlue/headerOrange/noBorder/fullBorder.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -61,6 +61,7 @@ const WRITE = [
   "insert_image",
   "insert_table",
   "edit_table",
+  "insert_page_break",
   "set_header_footer",
   "reply_comment",
   "resolve_comment",
