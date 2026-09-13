@@ -133,7 +133,7 @@
   },
   {
     "ParameterKey": "OfficeThoroughModel",
-    "ParameterValue": "us.anthropic.claude-opus-4-8"
+    "ParameterValue": ""
   },
   {
     "ParameterKey": "BdaProjectArn",
