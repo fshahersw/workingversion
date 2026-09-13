@@ -62,6 +62,19 @@ const words = (items: number, each: number) =>
 const nothing = z.object({}).strict();
 
 /**
+ * Per-step model controls shared by the generatable AI steps (prompt, agent).
+ * All optional: the materializer and the run-time adapter each default to the
+ * current single-pass behaviour when a control is absent, so an omitted control
+ * never changes how existing plans run. iterations is capped low because each
+ * pass is another model request counted against the per-step budget.
+ */
+const aiControls = {
+  maxTokens: z.number().int().min(512).max(32768).optional(),
+  iterations: z.number().int().min(1).max(4).optional(),
+  modelTier: z.enum(["fast", "balanced", "deep"]).optional(),
+} as const;
+
+/**
  * One member per generatable step kind, holding only the StepConfig keys the
  * engine actually reads for that kind (engine.ts executeLocalStep,
  * adapter.server.ts, and the Builder's own inspector).
@@ -90,12 +103,14 @@ const SETTINGS = {
     .object({
       instructions: line(8000),
       context: z.array(z.string().min(1).max(24)).max(MAX_CONTEXT).optional(),
+      ...aiControls,
     })
     .strict(),
   agent: z
     .object({
       instructions: line(8000),
       context: z.array(z.string().min(1).max(24)).max(MAX_CONTEXT).optional(),
+      ...aiControls,
     })
     .strict(),
   extract: z.object({ fields: words(40, 80) }).strict(),
@@ -876,12 +891,16 @@ function stepConfig(kind: StepKind, s: PlanSettings): StepConfig {
       return { options: [...(s.options ?? [])] };
     case "prompt":
     case "agent":
-      // The host adapter is the only place these can run, so the model choice is
-      // not the generator's to make.
+      // The host adapter is the only place these can run, so the model provider
+      // is not the generator's to make; modelTier only selects among the host's
+      // own approved tiers and is re-checked at run time.
       return {
         model: "bedrock",
         ...(s.instructions ? { instructions: s.instructions } : {}),
         context: [...(s.context ?? [])],
+        ...(s.maxTokens ? { maxTokens: s.maxTokens } : {}),
+        ...(s.iterations && s.iterations > 1 ? { iterations: s.iterations } : {}),
+        ...(s.modelTier && s.modelTier !== "balanced" ? { modelTier: s.modelTier } : {}),
       };
     case "extract":
     case "table":
@@ -1041,7 +1060,10 @@ const SERVICE_STEPS: readonly StepKind[] = ["search", "web", "scrape", "mcp", "c
 function estimateBudget(kind: StepKind, s: PlanSettings): PlanStep["budget"] {
   if (kind === "delay")
     return { modelRequests: 0, seconds: Math.max(0, Math.min(86_400, Math.trunc(s.seconds ?? 0))) };
-  if (AI_STEPS.includes(kind)) return { modelRequests: 1, seconds: 60 };
+  if (AI_STEPS.includes(kind)) {
+    const passes = Math.max(1, Math.min(4, Math.trunc(s.iterations ?? 1)));
+    return { modelRequests: passes, seconds: 60 * passes };
+  }
   if (SERVICE_STEPS.includes(kind)) return { modelRequests: 0, seconds: 20 };
   return { modelRequests: 0, seconds: 5 };
 }
@@ -1071,6 +1093,9 @@ function planSettings(kind: StepKind, config: StepConfig, rename: (output: strin
       return {
         instructions: config.instructions ?? "",
         ...(config.context?.length ? { context: config.context.slice(0, MAX_CONTEXT).map(rename) } : {}),
+        ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
+        ...(config.iterations && config.iterations > 1 ? { iterations: config.iterations } : {}),
+        ...(config.modelTier && config.modelTier !== "balanced" ? { modelTier: config.modelTier } : {}),
       };
     case "extract":
     case "table":

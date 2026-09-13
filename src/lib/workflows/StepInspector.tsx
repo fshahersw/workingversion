@@ -361,6 +361,50 @@ export function StepInspector(props: Props) {
                       )}
                     </div>
                   </label>
+                  <label className="swf-field">
+                    Model quality
+                    <select
+                      value={config.modelTier || "balanced"}
+                      onChange={(e) =>
+                        update({ modelTier: e.target.value as StepConfig["modelTier"] })
+                      }
+                    >
+                      <option value="fast">Fast · quick drafts</option>
+                      <option value="balanced">Balanced · default</option>
+                      <option value="deep">Deep · most thorough</option>
+                    </select>
+                    <small>
+                      Higher tiers may take longer. The exact model for each tier is set by your
+                      platform.
+                    </small>
+                  </label>
+                  <label className="swf-field">
+                    Response length
+                    <select
+                      value={String(config.maxTokens || 32768)}
+                      onChange={(e) => update({ maxTokens: Number(e.target.value) })}
+                    >
+                      <option value="8192">Standard</option>
+                      <option value="16384">Long</option>
+                      <option value="32768">Maximum</option>
+                    </select>
+                    <small>How much room this step has to write its result.</small>
+                  </label>
+                  <label className="swf-field">
+                    Refinement passes
+                    <select
+                      value={String(config.iterations || 1)}
+                      onChange={(e) => update({ iterations: Number(e.target.value) })}
+                    >
+                      <option value="1">1 · single pass</option>
+                      <option value="2">2 · draft, then revise</option>
+                      <option value="3">3 · revise twice</option>
+                      <option value="4">4 · maximum refinement</option>
+                    </select>
+                    <small>
+                      Extra passes re-check and improve the draft against the same evidence.
+                    </small>
+                  </label>
                   {step.data.kind === "agent" && (
                     <label className="swf-field">
                       Allowed tool group

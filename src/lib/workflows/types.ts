@@ -45,6 +45,10 @@ export type StepConfig = {
   query?: string;
   recipe?: string;
   url?: string;
+  /** AI-step controls (prompt/agent). Unset means the current single-pass default. */
+  maxTokens?: number;
+  iterations?: number;
+  modelTier?: "fast" | "balanced" | "deep";
 };
 export type WorkflowStep = {
   id: string;
