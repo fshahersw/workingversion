@@ -102,13 +102,50 @@ type MatterRow = {
 
 // The lead docket is corpus.matters.lead_case_id when set, else the first
 // federal docket flagged is_lead, else the first federal docket.
-const MATTER_SELECT = `
+// One pass over docket_files for every matter (grouped CTEs), instead of three
+// correlated lateral scans per matter. The old shape seq-scanned the whole
+// docket_files table once per matter (150k rows x 35 matters) and took ~1.6 s
+// warm; this runs in a fraction of that and scales with corpus size, not
+// corpus size x matter count. `WHERE_MATTER` is spliced into each CTE so the
+// single-matter workspace load only aggregates that matter's rows.
+const matterSelect = (whereMatter = "") => `
+  WITH per_docket AS (
+    SELECT d.matter_id, d.docket_id, d.scope,
+           count(f.file_id) AS files,
+           count(DISTINCT f.entry_number) AS entries,
+           count(f.s3_key) AS with_pdf,
+           count(*) FILTER (WHERE f.is_sealed) AS sealed
+    FROM corpus.dockets d
+    LEFT JOIN corpus.docket_files f ON f.docket_id = d.docket_id
+    ${whereMatter ? `WHERE ${whereMatter.replace(/\bm\./g, "d.")}` : ""}
+    GROUP BY d.matter_id, d.docket_id, d.scope
+  ),
+  agg AS (
+    SELECT matter_id,
+           sum(entries) AS entries, sum(files) AS documents,
+           sum(with_pdf) AS with_pdf, sum(sealed) AS sealed
+    FROM per_docket GROUP BY matter_id
+  ),
+  sc AS (
+    SELECT matter_id,
+           jsonb_object_agg(scope, jsonb_build_object('dockets', dockets, 'files', files)) AS counts
+    FROM (
+      SELECT matter_id, scope, count(*) AS dockets, sum(files) AS files
+      FROM per_docket GROUP BY matter_id, scope
+    ) s GROUP BY matter_id
+  ),
+  synced AS (
+    SELECT matter_id, max(last_synced_at) AS last_synced_at FROM corpus.dockets GROUP BY matter_id
+  )
   SELECT m.matter_id AS "slug", m.title AS "title", m.mdl_number AS "mdlNumber",
     ld.court_id AS "courtId", ld.docket_number AS "docketNumber",
     agg.entries AS "entries", agg.documents AS "documents", agg.with_pdf AS "withPdf", agg.sealed AS "sealed",
     sc.counts AS "scopeCounts",
-    (SELECT max(d.last_synced_at) FROM corpus.dockets d WHERE d.matter_id = m.matter_id) AS "lastSyncedAt"
+    synced.last_synced_at AS "lastSyncedAt"
   FROM corpus.matters m
+  LEFT JOIN agg ON agg.matter_id = m.matter_id
+  LEFT JOIN sc ON sc.matter_id = m.matter_id
+  LEFT JOIN synced ON synced.matter_id = m.matter_id
   LEFT JOIN LATERAL (
     SELECT d.court_id, d.docket_number FROM corpus.dockets d
     WHERE d.matter_id = m.matter_id
@@ -117,22 +154,13 @@ const MATTER_SELECT = `
              d.is_lead DESC
     LIMIT 1
   ) ld ON true
-  LEFT JOIN LATERAL (
-    SELECT count(DISTINCT (f.docket_id, f.entry_number)) AS entries,
-           count(*) AS documents,
-           count(*) FILTER (WHERE f.s3_key IS NOT NULL) AS with_pdf,
-           count(*) FILTER (WHERE f.is_sealed) AS sealed
-    FROM corpus.docket_files f WHERE f.matter_id = m.matter_id
-  ) agg ON true
-  LEFT JOIN LATERAL (
-    SELECT jsonb_object_agg(s.scope, jsonb_build_object('dockets', s.dockets, 'files', s.files)) AS counts
-    FROM (
-      SELECT d.scope, count(DISTINCT d.docket_id) AS dockets, count(f.file_id) AS files
-      FROM corpus.dockets d LEFT JOIN corpus.docket_files f ON f.docket_id = d.docket_id
-      WHERE d.matter_id = m.matter_id GROUP BY d.scope
-    ) s
-  ) sc ON true
+  ${whereMatter ? `WHERE ${whereMatter}` : ""}
 `;
+
+// Matters change only when a sync or backfill lands (every 30 minutes at most),
+// so a short per-container memo turns repeat navigations into a no-op.
+const LIST_TTL_MS = 60_000;
+let listCache: { at: number; rows: MatterListItem[] } | null = null;
 
 function toMatterItem(r: MatterRow): MatterListItem {
   const name = r.title ?? r.slug;
@@ -158,8 +186,11 @@ function toMatterItem(r: MatterRow): MatterListItem {
 
 export async function listMatters(): Promise<MatterListItem[]> {
   ensure();
-  const rows = await queryJson<MatterRow>(`${MATTER_SELECT} ORDER BY m.title`);
-  return rows.map(toMatterItem);
+  if (listCache && Date.now() - listCache.at < LIST_TTL_MS) return listCache.rows;
+  const rows = await queryJson<MatterRow>(`${matterSelect()} ORDER BY m.title`);
+  const items = rows.map(toMatterItem);
+  listCache = { at: Date.now(), rows: items };
+  return items;
 }
 
 type DocketRow = {
@@ -177,6 +208,8 @@ type DocketRow = {
   completionPct: number | string | null;
   followed: boolean | null;
   lastSyncedAt: string | null;
+  assignedJudge: string | null;
+  referredJudge: string | null;
 };
 
 function toDocket(r: DocketRow): WorkspaceDocket {
@@ -195,15 +228,230 @@ function toDocket(r: DocketRow): WorkspaceDocket {
     completionPct: r.completionPct == null ? null : Number(r.completionPct),
     followed: !!r.followed,
     lastSyncedAt: iso(r.lastSyncedAt),
+    assignedJudge: r.assignedJudge?.trim() || null,
+    referredJudge: r.referredJudge?.trim() || null,
   };
+}
+
+// --- court reference layer ---------------------------------------------------
+
+type CourtRow = {
+  key: string;
+  name: string;
+  level: string;
+  jurisdiction: string;
+  website: string | null;
+  formsPages: string | string[] | null;
+  logoKey: string | null;
+  logoKind: string | null;
+  logoBackground: string | null;
+  fallbackText: string;
+  reuseNote: string | null;
+};
+
+type JudgeRow = { name: string; surname: string; courtKey: string; portraitKey: string | null; sourcePage: string | null };
+
+const ASSET_TTL = 6 * 3600; // logos and portraits are stable; a long-lived URL keeps the header cacheable
+
+async function presign(key: string | null | undefined, expiresIn = ASSET_TTL): Promise<string | null> {
+  if (!key) return null;
+  try {
+    return await getSignedUrl(s3(), new GetObjectCommand({ Bucket: CORPUS_BUCKET, Key: key }), { expiresIn });
+  } catch {
+    return null;
+  }
+}
+
+/** Surname-based match between a docket's recorded judge ("Vince Girdhari Chhabria")
+ *  and the library's official portrait record ("Vince Chhabria"), same court only. */
+function judgeMatches(recorded: string, j: JudgeRow): boolean {
+  const tokens = recorded.toLowerCase().replace(/[^\p{L}\s'’-]/gu, " ").split(/\s+/).filter(Boolean);
+  const surname = j.surname.toLowerCase();
+  if (!tokens.includes(surname)) return false;
+  // Guard against two judges sharing a surname on one court: require the first name too.
+  const first = j.name.toLowerCase().split(/\s+/)[0];
+  return tokens.includes(first);
+}
+
+async function loadCourtLayer(
+  dockets: WorkspaceDocket[],
+): Promise<{ court: CourtIdentity | null; judges: JudgeIdentity[] }> {
+  const lead = dockets.find((d) => d.isLead && d.scope === "federal") ?? dockets.find((d) => d.scope === "federal") ?? dockets.find((d) => d.isLead) ?? dockets[0];
+  const keys = courtReferenceKeys(lead?.courtId);
+  if (!lead || !keys.length) return { court: null, judges: [] };
+  const [courtRows, countRows, judgeRows] = await Promise.all([
+    queryJson<CourtRow>(
+      `SELECT court_key AS "key", name, level, jurisdiction, website, forms_pages AS "formsPages",
+              logo_key AS "logoKey", logo_kind AS "logoKind", logo_background AS "logoBackground",
+              fallback_text AS "fallbackText", reuse_note AS "reuseNote"
+       FROM reference.courts WHERE court_key = :key`,
+      [param("key", keys[0])],
+    ),
+    queryJson<{ kind: string; count: number }>(
+      `SELECT kind, count(*) AS "count" FROM reference.court_documents
+       WHERE court_keys && ${listCast("keys", "text")} GROUP BY kind`,
+      [listParam("keys", keys)],
+    ),
+    queryJson<JudgeRow>(
+      `SELECT name, surname, court_key AS "courtKey", portrait_key AS "portraitKey", source_page AS "sourcePage"
+       FROM reference.judges WHERE court_key = :key`,
+      [param("key", keys[0])],
+    ),
+  ]);
+  const c = courtRows[0];
+  const counts = Object.fromEntries(COURT_RESOURCE_KINDS.map((k) => [k, 0])) as Record<CourtResourceKind, number>;
+  for (const r of countRows) if (r.kind in counts) counts[r.kind as CourtResourceKind] = num(r.count);
+  const court: CourtIdentity | null = c
+    ? {
+        key: c.key,
+        name: c.name,
+        level: c.level,
+        jurisdiction: c.jurisdiction,
+        website: c.website,
+        formsPages: Array.isArray(c.formsPages) ? c.formsPages : safeJsonArray(c.formsPages),
+        logoUrl: await presign(c.logoKey),
+        logoKind: c.logoKind,
+        logoBackground: c.logoBackground === "dark" ? "dark" : c.logoBackground === "light" ? "light" : null,
+        fallbackText: c.fallbackText,
+        reuseNote: c.reuseNote,
+        resourceCounts: counts,
+      }
+    : null;
+  // Portraits appear only for a judge the docket itself names. Never inferred.
+  const judges: JudgeIdentity[] = [];
+  for (const [role, recorded] of [["assigned", lead.assignedJudge], ["referred", lead.referredJudge]] as const) {
+    if (!recorded) continue;
+    const hit = judgeRows.find((j) => judgeMatches(recorded, j));
+    judges.push({
+      name: recorded,
+      courtKey: keys[0],
+      portraitUrl: hit ? await presign(hit.portraitKey) : null,
+      sourcePage: hit?.sourcePage ?? null,
+      role,
+    });
+  }
+  return { court, judges };
+}
+
+function safeJsonArray(v: unknown): string[] {
+  if (typeof v !== "string") return [];
+  try {
+    const parsed = JSON.parse(v) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+type ResourceRow = {
+  sha256: string;
+  title: string;
+  kind: string;
+  format: string;
+  bytes: number | null;
+  pageCount: number | null;
+  sourceUrl: string | null;
+  sourceDate: string | null;
+  sourceDateKind: string | null;
+  reviewStatus: string | null;
+  fillable: boolean | null;
+  judgeName: string | null;
+  courtKey: string | null;
+};
+
+const WORD_FORMATS = ["docx", "doc", "rtf"];
+
+/** Court rules, standing orders, forms and templates the library holds for a court. */
+export async function listCourtResources(q: CourtResourceQuery): Promise<CourtResourcePage> {
+  ensure();
+  const keys = q.courtKeys.filter((k) => /^[A-Z]{1,3}:[a-z0-9_-]+$/.test(k)).slice(0, 4);
+  const pageSize = Math.min(Math.max(q.pageSize ?? 50, 1), 200);
+  const page = Math.max(q.page ?? 1, 1);
+  if (!keys.length) return { total: 0, page, pageSize, items: [] };
+  const where = [`d.court_keys && ${listCast("keys", "text")}`];
+  const params: SqlParameter[] = [listParam("keys", keys)];
+  if (q.kind && (COURT_RESOURCE_KINDS as string[]).includes(q.kind)) {
+    params.push(param("kind", q.kind));
+    where.push("d.kind = :kind");
+  }
+  if (q.format === "word") where.push(`d.format = ANY(ARRAY['docx','doc','rtf'])`);
+  else if (q.format === "pdf") where.push("d.format = 'pdf'");
+  const search = q.search?.trim();
+  if (search) {
+    params.push(param("q", search.slice(0, 200)));
+    where.push("d.title ILIKE '%' || :q || '%'");
+  }
+  const w = where.join(" AND ");
+  const [countRows, rows] = await Promise.all([
+    queryJson<{ count: number }>(`SELECT count(*) AS "count" FROM reference.court_documents d WHERE ${w}`, params),
+    queryJson<ResourceRow>(
+      `SELECT d.sha256, d.title, d.kind, d.format, d.bytes, d.page_count AS "pageCount",
+              d.source_url AS "sourceUrl", d.source_date AS "sourceDate", d.source_date_kind AS "sourceDateKind",
+              d.review_status AS "reviewStatus", d.fillable, d.judge_name AS "judgeName", d.court_key AS "courtKey"
+       FROM reference.court_documents d
+       WHERE ${w}
+       ORDER BY CASE d.kind WHEN 'standing_order' THEN 0 WHEN 'local_rule' THEN 1 WHEN 'form' THEN 2 WHEN 'instruction' THEN 3 WHEN 'order' THEN 4 ELSE 5 END,
+                d.title
+       LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`,
+      params,
+    ),
+  ]);
+  // Portraits for standing orders that name a judge: one lookup per distinct judge on this court.
+  const judgeRows = rows.some((r) => r.judgeName)
+    ? await queryJson<JudgeRow>(
+        `SELECT name, surname, court_key AS "courtKey", portrait_key AS "portraitKey", source_page AS "sourcePage"
+         FROM reference.judges WHERE court_key = ANY(${listCast("keys", "text")})`,
+        [listParam("keys", keys)],
+      )
+    : [];
+  const portraitCache = new Map<string, Promise<string | null>>();
+  const items: CourtResource[] = await Promise.all(
+    rows.map(async (r) => {
+      const hit = r.judgeName ? judgeRows.find((j) => judgeMatches(r.judgeName!, j)) : undefined;
+      let judgePortraitUrl: string | null = null;
+      if (hit?.portraitKey) {
+        if (!portraitCache.has(hit.portraitKey)) portraitCache.set(hit.portraitKey, presign(hit.portraitKey));
+        judgePortraitUrl = await portraitCache.get(hit.portraitKey)!;
+      }
+      return {
+        sha256: r.sha256,
+        title: r.title,
+        kind: (COURT_RESOURCE_KINDS as string[]).includes(r.kind) ? (r.kind as CourtResourceKind) : "other",
+        format: (WORD_FORMATS.includes(r.format) || r.format === "pdf" ? r.format : "pdf") as CourtResource["format"],
+        bytes: r.bytes == null ? null : num(r.bytes),
+        pageCount: r.pageCount == null ? null : num(r.pageCount),
+        sourceUrl: r.sourceUrl,
+        sourceDate: r.sourceDate,
+        sourceDateKind: r.sourceDateKind,
+        reviewStatus: r.reviewStatus,
+        fillable: !!r.fillable,
+        judgeName: r.judgeName,
+        judgePortraitUrl,
+        courtKey: r.courtKey,
+      };
+    }),
+  );
+  return { total: num(countRows[0]?.count), page, pageSize, items };
+}
+
+/** Presigned URL to open an original court document from the library (30 minutes). */
+export async function courtResourceUrl(sha256: string): Promise<{ url: string; title: string; format: string } | null> {
+  ensure();
+  if (!/^[0-9a-f]{64}$/.test(sha256)) return null;
+  const rows = await queryJson<{ s3Key: string; title: string; format: string }>(
+    `SELECT s3_key AS "s3Key", title, format FROM reference.court_documents WHERE sha256 = :sha`,
+    [param("sha", sha256)],
+  );
+  const r = rows[0];
+  if (!r) return null;
+  const url = await presign(r.s3Key, 1800);
+  return url ? { url, title: r.title, format: r.format } : null;
 }
 
 export async function loadWorkspace(slug: string): Promise<MatterWorkspace | null> {
   ensure();
   const [matterRows, docketRows, facets, range] = await Promise.all([
-    queryJson<MatterRow>(`${MATTER_SELECT} WHERE m.matter_id = :slug LIMIT 1`, [
-      param("slug", slug),
-    ]),
+    queryJson<MatterRow>(`${matterSelect("m.matter_id = :slug")} LIMIT 1`, [param("slug", slug)]),
     queryJson<DocketRow>(
       `SELECT d.docket_id AS "docketId", d.scope AS "scope", d.court_id AS "courtId",
               d.docket_number AS "docketNumber", d.title AS "title", d.is_lead AS "isLead",
@@ -211,7 +459,8 @@ export async function loadWorkspace(slug: string): Promise<MatterWorkspace | nul
               (SELECT count(*) FROM corpus.docket_files f WHERE f.docket_id = d.docket_id) AS "filesPresent",
               (SELECT count(*) FROM corpus.docket_files f WHERE f.docket_id = d.docket_id AND f.s3_key IS NOT NULL) AS "pdfAvailable",
               d.sealed_count AS "sealedCount", d.missing_count AS "missingCount",
-              d.completion_pct AS "completionPct", d.followed_in_db AS "followed", d.last_synced_at AS "lastSyncedAt"
+              d.completion_pct AS "completionPct", d.followed_in_db AS "followed", d.last_synced_at AS "lastSyncedAt",
+              d.assigned_judge AS "assignedJudge", d.referred_judge AS "referredJudge"
        FROM corpus.dockets d
        WHERE d.matter_id = :slug
        ORDER BY CASE d.scope WHEN 'federal' THEN 0 WHEN 'jpml' THEN 1 WHEN 'appellate' THEN 2 WHEN 'state' THEN 3 ELSE 4 END,
@@ -232,14 +481,19 @@ export async function loadWorkspace(slug: string): Promise<MatterWorkspace | nul
   ]);
   const m = matterRows[0];
   if (!m) return null;
+  const dockets = docketRows.map(toDocket);
+  // The court layer is additive: a failure there must not take the matter down.
+  const { court, judges } = await loadCourtLayer(dockets).catch(() => ({ court: null, judges: [] }));
 
   return {
     matter: toMatterItem(m),
-    dockets: docketRows.map(toDocket),
+    dockets,
     parties: [], // Parties / counsel are not modeled in Aurora yet (CourtListener scrape pending).
     counsel: [],
     typeFacets: facets.map((f) => ({ type: f.type, count: num(f.count) })),
     dateRange: { first: range[0]?.first ?? null, last: range[0]?.last ?? null },
+    court,
+    judges,
   };
 }
 

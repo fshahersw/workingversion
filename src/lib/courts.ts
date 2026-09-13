@@ -411,3 +411,24 @@ export function courtInfo(rawId: string | null | undefined): CourtInfo {
 export function courtStateName(state: string | null): string | null {
   return state ? (STATE_NAMES[state] ?? state) : null;
 }
+
+// Stable keys of the firm's court reference library (reference.courts):
+// "FD:<id>" federal district, "FS:jpml" the Panel, "ST:<st>_state" statewide
+// state-court collections, "LC:<...>" selected local trial courts. DocketBird
+// state ids map onto the statewide collection (plus the local court where one
+// was collected) so a state docket still finds its rules and forms.
+const STATE_REFERENCE_KEYS: Record<string, string[]> = {
+  lasu: ["LC:ca_los_angeles", "ST:ca_state"],
+  "uc-ca-superct": ["ST:ca_state"],
+  nynew: ["LC:ny_new_york", "ST:ny_state"],
+};
+
+/** Reference-library keys for a docket's court, most specific first. */
+export function courtReferenceKeys(rawId: string | null | undefined): string[] {
+  const id = (rawId ?? "").trim().toLowerCase();
+  if (!id) return [];
+  if (id === "jpml") return ["FS:jpml"];
+  if (DISTRICTS[id]) return [`FD:${id}`];
+  if (STATE_REFERENCE_KEYS[id]) return STATE_REFERENCE_KEYS[id];
+  return [];
+}

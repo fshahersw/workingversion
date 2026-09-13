@@ -47,6 +47,94 @@ export type WorkspaceDocket = {
   /** Firm follows this docket in DocketBird, so it receives automatic updates. */
   followed: boolean;
   lastSyncedAt: string | null;
+  /** Assigned / referred judge as recorded on the docket (CourtListener), or null. */
+  assignedJudge: string | null;
+  referredJudge: string | null;
+};
+
+// ---- Court reference layer (reference.* schema: registry, identity assets,
+// ---- per-court rules, standing orders and forms from the firm's document library).
+
+export type CourtIdentity = {
+  /** Reference-library key, e.g. "FD:njd". */
+  key: string;
+  name: string;
+  level: string;
+  jurisdiction: string;
+  website: string | null;
+  formsPages: string[];
+  /** Presigned URL of the court mark, or null when the library holds none. */
+  logoUrl: string | null;
+  logoKind: string | null;
+  /** Background the mark was published on ("light" | "dark"). */
+  logoBackground: "light" | "dark" | null;
+  fallbackText: string;
+  reuseNote: string | null;
+  /** Documents the library holds for this court, by kind. */
+  resourceCounts: Record<CourtResourceKind, number>;
+};
+
+export type JudgeIdentity = {
+  name: string;
+  courtKey: string;
+  /** Presigned portrait URL; only shown when the docket names this judge. */
+  portraitUrl: string | null;
+  sourcePage: string | null;
+  role: "assigned" | "referred";
+};
+
+export type CourtResourceKind =
+  | "standing_order"
+  | "local_rule"
+  | "form"
+  | "instruction"
+  | "order"
+  | "other";
+
+export const COURT_RESOURCE_KINDS: CourtResourceKind[] = [
+  "standing_order",
+  "local_rule",
+  "form",
+  "instruction",
+  "order",
+  "other",
+];
+
+export type CourtResource = {
+  sha256: string;
+  title: string;
+  kind: CourtResourceKind;
+  format: "pdf" | "docx" | "doc" | "rtf";
+  bytes: number | null;
+  pageCount: number | null;
+  sourceUrl: string | null;
+  sourceDate: string | null;
+  sourceDateKind: string | null;
+  reviewStatus: string | null;
+  fillable: boolean;
+  /** Judge named in a standing order's title, when one is. */
+  judgeName: string | null;
+  /** Portrait of that judge when the library has an official one for this court. */
+  judgePortraitUrl: string | null;
+  courtKey: string | null;
+};
+
+export type CourtResourceQuery = {
+  /** Reference keys to search, most specific first (courtReferenceKeys). */
+  courtKeys: string[];
+  kind?: CourtResourceKind;
+  /** "word" narrows to DOCX/DOC/RTF templates; "pdf" to PDFs. */
+  format?: "word" | "pdf";
+  search?: string;
+  page?: number;
+  pageSize?: number;
+};
+
+export type CourtResourcePage = {
+  total: number;
+  page: number;
+  pageSize: number;
+  items: CourtResource[];
 };
 
 export type WorkspaceParty = {
@@ -111,6 +199,10 @@ export type MatterWorkspace = {
   counsel: WorkspaceCounsel[];
   typeFacets: { type: string; count: number }[];
   dateRange: { first: string | null; last: string | null };
+  /** Identity and library coverage for the lead docket's court, or null when unknown. */
+  court: CourtIdentity | null;
+  /** Judges named on the lead docket that the library can identify (portraits optional). */
+  judges: JudgeIdentity[];
 };
 
 export type LedgerSort = "date-desc" | "date-asc" | "entry-desc" | "entry-asc";
