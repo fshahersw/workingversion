@@ -112,7 +112,10 @@ export async function retrieveMatterCorpus(
     },
   });
   const res = await signedAwsFetch(
-    "bedrock-agent-runtime",
+    // The bedrock-agent-runtime endpoint validates the SigV4 credential scope as
+    // service "bedrock" (NOT "bedrock-agent-runtime") — signing it wrong returns
+    // 403 "Credential should be scoped to correct service: 'bedrock'".
+    "bedrock",
     `https://bedrock-agent-runtime.${REGION}.amazonaws.com/knowledgebases/${encodeURIComponent(
       kbId,
     )}/retrieve`,

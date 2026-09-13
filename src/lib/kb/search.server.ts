@@ -37,7 +37,10 @@ export async function rerankPassages(
   });
   const { signedAwsFetch } = await import("@/lib/agents/bedrock-sign.server");
   const res = await signedAwsFetch(
-    "bedrock-agent-runtime",
+    // SigV4 scope for the bedrock-agent-runtime endpoint is service "bedrock";
+    // signing it as "bedrock-agent-runtime" 403s (previously caught + silently
+    // fell back to fused order, degrading rerank).
+    "bedrock",
     `https://bedrock-agent-runtime.${region}.amazonaws.com/rerank`,
     { body, ...(signal ? { signal } : {}) },
   );
