@@ -67,3 +67,4 @@ scripts/pipeline/downloads/
 /AGENT-HANDOFF.md
 /.bedrock-pol-*.json
 /.artifacts/
+.claude/agents/
