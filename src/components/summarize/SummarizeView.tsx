@@ -261,7 +261,20 @@ export function SummarizeView() {
         setRestrictIds(new Set());
       }}
       onOpen={openPage}
-      onAddFiles={(incoming) => void addFiles(incoming)}
+      onAddFiles={(incoming) => {
+        // Discovery uploads always go through the server BDA ingest: extract
+        // structure locally (no capped on-device OCR), then upload + BDA
+        // (uncapped, every-page OCR). saveWorkspace polls to ready and swaps
+        // the complete ingested text back in for the full-text-scan Ask.
+        void (async () => {
+          await addFiles(incoming, { skipOcr: true });
+          const base = incoming[0]?.name?.replace(/\.[^.]+$/, "") ?? "Discovery documents";
+          const name = (
+            incoming.length > 1 ? `${base} +${incoming.length - 1} more` : base
+          ).slice(0, 120);
+          await saveWorkspace({ name });
+        })();
+      }}
       onClose={() => {
         if (desktopLayout) setFilesOpen(false);
         else setRefineOpen(false);

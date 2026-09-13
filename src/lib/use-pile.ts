@@ -553,7 +553,7 @@ export function usePile() {
   }, []);
 
   const start = useCallback(
-    async (incoming: File[], instructions?: string) => {
+    async (incoming: File[], instructions?: string, opts?: { skipOcr?: boolean }) => {
       const files = incoming.filter((f) => fileKind(f) !== null).slice(0, MAX_FILES);
       if (!files.length) {
         setState({
@@ -675,27 +675,31 @@ export function usePile() {
       persistPile(ownerRef.current, built.session, pagesRef.current);
       step({ id: "structure", label: "Structure rail", status: "running" });
 
-      try {
-        const next = await recoverScannedPages({
-          extracted: ok,
-          pages: pagesRef.current,
-          session: built.session,
-          pile: pile(),
-          signal: controller.signal,
-          step,
-        });
-        contentRevisionRef.current += 1;
-        sessionRef.current = next;
-        persistPile(ownerRef.current, next, pagesRef.current);
-        setState((s) => ({ ...s, session: next }));
-      } catch (e) {
-        if (controller.signal.aborted) return;
-        step({
-          id: "ocr",
-          label: "Reading scanned pages",
-          status: "error",
-          detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
-        });
+      // On-device OCR of scanned pages, skipped when the caller routes OCR to
+      // the server (BDA) so the capped inline OCR never runs redundantly.
+      if (!opts?.skipOcr) {
+        try {
+          const next = await recoverScannedPages({
+            extracted: ok,
+            pages: pagesRef.current,
+            session: built.session,
+            pile: pile(),
+            signal: controller.signal,
+            step,
+          });
+          contentRevisionRef.current += 1;
+          sessionRef.current = next;
+          persistPile(ownerRef.current, next, pagesRef.current);
+          setState((s) => ({ ...s, session: next }));
+        } catch (e) {
+          if (controller.signal.aborted) return;
+          step({
+            id: "ocr",
+            label: "Reading scanned pages",
+            status: "error",
+            detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
+          });
+        }
       }
 
       void refreshStructure(pile(), sessionRef.current, step, (structure) => {
@@ -709,10 +713,10 @@ export function usePile() {
   );
 
   const addFiles = useCallback(
-    async (incoming: File[]) => {
+    async (incoming: File[], opts?: { skipOcr?: boolean }) => {
       const sess = sessionRef.current;
       if (!sess || !pagesRef.current.length) {
-        await start(incoming);
+        await start(incoming, undefined, opts);
         return;
       }
 
@@ -849,27 +853,31 @@ export function usePile() {
         detail: `${appended.pages.length} pages · kept on this device`,
       });
 
-      try {
-        const afterOcr = await recoverScannedPages({
-          extracted: ok,
-          pages: pagesRef.current,
-          session: nextSession,
-          pile: pile(),
-          signal: controller.signal,
-          step,
-        });
-        contentRevisionRef.current += 1;
-        sessionRef.current = afterOcr;
-        persistPile(ownerRef.current, afterOcr, pagesRef.current);
-        setState((s) => ({ ...s, session: afterOcr }));
-      } catch (e) {
-        if (controller.signal.aborted) return;
-        step({
-          id: "ocr",
-          label: "Reading scanned pages",
-          status: "error",
-          detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
-        });
+      // On-device OCR of scanned pages, skipped when the caller routes OCR to
+      // the server (BDA) so the capped inline OCR never runs redundantly.
+      if (!opts?.skipOcr) {
+        try {
+          const afterOcr = await recoverScannedPages({
+            extracted: ok,
+            pages: pagesRef.current,
+            session: nextSession,
+            pile: pile(),
+            signal: controller.signal,
+            step,
+          });
+          contentRevisionRef.current += 1;
+          sessionRef.current = afterOcr;
+          persistPile(ownerRef.current, afterOcr, pagesRef.current);
+          setState((s) => ({ ...s, session: afterOcr }));
+        } catch (e) {
+          if (controller.signal.aborted) return;
+          step({
+            id: "ocr",
+            label: "Reading scanned pages",
+            status: "error",
+            detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
+          });
+        }
       }
 
       step({ id: "structure", label: "Structure rail", status: "running" });
