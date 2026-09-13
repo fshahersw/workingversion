@@ -12,8 +12,11 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ExternalLink,
   FileText,
   Filter,
+  Gavel,
+  Loader2,
   Lock,
   Paperclip,
   Search,
@@ -26,8 +29,11 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import { courtInfo } from "@/lib/courts";
+import { getCourtResourceUrl } from "@/lib/workspace.functions";
 import {
   SCOPE_LABEL,
+  courtResourceKindLabel,
+  courtResourcesQueryOptions,
   docTypeLabel,
   documentsQueryOptions,
   entriesQueryOptions,
@@ -39,8 +45,14 @@ import {
   workspaceQueryOptions,
 } from "@/lib/workspace";
 import {
+  COURT_RESOURCE_KINDS,
   DOCKET_SCOPES,
+  type CourtIdentity,
+  type CourtResource,
+  type CourtResourceKind,
+  type CourtResourceQuery,
   type DocketScope,
+  type JudgeIdentity,
   type LedgerFilter,
   type LedgerSort,
   type MatterWorkspace as Workspace,
@@ -52,7 +64,7 @@ import {
 import { PdfViewer } from "./PdfViewer";
 
 export type WorkspaceSearch = {
-  view?: "ledger" | "documents";
+  view?: "ledger" | "documents" | "rules";
   q?: string;
   types?: string[];
   scope?: DocketScope;
@@ -65,11 +77,20 @@ export type WorkspaceSearch = {
   entry?: string;
   doc?: string;
   page?: number;
+  /** Rules & forms view: filter by document kind. */
+  rkind?: CourtResourceKind;
+  /** Rules & forms view: narrow to Word templates or PDFs. */
+  rfmt?: "word" | "pdf";
 };
 
 type Patch = Partial<Record<keyof WorkspaceSearch, unknown>>;
 
 const PAGE_SIZE = 50;
+
+/** Total library documents the reference layer holds for a court. */
+function courtResourceTotal(court: CourtIdentity): number {
+  return COURT_RESOURCE_KINDS.reduce((sum, k) => sum + (court.resourceCounts[k] ?? 0), 0);
+}
 
 const SCOPE_DOT: Record<DocketScope, string> = {
   federal: "bg-brand-navy",
@@ -158,37 +179,47 @@ export function MatterWorkspace({
           onSelect={(patch) => onSearch({ ...patch, page: undefined, entry: undefined })}
         />
         <main className="flex min-w-0 flex-1 flex-col border-l border-border bg-card">
-          <ContextBar
-            ws={ws}
-            scope={search.scope}
-            docket={selectedDocket}
-            onClear={() => onSearch({ scope: undefined, docket: undefined, page: undefined })}
-          />
-          <Toolbar ws={ws} search={search} onSearch={(p) => onSearch({ ...p, page: undefined })} />
-          {view === "documents" ? (
-            <DocumentsTable
-              filter={filter}
-              showDocket={!search.docket}
-              page={search.page ?? 1}
-              openId={search.doc}
-              onOpen={openDocument}
-              onPage={(page) => onSearch({ page: page > 1 ? page : undefined })}
-            />
+          {view === "rules" && ws.court ? (
+            <CourtRulesView ws={ws} search={search} onSearch={onSearch} />
           ) : (
-            <LedgerTable
-              slug={slug}
-              filter={filter}
-              showDocket={!search.docket}
-              page={search.page ?? 1}
-              expandedEntry={search.entry}
-              openId={search.doc}
-              onExpand={(id) => onSearch({ entry: id })}
-              onOpen={openDocument}
-              onPage={(page) => onSearch({ page: page > 1 ? page : undefined })}
-            />
+            <>
+              <ContextBar
+                ws={ws}
+                scope={search.scope}
+                docket={selectedDocket}
+                onClear={() => onSearch({ scope: undefined, docket: undefined, page: undefined })}
+              />
+              <Toolbar
+                ws={ws}
+                search={search}
+                onSearch={(p) => onSearch({ ...p, page: undefined })}
+              />
+              {view === "documents" ? (
+                <DocumentsTable
+                  filter={filter}
+                  showDocket={!search.docket}
+                  page={search.page ?? 1}
+                  openId={search.doc}
+                  onOpen={openDocument}
+                  onPage={(page) => onSearch({ page: page > 1 ? page : undefined })}
+                />
+              ) : (
+                <LedgerTable
+                  slug={slug}
+                  filter={filter}
+                  showDocket={!search.docket}
+                  page={search.page ?? 1}
+                  expandedEntry={search.entry}
+                  openId={search.doc}
+                  onExpand={(id) => onSearch({ entry: id })}
+                  onOpen={openDocument}
+                  onPage={(page) => onSearch({ page: page > 1 ? page : undefined })}
+                />
+              )}
+            </>
           )}
         </main>
-        {search.doc && (
+        {search.doc && view !== "rules" && (
           <DocumentPane documentId={search.doc} doc={openDoc} onClose={closeDocument} />
         )}
       </div>
@@ -202,6 +233,7 @@ export function MatterWorkspace({
 function MatterHeader({ ws }: { ws: Workspace }) {
   const m = ws.matter;
   const court = courtInfo(m.courtId);
+  const assignedJudge = ws.judges.find((j) => j.role === "assigned")?.name ?? null;
   return (
     <header className="shrink-0 border-b border-border bg-card px-6 pb-4 pt-4">
       <Link
@@ -233,6 +265,15 @@ function MatterHeader({ ws }: { ws: Workspace }) {
             )}
             <span className="text-border">|</span>
             <span title={m.lastSyncedAt ?? undefined}>Synced {formatRelative(m.lastSyncedAt)}</span>
+            {assignedJudge && (
+              <>
+                <span className="text-border">|</span>
+                <span className="inline-flex items-center gap-1">
+                  <Gavel className="h-3.5 w-3.5" strokeWidth={2} />
+                  Hon. {assignedJudge}
+                </span>
+              </>
+            )}
           </div>
         </div>
         <dl className="flex shrink-0 items-stretch divide-x divide-border rounded-lg border border-border bg-surface">
@@ -612,23 +653,7 @@ function Toolbar({
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-5 py-3">
-      <div className="inline-flex rounded-md border border-border bg-surface p-0.5 text-[12.5px] font-medium">
-        {(["ledger", "documents"] as const).map((v) => (
-          <button
-            key={v}
-            type="button"
-            onClick={() => onSearch({ view: v === "ledger" ? undefined : v, entry: undefined })}
-            className={[
-              "rounded px-3 py-1 transition-colors",
-              view === v
-                ? "bg-card text-brand-navy shadow-sm"
-                : "text-muted-foreground hover:text-brand-navy",
-            ].join(" ")}
-          >
-            {v === "ledger" ? "Docket entries" : "Documents"}
-          </button>
-        ))}
-      </div>
+      <ViewTabs view={view} ws={ws} onSelect={onSearch} />
 
       <div className="relative min-w-[220px] flex-1 max-w-md">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -1411,6 +1436,412 @@ function DocumentPane({
         <PdfViewer documentId={documentId} title={doc?.title} fill />
       </div>
     </aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Rules & forms (court reference library)
+
+function ViewTabs({
+  view,
+  ws,
+  onSelect,
+}: {
+  view: "ledger" | "documents" | "rules";
+  ws: Workspace;
+  onSelect: (p: Patch) => void;
+}) {
+  const tabs = [
+    { v: "ledger" as const, label: "Docket entries", badge: 0 },
+    { v: "documents" as const, label: "Documents", badge: 0 },
+    ...(ws.court
+      ? [{ v: "rules" as const, label: "Rules & forms", badge: courtResourceTotal(ws.court) }]
+      : []),
+  ];
+  return (
+    <div className="inline-flex rounded-md border border-border bg-surface p-0.5 text-[12.5px] font-medium">
+      {tabs.map((t) => (
+        <button
+          key={t.v}
+          type="button"
+          onClick={() => onSelect({ view: t.v === "ledger" ? undefined : t.v, entry: undefined })}
+          className={[
+            "inline-flex items-center gap-1.5 rounded px-3 py-1 transition-colors",
+            view === t.v
+              ? "bg-card text-brand-navy shadow-sm"
+              : "text-muted-foreground hover:text-brand-navy",
+          ].join(" ")}
+        >
+          {t.label}
+          {t.badge > 0 && (
+            <span className="rounded-full bg-brand-blue-soft px-1.5 text-[10.5px] tabular-nums text-brand-blue">
+              {formatCount(t.badge)}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CourtRulesView({
+  ws,
+  search,
+  onSearch,
+}: {
+  ws: Workspace;
+  search: WorkspaceSearch;
+  onSearch: (p: Patch) => void;
+}) {
+  const court = ws.court!;
+  const page = search.page ?? 1;
+  const query: CourtResourceQuery = useMemo(
+    () => ({
+      courtKeys: court.keys,
+      ...(search.rkind ? { kind: search.rkind } : {}),
+      ...(search.rfmt ? { format: search.rfmt } : {}),
+      ...(search.q ? { search: search.q } : {}),
+      page,
+      pageSize: PAGE_SIZE,
+    }),
+    [court.keys, search.rkind, search.rfmt, search.q, page],
+  );
+  const { data, isLoading, isFetching } = useQuery(courtResourcesQueryOptions(query));
+  const rows = data?.items ?? [];
+  const total = data?.total ?? 0;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <CourtRulesToolbar
+        ws={ws}
+        search={search}
+        onSearch={(p) => onSearch({ ...p, page: undefined })}
+      />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <CourtIdentityCard court={court} judges={ws.judges} />
+        <table className="w-full table-fixed border-collapse text-[13px]">
+          <colgroup>
+            <col className="w-[132px]" />
+            <col />
+            <col className="w-[64px]" />
+            <col className="w-[84px]" />
+            <col className="w-[104px]" />
+          </colgroup>
+          <thead className="sticky top-0 z-10 bg-card">
+            <tr className="border-b border-border text-left text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+              <th className="px-3 py-2 pl-5">Type</th>
+              <th className="px-3 py-2">Title</th>
+              <th className="px-3 py-2">Format</th>
+              <th className="px-3 py-2 text-right">Size</th>
+              <th className="px-3 py-2 pr-5">Open</th>
+            </tr>
+          </thead>
+          <tbody className={isFetching && !isLoading ? "opacity-60 transition-opacity" : ""}>
+            {isLoading ? (
+              Array.from({ length: 10 }).map((_, i) => (
+                <tr key={i} className="border-b border-border/60">
+                  <td colSpan={5} className="px-5 py-3">
+                    <Skeleton className="h-4 w-full" />
+                  </td>
+                </tr>
+              ))
+            ) : rows.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={5}
+                  className="px-5 py-16 text-center text-[13px] text-muted-foreground"
+                >
+                  No rules, standing orders or forms match these filters.
+                </td>
+              </tr>
+            ) : (
+              rows.map((r) => <CourtResourceRow key={r.sha256} r={r} />)
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager
+        page={page}
+        total={total}
+        unit="documents"
+        onPage={(p) => onSearch({ page: p > 1 ? p : undefined })}
+      />
+    </div>
+  );
+}
+
+const RULES_FORMATS: { value: "" | "word" | "pdf"; label: string }[] = [
+  { value: "", label: "All" },
+  { value: "word", label: "Word" },
+  { value: "pdf", label: "PDF" },
+];
+
+function CourtRulesToolbar({
+  ws,
+  search,
+  onSearch,
+}: {
+  ws: Workspace;
+  search: WorkspaceSearch;
+  onSearch: (p: Patch) => void;
+}) {
+  const [q, setQ] = useState(search.q ?? "");
+  useEffect(() => setQ(search.q ?? ""), [search.q]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if ((q.trim() || undefined) !== search.q) onSearch({ q: q.trim() || undefined });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q, search.q, onSearch]);
+  const view = search.view ?? "rules";
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-border px-5 py-3">
+      <ViewTabs view={view} ws={ws} onSelect={onSearch} />
+
+      <div className="relative min-w-[220px] max-w-md flex-1">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search rules, standing orders and forms"
+          className="h-8 pl-8 text-[13px]"
+        />
+        {q && (
+          <button
+            type="button"
+            onClick={() => setQ("")}
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+            aria-label="Clear search"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      <select
+        value={search.rkind ?? ""}
+        onChange={(e) =>
+          onSearch({ rkind: (e.target.value || undefined) as CourtResourceKind | undefined })
+        }
+        aria-label="Document type"
+        className="h-8 rounded-md border border-border bg-card px-2 text-[12.5px] text-foreground outline-none focus:border-brand-blue"
+      >
+        <option value="">All types</option>
+        {COURT_RESOURCE_KINDS.map((k) => (
+          <option key={k} value={k}>
+            {courtResourceKindLabel(k)}
+          </option>
+        ))}
+      </select>
+
+      <div className="inline-flex rounded-md border border-border bg-surface p-0.5 text-[12.5px] font-medium">
+        {RULES_FORMATS.map((f) => {
+          const active = (search.rfmt ?? "") === f.value;
+          return (
+            <button
+              key={f.value || "all"}
+              type="button"
+              onClick={() => onSearch({ rfmt: f.value || undefined })}
+              className={[
+                "rounded px-3 py-1 transition-colors",
+                active
+                  ? "bg-card text-brand-navy shadow-sm"
+                  : "text-muted-foreground hover:text-brand-navy",
+              ].join(" ")}
+            >
+              {f.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CourtIdentityCard({ court, judges }: { court: CourtIdentity; judges: JudgeIdentity[] }) {
+  return (
+    <div className="border-b border-border bg-surface px-5 py-4">
+      <div className="flex items-start gap-4">
+        <CourtMark court={court} />
+        <div className="min-w-0 flex-1">
+          <div className="text-[15px] font-semibold leading-tight text-brand-navy">{court.name}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-muted-foreground">
+            <span>{court.level}</span>
+            <span className="text-border">|</span>
+            <span>{court.jurisdiction}</span>
+            {court.website && (
+              <>
+                <span className="text-border">|</span>
+                <a
+                  href={court.website}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-brand-blue hover:underline"
+                >
+                  Court website
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </>
+            )}
+          </div>
+        </div>
+        {judges.length > 0 && (
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-4">
+            {judges.map((j) => (
+              <JudgeChip key={`${j.role}:${j.name}`} judge={j} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CourtMark({ court }: { court: CourtIdentity }) {
+  const [broken, setBroken] = useState(false);
+  if (court.logoUrl && !broken) {
+    return (
+      <div
+        className={[
+          "flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border",
+          court.logoBackground === "dark" ? "bg-brand-navy" : "bg-white",
+        ].join(" ")}
+      >
+        <img
+          src={court.logoUrl}
+          alt=""
+          className="h-full w-full object-contain p-1"
+          onError={() => setBroken(true)}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-border bg-brand-blue-soft text-[15px] font-semibold text-brand-navy">
+      {court.fallbackText}
+    </div>
+  );
+}
+
+function JudgeChip({ judge: j }: { judge: JudgeIdentity }) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <div className="flex items-center gap-2">
+      {j.portraitUrl && !broken ? (
+        <img
+          src={j.portraitUrl}
+          alt=""
+          className="h-9 w-9 rounded-full object-cover ring-1 ring-border"
+          onError={() => setBroken(true)}
+        />
+      ) : (
+        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-muted text-muted-foreground ring-1 ring-border">
+          <Gavel className="h-4 w-4" />
+        </div>
+      )}
+      <div className="leading-tight">
+        <div className="text-[12.5px] font-medium text-foreground">{j.name}</div>
+        <div className="text-[10px] uppercase tracking-[0.07em] text-muted-foreground">
+          {j.role === "assigned" ? "Assigned judge" : "Referred judge"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CourtKindBadge({ kind }: { kind: CourtResourceKind }) {
+  const tone =
+    kind === "standing_order" || kind === "order"
+      ? "bg-brand-navy/[0.07] text-brand-navy"
+      : kind === "local_rule" || kind === "instruction"
+        ? "bg-brand-blue-soft text-brand-blue"
+        : kind === "form"
+          ? "bg-brand-orange-soft text-brand-orange"
+          : "bg-muted text-muted-foreground";
+  return (
+    <span
+      className={`inline-block whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium ${tone}`}
+    >
+      {courtResourceKindLabel(kind)}
+    </span>
+  );
+}
+
+function CourtResourceRow({ r }: { r: CourtResource }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [portraitBroken, setPortraitBroken] = useState(false);
+  const provenance = [r.sourceDateKind, r.sourceDate].filter(Boolean).join(" ");
+
+  const open = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await getCourtResourceUrl({ data: { sha256: r.sha256 } });
+      if (res?.url) window.open(res.url, "_blank", "noopener,noreferrer");
+      else setError("Unavailable");
+    } catch {
+      setError("Failed to open");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <tr className="border-b border-border/60 align-top transition-colors hover:bg-surface">
+      <td className="px-3 py-2.5 pl-5">
+        <CourtKindBadge kind={r.kind} />
+      </td>
+      <td className="px-3 py-2.5">
+        <div className="line-clamp-2 leading-snug text-foreground">{r.title}</div>
+        {(r.judgeName || provenance || r.fillable) && (
+          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground">
+            {r.judgeName && (
+              <span className="inline-flex items-center gap-1">
+                {r.judgePortraitUrl && !portraitBroken ? (
+                  <img
+                    src={r.judgePortraitUrl}
+                    alt=""
+                    className="h-4 w-4 rounded-full object-cover"
+                    onError={() => setPortraitBroken(true)}
+                  />
+                ) : (
+                  <Gavel className="h-3 w-3" />
+                )}
+                {r.judgeName}
+              </span>
+            )}
+            {provenance && <span>{provenance}</span>}
+            {r.fillable && (
+              <span className="rounded bg-brand-blue-soft px-1.5 py-0.5 text-brand-blue">
+                Fillable
+              </span>
+            )}
+          </div>
+        )}
+      </td>
+      <td className="px-3 py-2.5 text-[11.5px] uppercase text-muted-foreground">{r.format}</td>
+      <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
+        {r.pageCount ? `${formatCount(r.pageCount)} p` : formatBytes(r.bytes)}
+      </td>
+      <td className="px-3 py-2.5 pr-5">
+        <button
+          type="button"
+          onClick={open}
+          disabled={loading}
+          className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[12px] font-medium text-brand-navy transition-colors hover:bg-surface disabled:opacity-60"
+        >
+          {loading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <ExternalLink className="h-3.5 w-3.5" />
+          )}
+          Open
+        </button>
+        {error && <div className="mt-1 text-[10.5px] text-brand-orange">{error}</div>}
+      </td>
+    </tr>
   );
 }
 

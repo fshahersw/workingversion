@@ -4,6 +4,8 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireAdmin, requireAuth } from "@/lib/auth/require-auth";
 
 import type {
+  CourtResourcePage,
+  CourtResourceQuery,
   DocumentQuery,
   DocumentsPage,
   EntriesPage,
@@ -76,4 +78,24 @@ export const getPipelineRuns = createServerFn({ method: "GET" })
   .handler(async (): Promise<PipelineRun[]> => {
     const { loadPipelineRuns } = await import("./workspace.server");
     return loadPipelineRuns();
+  });
+
+// Court reference library: rules, standing orders and forms the firm holds for a
+// docket's court. listCourtResources sanitises the query server-side (court-key
+// pattern, page-size clamp, kind/format whitelist), so the validator is a shape
+// pass-through, mirroring the other matter reads above.
+export const getCourtResources = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((data: CourtResourceQuery) => data)
+  .handler(async ({ data }): Promise<CourtResourcePage> => {
+    const { listCourtResources } = await import("./workspace.server");
+    return listCourtResources(data);
+  });
+
+export const getCourtResourceUrl = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((data: { sha256: string }) => data)
+  .handler(async ({ data }): Promise<{ url: string; title: string; format: string } | null> => {
+    const { courtResourceUrl } = await import("./workspace.server");
+    return courtResourceUrl(data.sha256);
   });

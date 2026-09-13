@@ -1,5 +1,6 @@
 // Client-side query options + formatting helpers for the matters workspace.
 import {
+  getCourtResources,
   getDocumentViewUrl,
   getEntryDocuments,
   getMatterDocuments,
@@ -8,7 +9,13 @@ import {
   getMatterWorkspace,
   getPipelineRuns,
 } from "./workspace.functions";
-import type { DocketScope, DocumentQuery, EntryQuery } from "./workspace-types";
+import type {
+  CourtResourceKind,
+  CourtResourceQuery,
+  DocketScope,
+  DocumentQuery,
+  EntryQuery,
+} from "./workspace-types";
 
 export const mattersQueryOptions = {
   queryKey: ["workspace", "matters"] as const,
@@ -55,6 +62,14 @@ export const pipelineRunsQueryOptions = {
   staleTime: 30_000,
 };
 
+export const courtResourcesQueryOptions = (q: CourtResourceQuery) => ({
+  queryKey: ["workspace", "court-resources", q] as const,
+  queryFn: () => getCourtResources({ data: q }),
+  enabled: q.courtKeys.length > 0,
+  staleTime: 60_000,
+  placeholderData: <T>(prev: T) => prev,
+});
+
 // --- labels -----------------------------------------------------------------
 
 export const SCOPE_LABEL: Record<DocketScope, { title: string; short: string; hint: string }> = {
@@ -100,6 +115,20 @@ export const DOC_TYPE_LABEL: Record<string, string> = {
 export function docTypeLabel(t: string | null): string {
   const key = (t || "other").toLowerCase();
   return DOC_TYPE_LABEL[key] ?? key.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
+export const COURT_RESOURCE_LABEL: Record<CourtResourceKind, string> = {
+  standing_order: "Standing order",
+  local_rule: "Local rule",
+  form: "Form",
+  instruction: "Instruction",
+  order: "Order",
+  other: "Other",
+};
+
+export function courtResourceKindLabel(k: string | null): string {
+  const key = (k || "other") as CourtResourceKind;
+  return COURT_RESOURCE_LABEL[key] ?? key.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
 // --- formatting -------------------------------------------------------------

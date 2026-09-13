@@ -58,6 +58,9 @@ export type WorkspaceDocket = {
 export type CourtIdentity = {
   /** Reference-library key, e.g. "FD:njd". */
   key: string;
+  /** All reference keys for this court's documents, most specific first
+   *  (e.g. ["LC:ca_los_angeles", "ST:ca_state"]); pass to listCourtResources. */
+  keys: string[];
   name: string;
   level: string;
   jurisdiction: string;

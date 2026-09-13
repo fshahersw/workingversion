@@ -311,6 +311,7 @@ async function loadCourtLayer(
   const court: CourtIdentity | null = c
     ? {
         key: c.key,
+        keys,
         name: c.name,
         level: c.level,
         jurisdiction: c.jurisdiction,

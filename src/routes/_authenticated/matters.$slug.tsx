@@ -2,7 +2,13 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { AppShell } from "@/components/app-shell";
 import { MatterWorkspace, type WorkspaceSearch } from "@/components/matters/MatterWorkspace";
-import { DOCKET_SCOPES, type DocketScope, type LedgerSort } from "@/lib/workspace-types";
+import {
+  COURT_RESOURCE_KINDS,
+  DOCKET_SCOPES,
+  type CourtResourceKind,
+  type DocketScope,
+  type LedgerSort,
+} from "@/lib/workspace-types";
 
 const SORTS: LedgerSort[] = ["date-desc", "date-asc", "entry-desc", "entry-asc"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -15,7 +21,14 @@ const flag = (v: unknown): true | undefined => (v === true || v === "true" ? tru
 export const Route = createFileRoute("/_authenticated/matters/$slug")({
   ssr: false,
   validateSearch: (raw: Record<string, unknown>): WorkspaceSearch => ({
-    view: raw["view"] === "documents" ? "documents" : undefined,
+    view:
+      raw["view"] === "documents" || raw["view"] === "rules"
+        ? (raw["view"] as "documents" | "rules")
+        : undefined,
+    rkind: (COURT_RESOURCE_KINDS as string[]).includes(String(raw["rkind"]))
+      ? (raw["rkind"] as CourtResourceKind)
+      : undefined,
+    rfmt: raw["rfmt"] === "word" || raw["rfmt"] === "pdf" ? raw["rfmt"] : undefined,
     q: str(raw["q"]),
     types: Array.isArray(raw["types"])
       ? (raw["types"] as unknown[]).filter((t): t is string => typeof t === "string")
