@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
-  type WheelEvent as ReactWheelEvent,
 } from "react";
 import {
   Loader2,
@@ -400,12 +399,9 @@ export function KnowledgeGraph({
     return ids;
   }, [visible.edges]);
 
-  // Manual gestures stop an automatic flight immediately.
-  const onWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const scale = event.deltaMode === 1 ? 16 : 1;
-    pan(-event.deltaX * scale, -event.deltaY * scale);
-  };
+  // Manual gestures stop an automatic flight immediately. (Wheel is bound
+  // natively in the effect below with { passive: false } so preventDefault works
+  // and does not spam the console via React's passive root wheel listener.)
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button, input, select, a"))
       return;
@@ -437,9 +433,18 @@ export function KnowledgeGraph({
         move({ x: 0, y: 0, k: 1 });
       }
     };
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const scale = event.deltaMode === 1 ? 16 : 1;
+      pan(-event.deltaX * scale, -event.deltaY * scale);
+    };
     node.addEventListener("keydown", onKey);
-    return () => node.removeEventListener("keydown", onKey);
-  }, [fit, move, zoomBy]);
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      node.removeEventListener("keydown", onKey);
+      node.removeEventListener("wheel", onWheel);
+    };
+  }, [fit, move, zoomBy, pan]);
 
   const focusNode = active ? nodeById.get(active) : null;
   const focusLaid = active ? byId.get(active) : null;
@@ -1096,7 +1101,6 @@ export function KnowledgeGraph({
           tabIndex={0}
           className={`relative min-h-[12rem] min-w-0 flex-1 overflow-hidden rounded-md border border-border bg-surface outline-none ${mode === "list" ? "hidden" : ""}`}
           aria-label="Knowledge graph canvas"
-          onWheel={onWheel}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={() => setDragging(null)}

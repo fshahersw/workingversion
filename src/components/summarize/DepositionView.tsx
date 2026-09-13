@@ -1,6 +1,4 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { DiscoveryCoverage, DiscoveryScopeControl } from "@/components/docs/DiscoveryCoverage";
-import type { DiscoveryScope } from "@/lib/pile/discovery-scan";
 import {
   AlertCircle,
   Check,
@@ -17,7 +15,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DepositionAnalysisPane, type AnalysisTab } from "./DepositionAnalysisPane";
 import { DepositionDropPanel } from "./DepositionDropPanel";
 import { DepositionExportDialog } from "./DepositionExportDialog";
-import { DepositionIntakeSummary } from "./DepositionIntakeSummary";
 import { TranscriptPane } from "./TranscriptPane";
 import {
   AlertDialog,
@@ -117,8 +114,6 @@ export function DepositionView() {
     start,
     analyze,
     ask,
-    cancelAsk,
-    retryQueryScan,
     reset,
     exportMemo,
     setSearch,
@@ -138,9 +133,9 @@ export function DepositionView() {
     if (id) void reloadWorkspace(id);
   }, [reloadWorkspace]);
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("summary");
-  const [scope, setScope] = useState<DiscoveryScope>("full");
-  const [askSelectedOnly, setAskSelectedOnly] = useState(false);
-  const queryOptions = { scope, fileIds: askSelectedOnly && active ? [active.fileId] : undefined };
+  // Whole-document analysis always; the scan-scope toggle ("full / relevant")
+  // and per-transcript scoping were removed to declutter the workspace.
+  const queryOptions = { scope: "full" as const, fileIds: undefined };
   const [mobilePane, setMobilePane] = useState<"transcript" | "analysis">("analysis");
   const [transcriptOpen, setTranscriptOpen] = useState(() =>
     readLayoutPreference(DEPOSITION_TRANSCRIPT_KEY, true),
@@ -388,11 +383,6 @@ export function DepositionView() {
             </AlertDialogContent>
           </AlertDialog>
 
-          <DepositionIntakeSummary
-            transcripts={state.transcripts}
-            files={state.files}
-            ocr={state.ocr}
-          />
           {desktopLayout && transcriptOpen ? (
             <ResizablePanelGroup
               id="deposition-workbench"
@@ -469,30 +459,6 @@ export function DepositionView() {
             </div>
           )}
 
-          <DiscoveryCoverage
-            coverage={state.scanCoverage}
-            onCancel={cancelAsk}
-            onRetry={retryQueryScan}
-          />
-          <div className="flex shrink-0 flex-wrap items-center gap-3 border-t border-slate-200 bg-white px-3 py-2">
-            <DiscoveryScopeControl
-              scope={scope}
-              onChange={setScope}
-              disabled={state.asking || analyzing}
-              count={askSelectedOnly ? 1 : state.transcripts.length}
-            />
-            {state.transcripts.length > 1 && (
-              <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={askSelectedOnly}
-                  disabled={state.asking}
-                  onChange={(e) => setAskSelectedOnly(e.target.checked)}
-                />
-                Selected transcript only
-              </label>
-            )}
-          </div>
           <form
             className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border bg-surface px-3 py-1.5 sm:flex-nowrap sm:gap-3"
             onSubmit={(event) => {
