@@ -1,7 +1,6 @@
 import { useRef, useState } from "react";
 import { templates } from "./seeds";
 import { appTemplates } from "./app-templates";
-import { firmRoles, litigationStages } from "./practice-templates";
 import { TemplateGuide } from "./TemplateGuide";
 import { Badge, Button, Icon, IconButton, Tile, timeLabel, statusTone } from "./ui";
 import type { Workflow, WorkflowRun } from "./types";
@@ -27,13 +26,9 @@ export function Library(props: Props) {
     [filter, setFilter] = useState("all");
   const importRef = useRef<HTMLInputElement>(null);
   const [category, setCategory] = useState("All categories");
-  const [role, setRole] = useState("All roles");
-  const [stage, setStage] = useState("All stages");
   const apps = appTemplates.filter(
     (t) =>
       (category === "All categories" || t.category === category) &&
-      (role === "All roles" || t.guide?.roles.includes(role)) &&
-      (stage === "All stages" || t.guide?.stage === stage) &&
       [t.name, t.description, t.category, t.input, t.output, ...(t.guide?.roles || [])]
         .join(" ")
         .toLowerCase()
@@ -155,14 +150,12 @@ export function Library(props: Props) {
             </div>
           )}
           {tab === "templates" && (
-            <span className="swf-body-muted">
-              {filteredTemplates.length + apps.length} legal workflow templates
-            </span>
+            <span className="swf-body-muted">{filteredTemplates.length} templates</span>
           )}
-          {["apps", "templates"].includes(tab) && (
+          {tab === "apps" && (
             <select
               className="swf-category-filter"
-              aria-label="Template category"
+              aria-label="App category"
               value={category}
               onChange={(e) => setCategory(e.target.value)}
             >
@@ -172,58 +165,15 @@ export function Library(props: Props) {
             </select>
           )}
         </div>
-        {["apps", "templates"].includes(tab) && (
-          <div className="swf-role-filters">
-            <label>
-              <Icon name="Users" size={14} />
-              <span>For your role</span>
-              <select aria-label="Firm role" value={role} onChange={(e) => setRole(e.target.value)}>
-                <option>All roles</option>
-                {firmRoles.map((r) => (
-                  <option key={r}>{r}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Litigation stage</span>
-              <select
-                aria-label="Litigation stage"
-                value={stage}
-                onChange={(e) => setStage(e.target.value)}
-              >
-                <option>All stages</option>
-                {litigationStages.map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
-              </select>
-            </label>
-            <span>{apps.length} matching apps</span>
-            {(role !== "All roles" ||
-              stage !== "All stages" ||
-              category !== "All categories" ||
-              query) && (
-              <button
-                className="swf-text-button"
-                onClick={() => {
-                  setRole("All roles");
-                  setStage("All stages");
-                  setCategory("All categories");
-                  setQuery("");
-                }}
-              >
-                Clear filters
-              </button>
-            )}
-          </div>
-        )}
         {tab === "apps" && (
           <>
             <div className="swf-app-library-intro">
               <div>
                 <h2>Ready-to-use mini apps</h2>
                 <p>
-                  Practical tools for intake, discovery, docketing, trial and settlement. Choose a
-                  template, then adapt the workflow to your matter.
+                  Focused tools for extraction, comparison, citations, plain-language editing,
+                  email and meeting notes, page monitoring and matter briefs. Choose an app, then
+                  adapt it to your matter.
                 </p>
               </div>
               <Badge tone="green">{appTemplates.length} ready-to-adapt apps</Badge>
@@ -247,7 +197,6 @@ export function Library(props: Props) {
                 <AppCard
                   key={t.id}
                   t={t}
-                  selectedRole={role}
                   onUse={() => props.onApp(t.id)}
                   onBuild={() => props.onTemplate(t.id)}
                 />
@@ -390,19 +339,14 @@ export function Library(props: Props) {
         )}
         {tab === "templates" && (
           <>
-            <div className="swf-app-template-grid">
-              {apps.map((t) => (
-                <AppCard
-                  key={t.id}
-                  t={t}
-                  selectedRole={role}
-                  onUse={() => props.onApp(t.id)}
-                  onBuild={() => props.onTemplate(t.id)}
-                />
-              ))}
-            </div>
             <div className="swf-section-heading">
-              <h3>Foundational workflow patterns</h3>
+              <div>
+                <h2>Templates</h2>
+                <p>
+                  Starting structures for a custom workflow. Open one in the builder and adapt the
+                  steps to your team's process.
+                </p>
+              </div>
             </div>
             <div className="swf-template-grid swf-template-full">
               {filteredTemplates.map((t) => (
@@ -432,20 +376,15 @@ export function Library(props: Props) {
 }
 function AppCard({
   t,
-  selectedRole,
   onUse,
   onBuild,
 }: {
   t: (typeof appTemplates)[number];
-  selectedRole: string;
   onUse: () => void;
   onBuild: () => void;
 }) {
   const roles = t.guide?.roles || [];
-  const visibleRoles =
-    selectedRole !== "All roles" && roles.includes(selectedRole)
-      ? [selectedRole, ...roles.filter((r) => r !== selectedRole)]
-      : roles;
+  const visibleRoles = roles;
   return (
     <article className="swf-app-template-card">
       <div className="swf-inline">

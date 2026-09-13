@@ -91,7 +91,7 @@ test("native authenticated shell, usable catalog, and no seeded records", async 
     "aria-current",
     "page",
   );
-  await expect(page.getByRole("tab", { name: "Mini apps 56" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Mini apps 11" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "My workflows 0" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Run history 0" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Load realistic sample/ })).toHaveCount(0);
@@ -164,11 +164,10 @@ test("mini app opens its form, reads an upload, exports evidence and saves a Wor
     });
   });
   await page.goto("/workflows");
-  await page
-    .getByRole("textbox", { name: "Search workflows" })
-    .fill("Plaintiff fact-sheet completeness");
+  await page.getByRole("textbox", { name: "Search workflows" }).fill("Custom intake extractor");
   await page.getByRole("button", { name: "Use mini app", exact: true }).click();
   await expect(page.getByRole("button", { name: "Run app", exact: true })).toBeVisible();
+  await page.getByLabel("Field labels to extract").fill("Client ID, Plaintiff, Product");
   await page
     .locator('input[type="file"]')
     .first()

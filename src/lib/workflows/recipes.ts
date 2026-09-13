@@ -16,11 +16,9 @@ import {
   matchesTerm,
   strictDate,
 } from "./evidence.ts";
-import { practiceRecipeNames, runPracticeRecipe } from "./practice-recipes.ts";
 export { sourceLines, reportCsv } from "./evidence.ts";
 
 export const recipeNames: Record<string, string> = {
-  ...practiceRecipeNames,
   parties: "Parties & people",
   chronology: "Source chronology",
   issues: "Issue evidence matrix",
@@ -101,7 +99,6 @@ export function analyzeRecipe(
   ctx: ExecutionContext,
   config: StepConfig = {},
 ): ExecutionResult {
-  if (practiceRecipeNames[recipe]) return runPracticeRecipe(recipe, ctx, config);
   if (!recipeNames[recipe]) throw new Error("Choose a supported analysis recipe.");
   const files = sourceFiles(ctx);
   const lines = sourceLines(files);

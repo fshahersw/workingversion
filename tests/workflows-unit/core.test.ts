@@ -2,7 +2,6 @@
 import { describe, expect, test } from "bun:test";
 import { blankWorkflow, fromTemplate, templates } from "../../src/lib/workflows/seeds";
 import { appTemplates, createAppWorkflow } from "../../src/lib/workflows/app-templates";
-import { firmRoles } from "../../src/lib/workflows/practice-templates";
 import { validateWorkflow } from "../../src/lib/workflows/graph";
 import { advanceRun, createRun, conditionMatches, reviewRun } from "../../src/lib/workflows/engine";
 import {
@@ -30,6 +29,8 @@ const input: RunInputs = {
   selection: "Attorney review",
   files: [],
 };
+// Custom intake extractor pulls "Label: value" rows for the labels it is given.
+const intake: RunInputs = { ...input, fields: { columns: "Client ID, Plaintiff, Product" } };
 const owner = { sub: crypto.randomUUID(), email: "owner@example.test", groups: ["Litigation"] };
 const teammate = {
   sub: crypto.randomUUID(),
@@ -39,9 +40,8 @@ const teammate = {
 const stranger = { sub: crypto.randomUUID(), email: "outsider@example.test", groups: [] };
 
 describe("templates are definitions, never seeded case records", () => {
-  test("all legal apps and foundational patterns form valid graphs", () => {
-    expect(appTemplates.length).toBe(56);
-    expect(firmRoles.length).toBe(15);
+  test("all mini apps and templates form valid graphs", () => {
+    expect(appTemplates.length).toBe(11);
     for (const template of appTemplates) {
       const flow = createAppWorkflow(template.id, true);
       expect(validateWorkflow(flow).filter((i) => i.severity === "error")).toEqual([]);
@@ -160,15 +160,15 @@ describe("durable engine behavior", () => {
     expect(r.logs.at(-1)?.message).toContain("server analysis");
   });
   test("recipe reports can run with source input and create real downloadable artifact content", async () => {
-    const f = createAppWorkflow("pfs-completeness");
-    const r = await advanceRun(createRun(f, input));
+    const f = createAppWorkflow("custom-intake");
+    const r = await advanceRun(createRun(f, intake));
     expect(r.status).toBe("completed");
     expect(r.artifacts.length).toBeGreaterThan(0);
     expect(r.artifacts.some((a) => a.format === "docx")).toBe(true);
     expect(r.artifacts.map((a) => a.content).join("\n")).toContain("QA-1");
   });
   test("required app fields are validated server-side", () => {
-    const f = createAppWorkflow("web-research");
+    const f = createAppWorkflow("page-monitor");
     expect(() => assertRunnable(f, input)).toThrow();
   });
   test("source warnings need acknowledgement and supplied context is not dropped beside uploads", async () => {
@@ -184,7 +184,7 @@ describe("durable engine behavior", () => {
       },
     };
     const values = { ...input, files: [source] };
-    expect(() => assertRunnable(createAppWorkflow("pfs-completeness"), values)).toThrow(
+    expect(() => assertRunnable(createAppWorkflow("custom-intake"), values)).toThrow(
       "acknowledge",
     );
     const step = makeStep("files", 1, { x: 0, y: 0 });
@@ -197,7 +197,7 @@ describe("durable engine behavior", () => {
     expect(JSON.stringify(output)).toContain("File evidence");
     expect(JSON.stringify(output)).toContain("QA-1");
     expect(() =>
-      assertRunnable(createAppWorkflow("pfs-completeness"), {
+      assertRunnable(createAppWorkflow("custom-intake"), {
         ...values,
         fields: { coverageAcknowledged: "true" },
       }),
@@ -210,7 +210,7 @@ describe("durable engine behavior", () => {
     expect(source.text).toBe(input.text);
     expect(source.metadata?.sha256).toHaveLength(64);
     const run = await advanceRun(
-      createRun(createAppWorkflow("pfs-completeness"), { ...input, text: "", files: [source] }),
+      createRun(createAppWorkflow("custom-intake"), { ...intake, text: "", files: [source] }),
     );
     const report = Object.values(run.results)
       .map((r) => r.output)

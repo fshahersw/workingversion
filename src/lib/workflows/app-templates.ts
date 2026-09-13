@@ -1,6 +1,15 @@
 import { makeStep } from "./catalog.ts";
-import { baseTemplateGuide, practiceTemplates, type TemplateGuide } from "./practice-templates.ts";
-import type { AppField, RunInputs, StepConfig, Workflow } from "./types";
+import type { AppField, StepConfig, Workflow } from "./types";
+export type TemplateGuide = {
+  roles: string[];
+  stage: string;
+  inputGuide: string;
+  process: string[];
+  reviewChecks: string[];
+  reviewer: string;
+  cadence: string;
+  boundary: string;
+};
 export type AppTemplate = {
   id: string;
   name: string;
@@ -13,7 +22,7 @@ export type AppTemplate = {
   output: string;
   fields: AppField[];
   config?: StepConfig;
-  mode: "Local" | "Web connection";
+  mode: "Local" | "Web connection" | "Bedrock analysis";
   source: string;
   guide?: TemplateGuide;
 };
@@ -33,43 +42,26 @@ const extras: Record<string, AppField[]> = {
       "All roles",
     ]),
   ],
-  "people-map": [
-    field("role", "Roles to include", "select", "All roles", [
-      "All roles",
-      "Plaintiffs",
-      "Defendants",
-      "Witnesses",
-    ]),
-  ],
-  "testimony-issues": [
-    field("issues", "Issues to find", "textarea", "notice, warning, injury, training"),
-  ],
-  "privilege-queue": [field("reviewer", "Assigned reviewer", "text", "")],
-  "contract-clauses": [
-    field(
-      "issues",
-      "Clause topics",
-      "textarea",
-      "liability, indemnification, termination, assignment, governing law",
-    ),
-  ],
-  "policy-evidence": [
-    field(
-      "issues",
-      "Topics or obligations",
-      "textarea",
-      "confidentiality, retention, security, notice",
-    ),
-  ],
   "daily-mail": [field("since", "Include messages from", "date")],
-  "exhibit-index": [field("prefix", "Exhibit prefix", "text", "EX")],
   "custom-intake": [
     field("columns", "Field labels to extract", "textarea", "Plaintiffs, Defendants, Date, Matter"),
   ],
-  "web-research": [{ ...field("query", "Research query", "text"), required: true }],
-  "page-reader": [{ ...field("url", "Public page URL", "url"), required: true }],
   "page-monitor": [{ ...field("url", "Page to monitor", "url"), required: true }],
+  "matter-brief": [
+    field("audience", "Written for", "select", "Case team", [
+      "Case team",
+      "Leadership",
+      "Client-facing",
+    ]),
+    field(
+      "focus",
+      "Focus areas",
+      "textarea",
+      "Procedural posture, key rulings and orders, upcoming deadlines, open motions, next steps",
+    ),
+  ],
 };
+// [id, name, description, category, icon, recipe, input, output]
 const data = [
   [
     "plaintiff-intake",
@@ -80,18 +72,6 @@ const data = [
     "parties",
     "Deposition PDF, DOCX or text",
     "Plaintiff register",
-    "deposition",
-  ],
-  [
-    "people-map",
-    "People & witness register",
-    "Index named parties, witnesses and counsel from explicit role labels.",
-    "Litigation",
-    "Users",
-    "parties",
-    "Case materials with role labels",
-    "People register",
-    "deposition",
   ],
   [
     "case-chronology",
@@ -102,29 +82,6 @@ const data = [
     "chronology",
     "Orders, correspondence or transcripts",
     "Chronology",
-    "deposition",
-  ],
-  [
-    "treatment-timeline",
-    "Treatment record timeline",
-    "Index dated treatment entries without inventing diagnoses, causation or missing visits.",
-    "Litigation",
-    "ListFilter",
-    "chronology",
-    "Text-based treatment records",
-    "Dated source entries",
-    "medical",
-  ],
-  [
-    "testimony-issues",
-    "Testimony issue matrix",
-    "Find passages for your issue list and retain the supporting text beside each match.",
-    "Litigation",
-    "Table2",
-    "issues",
-    "One or more transcripts",
-    "Issue / evidence matrix",
-    "deposition",
   ],
   [
     "cross-analysis",
@@ -135,29 +92,6 @@ const data = [
     "compare",
     "Two documents, baseline first",
     "Text differences",
-    "comparison",
-  ],
-  [
-    "discovery-matrix",
-    "Discovery response matrix",
-    "Pair numbered requests with adjacent response and objection text for deficiency review.",
-    "Litigation",
-    "Table2",
-    "requests",
-    "Numbered requests and responses",
-    "Request / response matrix",
-    "discovery",
-  ],
-  [
-    "privilege-queue",
-    "Privilege screening queue",
-    "Flag privilege-related wording for an attorney to review before any withholding decision.",
-    "Litigation",
-    "ShieldCheck",
-    "privilege",
-    "Production or correspondence excerpts",
-    "Potential privilege queue",
-    "discovery",
   ],
   [
     "bluebook-check",
@@ -168,18 +102,6 @@ const data = [
     "citations",
     "Brief, memo or citation list",
     "Format flags + verification queue",
-    "citations",
-  ],
-  [
-    "authority-index",
-    "Authority inventory",
-    "Collect citation candidates in one place for source and subsequent-history checks.",
-    "Drafting",
-    "NotebookText",
-    "citations",
-    "Brief or research memorandum",
-    "Citation inventory",
-    "citations",
   ],
   [
     "humanizer",
@@ -190,62 +112,16 @@ const data = [
     "plain",
     "Draft DOCX or pasted text",
     "Edited draft + change log",
-    "draft",
   ],
   [
-    "client-update",
-    "Client update editor",
-    "Make a draft update more direct, with every phrase substitution available for review.",
-    "Drafting",
-    "FilePenLine",
-    "plain",
-    "Existing client update",
-    "Plain-language draft",
-    "draft",
-  ],
-  [
-    "contract-clauses",
-    "Contract clause review",
-    "Collect important clause text beside review questions for your approved playbook.",
-    "Contracts",
-    "FileCheck2",
-    "clauses",
-    "Contract or agreement set",
-    "Clause matrix",
-    "contract",
-  ],
-  [
-    "nda-redline",
-    "NDA version comparison",
-    "Compare a baseline with a counterparty version and isolate textual changes for counsel.",
-    "Contracts",
-    "Files",
-    "compare",
-    "Two NDA versions",
-    "Text difference report",
-    "comparison",
-  ],
-  [
-    "policy-evidence",
-    "Policy evidence matrix",
-    "Collect relevant passages for an obligation list without inferring compliance.",
+    "matter-brief",
+    "Matter brief",
+    "Turn the orders, filings and notes for one matter into a concise team brief with source references.",
     "Research",
-    "ShieldCheck",
-    "issues",
-    "Policies or public guidance",
-    "Topic / evidence matrix",
-    "contract",
-  ],
-  [
-    "obligation-tracker",
-    "Obligation & commitment log",
-    "Pull explicit commitments and dates into a list for ownership review.",
-    "Contracts",
-    "CheckCheck",
-    "actions",
-    "Contract or meeting notes",
-    "Action / owner / date register",
-    "contract",
+    "NotebookText",
+    "brief",
+    "Orders, filings, correspondence or notes for one matter",
+    "Team brief (Word)",
   ],
   [
     "daily-mail",
@@ -256,7 +132,6 @@ const data = [
     "emails",
     "EML files or plain email exports",
     "Email briefing",
-    "emails",
   ],
   [
     "email-followups",
@@ -267,7 +142,6 @@ const data = [
     "actions",
     "Email exports or pasted thread",
     "Follow-up queue",
-    "emails",
   ],
   [
     "voice-notes",
@@ -278,18 +152,6 @@ const data = [
     "actions",
     "Dictation or a text transcript",
     "Meeting action list",
-    "meeting",
-  ],
-  [
-    "exhibit-index",
-    "Exhibit & file manifest",
-    "Create a consistent batch index with suggested exhibit numbers and source sizes.",
-    "Intake & operations",
-    "FolderOpen",
-    "manifest",
-    "Selected folder or file batch",
-    "Exhibit manifest",
-    "comparison",
   ],
   [
     "custom-intake",
@@ -300,29 +162,6 @@ const data = [
     "fields",
     "Labeled intake documents",
     "Custom field register",
-    "deposition",
-  ],
-  [
-    "web-research",
-    "Public research brief",
-    "Search reference sources and collect links. General web search is available with Firecrawl.",
-    "Research",
-    "Search",
-    "webbrief",
-    "Research query",
-    "Linked sources + reading brief",
-    "web",
-  ],
-  [
-    "page-reader",
-    "Web page to research note",
-    "Extract readable text from a public page with its URL and retrieval time.",
-    "Research",
-    "Globe",
-    "webbrief",
-    "Public HTTPS URL",
-    "Source excerpts",
-    "web",
   ],
   [
     "page-monitor",
@@ -333,10 +172,70 @@ const data = [
     "changes",
     "Public URL or two snapshots",
     "Change report",
-    "comparison",
   ],
 ];
-const baseTemplates: AppTemplate[] = data.map(
+export function baseTemplateGuide(id: string, category: string, input: string): TemplateGuide {
+  const roles =
+    id === "matter-brief"
+      ? ["Litigating attorney", "Case manager", "Leadership"]
+      : category === "Drafting"
+        ? ["Litigating attorney", "Research attorney", "Litigation paralegal"]
+        : category === "Email & meetings"
+          ? ["Case manager", "Client liaison", "Leadership"]
+          : category === "Research"
+            ? ["Research attorney", "Knowledge management"]
+            : category === "Intake & operations"
+              ? ["Litigation paralegal", "Discovery / litigation support", "Managing clerk / MCO"]
+              : ["Litigating attorney", "Litigation paralegal", "Case manager"];
+  return {
+    roles,
+    stage:
+      id === "matter-brief"
+        ? "Case management"
+        : category === "Drafting"
+          ? "Motions"
+          : category === "Email & meetings"
+            ? "Case management"
+            : category === "Intake & operations"
+              ? "Firm operations"
+              : "Discovery",
+    inputGuide: input,
+    process:
+      id === "matter-brief"
+        ? [
+            "Upload the orders, filings, correspondence or notes that define where the matter stands.",
+            "Choose the audience and adjust the focus areas.",
+            "Review the brief against the sources, then save it to Word.",
+          ]
+        : [
+            "Inspect the required input format and source coverage.",
+            "Load your sources and configure the available fields.",
+            "Review the source excerpts and scope notes, then export the working paper.",
+          ],
+    reviewChecks:
+      id === "matter-brief"
+        ? [
+            "Confirm every statement in the brief traces to a supplied document.",
+            "Check dates and deadlines against the original orders before circulating.",
+            "Treat the brief as a draft; the responsible attorney signs off.",
+          ]
+        : [
+            "Verify source identity and read coverage.",
+            "Inspect the original before relying on a finding.",
+            "Use a connected approved model for semantic work beyond the stated local recipe.",
+          ],
+    reviewer: "Responsible attorney or case-team reviewer",
+    cadence:
+      id === "matter-brief"
+        ? "Before team meetings or on new significant filings"
+        : "On demand or after updated source material",
+    boundary:
+      id === "matter-brief"
+        ? "Bedrock drafts from the supplied documents only. It does not search the docket or the knowledge base; use the Matter briefing template in the builder for that."
+        : "Local capabilities are described in the app. Use configured server services for account access and scheduling. Legal conclusions require review; email delivery is not enabled.",
+  };
+}
+export const appTemplates: AppTemplate[] = data.map(
   ([id, name, description, category, icon, recipe, input, output]) => ({
     id,
     name,
@@ -348,8 +247,13 @@ const baseTemplates: AppTemplate[] = data.map(
     output,
     guide: baseTemplateGuide(id, category, input),
     fields: extras[id] || [],
-    tone: category === "Drafting" ? "green" : category === "Contracts" ? "amber" : "blue",
-    mode: ["web-research", "page-reader", "page-monitor"].includes(id) ? "Web connection" : "Local",
+    tone: category === "Drafting" ? "green" : category === "Research" ? "amber" : "blue",
+    mode:
+      id === "page-monitor"
+        ? "Web connection"
+        : id === "matter-brief"
+          ? "Bedrock analysis"
+          : "Local",
     source:
       recipe === "citations"
         ? "https://www.law.cornell.edu/citation/2-200"
@@ -358,38 +262,37 @@ const baseTemplates: AppTemplate[] = data.map(
           : "https://www.harvey.ai/blog/top-harvey-use-cases",
   }),
 );
-export const appTemplates: AppTemplate[] = [...baseTemplates, ...practiceTemplates];
+const BRIEF_INSTRUCTIONS = [
+  "Write a concise matter brief for the {{input.fields.audience}} from the supplied documents only.",
+  "Focus areas: {{input.fields.focus}}.",
+  "Structure: one-paragraph status, then short sections per focus area, then open items and next steps.",
+  "Every factual statement carries a source reference (document name and page or line where available).",
+  "Separate what the documents establish from what remains open. Do not calculate legal deadlines or draw legal conclusions; flag them for the responsible attorney.",
+].join(" ");
 export function createAppWorkflow(id: string, reviewGate = false): Workflow {
   const t = appTemplates.find((t) => t.id === id);
   if (!t) throw new Error("Unknown template.");
   const start = makeStep("trigger", 1, { x: 250, y: 10 });
   start.data.output = "input";
   start.data.label = t.mode === "Web connection" ? "Research requested" : "Files or text received";
-  const input = makeStep(
-    id === "web-research"
-      ? "web"
-      : ["page-reader", "page-monitor"].includes(id)
-        ? "scrape"
-        : "files",
-    2,
-    { x: 250, y: 145 },
-  );
+  const input = makeStep(id === "page-monitor" ? "scrape" : "files", 2, { x: 250, y: 145 });
   input.data.output = "sources";
-  if (id === "web-research")
-    input.data.config = {
-      connection: "web-search",
-      query: "{{input.fields.query}}",
-    };
-  if (["page-reader", "page-monitor"].includes(id))
+  if (id === "page-monitor")
     input.data.config = {
       connection: "public-web",
       url: "{{input.fields.url}}",
-      ...(id === "page-monitor" ? { tool: "monitor-page" } : {}),
+      tool: "monitor-page",
     };
-  const action = makeStep("recipe", 3, { x: 250, y: 280 });
+  const action =
+    id === "matter-brief"
+      ? makeStep("prompt", 3, { x: 250, y: 280 })
+      : makeStep("recipe", 3, { x: 250, y: 280 });
   action.data.label = t.name;
   action.data.output = "analysis";
-  action.data.config = { recipe: t.recipe, ...t.config, context: ["sources"] };
+  action.data.config =
+    id === "matter-brief"
+      ? { model: "bedrock", instructions: BRIEF_INSTRUCTIONS, context: ["sources"] }
+      : { recipe: t.recipe, ...t.config, context: ["sources"] };
   const document = makeStep("document", 4, { x: 250, y: 415 });
   document.data.config = { format: "docx", filename: t.name };
   const end = makeStep("response", 5, { x: 250, y: 550 });
