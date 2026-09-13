@@ -32,15 +32,29 @@ export function bucketName(): string {
 export function s3(): S3Client {
   const { region } = loadS3Config();
   if (!_s3 || _s3Region !== region) {
-    _s3 = new S3Client({ region });
+    // requestChecksumCalculation: "WHEN_REQUIRED" is REQUIRED for browser
+    // presigned PUTs. aws-sdk-js-v3 >= 3.729 defaults to "WHEN_SUPPORTED",
+    // which injects a default (CRC32) checksum the browser fetch cannot supply,
+    // breaking every presigned upload (deposition originals, Working Set,
+    // Office attachments). The explicit ChecksumSHA256 we sign for integrity is
+    // still honored under WHEN_REQUIRED.
+    _s3 = new S3Client({ region, requestChecksumCalculation: "WHEN_REQUIRED" });
     _s3Region = region;
   }
   return _s3;
 }
 
 /** Presigned URL for a direct browser PUT. Content-Type remains unsigned; an
- * optional SHA-256 checksum header is signed for async-ingest integrity. */
+ * optional SHA-256 checksum header is signed for async-ingest integrity.
+ *
+ * The checksum MUST stay a signed HEADER (not a hoisted query parameter). The
+ * presigner hoists unlisted headers into the query string by default; S3 then
+ * (a) rejects the browser's `x-amz-checksum-sha256` header as unsigned (403
+ * HeadersNotSigned), and (b) does not enforce or store a query-only checksum,
+ * so a tampered body is accepted and verifyUploadedObject can never match.
+ * Probed live 2026-09-12; both failure modes reproduced. */
 export async function presignPut(key: string, checksumSha256?: string): Promise<string> {
+  const checksumHeader = "x-amz-checksum-sha256";
   return getSignedUrl(
     s3(),
     new PutObjectCommand({
@@ -48,7 +62,15 @@ export async function presignPut(key: string, checksumSha256?: string): Promise<
       Key: key,
       ...(checksumSha256 ? { ChecksumSHA256: checksumSha256 } : {}),
     }),
-    { expiresIn: PUT_TTL },
+    {
+      expiresIn: PUT_TTL,
+      ...(checksumSha256
+        ? {
+            signableHeaders: new Set([checksumHeader]),
+            unhoistableHeaders: new Set([checksumHeader]),
+          }
+        : {}),
+    },
   );
 }
 
