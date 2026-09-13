@@ -83,6 +83,7 @@ Parameters:
   Environment:
     Type: String
     AllowedValues:
+      - testing
       - staging
       - prod
 
@@ -171,7 +172,7 @@ Parameters:
 
   BedrockEmbeddingModelArn:
     Type: String
-    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:(?:[0-9]{12})?:[A-Za-z0-9._/-]+$"
+    AllowedPattern: "^arn:[^:]+:bedrock:[^:]+:(?:[0-9]{12})?:[A-Za-z0-9._/:-]+$"
     Description: Exact Titan embedding model or inference-profile ARN.
 
   IngestKmsKeyArn:
@@ -445,12 +446,14 @@ Resources:
               jobId: $.detail.job_id
             InputTemplate: !Sub '{"version":1,"invocationArn":"arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:data-automation-invocation/<jobId>","outcome":"failure","correlationId":<correlationId>}'
 
+  # SQS requires each queue-policy statement to reference exactly one resource
+  # (the queue the policy is attached to), so the main queue and the DLQ each
+  # get their own policy scoped to their own ARN.
   IngestQueuePolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
       Queues:
         - !Ref IngestQueue
-        - !Ref IngestDeadLetterQueue
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -458,9 +461,7 @@ Resources:
             Effect: Deny
             Principal: "*"
             Action: "sqs:*"
-            Resource:
-              - !GetAtt IngestQueue.Arn
-              - !GetAtt IngestDeadLetterQueue.Arn
+            Resource: !GetAtt IngestQueue.Arn
             Condition:
               Bool:
                 "aws:SecureTransport": "false"
@@ -469,9 +470,38 @@ Resources:
             Principal:
               Service: events.amazonaws.com
             Action: sqs:SendMessage
-            Resource:
-              - !GetAtt IngestQueue.Arn
-              - !GetAtt IngestDeadLetterQueue.Arn
+            Resource: !GetAtt IngestQueue.Arn
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+              ArnEquals:
+                "aws:SourceArn":
+                  - !GetAtt BdaSuccessRule.Arn
+                  - !GetAtt BdaFailureRule.Arn
+                  - !GetAtt ReconcileSchedule.Arn
+
+  IngestDlqPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IngestDeadLetterQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "sqs:*"
+            Resource: !GetAtt IngestDeadLetterQueue.Arn
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+          - Sid: AllowExactEventBridgeRules
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt IngestDeadLetterQueue.Arn
             Condition:
               StringEquals:
                 "aws:SourceAccount": !Ref AWS::AccountId
@@ -598,7 +628,11 @@ Resources:
                 Effect: Allow
                 Action:
                   - bedrock:InvokeModel
-                Resource: !Ref BedrockEmbeddingModelArn
+                # Wildcard rather than the exact versioned FM ARN param so
+                # CloudFormation Early Validation (ResourceExistenceCheck) does
+                # not try to resolve amazon.titan-embed-text-v2:0 (the :0 suffix
+                # trips its ARN existence check).
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2*"
               - Sid: AppDataKms
                 Effect: Allow
                 Action:

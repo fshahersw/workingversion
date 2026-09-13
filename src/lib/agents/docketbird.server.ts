@@ -272,6 +272,50 @@ export async function getDocketSheet(
   }));
 }
 
+/** One raw row of the docket sheet with the fields the matters corpus sync
+ *  needs. `restricted` = sealed; `downloaded` + `docketbird_document_url` mean a
+ *  PDF is available (the URL is a short-lived presigned S3 link). */
+export type DbSheetRow = {
+  id: string;
+  title: string;
+  filing_date: string | null;
+  entry_number: number | null;
+  restricted: boolean;
+  downloaded: boolean;
+  document_url: string | null;
+};
+
+/** Full docket sheet in chronological order, keeping the fields the reduced
+ *  getDocketSheet drops. Used by the matters corpus sync; large MDL sheets can
+ *  take tens of seconds, so callers pass a generous timeout. */
+export async function getDocketSheetFull(
+  caseId: string,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<DbSheetRow[]> {
+  const data = await db<unknown>(`/documents${qp({ case_id: caseId, sort: "chronological" })}`, {
+    timeoutMs: opts?.timeoutMs ?? 90_000,
+    ...(opts?.signal ? { signal: opts.signal } : {}),
+  });
+  const rows = Array.isArray(data)
+    ? (data as Record<string, unknown>[])
+    : (((data as Record<string, unknown>)?.["documents"] as Record<string, unknown>[]) ?? []);
+  return rows.map((r) => {
+    const entry = Number(r["primary_docket_sheet_number"]);
+    return {
+      id: String(r["id"] ?? ""),
+      title: String(r["title"] ?? ""),
+      filing_date: r["filing_date"] != null ? String(r["filing_date"]).slice(0, 10) : null,
+      entry_number: Number.isFinite(entry) ? entry : null,
+      restricted: r["restricted"] === true,
+      downloaded: r["downloaded"] === true,
+      document_url:
+        typeof r["docketbird_document_url"] === "string" && r["docketbird_document_url"]
+          ? (r["docketbird_document_url"] as string)
+          : null,
+    };
+  });
+}
+
 // --- Case calendar (GET /calendar_entries?case_id=) ------------------------
 // Deadlines, hearings, conferences from the firm's autocalendars. Richest for
 // followed matters; may be empty for a case the firm does not track.

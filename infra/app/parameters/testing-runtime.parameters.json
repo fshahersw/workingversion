@@ -21,11 +21,11 @@
   },
   {
     "ParameterKey": "ArtifactObjectKey",
-    "ParameterValue": "releases/b80bd1dc54e8eba3500e9da948e9d04c87f8a0443f98c898d280893c94524e42/app-runtime.zip"
+    "ParameterValue": "releases/7c9bdabb47d702286575a5fb15a86dda46012961ada187ec837e8e4d96fc1b29/app-runtime.zip"
   },
   {
     "ParameterKey": "ArtifactObjectVersion",
-    "ParameterValue": "YRjzi7IFb60NgNR8VgX45mWXATKTYsiR"
+    "ParameterValue": "dN1lSpqvMoMEFVyMn4oGXEO.uKJ9dVMv"
   },
   {
     "ParameterKey": "Architecture",
@@ -93,15 +93,23 @@
   },
   {
     "ParameterKey": "KbIngestAccessPolicyArn",
-    "ParameterValue": ""
+    "ParameterValue": "arn:aws:iam::475976462949:policy/lit-ai/testing/litai-testing-kb-ingest-app-access"
   },
   {
     "ParameterKey": "KbIngestJobsTableName",
-    "ParameterValue": ""
+    "ParameterValue": "litai-testing-kb-ingest-jobs"
   },
   {
     "ParameterKey": "KbIngestQueueUrl",
-    "ParameterValue": ""
+    "ParameterValue": "https://sqs.us-east-1.amazonaws.com/475976462949/litai-testing-kb-ingest"
+  },
+  {
+    "ParameterKey": "MattersCorpusBucketName",
+    "ParameterValue": "sw-matters-corpus-475976462949"
+  },
+  {
+    "ParameterKey": "MattersSyncSchedule",
+    "ParameterValue": "rate(30 minutes)"
   },
   {
     "ParameterKey": "BedrockRegion",
@@ -218,5 +226,9 @@
   {
     "ParameterKey": "BedrockResearchModel",
     "ParameterValue": "us.anthropic.claude-sonnet-5"
+  },
+  {
+    "ParameterKey": "RuntimeSecretRevision",
+    "ParameterValue": "1789266729455"
   }
 ]

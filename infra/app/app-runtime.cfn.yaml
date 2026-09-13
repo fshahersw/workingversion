@@ -68,6 +68,9 @@ Metadata:
           - KbIngestAccessPolicyArn
           - KbIngestJobsTableName
           - KbIngestQueueUrl
+          - MattersCorpusBucketName
+          - MattersSyncSchedule
+          - RuntimeSecretRevision
       - Label:
           default: AI and application configuration
         Parameters:
@@ -328,6 +331,41 @@ Parameters:
     AllowedPattern: "^$|^https://[^\\s]+$"
     ConstraintDescription: Supply the HTTPS IngestQueueUrl output from the KB ingest stack, or leave empty.
     Description: IngestQueueUrl output; exported as KB_INGEST_QUEUE_URL. Empty when unused.
+
+  MattersCorpusBucketName:
+    Type: String
+    Default: ""
+    MaxLength: 63
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+    Description: >-
+      S3 bucket holding the firm's docket PDFs (matters corpus, SSE-S3). The
+      runtime presigns inline GETs for the /matters PDF pane and admin PUTs into
+      <slug>/incoming/. Exported as MATTERS_CORPUS_BUCKET. Empty disables the
+      grant and the app falls back to its compiled default bucket name.
+
+  RuntimeSecretRevision:
+    Type: String
+    Default: "1"
+    MaxLength: 32
+    AllowedPattern: "^[A-Za-z0-9._-]+$"
+    Description: >-
+      Opaque marker exported as RUNTIME_SECRET_REVISION. CloudFormation only
+      re-reads a Secrets Manager dynamic reference when the containing property
+      changes, so after rotating a key inside CorpusServiceSecretArn, bump this
+      value (deploy-testing.mjs --refresh-env does it) to make the function pick
+      up the new secret values.
+
+  MattersSyncSchedule:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^(rate\\([0-9]+ (minute|minutes|hour|hours|day|days)\\)|cron\\(.+\\))$"
+    ConstraintDescription: An EventBridge schedule expression such as rate(30 minutes), or empty.
+    Description: >-
+      When set (and MattersCorpusBucketName is set), a small invoker Lambda calls
+      POST /api/public/matters/sync on this schedule to pull new docket entries and
+      PDFs for the followed hub dockets from DocketBird. The route authenticates with
+      INGEST_API_KEY, which must exist as a key in the CorpusServiceSecretArn secret.
+      Empty disables the schedule, the invoker and the INGEST_API_KEY export.
 
   BedrockRegion:
     Type: String
@@ -667,6 +705,16 @@ Conditions:
       - !Equals
         - !Ref AcmCertificateArn
         - ""
+  HasMattersCorpus: !Not
+    - !Equals
+      - !Ref MattersCorpusBucketName
+      - ""
+  HasMattersSync: !And
+    - !Condition HasMattersCorpus
+    - !Not
+      - !Equals
+        - !Ref MattersSyncSchedule
+        - ""
   HasKbIngest: !And
     - !Not
       - !Equals
@@ -772,6 +820,23 @@ Resources:
           - !Ref KbIngestAccessPolicyArn
           - !Ref AWS::NoValue
       Policies:
+        - !If
+          - HasMattersCorpus
+          - PolicyName: matters-corpus
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: MattersCorpusRead
+                  Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${MattersCorpusBucketName}/*"
+                - Sid: MattersCorpusWrite
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                  Resource: !Sub "arn:${AWS::Partition}:s3:::${MattersCorpusBucketName}/*"
+          - !Ref AWS::NoValue
         - PolicyName: runtime-telemetry
           PolicyDocument:
             Version: "2012-10-17"
@@ -903,6 +968,19 @@ Resources:
             - HasKbIngest
             - !Ref KbIngestQueueUrl
             - !Ref AWS::NoValue
+          MATTERS_CORPUS_BUCKET: !If
+            - HasMattersCorpus
+            - !Ref MattersCorpusBucketName
+            - !Ref AWS::NoValue
+          # Shared secret for the scheduled matters sync (and the other
+          # /api/public ingest routes). Only exported when the sync is enabled.
+          INGEST_API_KEY: !If
+            - HasMattersSync
+            - !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:INGEST_API_KEY}}"
+            - !Ref AWS::NoValue
+          # Bump RuntimeSecretRevision after rotating any key in the runtime
+          # secret; the changed Environment forces the resolves above to re-read.
+          RUNTIME_SECRET_REVISION: !Ref RuntimeSecretRevision
           BEDROCK_REGION: !Ref BedrockRegion
           # Research landing "Since you were here" headlines are OFF by default:
           # the brief derived topics from raw conversation titles and egressed
@@ -1079,6 +1157,128 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceAccount: !Ref AWS::AccountId
       SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+
+  # --- Matters corpus sync (DocketBird -> Aurora + S3) -----------------------
+  # EventBridge API destinations give an HTTP target 5 seconds, which is far too
+  # short for a docket sync, so the schedule invokes this tiny Lambda instead and
+  # it calls the app's sync route through CloudFront with a long timeout. The app
+  # route itself does bounded work per call; the schedule catches the remainder.
+  MattersSyncInvokerRole:
+    Type: AWS::IAM::Role
+    Condition: HasMattersSync
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Least-privilege execution role for the scheduled sync invoker (logs only).
+        must:
+          - Grant nothing beyond CloudWatch Logs; the invoker holds no AWS data access.
+        mutable: change-with-constraints
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-matters-sync-invoker"
+      Path: !Sub "/lit-ai/${Environment}/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  MattersSyncInvoker:
+    Type: AWS::Lambda::Function
+    Condition: HasMattersSync
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Call POST /api/public/matters/sync on a schedule with a long HTTP timeout.
+        must:
+          - Go through the public origin (API Gateway requires the CloudFront-injected API key).
+          - Never log the shared secret; log only the HTTP status and a bounded response excerpt.
+        mutable: change-with-constraints
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-${Environment}-matters-sync-invoker"
+      Description: Scheduled trigger for the matters corpus DocketBird sync.
+      Role: !GetAtt MattersSyncInvokerRole.Arn
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Timeout: 290
+      MemorySize: 256
+      Environment:
+        Variables:
+          SYNC_URL: !If
+            - HasCustomDomain
+            - !Sub "https://${AppAliasDomain}/api/public/matters/sync"
+            - !Sub "https://${Distribution.DomainName}/api/public/matters/sync"
+          INGEST_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:INGEST_API_KEY}}"
+          RUNTIME_SECRET_REVISION: !Ref RuntimeSecretRevision
+          MAX_DOCKETS: "3"
+          MAX_DOWNLOADS: "40"
+      Code:
+        ZipFile: |
+          "use strict";
+          exports.handler = async () => {
+            const url = process.env.SYNC_URL;
+            const key = process.env.INGEST_API_KEY;
+            if (!url || !key) throw new Error("SYNC_URL and INGEST_API_KEY are required");
+            const body = JSON.stringify({
+              maxDockets: Number(process.env.MAX_DOCKETS || 3),
+              maxDownloads: Number(process.env.MAX_DOWNLOADS || 40),
+              deadlineMs: 240000,
+            });
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 280000);
+            try {
+              const res = await fetch(url, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "x-ingest-key": key,
+                  "user-agent": "litai-matters-sync-invoker/1.0",
+                },
+                body,
+                signal: controller.signal,
+              });
+              const text = await res.text();
+              console.log(JSON.stringify({ status: res.status, body: text.slice(0, 4000) }));
+              if (!res.ok) throw new Error("matters sync returned HTTP " + res.status);
+              return { status: res.status };
+            } finally {
+              clearTimeout(timer);
+            }
+          };
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  MattersSyncRule:
+    Type: AWS::Events::Rule
+    Condition: HasMattersSync
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-matters-sync"
+      Description: Pull new docket entries and PDFs for followed hub dockets into the matters corpus.
+      ScheduleExpression: !Ref MattersSyncSchedule
+      State: ENABLED
+      Targets:
+        - Id: invoker
+          Arn: !GetAtt MattersSyncInvoker.Arn
+
+  MattersSyncInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasMattersSync
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MattersSyncInvoker
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MattersSyncRule.Arn
 
   ApiDeploymentBlue:
     Type: AWS::ApiGateway::Deployment

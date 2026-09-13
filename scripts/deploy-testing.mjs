@@ -342,6 +342,11 @@ async function main() {
     setParameterValue(params, "AppAliasDomain", testingDomain);
     setParameterValue(params, "AcmCertificateArn", testingCertArn);
   }
+  if (args.refreshEnv) {
+    // CloudFormation only re-reads {{resolve:secretsmanager}} references when
+    // the Environment block changes; a fresh marker guarantees that.
+    setParameterValue(params, "RuntimeSecretRevision", String(Date.now()));
+  }
 
   const needsUpload = !sameArtifact;
   const needsUpdate = needsUpload || args.flipSlot || args.attachAlias || args.refreshEnv;
