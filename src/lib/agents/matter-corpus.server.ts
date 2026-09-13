@@ -96,10 +96,10 @@ export type CorpusPassage = {
  * `Retrieve`; the KB embeds the query with its own model). Throws on transport
  * error so the tool can surface it.
  */
-export async function retrieveMatterCorpus(
+async function retrieveOnce(
   kbId: string,
   query: string,
-  k: number,
+  n: number,
   signal?: AbortSignal,
 ): Promise<CorpusPassage[]> {
   const body = JSON.stringify({
@@ -108,7 +108,7 @@ export async function retrieveMatterCorpus(
     // they reject vectorSearchConfiguration with a ValidationException; the
     // managed variant is required.
     retrievalConfiguration: {
-      managedSearchConfiguration: { numberOfResults: Math.min(Math.max(k, 1), 25) },
+      managedSearchConfiguration: { numberOfResults: Math.min(Math.max(n, 1), 25) },
     },
   });
   const res = await signedAwsFetch(
@@ -141,4 +141,45 @@ export async function retrieveMatterCorpus(
       ...(r.metadata ? { metadata: r.metadata } : {}),
     }))
     .filter((p) => p.text);
+}
+
+/** Normalized leading content — the dedupe key. */
+const dedupeKey = (text: string): string =>
+  text
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+
+/**
+ * Retrieve for one or more query phrasings in parallel and merge into the top-K
+ * DISTINCT passages. Two reasons this beats a single Retrieve:
+ *  - Recall: one vector query misses facets a reformulation catches (the same
+ *    reason AWS's agentic retrieve reformulates); running 2-3 angles at once
+ *    widens coverage without an extra agent turn.
+ *  - Precision: managed-KB results repeat near-identical boilerplate (e.g. the
+ *    same appendix / suggestion-of-remand text across many dockets), so we
+ *    dedupe on normalized leading content and keep the highest-scoring copy.
+ */
+export async function retrieveMatterCorpus(
+  kbId: string,
+  queries: string[],
+  k: number,
+  signal?: AbortSignal,
+): Promise<CorpusPassage[]> {
+  const qs = [...new Set(queries.map((q) => q.trim()).filter((q) => q.length >= 3))].slice(0, 3);
+  if (!qs.length) return [];
+  // Over-fetch per query so the dedupe/merge has material to choose from.
+  const perQuery = Math.min(Math.max(k, 10), 25);
+  const batches = await Promise.all(
+    qs.map((q) => retrieveOnce(kbId, q, perQuery, signal).catch(() => [] as CorpusPassage[])),
+  );
+  const best = new Map<string, CorpusPassage>();
+  for (const p of batches.flat()) {
+    const key = dedupeKey(p.text);
+    if (!key) continue;
+    const cur = best.get(key);
+    if (!cur || p.score > cur.score) best.set(key, p);
+  }
+  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, Math.max(k, 1));
 }

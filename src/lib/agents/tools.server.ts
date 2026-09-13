@@ -474,7 +474,7 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
   {
     name: "matter_corpus_search",
     description:
-      "Semantic search over the FIRM'S OWN INGESTED DOCKET CORPUS for one of its active MDL matters — the full text of the filings the firm has collected and indexed for that matter (a managed per-matter vector knowledge base). Use it to pull on-point passages BY MEANING from a matter's own record: what an order held, how a brief argued a point, an expert's opinion, a defense raised. This is NOT DocketBird — db_* hit the LIVE federal docket for ANY case; this searches only the firm's curated corpus for a KNOWN matter and returns the actual passage TEXT (not just docket lines). Prefer it over db_search_filings when the matter is one of the firm's own and you want the substance of what its filings SAY; it needs no case_id. Pass `matter` (the matter name or MDL — e.g. 'roundup', 'social media adolescent addiction', 'zantac', 'insulin pricing') and `query` (what to find). If the matter is not in the corpus, the tool returns the list of matters that ARE — pick from those.",
+      "Semantic search over the FIRM'S OWN INGESTED DOCKET CORPUS for one of its active MDL matters — the full text of the filings the firm has collected and indexed for that matter (a managed per-matter vector knowledge base). Use it to pull on-point passages BY MEANING from a matter's own record: what an order held, how a brief argued a point, an expert's opinion, a defense raised. This is NOT DocketBird — db_* hit the LIVE federal docket for ANY case; this searches only the firm's curated corpus for a KNOWN matter and returns the actual passage TEXT (not just docket lines). Prefer it over db_search_filings when the matter is one of the firm's own and you want the substance of what its filings SAY; it needs no case_id. Pass `matter` (the matter name or MDL — e.g. 'roundup', 'social media adolescent addiction', 'zantac', 'insulin pricing') and `query` (what to find), optionally with 1-2 short alternate angles in `queries` for wider recall (run in parallel, merged + de-duplicated). If the matter is not in the corpus, the tool returns the list of matters that ARE — pick from those.",
     input_schema: {
       type: "object",
       properties: {
@@ -488,7 +488,13 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
           description:
             "What to find in that matter's filings — a holding, doctrine, expert, defense, fact, or ruling. A phrase or question; the corpus is searched by meaning, not keywords.",
         },
-        limit: { type: "number", description: "Passages to return (default 8, cap 15)." },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional 1-2 ALTERNATE phrasings/angles of the same question (a doctrine, a specific order or judge, a party or defense) run IN PARALLEL with `query` and merged + de-duplicated. Widens recall on a single call — keep them short and genuinely distinct, not restatements of `query`.",
+        },
+        limit: { type: "number", description: "Distinct passages to return (default 8, cap 15)." },
       },
       required: ["matter", "query"],
     },
@@ -1412,9 +1418,12 @@ async function matterCorpusSearch(
     };
   }
   const k = clamp(input["limit"], 8, 15);
+  const extraQueries = Array.isArray(input["queries"])
+    ? (input["queries"] as unknown[]).map((q) => str(q))
+    : [];
   let passages;
   try {
-    passages = await retrieveMatterCorpus(matter.kbId, query, k);
+    passages = await retrieveMatterCorpus(matter.kbId, [query, ...extraQueries], k);
   } catch (err) {
     console.error(
       `[matter_corpus_search] retrieve error kb=${matter.kbId}: ${err instanceof Error ? err.message : String(err)}`,
