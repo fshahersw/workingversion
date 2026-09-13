@@ -31,13 +31,20 @@ export async function listMatterKbs(): Promise<MatterKb[]> {
        FROM corpus.matters
       WHERE kb_id IS NOT NULL AND kb_id <> ''
       ORDER BY title`,
-  ).catch(() => [] as { matterId: string; title: string | null; kbId: string }[]);
+  ).catch((e) => {
+    console.error(
+      `[matter_corpus] listMatterKbs query failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return [] as { matterId: string; title: string | null; kbId: string }[];
+  });
   const out: MatterKb[] = rows.map((r) => ({
     matterId: r.matterId,
     title: r.title ?? r.matterId,
     kbId: r.kbId,
   }));
-  _cache = { at: Date.now(), rows: out };
+  // Cache only a non-empty result, so a transient query failure never poisons
+  // the tool for the whole TTL.
+  if (out.length) _cache = { at: Date.now(), rows: out };
   return out;
 }
 

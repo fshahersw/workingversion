@@ -1400,6 +1400,9 @@ async function matterCorpusSearch(
     return { text: "No matter corpora are available for retrieval yet.", hits: 0, refs: [] };
   const matterQ = str(input["matter"]);
   const matter = await resolveMatterKb(matterQ);
+  console.error(
+    `[matter_corpus_search] q=${JSON.stringify(matterQ)} avail=${available.length} matched=${matter?.matterId ?? "NONE"} kb=${matter?.kbId ?? "-"}`,
+  );
   if (!matter) {
     const names = available.map((m) => `- ${m.title} (${m.matterId})`).join("\n");
     return {
@@ -1413,12 +1416,16 @@ async function matterCorpusSearch(
   try {
     passages = await retrieveMatterCorpus(matter.kbId, query, k);
   } catch (err) {
+    console.error(
+      `[matter_corpus_search] retrieve error kb=${matter.kbId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return {
       text: `Corpus retrieve failed for ${matter.title}: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
       hits: 0,
       refs: [],
     };
   }
+  console.error(`[matter_corpus_search] kb=${matter.kbId} passages=${passages.length}`);
   if (!passages.length)
     return {
       text: `No passages in the ${matter.title} corpus matched "${query}".`,
