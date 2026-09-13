@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DiscoveryScopeControl } from "@/components/docs/DiscoveryCoverage";
 import { ColumnSuggestionsDialog } from "./ColumnSuggestionsDialog";
 import {
   AlertCircle,
@@ -574,12 +573,12 @@ export function ReviewTablesTab() {
         onAdd={review.addColumns}
       />
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
-        <DiscoveryScopeControl
-          scope={review.queryScope}
-          onChange={review.setQueryScope}
-          disabled={run.running}
-          count={rows.length}
-        />
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-600">
+          <span className="font-medium text-slate-800">Full text scan</span>
+          <span className="text-slate-500">
+            · every available text page across {rows.length} document{rows.length === 1 ? "" : "s"}
+          </span>
+        </div>
         {stats.errors > 0 && (
           <Button
             size="sm"
@@ -591,8 +590,8 @@ export function ReviewTablesTab() {
           </Button>
         )}
         <p className="w-full text-[11px] text-slate-500">
-          Verified and manually edited cells stay protected. Weak passage results automatically
-          widen to a full text scan. Each cell records its coverage and source quotes.
+          Every available text page is scanned in bounded sections. Verified and manually edited
+          cells stay protected. Each cell records its coverage and source quotes.
         </p>
       </div>
       {run.running || run.label ? (
