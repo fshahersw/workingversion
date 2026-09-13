@@ -208,7 +208,10 @@ export function productionAdapter(user: Principal, previousRequests = 0) {
               text,
               evidence: evidence?.output,
               model: loadResearchModel(),
-              usage: { ...usage },
+              // Token usage is intentionally not returned in step output: it is
+              // rendered verbatim in the "raw output" panel, and firm rule is no
+              // cost/token figures in the product UI. Accounting still folds
+              // runtime.usage into the run record in worker.server.ts.
             },
           };
         }
