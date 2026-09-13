@@ -115,7 +115,7 @@ function envInt(name: string, fallback: number): number {
  * never cut off. A model that rejects the ceiling gets a smaller retry.
  */
 const MAX_TOKENS: Record<WriterProfile, number> = {
-  standard: envInt("OFFICE_MAX_TOKENS_STANDARD", 32_768),
+  standard: envInt("OFFICE_MAX_TOKENS_STANDARD", 40_960),
   thorough: envInt("OFFICE_MAX_TOKENS_THOROUGH", 65_536),
 };
 
@@ -640,7 +640,7 @@ export async function classifyTask(
               content: [{ text: `Editor: ${app}\nRequest:\n${text.slice(0, 3_000)}` }],
             },
           ],
-          inferenceConfig: { maxTokens: 8, temperature: 0 },
+          inferenceConfig: { maxTokens: 8 },
         }),
         signal: controller.signal,
       },

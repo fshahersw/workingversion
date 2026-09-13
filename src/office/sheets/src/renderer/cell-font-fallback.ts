@@ -1,3 +1,6 @@
+import carlitoRegularUrl from '../../../../writer/packages/ui/src/fonts/Carlito-Regular.ttf?url'
+import carlitoBoldUrl from '../../../../writer/packages/ui/src/fonts/Carlito-Bold.ttf?url'
+
 /**
  * Cell-font fallback for the grid canvas (document data, theme-independent).
  * Univer draws/measures with a bare `italic bold 11pt "Family"` string, so an
@@ -163,14 +166,17 @@ const SONG_BOLD = ['STSongti-SC-Bold', 'Songti SC Bold']
 const KAI = ['KaiTi', 'Kaiti SC', 'STKaitiSC-Regular', 'STKaiti']
 const MING_TC = ['PMingLiU', 'Songti TC', 'Apple LiSung']
 const KR_SANS = ['Malgun Gothic', 'Apple SD Gothic Neo', 'AppleGothic']
-/// Carlito is bundled, not installed — local() alone can never resolve it.
+/// Carlito is bundled, not installed — local() alone can never resolve it. The
+/// URL comes from a static ?url asset import so the production bundle serves a
+/// real hashed path; the old new URL(import.meta.url) form pointed at a source
+/// path (missing the writer/ segment) that 404'd in the deployed build.
 const CARLITO_SRC = [
   'Carlito',
-  `url(${new URL('../../../../packages/ui/src/fonts/Carlito-Regular.ttf', import.meta.url).href})`,
+  `url(${carlitoRegularUrl})`,
 ]
 const CARLITO_BOLD_SRC = [
   'Carlito Bold',
-  `url(${new URL('../../../../packages/ui/src/fonts/Carlito-Bold.ttf', import.meta.url).href})`,
+  `url(${carlitoBoldUrl})`,
 ]
 /// Malgun Gothic prints hangul at 1.0em — exactly AppleGothic — but digits at
 /// 0.6em vs AppleGothic's 0.68em, so number tails clipped while hangul was
