@@ -36,6 +36,21 @@ export type IntelItem = {
 
 export type IntelFeedPage = { items: IntelItem[] };
 
+/** Input for the story-scoped "Ask about this" answer (client → server fn). */
+export type IntelAskInput = {
+  title: string;
+  url?: string | null;
+  source?: string | null;
+  publishedAt?: string | null;
+  summary?: string | null;
+  lead?: string | null;
+  bullets?: string[];
+  impact?: string | null;
+  question: string;
+};
+
+export type IntelAnswer = { answer: string; grounded: "article" | "briefing" };
+
 export type IntelStatus = {
   lastRunAt: string | null;
   itemCount: number;

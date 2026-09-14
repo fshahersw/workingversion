@@ -1,6 +1,17 @@
+import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ExternalLink, Lock, MessageSquare, Scale, ShieldCheck, X } from "lucide-react";
+import {
+  ExternalLink,
+  Loader2,
+  Lock,
+  MessageSquare,
+  Scale,
+  ShieldCheck,
+  Sparkles,
+  X,
+} from "lucide-react";
 
+import { askIntelStory } from "@/lib/intel.functions";
 import { shortDate, type TerminalRow } from "./useTerminalData";
 
 export function ReaderPane({
@@ -146,6 +157,8 @@ export function ReaderPane({
           </Section>
         )}
 
+        <AskAboutThis row={row} />
+
         <Section title="Take it further">
           <div className="flex flex-wrap gap-2">
             {row.matterSlug && (
@@ -178,5 +191,81 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       </p>
       {children}
     </div>
+  );
+}
+
+/** Story-scoped question box: answers from this story + its full source only,
+ *  without leaving the terminal. Never sends to the general research agent. */
+function AskAboutThis({ row }: { row: TerminalRow }) {
+  const [q, setQ] = useState("");
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function ask() {
+    const question = q.trim();
+    if (!question || busy) return;
+    setBusy(true);
+    setError(null);
+    setAnswer(null);
+    try {
+      const intel = row.intel;
+      const summary = [row.detail, row.analysis].filter(Boolean).join(" ") || intel?.summary || null;
+      const res = await askIntelStory({
+        data: {
+          title: row.title,
+          url: row.url,
+          source: row.source,
+          publishedAt: row.timestamp,
+          summary,
+          lead: intel?.analysisLead ?? null,
+          bullets: row.bullets,
+          impact: row.impact ?? intel?.impact ?? null,
+          question,
+        },
+      });
+      setAnswer(res.answer);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not answer right now.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section title="Ask about this">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void ask();
+        }}
+        className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 transition-colors focus-within:border-primary/40"
+      >
+        <Sparkles className="h-3.5 w-3.5 shrink-0 text-brand-orange/70" />
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Ask a question about this story…"
+          disabled={busy}
+          className="flex-1 bg-transparent text-[12px] placeholder:text-muted-foreground/70 focus:outline-none"
+        />
+        <button
+          type="submit"
+          disabled={busy || !q.trim()}
+          className="rounded-md bg-brand-navy px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:bg-brand-navy/90 disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : "Ask"}
+        </button>
+      </form>
+      {error && <p className="mt-2 text-[11px] text-destructive">{error}</p>}
+      {answer && (
+        <div className="mt-2 whitespace-pre-wrap rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-[12.5px] leading-[1.55] text-foreground/85">
+          {answer}
+        </div>
+      )}
+      <p className="mt-1.5 text-[10px] text-muted-foreground">
+        Answers use only this story and its original source.
+      </p>
+    </Section>
   );
 }

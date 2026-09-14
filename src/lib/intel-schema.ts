@@ -63,6 +63,13 @@ export const intelItemSchema = z.object({
   analysisLead: z.string().optional().nullable(),
   analysisBullets: z.array(z.string()).optional(),
   analysisImpact: z.string().optional().nullable(),
+  // Quality-assurance verdict (set by the internal QA gate; absent from external
+  // feeds, which default to "approved" so they are never silently hidden).
+  reviewStatus: z.string().optional().nullable(),
+  reviewScore: z.number().optional().nullable(),
+  reviewReasons: z.array(z.string()).optional(),
+  imageReview: z.string().optional().nullable(),
+  reviewerModel: z.string().optional().nullable(),
   metadata: z
     .object({ author: z.string().nullish(), description: z.string().nullish() })
     .passthrough()
@@ -113,6 +120,12 @@ export type IntelRow = {
   analysis_lead: string | null;
   analysis_bullets: string[];
   analysis_impact: string | null;
+  review_status: string;
+  review_score: number | null;
+  review_reasons: string[];
+  image_review: string | null;
+  reviewed_at: string | null;
+  reviewer_model: string | null;
 };
 
 
@@ -173,6 +186,14 @@ export function toRow(item: IntelItemInput, receivedAt: string): IntelRow {
     analysis_lead: item.analysisLead?.trim() || null,
     analysis_bullets: (item.analysisBullets ?? []).slice(0, 4),
     analysis_impact: item.analysisImpact?.trim() || null,
+    // Unreviewed feeds default to "approved" so they stay visible; the internal
+    // QA gate sets an explicit verdict on every item it processes.
+    review_status: item.reviewStatus || "approved",
+    review_score: typeof item.reviewScore === "number" ? item.reviewScore : null,
+    review_reasons: (item.reviewReasons ?? []).slice(0, 8),
+    image_review: item.imageReview || null,
+    reviewed_at: item.reviewStatus ? receivedAt : null,
+    reviewer_model: item.reviewerModel || null,
   };
 }
 

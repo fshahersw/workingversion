@@ -209,6 +209,9 @@ export async function loadIntelFeed(input: {
     order: "signal_score.desc,published_at.desc",
     limit: String(Math.min(limit * 4, 500)),
   };
+  // Publish only stories that passed the QA gate. Older/external rows without a
+  // verdict default to "approved" at ingest, so nothing is hidden retroactively.
+  params["review_status"] = "eq.approved";
   if (cats?.length) params["category"] = `in.(${cats.map((c) => `"${c}"`).join(",")})`;
   const q = input.search?.trim();
   if (q) {
@@ -227,7 +230,16 @@ export async function loadIntelFeed(input: {
     if (latestRunId) params["run_id"] = `eq.${latestRunId}`;
     rows = await select("corpus_intel_items", params);
   } catch {
-    rows = [];
+    // Tolerate a corpus that has not had the QA migration applied yet: retry
+    // without the review filter so the terminal still populates. Pre-migration
+    // this is the prior (ungated) behavior; once the column exists the filter
+    // above succeeds and the QA gate is live — no deploy-ordering dependency.
+    delete params["review_status"];
+    try {
+      rows = await select("corpus_intel_items", params);
+    } catch {
+      rows = [];
+    }
   }
   const gate = SECTION_KEYWORDS[input.section];
   if (gate && rows.length > 0) {

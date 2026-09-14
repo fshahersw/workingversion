@@ -217,6 +217,15 @@ export function composeSkill(skill: ResearchSkill, values: Record<string, string
   return skill.compose(values).replace(/\s+/g, " ").trim();
 }
 
+/** Seed a skill's values so every `select` field starts on its first option. */
+export function initialSkillValues(skill: ResearchSkill): Record<string, string> {
+  const init: Record<string, string> = {};
+  for (const field of skill.fields) {
+    if (field.kind === "select" && field.options?.[0]) init[field.id] = field.options[0].id;
+  }
+  return init;
+}
+
 /** True when the composer text is a slash command still being typed. */
 export function slashDraft(text: string): string | null {
   if (!text.startsWith("/")) return null;

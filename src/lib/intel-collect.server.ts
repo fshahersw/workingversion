@@ -398,8 +398,14 @@ export type IntelRunResult = {
   editorialImages?: number;
   genericImages?: number;
   analyzed?: number;
+  reviewed?: number;
+  approved?: number;
+  rejected?: number;
+  pending?: number;
+  imagesDropped?: number;
   docketAnalyzed?: number;
   analysisErrors?: string[];
+  qaErrors?: string[];
   searchErrors: string[];
   scrapeErrors: string[];
   ingest?: Record<string, unknown>;
@@ -526,6 +532,47 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
     } satisfies IntelItemInput;
   });
 
+  // ---- quality-assurance gate --------------------------------------------
+  // Review the ranked stories before publishing: a text pass judges relevance,
+  // grounding (briefing supported by the extract) and quality, then a vision
+  // pass checks each surviving image. Items are ordered best-first, so the QA
+  // cap covers everything the terminal actually surfaces. Fail-open: a model
+  // outage keeps items visible rather than blanking the feed.
+  const { reviewIntelItems, QA_TEXT_MODEL } = await import("@/lib/intel-qa.server");
+  const {
+    reviews,
+    stats: reviewStats,
+    errors: reviewErrors,
+  } = await reviewIntelItems(
+    items.map((it) => ({
+      key: (it.canonicalUrl as string) || it.url,
+      title: it.title,
+      source: it.domain ?? it.sourceName ?? null,
+      summary: it.summary ?? null,
+      lead: it.analysisLead ?? null,
+      bullets: it.analysisBullets ?? [],
+      text:
+        enriched.get(it.canonicalUrl as string)?.markdown ||
+        enriched.get(it.canonicalUrl as string)?.description ||
+        it.summary ||
+        null,
+      category: it.category,
+      imageUrl: it.image?.url ?? null,
+    })),
+  );
+  for (const it of items) {
+    const verdict = reviews.get((it.canonicalUrl as string) || it.url);
+    if (!verdict) continue;
+    it.reviewStatus = verdict.status;
+    it.reviewScore = verdict.score;
+    it.reviewReasons = verdict.reasons;
+    it.imageReview = verdict.imageReview;
+    it.reviewerModel = QA_TEXT_MODEL;
+    // A thumbnail that failed the vision gate is dropped; the card falls back to
+    // a favicon while the story itself remains.
+    if (verdict.imageReview === "dropped") it.image = null;
+  }
+
   const feed: IntelFeed = {
     generatedAt: fetchedAt,
     schemaVersion: "intel-v1",
@@ -536,8 +583,15 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
       editorialImages,
       genericImages,
       analyzed: analyses.size,
+      reviewed: reviewStats.reviewed,
+      approved: reviewStats.approved,
+      rejected: reviewStats.rejected,
+      pending: reviewStats.pending,
+      imagesChecked: reviewStats.imagesChecked,
+      imagesDropped: reviewStats.imagesDropped,
+      qaErrors: reviewStats.qaErrors,
     },
-    errors: { search: searchErrors, scrape: scrapeErrors, analysis: analysisErrors },
+    errors: { search: searchErrors, scrape: scrapeErrors, analysis: analysisErrors, qa: reviewErrors },
     retainDays: 90,
     items,
   };
@@ -555,10 +609,16 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
     editorialImages,
     genericImages,
     analyzed: analyses.size,
+    reviewed: reviewStats.reviewed,
+    approved: reviewStats.approved,
+    rejected: reviewStats.rejected,
+    pending: reviewStats.pending,
+    imagesDropped: reviewStats.imagesDropped,
     docketAnalyzed: docket.analyzed,
     searchErrors,
     scrapeErrors,
     analysisErrors,
+    qaErrors: reviewErrors,
     ingest,
     durationMs: Date.now() - started,
   };

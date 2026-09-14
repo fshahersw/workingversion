@@ -16,6 +16,8 @@ import {
   type ComposerMode,
 } from "@/components/chat/composer-kit";
 import { ResearchLanding } from "@/components/chat/ResearchLanding";
+import { GuidedSetup } from "@/components/chat/GuidedSetup";
+import { MatterScopePicker } from "@/components/matters/MatterScopePicker";
 import { SlashPalette } from "@/components/chat/SkillMenu";
 import type { Attachment, ChoiceAnswer, MatterScope } from "@/lib/chat-types";
 import { useChat } from "@/lib/use-chat";
@@ -71,6 +73,9 @@ function ResearchPage() {
   const [prefill, setPrefill] = useState("");
   const [matter, setMatter] = useState<MatterScope | null>(null);
   const [skill, setSkill] = useState<ResearchSkill | null>(null);
+  const [pane, setPane] = useState<"chat" | "guided">("chat");
+  /** Depth chosen in Guided setup, seeded into the composer on Fill chat. */
+  const [seedMode, setSeedMode] = useState<ComposerMode | null>(null);
 
   const openConversation = useCallback(
     async (id: string) => {
@@ -93,6 +98,16 @@ function ResearchPage() {
     ) => send(text, matter, opts),
     [send, matter],
   );
+
+  // Guided setup fills the composer (it never sends): drop any active skill,
+  // carry the chosen depth into the composer, prefill the request, and return to
+  // the chat view so the editable draft is front and center.
+  const handleGuidedFill = useCallback((text: string, mode: ComposerMode) => {
+    setSkill(null);
+    setSeedMode(mode);
+    setPrefill(text);
+    setPane("chat");
+  }, []);
 
   // Open a conversation handed off from the Library page (sessionStorage key set
   // there, then a navigate to /research). Runs once on mount.
@@ -144,6 +159,24 @@ function ResearchPage() {
             className="flex h-full w-full items-start justify-center overflow-y-auto px-4 py-6 sm:px-6"
           >
             <div className="mx-auto flex w-full max-w-[720px] flex-col items-center pt-[min(12vh,7rem)]">
+              <div className="mb-3 flex w-full justify-end">
+                <div className="inline-flex rounded-md border border-border bg-card p-0.5">
+                  {(["chat", "guided"] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setPane(p)}
+                      className={`rounded px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                        pane === p
+                          ? "bg-brand-navy text-white"
+                          : "text-muted-foreground hover:text-brand-navy"
+                      }`}
+                    >
+                      {p === "chat" ? "Chat" : "Guided setup"}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="w-full">
                 <HeroComposer
                   onSubmit={sendScoped}
@@ -153,20 +186,27 @@ function ResearchPage() {
                     setSkill(s);
                     setPrefill("");
                   }}
+                  matter={matter}
+                  onMatterChange={setMatter}
+                  seedMode={seedMode}
                 />
               </div>
-              <ResearchLanding
-                onSend={(text) => {
-                  setSkill(null);
-                  sendScoped(text);
-                }}
-                onPrefill={(text) => {
-                  setSkill(null);
-                  setPrefill(text);
-                }}
-                skill={skill}
-                onSkill={setSkill}
-              />
+              {pane === "guided" ? (
+                <GuidedSetup matter={matter} onMatterChange={setMatter} onFill={handleGuidedFill} />
+              ) : (
+                <ResearchLanding
+                  onSend={(text) => {
+                    setSkill(null);
+                    sendScoped(text);
+                  }}
+                  onPrefill={(text) => {
+                    setSkill(null);
+                    setPrefill(text);
+                  }}
+                  skill={skill}
+                  onSkill={setSkill}
+                />
+              )}
             </div>
           </motion.main>
         ) : (
@@ -199,6 +239,9 @@ function HeroComposer({
   disabled,
   initialValue = "",
   onPickSkill,
+  matter = null,
+  onMatterChange,
+  seedMode = null,
 }: {
   onSubmit: (
     t: string,
@@ -207,6 +250,9 @@ function HeroComposer({
   disabled: boolean;
   initialValue?: string;
   onPickSkill: (skill: ResearchSkill) => void;
+  matter?: MatterScope | null;
+  onMatterChange?: (m: MatterScope | null) => void;
+  seedMode?: ComposerMode | null;
 }) {
   const [v, setV] = useState(initialValue);
   const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
@@ -219,6 +265,11 @@ function HeroComposer({
   useEffect(() => {
     if (initialValue) setV(initialValue);
   }, [initialValue]);
+
+  // Guided setup seeds the depth when it fills the composer.
+  useEffect(() => {
+    if (seedMode) setMode(seedMode);
+  }, [seedMode, setMode]);
 
   useEffect(() => {
     const el = ref.current;
@@ -278,7 +329,12 @@ function HeroComposer({
           />
         </div>
         <div className="mt-1.5 flex items-center justify-between gap-1 border-t border-border/60 px-2 py-1.5">
-          <ModeDropdown mode={mode} onChange={setMode} disabled={disabled} />
+          <div className="flex items-center gap-1">
+            {onMatterChange && (
+              <MatterScopePicker value={matter} onChange={onMatterChange} disabled={disabled} />
+            )}
+            <ModeDropdown mode={mode} onChange={setMode} disabled={disabled} />
+          </div>
           <div className="flex items-center gap-1">
             <UploadButton onFiles={handleFiles} uploading={uploading} disabled={disabled} />
             <MicButton

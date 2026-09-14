@@ -4,6 +4,7 @@ import { ArrowRight, X } from "lucide-react";
 import {
   composeSkill,
   filterSkills,
+  initialSkillValues,
   slashDraft,
   type ResearchSkill,
 } from "@/lib/research-skills";
@@ -88,6 +89,50 @@ export function SlashPalette({
   );
 }
 
+/** The editable field grid for a skill. Shared by SkillForm and the guided setup. */
+export function SkillFields({
+  skill,
+  values,
+  onChange,
+}: {
+  skill: ResearchSkill;
+  values: Record<string, string>;
+  onChange: (id: string, value: string) => void;
+}) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {skill.fields.map((field) => (
+        <label key={field.id} className="block min-w-0">
+          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            {field.label}
+            {field.required ? "" : " · optional"}
+          </span>
+          {field.kind === "select" && field.options ? (
+            <select
+              value={values[field.id] ?? field.options[0]?.id ?? ""}
+              onChange={(e) => onChange(field.id, e.target.value)}
+              className="h-8 w-full border border-border bg-white px-2 text-[12.5px] text-foreground focus:border-primary/40 focus:outline-none"
+            >
+              {field.options.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={values[field.id] ?? ""}
+              onChange={(e) => onChange(field.id, e.target.value)}
+              placeholder={field.placeholder}
+              className="h-8 w-full border border-border bg-white px-2 text-[12.5px] text-foreground placeholder:text-muted-foreground/80 focus:border-primary/40 focus:outline-none"
+            />
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 export function SkillForm({
   skill,
   onCancel,
@@ -97,13 +142,7 @@ export function SkillForm({
   onCancel: () => void;
   onRun: (prompt: string) => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    for (const field of skill.fields) {
-      if (field.kind === "select" && field.options?.[0]) init[field.id] = field.options[0].id;
-    }
-    return init;
-  });
+  const [values, setValues] = useState<Record<string, string>>(() => initialSkillValues(skill));
 
   const prompt = composeSkill(skill, values);
 
@@ -123,36 +162,11 @@ export function SkillForm({
           <X className="h-3.5 w-3.5" strokeWidth={2} />
         </button>
       </div>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {skill.fields.map((field) => (
-          <label key={field.id} className="block min-w-0">
-            <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              {field.label}
-              {field.required ? "" : " · optional"}
-            </span>
-            {field.kind === "select" && field.options ? (
-              <select
-                value={values[field.id] ?? field.options[0]?.id ?? ""}
-                onChange={(e) => setValues((v) => ({ ...v, [field.id]: e.target.value }))}
-                className="h-8 w-full border border-border bg-white px-2 text-[12.5px] text-foreground focus:border-primary/40 focus:outline-none"
-              >
-                {field.options.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                value={values[field.id] ?? ""}
-                onChange={(e) => setValues((v) => ({ ...v, [field.id]: e.target.value }))}
-                placeholder={field.placeholder}
-                className="h-8 w-full border border-border bg-white px-2 text-[12.5px] text-foreground placeholder:text-muted-foreground/80 focus:border-primary/40 focus:outline-none"
-              />
-            )}
-          </label>
-        ))}
-      </div>
+      <SkillFields
+        skill={skill}
+        values={values}
+        onChange={(id, value) => setValues((v) => ({ ...v, [id]: value }))}
+      />
       <div className="mt-3 flex justify-end">
         <button
           type="button"
