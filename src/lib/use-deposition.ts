@@ -1653,6 +1653,9 @@ export function useDeposition() {
         // "auto" (the default) resolves here: a saved deposition set with a
         // hybrid index answers from the KB (adaptive RAG); otherwise the
         // in-browser full-text scan runs, unchanged. Explicit scopes override.
+        // Full-text scan is retired: transcripts auto-save + index on upload, so
+        // Ask is RAG-only. Scan stays behind this flag as a dormant fallback.
+        const FULL_TEXT_SCAN_ENABLED = false;
         const resolvedScope: DiscoveryScope =
           opts.scope === "full" || opts.scope === "relevant"
             ? opts.scope
@@ -1660,6 +1663,11 @@ export function useDeposition() {
               ? "relevant"
               : "full";
         if (resolvedScope === "full") {
+          if (!FULL_TEXT_SCAN_ENABLED) {
+            throw new Error(
+              "These transcripts are still indexing — Ask will be ready in a moment. Uploads now index automatically for retrieval.",
+            );
+          }
           lastScan.current = { query, fileIds: opts.fileIds ? [...opts.fileIds] : undefined };
           const selected = transcriptsRef.current.filter(
             (t) => !opts.fileIds || opts.fileIds.includes(t.fileId),

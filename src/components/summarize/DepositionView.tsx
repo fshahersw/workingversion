@@ -542,7 +542,18 @@ export function DepositionView() {
               transition={{ duration: 0.32, ease: EASE }}
               className="w-full max-w-[820px] pb-6"
             >
-              <DepositionDropPanel onStart={(f, i) => void start(f, i)} busy={false} files={[]} />
+              <DepositionDropPanel
+                onStart={(f, i) =>
+                  void (async () => {
+                    // Auto-save + index transcripts on upload so Ask is RAG-ready
+                    // immediately, with no full-text scan fallback.
+                    await start(f, i);
+                    await saveWorkspace();
+                  })()
+                }
+                busy={false}
+                files={[]}
+              />
               <p className="mx-auto mt-3 max-w-2xl text-center text-[12px] leading-relaxed text-muted-foreground">
                 Build a cite-addressable transcript record, then review admissions, conflicts,
                 chronology, exhibits, and connections.

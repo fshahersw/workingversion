@@ -1032,6 +1032,10 @@ export function usePile() {
         // "auto" (the default) resolves here: a saved/indexed set answers from the
         // KB (adaptive RAG); an unsaved pile keeps the in-browser full-text scan,
         // byte-for-byte unchanged. Explicit "full"/"relevant" still override.
+        // Full-text scan is retired: uploads auto-save + index, so Ask is
+        // RAG-only. The in-browser scan stays behind this flag as a dormant
+        // emergency fallback (off), to be deleted once auto-index is proven.
+        const FULL_TEXT_SCAN_ENABLED = false;
         const resolvedScope: DiscoveryScope =
           opts.scope === "full" || opts.scope === "relevant"
             ? opts.scope
@@ -1039,6 +1043,13 @@ export function usePile() {
               ? "relevant"
               : "full";
         if (resolvedScope === "full") {
+          if (!FULL_TEXT_SCAN_ENABLED) {
+            // No indexed documents yet -> the set is still processing. Never
+            // fall back to scanning every page.
+            throw new Error(
+              "These documents are still indexing — Ask will be ready in a moment. Uploads now index automatically for retrieval.",
+            );
+          }
           lastScan.current = {
             query: q,
             opts: { ...opts, fileIds: opts.fileIds ? [...opts.fileIds] : undefined },
@@ -1674,8 +1685,15 @@ export function usePile() {
               }
             });
           }
-          bytesKey = await upload;
-          if (controller.signal.aborted) return;
+          // A document with extractable text takes the text/sync lane, which
+          // never reads the original bytes -- so don't block the save on the
+          // upload. Let it finish in the background (recorded for reload / a
+          // true-scan fallback). Only a text-less scan must wait, since BDA
+          // converts from the bytes.
+          if (fp.length === 0) {
+            bytesKey = await upload;
+            if (controller.signal.aborted) return;
+          }
         }
         const totalChars = fp.reduce((total, page) => total + page.text.length, 0);
         const hasLowQualityExtraction =
@@ -1770,7 +1788,9 @@ export function usePile() {
             message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} pending`,
           },
         }));
-        await abortableDelay(5_000, controller.signal);
+        // Poll fast at first so a quick index (small docs, warm worker) flips to
+        // ready in ~1s instead of a fixed 5s floor; back off for long jobs.
+        await abortableDelay(poll < 4 ? 1_000 : 5_000, controller.signal);
         const polled = await withRetry(
           () => getWorkspaceStatusFn({ data: { itemId: res.itemId } }),
           { tries: 3, baseMs: 500, signal: controller.signal },

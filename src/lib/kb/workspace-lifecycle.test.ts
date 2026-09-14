@@ -133,7 +133,7 @@ test("client retries reuse their request and bind original bytes by pile file id
   assert.match(client, /contentRevisionRef\.current === snapshotRevision/);
   assert.match(client, /revision:\s*snapshotRevision/);
   assert.match(client, /uploadByFileId/);
-  assert.match(client, /abortableDelay\(5_000, controller\.signal\)/);
+  assert.match(client, /abortableDelay\(poll < 4 \? 1_000 : 5_000, controller\.signal\)/);
   assert.match(client, /saveAbort\.current\?\.abort\(\)/);
   assert.doesNotMatch(client, /filesByNameRef/);
   assert.match(client, /file\.emptyPages > 0 \|\| fp\.some/);

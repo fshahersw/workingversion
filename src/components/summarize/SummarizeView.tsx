@@ -453,7 +453,23 @@ export function SummarizeView() {
               transition={{ duration: 0.32, ease: EASE }}
               className="w-full max-w-[880px]"
             >
-              <DropPanel onStart={(f, i) => void start(f, i)} busy={false} />
+              <DropPanel
+                onStart={(f, i) =>
+                  void (async () => {
+                    // Auto-save + index on upload: extract structure locally
+                    // (skipOcr -> no minutes-long on-device OCR; the server
+                    // indexes text and BDA-OCRs true scans), then save so Ask is
+                    // RAG-ready with no full-text scan.
+                    await start(f, i, { skipOcr: true });
+                    const base = f[0]?.name?.replace(/\.[^.]+$/, "") ?? "Working set";
+                    const name = (
+                      f.length > 1 ? `${base} +${f.length - 1} more` : base
+                    ).slice(0, 120);
+                    await saveWorkspace({ name });
+                  })()
+                }
+                busy={false}
+              />
               <p className="mt-3 text-center text-[12px] leading-relaxed text-muted-foreground">
                 Ask questions across a set of documents. Answers are cited to the page. The set is
                 kept on this device until you clear it.
@@ -564,16 +580,16 @@ export function SummarizeView() {
                   {mode === "ask" && (
                     <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
                       <span className="font-medium text-slate-800">
-                        {savedSet ? "Indexed retrieval" : "Full text scan"}
+                        {savedSet ? "Indexed retrieval" : "Indexing…"}
                       </span>
                       <span>
                         {savedSet
                           ? partialSet
                             ? ` · covers ${coverage.ready} of ${coverage.total} indexed documents; the rest are still indexing`
                             : ` · relevant passages across ${coverage.total} document${coverage.total === 1 ? "" : "s"}`
-                          : ` · every available text page across ${fileIds?.length ?? files.length} document${
+                          : ` · preparing ${fileIds?.length ?? files.length} document${
                               (fileIds?.length ?? files.length) === 1 ? "" : "s"
-                            }`}
+                            } for retrieval`}
                       </span>
                     </div>
                   )}
