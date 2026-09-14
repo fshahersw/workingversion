@@ -221,13 +221,10 @@ export async function loadIntelFeed(input: {
 
   let rows: Row[] = [];
   try {
-    const latestRuns = await select("corpus_intel_runs", {
-      select: "run_id",
-      order: "generated_at.desc",
-      limit: "1",
-    });
-    const latestRunId = sn(latestRuns[0]?.["run_id"]);
-    if (latestRunId) params["run_id"] = `eq.${latestRunId}`;
+    // Show the best approved items across the rolling window rather than pinning
+    // to a single run: canonical-url dedupe + 90-day retention keep this a clean
+    // rolling feed, and bounded scheduled runs (which review fewer items each)
+    // still render a full terminal.
     rows = await select("corpus_intel_items", params);
   } catch {
     // Tolerate a corpus that has not had the QA migration applied yet: retry

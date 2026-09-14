@@ -81,6 +81,9 @@ const RELEVANT = [
 ];
 
 const MAX_SCRAPES = 110;
+/** When a run has a deadline, stop scraping this early so the briefings, QA and
+ *  ingest phases still fit inside the caller's budget. */
+const SCRAPE_RESERVE_MS = 90_000;
 /** Max stories any single outlet can contribute to one run. */
 const DOMAIN_CAP = 6;
 /** Directory pages, firm marketing and award lists are not litigation signals. */
@@ -414,8 +417,19 @@ export type IntelRunResult = {
 };
 
 /** Run one full discovery + enrichment + ingest cycle. */
-export async function runIntelCollection(): Promise<IntelRunResult> {
+export async function runIntelCollection(
+  opts: { deadlineMs?: number; maxScrapes?: number; analyzeCap?: number; reviewCap?: number } = {},
+): Promise<IntelRunResult> {
   const started = Date.now();
+  // The scheduled worker runs this off the HTTP path (a direct async Lambda
+  // invoke, ~900s budget), so a full run fits. `deadlineMs` is only a safety
+  // wall-clock that trims the scrape phase; the briefing/QA caps are explicit
+  // and default to the full run.
+  const deadline =
+    opts.deadlineMs && opts.deadlineMs > 0 ? started + opts.deadlineMs : Number.POSITIVE_INFINITY;
+  const maxScrapes = Math.min(Math.max(opts.maxScrapes ?? MAX_SCRAPES, 0), MAX_SCRAPES);
+  const analyzeCap = Math.min(Math.max(opts.analyzeCap ?? 140, 1), 140);
+  const reviewCap = Math.min(Math.max(opts.reviewCap ?? 150, 1), 150);
   const searchErrors: string[] = [];
   const scrapeErrors: string[] = [];
 
@@ -463,9 +477,12 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
   }
 
   const scrapable = kept.filter((c) => c.category !== "Commentary");
-  const toScrape = firecrawlKey ? scrapable.slice(0, MAX_SCRAPES) : [];
+  const toScrape = firecrawlKey ? scrapable.slice(0, maxScrapes) : [];
   const enrichments = await mapLimit(toScrape, SCRAPE_CONCURRENCY, (c) =>
-    firecrawl(firecrawlKey as string, c.url, scrapeErrors),
+    // Stop enriching as the deadline nears so briefings, QA and ingest still fit.
+    Date.now() > deadline - SCRAPE_RESERVE_MS
+      ? Promise.resolve(null)
+      : firecrawl(firecrawlKey as string, c.url, scrapeErrors),
   );
   const enriched = new Map<string, Enrichment>();
   toScrape.forEach((c, i) => {
@@ -488,7 +505,7 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
         text: e?.markdown?.trim() || e?.description || c.summary,
       };
     }),
-    { cap: 140, batchSize: 4, concurrency: 6 },
+    { cap: analyzeCap, batchSize: 4, concurrency: 6 },
   );
   analysisErrors.push(...aiErrors);
 
@@ -559,6 +576,7 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
       category: it.category,
       imageUrl: it.image?.url ?? null,
     })),
+    { cap: reviewCap },
   );
   for (const it of items) {
     const verdict = reviews.get((it.canonicalUrl as string) || it.url);

@@ -70,6 +70,7 @@ Metadata:
           - KbIngestQueueUrl
           - MattersCorpusBucketName
           - MattersSyncSchedule
+          - IntelRefreshSchedule
           - RuntimeSecretRevision
       - Label:
           default: AI and application configuration
@@ -367,6 +368,19 @@ Parameters:
       PDFs for the followed hub dockets from DocketBird. The route authenticates with
       INGEST_API_KEY, which must exist as a key in the CorpusServiceSecretArn secret.
       Empty disables the schedule, the invoker and the INGEST_API_KEY export.
+
+  IntelRefreshSchedule:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^(rate\\([0-9]+ (minute|minutes|hour|hours|day|days)\\)|cron\\(.+\\))$"
+    ConstraintDescription: An EventBridge schedule expression such as rate(4 hours), or empty.
+    Description: >-
+      When set, a small invoker Lambda calls POST /api/public/intel/run on this
+      schedule to refresh the litigation-intelligence feed (Tavily discovery +
+      Firecrawl enrichment + Bedrock briefings + the QA gate). The route
+      authenticates with INGEST_API_KEY from the CorpusServiceSecretArn secret.
+      The invoker passes a deadline + scrape cap so the run stays inside the
+      API-gateway timeout. Empty disables the schedule and its invoker.
 
   BedrockRegion:
     Type: String
@@ -725,6 +739,15 @@ Conditions:
       - !Equals
         - !Ref MattersSyncSchedule
         - ""
+  HasIntelRefresh: !Not
+    - !Equals
+      - !Ref IntelRefreshSchedule
+      - ""
+  # INGEST_API_KEY is exported to the app Lambda when ANY /api/public ingest
+  # consumer is enabled (the matters sync or the intel refresh).
+  HasIngestConsumer: !Or
+    - !Condition HasMattersSync
+    - !Condition HasIntelRefresh
   HasKbIngest: !And
     - !Not
       - !Equals
@@ -989,7 +1012,7 @@ Resources:
           # Shared secret for the scheduled matters sync (and the other
           # /api/public ingest routes). Only exported when the sync is enabled.
           INGEST_API_KEY: !If
-            - HasMattersSync
+            - HasIngestConsumer
             - !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:INGEST_API_KEY}}"
             - !Ref AWS::NoValue
           # Bump RuntimeSecretRevision after rotating any key in the runtime
@@ -1294,6 +1317,138 @@ Resources:
       FunctionName: !Ref MattersSyncInvoker
       Principal: events.amazonaws.com
       SourceArn: !GetAtt MattersSyncRule.Arn
+
+  IntelRefreshInvokerRole:
+    Type: AWS::IAM::Role
+    Condition: HasIntelRefresh
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Execution role for the scheduled intel-refresh invoker (logs + invoke the app function).
+        must:
+          - Grant only CloudWatch Logs and lambda:InvokeFunction on the app function.
+        mutable: change-with-constraints
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-intel-refresh-invoker"
+      Path: !Sub "/lit-ai/${Environment}/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: invoke-app-function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${NamePrefix}-${Environment}-app"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IntelRefreshInvoker:
+    Type: AWS::Lambda::Function
+    Condition: HasIntelRefresh
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Fire the intel-refresh run off the HTTP path via a direct async invoke of the app function.
+        must:
+          - Invoke the app function asynchronously (Event) so the run is not bound by any HTTP/CloudFront timeout (the app Lambda has a 900s timeout).
+          - Route the synthetic API Gateway v1 event to POST /api/public/intel/run; authenticate with the shared ingest key.
+          - Never log the shared secret; log only that the async invoke was accepted.
+        mutable: change-with-constraints
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-${Environment}-intel-refresh-invoker"
+      Description: Scheduled trigger for the litigation-intelligence feed refresh (async direct invoke).
+      Role: !GetAtt IntelRefreshInvokerRole.Arn
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          APP_FUNCTION_NAME: !Sub "${NamePrefix}-${Environment}-app"
+          INGEST_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:INGEST_API_KEY}}"
+          RUNTIME_SECRET_REVISION: !Ref RuntimeSecretRevision
+          DEADLINE_MS: "700000"
+      Code:
+        ZipFile: |
+          "use strict";
+          const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
+          const lambda = new LambdaClient({});
+          exports.handler = async () => {
+            const fn = process.env.APP_FUNCTION_NAME;
+            const key = process.env.INGEST_API_KEY;
+            if (!fn || !key) throw new Error("APP_FUNCTION_NAME and INGEST_API_KEY are required");
+            const body = JSON.stringify({ deadlineMs: Number(process.env.DEADLINE_MS || 700000) });
+            // Minimal API Gateway REST (v1) proxy event so the Lambda Web Adapter
+            // routes it to POST /api/public/intel/run in-process (no CloudFront cap).
+            const event = {
+              resource: "/{proxy+}",
+              path: "/api/public/intel/run",
+              httpMethod: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-ingest-key": key,
+                "user-agent": "litai-intel-refresh-invoker/2.0",
+              },
+              multiValueHeaders: {},
+              queryStringParameters: null,
+              multiValueQueryStringParameters: null,
+              pathParameters: { proxy: "api/public/intel/run" },
+              stageVariables: null,
+              requestContext: {
+                resourcePath: "/{proxy+}",
+                httpMethod: "POST",
+                path: "/api/public/intel/run",
+                stage: "invoke",
+              },
+              body,
+              isBase64Encoded: false,
+            };
+            const res = await lambda.send(new InvokeCommand({
+              FunctionName: fn,
+              InvocationType: "Event",
+              Payload: Buffer.from(JSON.stringify(event)),
+            }));
+            console.log(JSON.stringify({ invoked: fn, statusCode: res.StatusCode }));
+            return { statusCode: res.StatusCode };
+          };
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IntelRefreshRule:
+    Type: AWS::Events::Rule
+    Condition: HasIntelRefresh
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-intel-refresh"
+      Description: Refresh the litigation-intelligence feed (Tavily + Firecrawl + Bedrock briefings + QA gate).
+      ScheduleExpression: !Ref IntelRefreshSchedule
+      State: ENABLED
+      Targets:
+        - Id: invoker
+          Arn: !GetAtt IntelRefreshInvoker.Arn
+
+  IntelRefreshInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasIntelRefresh
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IntelRefreshInvoker
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IntelRefreshRule.Arn
 
   ApiDeploymentBlue:
     Type: AWS::ApiGateway::Deployment

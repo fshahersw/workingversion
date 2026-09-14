@@ -21,11 +21,11 @@
   },
   {
     "ParameterKey": "ArtifactObjectKey",
-    "ParameterValue": "releases/1bd0d6f35a186baaed78a8e4ae2945bd55ac62ce8611188c4af98de713782743/app-runtime.zip"
+    "ParameterValue": "releases/df8f56579ef90098d645f89137587b59dd454115a95916743e63cf2fc04e1563/app-runtime.zip"
   },
   {
     "ParameterKey": "ArtifactObjectVersion",
-    "ParameterValue": "k.KvUGW2pt3GsjpdfA2S12B.P8O_FeFZ"
+    "ParameterValue": "z1FxFF_uuDWD_PNGQNcwoVmvTP6Ssm7R"
   },
   {
     "ParameterKey": "Architecture",
@@ -110,6 +110,10 @@
   {
     "ParameterKey": "MattersSyncSchedule",
     "ParameterValue": "rate(30 minutes)"
+  },
+  {
+    "ParameterKey": "IntelRefreshSchedule",
+    "ParameterValue": "rate(4 hours)"
   },
   {
     "ParameterKey": "BedrockRegion",

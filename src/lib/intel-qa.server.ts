@@ -199,8 +199,12 @@ async function reviewTextBatch(
  */
 export async function reviewIntelItems(
   inputs: IntelReviewInput[],
-  signal?: AbortSignal,
+  opts: { cap?: number; signal?: AbortSignal } = {},
 ): Promise<{ reviews: Map<string, IntelReview>; stats: IntelReviewStats; errors: string[] }> {
+  const signal = opts.signal;
+  // A tighter cap (bounded/scheduled runs) keeps text + vision QA inside budget.
+  const textCap = Math.min(Math.max(opts.cap ?? TEXT_CAP, 1), TEXT_CAP);
+  const imageCap = Math.min(opts.cap ?? IMAGE_CAP, IMAGE_CAP);
   const errors: string[] = [];
   const reviews = new Map<string, IntelReview>();
   const stats: IntelReviewStats = {
@@ -228,8 +232,8 @@ export async function reviewIntelItems(
     return { reviews, stats, errors: ["Bedrock credentials are not configured"] };
   }
 
-  const reviewable = inputs.slice(0, TEXT_CAP);
-  const overflow = inputs.slice(TEXT_CAP);
+  const reviewable = inputs.slice(0, textCap);
+  const overflow = inputs.slice(textCap);
 
   // ---- text QA (batched) --------------------------------------------------
   const batches: IntelReviewInput[][] = [];
@@ -255,7 +259,7 @@ export async function reviewIntelItems(
     const v = reviews.get(b.key);
     return v?.status === "approved" && !!b.imageUrl;
   });
-  const imageBatch = withImages.slice(0, IMAGE_CAP);
+  const imageBatch = withImages.slice(0, imageCap);
   await mapLimit(imageBatch, IMAGE_CONCURRENCY, async (b) => {
     const v = reviews.get(b.key);
     if (!v || !b.imageUrl) return;
