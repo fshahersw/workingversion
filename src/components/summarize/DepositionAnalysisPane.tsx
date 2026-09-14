@@ -42,6 +42,7 @@ const TABS: {
   { id: "summary", label: "Summary", pass: "case" },
   { id: "admissions", label: "Admissions", count: (a) => a.admissions.length, pass: "case" },
   { id: "impeachment", label: "Impeachment", count: (a) => a.impeachment.length, pass: "case" },
+  { id: "objections", label: "Objections", count: (a) => a.objections.length, pass: "case" },
   { id: "themes", label: "Themes", count: (a) => a.themes.length, pass: "record" },
   { id: "intel", label: "Intelligence", pass: "connections" },
   { id: "witnesses", label: "Witnesses", count: (a) => a.witnesses.length, pass: "connections" },
@@ -51,16 +52,21 @@ const TABS: {
     count: (a) => a.contradictions.length,
     pass: "connections",
   },
-  { id: "graph", label: "Connections", count: (a) => a.graph.nodes.length, pass: "connections" },
-  { id: "chronology", label: "Chronology", count: (a) => a.chronology.length, pass: "record" },
+  { id: "graph", label: "Knowledge graph", count: (a) => a.graph.nodes.length, pass: "connections" },
+  { id: "chronology", label: "Timeline", count: (a) => a.chronology.length, pass: "record" },
   { id: "exhibits", label: "Exhibits", count: (a) => a.exhibits.length, pass: "record" },
 ];
 
+// Grouped for the left nav using the deposition workspace's reference vocabulary
+// (Overview / Case analysis / The record / Connections). Ids are unchanged, so
+// citations, export sections, and graph jumps keep working; only nav labels,
+// order, and grouping change. Objections joins Case analysis and is now
+// reachable (it auto-hides when the case pass finds none — see visibleTabs).
 const GROUPS: { label: string; ids: AnalysisTab[] }[] = [
-  { label: "Overview", ids: ["ask", "summary"] },
-  { label: "Case", ids: ["admissions", "impeachment"] },
-  { label: "Record", ids: ["themes", "chronology", "exhibits"] },
-  { label: "Map", ids: ["intel", "witnesses", "contradictions", "graph"] },
+  { label: "Overview", ids: ["summary", "ask"] },
+  { label: "Case analysis", ids: ["admissions", "impeachment", "objections", "contradictions"] },
+  { label: "The record", ids: ["themes", "chronology", "exhibits"] },
+  { label: "Connections", ids: ["graph", "witnesses", "intel"] },
 ];
 
 function CiteButton({
@@ -161,7 +167,7 @@ function FindingCard({
         <p className="mt-2 text-[13px] leading-relaxed text-foreground/90">{item.summary}</p>
       ) : null}
       {item.quote ? (
-        <blockquote className="mt-3 rounded-lg bg-[#eef3fb] px-3 py-2.5 text-[13px] italic leading-relaxed text-foreground/90">
+        <blockquote className="mt-3 rounded-lg bg-brand-blue-soft px-3 py-2.5 text-[13px] italic leading-relaxed text-foreground/90">
           “{item.quote}”
         </blockquote>
       ) : null}
