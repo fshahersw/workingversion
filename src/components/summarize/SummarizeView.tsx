@@ -31,7 +31,7 @@ import { takeWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { flattenFolders, ROOT_FOLDER, type LibraryFolder } from "@/lib/library/folder-tree";
 import { listFoldersFn } from "@/lib/library/folders.functions";
 import { suggestQuestions } from "@/lib/pile/suggest-questions";
-import { completeSavedWorkspace } from "@/lib/pile/kb-binding";
+import { savedCoverage } from "@/lib/pile/kb-binding";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
 import type { PileFile, PileFileHits } from "@/lib/pile/types";
 import { useSharedPile } from "@/lib/pile-context";
@@ -109,8 +109,11 @@ export function SummarizeView() {
   const busy = ingesting || state.phase === "asking" || state.adding;
   const files = state.session?.files ?? [];
   // A saved/indexed set answers from the KB (adaptive RAG); an unsaved pile runs
-  // the full-text scan. Drives the mode label so it reflects what actually runs.
-  const savedSet = Boolean(completeSavedWorkspace(state.session ?? null));
+  // the full-text scan. Coverage drives the mode label so it reflects what runs,
+  // including a partial set (some documents still indexing).
+  const coverage = savedCoverage(state.session ?? null);
+  const savedSet = coverage.ready > 0;
+  const partialSet = savedSet && coverage.ready < coverage.total;
 
   useEffect(() => {
     writeLayoutPreference(WORKING_SET_FILES_KEY, filesOpen);
@@ -564,10 +567,13 @@ export function SummarizeView() {
                         {savedSet ? "Indexed retrieval" : "Full text scan"}
                       </span>
                       <span>
-                        ·{" "}
-                        {savedSet ? "relevant passages across" : "every available text page across"}{" "}
-                        {fileIds?.length ?? files.length} document
-                        {(fileIds?.length ?? files.length) === 1 ? "" : "s"}
+                        {savedSet
+                          ? partialSet
+                            ? ` · covers ${coverage.ready} of ${coverage.total} indexed documents; the rest are still indexing`
+                            : ` · relevant passages across ${coverage.total} document${coverage.total === 1 ? "" : "s"}`
+                          : ` · every available text page across ${fileIds?.length ?? files.length} document${
+                              (fileIds?.length ?? files.length) === 1 ? "" : "s"
+                            }`}
                       </span>
                     </div>
                   )}

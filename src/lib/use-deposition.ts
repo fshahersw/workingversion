@@ -565,12 +565,16 @@ export function useDeposition() {
           doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
         ),
       );
-      const bound = transcriptsRef.current.every((t) => Boolean(docIdByFileId[t.fileId]));
+      const readyCount = transcriptsRef.current.filter((t) => Boolean(docIdByFileId[t.fileId])).length;
+      const bound = readyCount === transcriptsRef.current.length;
       setSaved({
         status: "ready",
         itemId: initialStatus.itemId,
         docIdByFileId,
-        hybridAsk: bound,
+        // Partial binding: hybrid Ask runs whenever at least one transcript is
+        // indexed; the ready subset answers via RAG and the rest via in-tab
+        // retrieval, instead of the whole set falling back until all are ready.
+        hybridAsk: readyCount > 0,
         message: bound
           ? transcriptsRef.current.some(
               (t) =>
@@ -579,7 +583,9 @@ export function useDeposition() {
             )
             ? "Transcript text and analysis can be saved, but an original file upload failed. Keep your original files."
             : null
-          : "Saved, but not every transcript is indexed. Ask uses in-tab retrieval.",
+          : readyCount > 0
+            ? `Ask covers the ${readyCount} indexed transcript${readyCount === 1 ? "" : "s"} so far; the rest are still indexing.`
+            : "Saved, but not indexed yet. Ask uses in-tab retrieval.",
       });
       step({
         id: "save",
@@ -1584,8 +1590,10 @@ export function useDeposition() {
         const transcripts = transcriptsRef.current.filter(
           (t) => !opts.fileIds || opts.fileIds.includes(t.fileId),
         );
+        // Partial binding: RAG the transcripts that ARE indexed; if none are
+        // ready yet, fall back to the in-tab retriever.
         const docIds = transcripts.map((t) => saved.docIdByFileId[t.fileId]).filter(Boolean);
-        if (docIds.length !== transcripts.length) return false;
+        if (!docIds.length) return false;
         const outcome: { streamed: boolean; completed: boolean; softError: string | null } = {
           streamed: false,
           completed: false,

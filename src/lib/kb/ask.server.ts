@@ -99,8 +99,12 @@ export async function askSavedWorkspace(
 ): Promise<void> {
   const workspace = await getWorkspace(principal, input.itemId);
   if (!workspace) throw new KbAskError("Workspace not found.", 404, true);
-  if (workspace.status !== "ready") {
-    throw new KbAskError("Workspace is not ready to search.", 409, true);
+  // Partial binding: a workspace that is still ingesting (or hit a per-document
+  // failure) can still answer from the documents that HAVE finalized —
+  // `workspace.docs` only contains ready docs, and the client sends the ready
+  // doc-id subset. Block only when nothing is ready yet.
+  if (workspace.status !== "ready" && workspace.docs.length === 0) {
+    throw new KbAskError("Workspace is still indexing; no documents are ready yet.", 409, true);
   }
   // Working Set and Deposition workspaces share the same chunk index and the
   // same answer writer; review tables are queried through their own pipeline.

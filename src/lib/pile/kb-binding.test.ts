@@ -1,80 +1,84 @@
+// Unit tests for saved-workspace binding resolution, incl. PARTIAL binding
+// (some documents ready, others still indexing/failed). Pure: no AWS, no deps.
+//   node --experimental-strip-types --test src/lib/pile/kb-binding.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
   completeSavedWorkspace,
+  savedCoverage,
   selectedWorkspaceDocIds,
-  withoutSavedWorkspace,
 } from "./kb-binding.ts";
-import type { PileSession } from "./types.ts";
 
-function session(): PileSession {
+// Non-null PileSession shape (selectedWorkspaceDocIds requires non-null).
+type LooseSession = Parameters<typeof selectedWorkspaceDocIds>[0];
+
+function session(fileIds: string[], docIdByFileId: Record<string, string>): LooseSession {
   return {
-    id: "local-1",
-    createdAt: 1,
-    expiresAt: 2,
-    matterLabel: null,
-    instructions: null,
-    files: [
-      { id: "local-a", name: "same.pdf", pageCount: 2, emptyPages: 0, ocrPages: 0 },
-      { id: "local-b", name: "same.pdf", pageCount: 3, emptyPages: 0, ocrPages: 0 },
-    ],
-    pageCount: 5,
-    structure: null,
+    id: "s1",
+    files: fileIds.map((id) => ({ id, name: `${id}.pdf`, pageCount: 3 })),
     savedWorkspace: {
-      itemId: "workspace-1",
-      kbWorkspaceId: "11111111-1111-4111-8111-111111111111",
+      itemId: "ws1",
+      kbWorkspaceId: "kb1",
       surface: "workingset",
-      docIdByFileId: {
-        "local-a": "doc-a",
-        "local-b": "doc-b",
-      },
+      docIdByFileId,
     },
-  };
+  } as unknown as LooseSession;
 }
 
-test("a complete binding maps duplicate filenames by file id", () => {
-  const value = session();
-  assert.ok(completeSavedWorkspace(value));
-  assert.deepEqual(selectedWorkspaceDocIds(value), ["doc-a", "doc-b"]);
-  assert.deepEqual(selectedWorkspaceDocIds(value, ["local-b"]), ["doc-b"]);
+test("completeSavedWorkspace: all files ready -> binding (unchanged)", () => {
+  const s = session(["a", "b"], { a: "docA", b: "docB" });
+  assert.ok(completeSavedWorkspace(s));
 });
 
-test("incomplete, duplicate, or unknown mappings fail closed", () => {
-  const missing = session();
-  delete missing.savedWorkspace!.docIdByFileId["local-b"];
-  assert.equal(completeSavedWorkspace(missing), null);
-
-  const missingWorkspace = session();
-  missingWorkspace.savedWorkspace!.kbWorkspaceId = "";
-  assert.equal(completeSavedWorkspace(missingWorkspace), null);
-
-  const duplicate = session();
-  duplicate.savedWorkspace!.docIdByFileId["local-b"] = "doc-a";
-  assert.equal(completeSavedWorkspace(duplicate), null);
-
-  const unknown = session();
-  assert.equal(selectedWorkspaceDocIds(unknown, ["not-in-pile"]), null);
+test("completeSavedWorkspace: PARTIAL (one ready) -> binding", () => {
+  const s = session(["a", "b"], { a: "docA" }); // b still indexing
+  assert.ok(completeSavedWorkspace(s), "a set with one ready doc still binds");
 });
 
-test("content mutation removes the saved workspace binding", () => {
-  const local = withoutSavedWorkspace(session());
-  assert.equal(local.savedWorkspace, undefined);
-  assert.equal(local.files.length, 2);
+test("completeSavedWorkspace: zero ready -> null (falls back to scan)", () => {
+  const s = session(["a", "b"], {});
+  assert.equal(completeSavedWorkspace(s), null);
 });
 
-test("reload bindings stay complete when pile ids equal Aurora doc ids", () => {
-  const reloaded = session();
-  reloaded.files = reloaded.files.map((file, index) => ({
-    ...file,
-    id: index === 0 ? "doc-a" : "doc-b",
-  }));
-  reloaded.savedWorkspace = {
-    itemId: "workspace-1",
-    kbWorkspaceId: "11111111-1111-4111-8111-111111111111",
-    surface: "workingset",
-    docIdByFileId: { "doc-a": "doc-a", "doc-b": "doc-b" },
-  };
-  assert.ok(completeSavedWorkspace(reloaded));
-  assert.deepEqual(selectedWorkspaceDocIds(reloaded), ["doc-a", "doc-b"]);
+test("completeSavedWorkspace: null / wrong surface / no files -> null", () => {
+  assert.equal(completeSavedWorkspace(null), null);
+  const wrong = session(["a"], { a: "docA" }) as { savedWorkspace: { surface: string } };
+  wrong.savedWorkspace.surface = "review";
+  assert.equal(completeSavedWorkspace(wrong as unknown as LooseSession), null);
+});
+
+test("completeSavedWorkspace: duplicate doc ids -> null", () => {
+  const s = session(["a", "b"], { a: "dup", b: "dup" });
+  assert.equal(completeSavedWorkspace(s), null);
+});
+
+test("savedCoverage: counts ready vs total", () => {
+  assert.deepEqual(savedCoverage(session(["a", "b", "c"], { a: "d1", b: "d2" })), {
+    ready: 2,
+    total: 3,
+  });
+  assert.deepEqual(savedCoverage(session(["a"], { a: "d1" })), { ready: 1, total: 1 });
+  assert.deepEqual(savedCoverage(session(["a", "b"], {})), { ready: 0, total: 2 });
+});
+
+test("selectedWorkspaceDocIds: all ready, no filter -> all doc ids", () => {
+  const s = session(["a", "b"], { a: "docA", b: "docB" });
+  assert.deepEqual(selectedWorkspaceDocIds(s), ["docA", "docB"]);
+});
+
+test("selectedWorkspaceDocIds: partial -> only the ready subset", () => {
+  const s = session(["a", "b", "c"], { a: "docA", c: "docC" }); // b not ready
+  assert.deepEqual(selectedWorkspaceDocIds(s), ["docA", "docC"]);
+});
+
+test("selectedWorkspaceDocIds: filter to a not-ready file -> excluded (null if none ready)", () => {
+  const s = session(["a", "b"], { a: "docA" });
+  assert.deepEqual(selectedWorkspaceDocIds(s, ["a"]), ["docA"]);
+  assert.equal(selectedWorkspaceDocIds(s, ["b"]), null, "selecting only a not-ready file -> null");
+});
+
+test("selectedWorkspaceDocIds: unknown selected file id -> null", () => {
+  const s = session(["a"], { a: "docA" });
+  assert.equal(selectedWorkspaceDocIds(s, ["zzz"]), null);
 });

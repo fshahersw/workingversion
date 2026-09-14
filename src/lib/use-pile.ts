@@ -1710,15 +1710,22 @@ export function usePile() {
         );
       }
       attempt.submitted = true;
-      const res = await saveWorkspaceFn({
-        data: {
-          requestId: attempt.requestId,
-          name: opts.name,
-          surface: "workingset",
-          folderId: opts.folderId,
-          files,
-        },
-      });
+      // Idempotent auto-retry: the save keys on a stable requestId, so retrying a
+      // transient failure (network / throttle) is a no-op if the first attempt
+      // actually landed, and recovers the set instead of leaving it unindexed.
+      const res = await withRetry(
+        () =>
+          saveWorkspaceFn({
+            data: {
+              requestId: attempt.requestId,
+              name: opts.name,
+              surface: "workingset",
+              folderId: opts.folderId,
+              files,
+            },
+          }),
+        { tries: 3, baseMs: 800, signal: controller.signal },
+      );
       if (controller.signal.aborted) return;
       let status: {
         status: "saving" | "ready" | "error";
@@ -1769,41 +1776,23 @@ export function usePile() {
         status = polled;
       }
       if (controller.signal.aborted) return;
-      if (status.status === "saving") {
-        setState((current) => ({
-          ...current,
-          kbSave: {
-            status:
-              status.stage === "embedding"
-                ? "embedding"
-                : status.stage === "converting"
-                  ? "converting"
-                  : "queued",
-            message: "Workspace ingest is continuing in the background.",
-          },
-        }));
-        return;
-      }
-      if (status.status === "error") {
-        pendingWorkspaceSaveRef.current = null;
-        setState((current) => ({
-          ...current,
-          kbSave: {
-            status: "error",
-            message: status.errorSummary ?? "Workspace ingest did not complete.",
-          },
-        }));
-        return;
-      }
+      // Bind the READY documents up front (partial binding): even while the rest
+      // of the set is still ingesting, or after a per-document failure, the ready
+      // docs answer via RAG. Only docs the server reports ready (with a docId)
+      // are bound; unmapped files stay on the full-text scan and the coverage is
+      // surfaced to the user (savedCoverage). This runs regardless of the overall
+      // workspace status so a slow/failed sibling never blocks the ready subset.
       const docIdByFileId = Object.fromEntries(
         status.documents.flatMap((doc) =>
           doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
         ),
       );
+      const readyCount = Object.keys(docIdByFileId).length;
+      const total = session.files.length;
       const bindingComplete = session.files.every((file) => Boolean(docIdByFileId[file.id]));
       const snapshotStillCurrent =
         contentRevisionRef.current === snapshotRevision && sessionRef.current?.id === session.id;
-      if (bindingComplete && snapshotStillCurrent) {
+      if (readyCount > 0 && snapshotStillCurrent) {
         const savedSession: PileSession = {
           ...session,
           savedWorkspace: {
@@ -1816,6 +1805,41 @@ export function usePile() {
         sessionRef.current = savedSession;
         persistPile(ownerRef.current, savedSession, pagesRef.current);
         setState((state) => ({ ...state, session: savedSession }));
+      }
+      if (status.status === "saving") {
+        setState((current) => ({
+          ...current,
+          kbSave: {
+            status:
+              status.stage === "embedding"
+                ? "embedding"
+                : status.stage === "converting"
+                  ? "converting"
+                  : "queued",
+            message:
+              readyCount > 0
+                ? `Indexing — ${readyCount} of ${total} ready; Ask uses the ready documents so far.`
+                : "Workspace ingest is continuing in the background.",
+          },
+        }));
+        return;
+      }
+      if (status.status === "error") {
+        pendingWorkspaceSaveRef.current = null;
+        setState((current) => ({
+          ...current,
+          kbSave:
+            readyCount > 0
+              ? {
+                  status: "saved",
+                  message: `Indexed ${readyCount} of ${total} — some documents failed and are excluded from Ask; re-save to retry them.`,
+                }
+              : {
+                  status: "error",
+                  message: status.errorSummary ?? "Workspace ingest did not complete.",
+                },
+        }));
+        return;
       }
       pendingWorkspaceSaveRef.current = null;
       const caveats = [
