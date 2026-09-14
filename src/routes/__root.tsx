@@ -11,6 +11,7 @@ import { type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { Toaster } from "../components/ui/sonner";
+import { WorkspaceReadyWatcher } from "../components/WorkspaceReadyWatcher";
 
 import swLogoAsset from "../assets/sw-logo.asset.json";
 
@@ -126,6 +127,7 @@ function RootComponent() {
     <QueryClientProvider client={queryClient}>
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
       <Outlet />
+      <WorkspaceReadyWatcher />
       <Toaster position="bottom-right" />
     </QueryClientProvider>
   );

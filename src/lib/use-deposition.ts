@@ -19,6 +19,7 @@ import {
   type DepositionRecordPassStatus,
 } from "@/lib/kb/deposition-record";
 import { planSaveLane } from "@/lib/kb/ingest-state";
+import { addPendingWorkspace, removePendingWorkspace } from "@/lib/pile/pending-workspaces";
 import { streamSavedWorkspaceAsk, type KbAskSource } from "@/lib/kb/kb-client";
 import {
   deleteWorkspaceFn,
@@ -511,6 +512,15 @@ export function useDeposition() {
       signal: AbortSignal,
     ) => {
       let status = initialStatus;
+      // Track across navigation so the app-level watcher can notify on ready if
+      // the user leaves; cleared below on a terminal in-view result.
+      if (status.status === "saving") {
+        addPendingWorkspace({
+          itemId: initialStatus.itemId,
+          name: savedRef.current.name || depositionWorkspaceName(transcriptsRef.current),
+          surface: "deposition",
+        });
+      }
       for (let poll = 0; status.status === "saving" && poll < SAVE_POLL_MAX; poll++) {
         setSaved({
           status: status.stage === "embedding" ? "embedding" : "queued",
@@ -547,6 +557,7 @@ export function useDeposition() {
       }
       if (status.status === "error") {
         saveAttemptRef.current = null;
+        removePendingWorkspace(initialStatus.itemId);
         setSaved({
           status: "error",
           itemId: initialStatus.itemId,
@@ -560,6 +571,7 @@ export function useDeposition() {
         });
         return;
       }
+      removePendingWorkspace(initialStatus.itemId);
       const docIdByFileId = Object.fromEntries(
         status.documents.flatMap((doc) =>
           doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],

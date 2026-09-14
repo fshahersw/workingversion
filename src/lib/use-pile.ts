@@ -37,6 +37,7 @@ import {
   selectedWorkspaceDocIds,
   withoutSavedWorkspace,
 } from "@/lib/pile/kb-binding";
+import { addPendingWorkspace, removePendingWorkspace } from "@/lib/pile/pending-workspaces";
 import {
   clearLocalPile,
   loadLocalPile,
@@ -1774,6 +1775,12 @@ export function usePile() {
         documents: res.documents,
         ...(res.errorSummary ? { errorSummary: res.errorSummary } : {}),
       };
+      // Track it as pending across navigation: if the user leaves before it is
+      // ready, the app-level watcher notifies them. Cleared below once this
+      // in-view poll reaches a terminal state (so staying never double-notifies).
+      if (status.status === "saving") {
+        addPendingWorkspace({ itemId: res.itemId, name: opts.name, surface: "workingset" });
+      }
       for (let poll = 0; status.status === "saving" && poll < 180; poll++) {
         const activeStage =
           status.stage === "embedding"
@@ -1785,7 +1792,7 @@ export function usePile() {
           ...current,
           kbSave: {
             status: activeStage,
-            message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} pending`,
+            message: "Preparing in the background — you can leave; we'll notify you when it's ready.",
           },
         }));
         // Poll fast at first so a quick index (small docs, warm worker) flips to
@@ -1800,6 +1807,9 @@ export function usePile() {
         status = polled;
       }
       if (controller.signal.aborted) return;
+      // Reached a terminal state in-view -> the user is still here, so drop the
+      // pending marker; the app-level watcher only fires for sets left mid-save.
+      if (status.status !== "saving") removePendingWorkspace(res.itemId);
       // Bind the READY documents up front (partial binding): even while the rest
       // of the set is still ingesting, or after a per-document failure, the ready
       // docs answer via RAG. Only docs the server reports ready (with a docId)
