@@ -713,9 +713,21 @@ Resources:
                 Effect: Allow
                 Action:
                   - bedrock:InvokeDataAutomationAsync
+                # See StartConfiguredBdaJob: the cross-region profile must be
+                # authorized in every region it routes to (us-east-1/us-east-2/
+                # us-west-1/us-west-2) or the reconciler's restart fails closed.
                 Resource:
                   - !Ref BdaProjectArn
                   - !Ref BdaProfileArn
+                  - !Sub
+                    - "arn:${AWS::Partition}:bedrock:us-east-2:${AWS::AccountId}:${Profile}"
+                    - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+                  - !Sub
+                    - "arn:${AWS::Partition}:bedrock:us-west-1:${AWS::AccountId}:${Profile}"
+                    - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+                  - !Sub
+                    - "arn:${AWS::Partition}:bedrock:us-west-2:${AWS::AccountId}:${Profile}"
+                    - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
               - Sid: ReadQueuedBdaInput
                 Effect: Allow
                 Action:
@@ -967,9 +979,25 @@ Resources:
             Effect: Allow
             Action:
               - bedrock:InvokeDataAutomationAsync
+            # A cross-region data-automation profile (us.data-automation-v1) is
+            # authorized against the profile ARN in EVERY region it can route to,
+            # not just the calling region. For the US profile that is us-east-1,
+            # us-east-2, us-west-1 and us-west-2 (per the AWS "Cross Region support
+            # required for Bedrock Data Automation" table). Granting only the
+            # source-region ARN makes InvokeDataAutomationAsync fail closed with
+            # AccessDenied. The project resource stays single-region.
             Resource:
               - !Ref BdaProjectArn
               - !Ref BdaProfileArn
+              - !Sub
+                - "arn:${AWS::Partition}:bedrock:us-east-2:${AWS::AccountId}:${Profile}"
+                - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+              - !Sub
+                - "arn:${AWS::Partition}:bedrock:us-west-1:${AWS::AccountId}:${Profile}"
+                - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+              - !Sub
+                - "arn:${AWS::Partition}:bedrock:us-west-2:${AWS::AccountId}:${Profile}"
+                - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
           - Sid: CorrelationTableKms
             Effect: Allow
             Action:

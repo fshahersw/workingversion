@@ -77,6 +77,14 @@ test("worker identity stays least privilege and runtime receives producer contra
   assert.match(template, /bedrock:GetDataAutomationStatus/);
   assert.match(template, /bedrock:InvokeDataAutomationAsync/);
   assert.match(template, /bedrock:InvokeModel/);
+  // The cross-region data-automation profile must be authorized in every region
+  // it can route to (us-east-1/us-east-2/us-west-1/us-west-2) or the invoke and
+  // reconciler restart fail closed with AccessDenied. Regression guard for both
+  // the app (StartConfiguredBdaJob) and worker (RestartAmbiguousBdaInvocation).
+  assert.match(template, /bedrock:us-east-2:\$\{AWS::AccountId\}:\$\{Profile\}/);
+  assert.match(template, /bedrock:us-west-1:\$\{AWS::AccountId\}:\$\{Profile\}/);
+  assert.match(template, /bedrock:us-west-2:\$\{AWS::AccountId\}:\$\{Profile\}/);
+  assert.match(template, /Profile: !Select \[5, !Split \[":", !Ref BdaProfileArn\]\]/);
   assert.match(template, /\$\{AppDataBucketArn\}\/uploads\/\*/);
   assert.match(template, /rds-data:BeginTransaction/);
   assert.match(template, /KB_INGEST_JOBS_TABLE/);
