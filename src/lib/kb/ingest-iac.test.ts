@@ -85,6 +85,13 @@ test("worker identity stays least privilege and runtime receives producer contra
   assert.match(template, /bedrock:us-west-1:\$\{AWS::AccountId\}:\$\{Profile\}/);
   assert.match(template, /bedrock:us-west-2:\$\{AWS::AccountId\}:\$\{Profile\}/);
   assert.match(template, /Profile: !Select \[5, !Split \[":", !Ref BdaProfileArn\]\]/);
+  // No-BDA text lane: the app enqueues a text job and the worker reads back the
+  // browser-extracted pages it stored. Guard both least-privilege grants.
+  assert.match(template, /Sid: EnqueueTextIngest[\s\S]*?sqs:SendMessage[\s\S]*?!GetAtt IngestQueue\.Arn/);
+  assert.match(
+    template,
+    /Sid: ReadCanonicalPages[\s\S]*?s3:GetObject[\s\S]*?\$\{AppDataBucketArn\}\/kb\/pages\/\*/,
+  );
   assert.match(template, /\$\{AppDataBucketArn\}\/uploads\/\*/);
   assert.match(template, /rds-data:BeginTransaction/);
   assert.match(template, /KB_INGEST_JOBS_TABLE/);

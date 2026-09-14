@@ -10,6 +10,8 @@ import {
   planSaveLane,
   selectIngestLane,
   SYNC_INGEST_MAX_PAGES,
+  SYNC_INLINE_MAX_PAGES,
+  SYNC_INLINE_MAX_CHARS,
   terminalErrorSummary,
   type IngestStatus,
 } from "./ingest-state.ts";
@@ -104,6 +106,60 @@ test("lane selection preserves ordinary sync files and requires owned bytes for 
     lane: "reject",
     reason: "async-input-required",
   });
+});
+
+test("text-background lane indexes extracted text and reserves BDA for true scans", () => {
+  const tb = { textBackground: true } as const;
+  // Small text -> inline sync (no queue latency for a short document).
+  assert.deepEqual(selectIngestLane({ readablePages: 10, totalChars: 20_000 }, tb), {
+    lane: "sync",
+  });
+  // Large by pages -> background text worker; no original bytes required.
+  assert.deepEqual(
+    selectIngestLane({ readablePages: SYNC_INLINE_MAX_PAGES + 1, totalChars: 10 }, tb),
+    { lane: "text" },
+  );
+  // Large by chars -> background text worker.
+  assert.deepEqual(
+    selectIngestLane({ readablePages: 5, totalChars: SYNC_INLINE_MAX_CHARS + 1 }, tb),
+    { lane: "text" },
+  );
+  // A document with extractable text never routes to BDA even with bytes.
+  assert.equal(
+    selectIngestLane(
+      { readablePages: 4000, totalChars: 9_000_000, bytesKey: "uploads/p/o", sha256: "a".repeat(64) },
+      tb,
+    ).lane,
+    "text",
+  );
+  // No extractable text: BDA when bytes exist, else reject (unchanged intent).
+  assert.deepEqual(
+    selectIngestLane(
+      { readablePages: 0, totalChars: 0, bytesKey: "uploads/p/o", sha256: "a".repeat(64) },
+      tb,
+    ),
+    { lane: "async" },
+  );
+  assert.deepEqual(selectIngestLane({ readablePages: 0, totalChars: 0 }, tb), {
+    lane: "reject",
+    reason: "async-input-required",
+  });
+  // With the lane OFF (default), a large text doc still follows the legacy split.
+  assert.equal(
+    selectIngestLane({
+      readablePages: SYNC_INGEST_MAX_PAGES + 1,
+      totalChars: 10,
+      bytesKey: "uploads/p/o",
+      sha256: "a".repeat(64),
+    }).lane,
+    "async",
+  );
+  assert.equal(selectIngestLane({ readablePages: 10, totalChars: 20_000 }).lane, "sync");
+});
+
+test("text lane byte-size validation does not inherit the BDA conversion cap", () => {
+  assert.doesNotThrow(() => validateSaveByteSize(64 * 1024 * 1024, "text"));
+  assert.throws(() => validateSaveByteSize(201 * 1024 * 1024, "text"), /200 MiB/);
 });
 
 test("terminal summaries are generic, bounded, and contain no raw error input", () => {

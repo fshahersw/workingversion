@@ -1700,7 +1700,11 @@ export function usePile() {
           ...(sha256 ? { sha256 } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
           ...(bytesKey ? { bytesKey } : {}),
-          pages: plan === "async" ? [] : fp,
+          // Always send the extracted page text when there is any: the server's
+          // text-background lane indexes it directly (no BDA round-trip) and
+          // only falls back to BDA when a document has no extractable text.
+          // Bytes are still uploaded above so a true scan can OCR.
+          pages: fp,
         });
       }
       if (controller.signal.aborted) return;

@@ -692,7 +692,10 @@ export function useDeposition() {
           ...(sha256 ? { sha256 } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
           ...(bytesKey ? { bytesKey } : {}),
-          pages: plan === "async" ? [] : fp,
+          // Send the transcript text whenever present: the server text lane
+          // indexes it directly (large ones via the worker) and only uses BDA
+          // for a transcript with no extractable text at all.
+          pages: fp,
         };
       });
       if (controller.signal.aborted) return;

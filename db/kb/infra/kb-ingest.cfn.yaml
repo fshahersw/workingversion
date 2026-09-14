@@ -593,6 +593,15 @@ Resources:
                 Action:
                   - s3:PutObject
                 Resource: !Sub "${AppDataBucketArn}/kb/pages/*"
+              - Sid: ReadCanonicalPages
+                # The no-BDA text lane stores browser-extracted page text under
+                # kb/pages/ from the save request; the worker reads it back to
+                # chunk + embed. (BDA-lane pages are produced by the worker
+                # itself, so only the text lane needs this read.)
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${AppDataBucketArn}/kb/pages/*"
               - Sid: ForceRlsDataApi
                 Effect: Allow
                 Action:
@@ -1009,6 +1018,15 @@ Resources:
               - CreateIngestKey
               - !GetAtt IngestKmsKey.Arn
               - !Ref IngestKmsKeyArn
+          - Sid: EnqueueTextIngest
+            # The no-BDA text lane enqueues a compact job from the save request
+            # so a large document embeds in the background worker instead of
+            # inside the synchronous request. Queue-CMK access is already granted
+            # by CorrelationTableKms (the queue uses the ingest key).
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt IngestQueue.Arn
 
   IngestDlqAlarm:
     Type: AWS::CloudWatch::Alarm

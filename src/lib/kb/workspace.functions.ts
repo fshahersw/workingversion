@@ -109,6 +109,7 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       { ingestPages },
       { updateDocumentIngest },
       { registerAsyncIngest },
+      { registerTextIngest },
       {
         checkpointWorkspaceDocument,
         finalizeWorkspaceFromCheckpoints,
@@ -123,9 +124,25 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       import("@/lib/kb/ingest.server"),
       import("@/lib/kb/aurora.server"),
       import("@/lib/kb/ingest-async.server"),
+      import("@/lib/kb/ingest-text.server"),
       import("@/lib/kb/workspace.server"),
       import("@/lib/pile/async"),
     ]);
+
+    // Text-first ingest: index extracted page text (small inline, large via the
+    // background worker) instead of routing to Bedrock Data Automation. Enabled
+    // by default; KB_TEXT_BACKGROUND_LANE=0 restores the legacy sync/BDA split.
+    // Gated on the ingest queue being configured, since the large-doc path
+    // enqueues; without it, fall back to the legacy lanes.
+    let textBackground = process.env["KB_TEXT_BACKGROUND_LANE"] !== "0";
+    if (textBackground) {
+      try {
+        const { kbAsyncIngestConfigured } = await import("@/lib/config.server");
+        textBackground = kbAsyncIngestConfigured();
+      } catch {
+        textBackground = false;
+      }
+    }
 
     const files = data.files.map((file) => {
       const pages = (file.pages ?? []).filter(
@@ -137,12 +154,15 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
       const totalChars = file.pages.reduce((total, page) => total + page.text.length, 0);
       return {
         ...file,
-        lane: selectIngestLane({
-          readablePages: file.pages.length,
-          totalChars,
-          ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
-          ...(file.sha256 ? { sha256: file.sha256 } : {}),
-        }),
+        lane: selectIngestLane(
+          {
+            readablePages: file.pages.length,
+            totalChars,
+            ...(file.bytesKey ? { bytesKey: file.bytesKey } : {}),
+            ...(file.sha256 ? { sha256: file.sha256 } : {}),
+          },
+          { textBackground },
+        ),
       };
     });
     const rejected = prepared.filter((file) => file.lane.lane === "reject");
@@ -249,6 +269,25 @@ export const saveWorkspaceFn = createServerFn({ method: "POST" })
             sha256: file.sha256!,
             byteSize: file.byteSize!,
             inputKey: file.bytesKey!,
+          });
+          return;
+        }
+        if (file.lane.lane === "text") {
+          // Large text document: store the extracted pages and hand embedding
+          // to the background worker so the save request cannot time out. The
+          // fingerprint is the dedup key, so an idempotent client retry reuses
+          // the same document row instead of creating a duplicate.
+          await registerTextIngest({
+            ownerSub: sub,
+            workspaceItemId: reservation.itemId,
+            workspaceId: reservation.kbWorkspaceId,
+            clientFileId: file.clientFileId,
+            fileName: file.fileName,
+            surface: data.surface,
+            ...(file.mime ? { mime: file.mime } : {}),
+            sha256: fileFingerprints[index]!,
+            ...(file.byteSize !== undefined ? { byteSize: file.byteSize } : {}),
+            pages: file.pages,
           });
           return;
         }
