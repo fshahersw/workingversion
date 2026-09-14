@@ -13,6 +13,7 @@ import { type ComposerMode, MODE_OPTIONS, initialMode } from "./composer-kit";
 import { MatterScopePicker } from "@/components/matters/MatterScopePicker";
 import type { MatterScope } from "@/lib/chat-types";
 import {
+  appendSourceScope,
   composeSkill,
   filterSkills,
   initialSkillValues,
@@ -104,14 +105,7 @@ export function GuidedSetup({
     const vals = hasFormatField ? { ...values, format } : values;
     const base = composeSkill(skill, vals);
     if (!base) return "";
-    let text = base;
-    if (selectedDocs.length) {
-      const titles = selectedDocs.map((d) => `“${d.title}”`).join(", ");
-      const where = matter?.label ?? "matter";
-      text += focusOnly
-        ? ` Base the analysis strictly on these documents from the ${where} file: ${titles}.`
-        : ` Give particular attention to these documents from the ${where} file: ${titles}.`;
-    }
+    let text = appendSourceScope(base, matter, selectedDocs, focusOnly);
     if (!hasFormatField) text += deliverDirective(format);
     return text.replace(/\s+/g, " ").trim();
   }, [skill, values, selectedDocs, focusOnly, format, matter]);

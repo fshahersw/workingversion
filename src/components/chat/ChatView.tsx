@@ -34,7 +34,8 @@ import { AnswerActions } from "./AnswerActions";
 import { WorkspaceRail } from "./WorkspaceRail";
 import { StructuredChoicePanel } from "./StructuredChoicePanel";
 import { SkillForm, SlashPalette } from "./SkillMenu";
-import { filterSkills, slashDraft, type ResearchSkill } from "@/lib/research-skills";
+import { ComposerScope, MatterChip } from "./ComposerScope";
+import { filterSkills, slashDraft, type ResearchSkill, type SelectedDoc } from "@/lib/research-skills";
 
 const MIN_LEFT = 45;
 const MAX_LEFT = 75;
@@ -116,6 +117,11 @@ export function ChatView({
   onNewChat,
   sessionId,
   matter,
+  onMatterChange,
+  selectedDocs = [],
+  onDocsChange,
+  focusOnly = false,
+  onFocusOnlyChange,
   conversationId,
 }: {
   messages: Message[];
@@ -136,6 +142,11 @@ export function ChatView({
   onNewChat: () => void;
   sessionId: string;
   matter: MatterScope | null;
+  onMatterChange?: (m: MatterScope | null) => void;
+  selectedDocs?: SelectedDoc[];
+  onDocsChange?: (docs: SelectedDoc[]) => void;
+  focusOnly?: boolean;
+  onFocusOnlyChange?: (v: boolean) => void;
   conversationId: string | null;
 }) {
   const [leftPct, setLeftPct] = useState<number>(() => {
@@ -502,6 +513,12 @@ export function ChatView({
                 onStop={onStop}
                 onNewChat={onNewChat}
                 textareaRef={composerRef}
+                matter={matter}
+                onMatterChange={onMatterChange}
+                selectedDocs={selectedDocs}
+                onDocsChange={onDocsChange}
+                focusOnly={focusOnly}
+                onFocusOnlyChange={onFocusOnlyChange}
               />
             </div>
           </div>
@@ -618,6 +635,12 @@ function ChatComposer({
   onStop,
   onNewChat,
   textareaRef,
+  matter = null,
+  onMatterChange,
+  selectedDocs = [],
+  onDocsChange,
+  focusOnly = false,
+  onFocusOnlyChange,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -626,6 +649,12 @@ function ChatComposer({
   onStop?: () => void;
   onNewChat: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  matter?: MatterScope | null;
+  onMatterChange?: (m: MatterScope | null) => void;
+  selectedDocs?: SelectedDoc[];
+  onDocsChange?: (docs: SelectedDoc[]) => void;
+  focusOnly?: boolean;
+  onFocusOnlyChange?: (v: boolean) => void;
 }) {
   const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
   const setMode = useCallback((m: ComposerMode) => {
@@ -707,6 +736,22 @@ function ChatComposer({
           setSkill(s);
         }}
       />
+      {matter && (
+        <div className="flex justify-end px-2.5 pt-2">
+          <MatterChip
+            matter={matter}
+            onClear={
+              onMatterChange
+                ? () => {
+                    onMatterChange(null);
+                    onDocsChange?.([]);
+                    onFocusOnlyChange?.(false);
+                  }
+                : undefined
+            }
+          />
+        </div>
+      )}
       {skill ? (
         <div className="border-b border-border/60 p-2">
           <SkillForm
@@ -739,6 +784,18 @@ function ChatComposer({
       </div>
       <div className="mt-1 flex items-center justify-between gap-1 border-t border-border/60 px-2 py-1.5">
         <div className="flex items-center gap-1">
+          {onMatterChange && (
+            <ComposerScope
+              matter={matter}
+              onMatterChange={onMatterChange}
+              selectedDocs={selectedDocs}
+              onDocsChange={onDocsChange ?? (() => {})}
+              focusOnly={focusOnly}
+              onFocusOnlyChange={onFocusOnlyChange ?? (() => {})}
+              uploads={files}
+              disabled={busy}
+            />
+          )}
           <ModeDropdown mode={mode} onChange={setMode} disabled={busy} />
           <span className="mx-0.5 h-4 w-px bg-border/70" />
           <button

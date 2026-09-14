@@ -15,13 +15,19 @@ import {
   persistMode,
   type ComposerMode,
 } from "@/components/chat/composer-kit";
-import { ResearchLanding } from "@/components/chat/ResearchLanding";
 import { GuidedSetup } from "@/components/chat/GuidedSetup";
-import { MatterScopePicker } from "@/components/matters/MatterScopePicker";
-import { SlashPalette } from "@/components/chat/SkillMenu";
+import { ResearchToolkit } from "@/components/chat/ResearchToolkit";
+import { ComposerScope, MatterChip } from "@/components/chat/ComposerScope";
+import { SlashPalette, SkillForm } from "@/components/chat/SkillMenu";
 import type { Attachment, ChoiceAnswer, MatterScope } from "@/lib/chat-types";
 import { useChat } from "@/lib/use-chat";
-import { filterSkills, slashDraft, type ResearchSkill } from "@/lib/research-skills";
+import {
+  appendSourceScope,
+  filterSkills,
+  slashDraft,
+  type ResearchSkill,
+  type SelectedDoc,
+} from "@/lib/research-skills";
 
 export const Route = createFileRoute("/_authenticated/research")({
   ssr: false,
@@ -76,6 +82,10 @@ function ResearchPage() {
   const [pane, setPane] = useState<"chat" | "guided">("chat");
   /** Depth chosen in Guided setup, seeded into the composer on Fill chat. */
   const [seedMode, setSeedMode] = useState<ComposerMode | null>(null);
+  /** Focus documents chosen in the composer's Sources popover (fold into the
+   *  first request; matter scoping itself is real and applies every turn). */
+  const [selectedDocs, setSelectedDocs] = useState<SelectedDoc[]>([]);
+  const [focusOnly, setFocusOnly] = useState(false);
 
   const openConversation = useCallback(
     async (id: string) => {
@@ -95,8 +105,14 @@ function ResearchPage() {
         /** With `choice`: the assistant message whose clarifying question is answered. */
         resumeId?: string;
       },
-    ) => send(text, matter, opts),
-    [send, matter],
+    ) => {
+      // Focus documents fold into the request only at construction (the first
+      // message of a conversation). Matter scoping (matter_id) is sent on every
+      // turn regardless, so follow-ups stay scoped without re-listing titles.
+      const scoped = inChat ? text : appendSourceScope(text, matter, selectedDocs, focusOnly);
+      send(scoped, matter, opts);
+    },
+    [send, matter, selectedDocs, focusOnly, inChat],
   );
 
   // Guided setup fills the composer (it never sends): drop any active skill,
@@ -156,11 +172,19 @@ function ResearchPage() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
             transition={{ duration: 0.4 }}
-            className="flex h-full w-full items-start justify-center overflow-y-auto px-4 py-6 sm:px-6"
+            className="flex h-full w-full justify-center overflow-y-auto px-4 py-6 sm:px-6"
           >
-            <div className="mx-auto flex w-full max-w-[720px] flex-col items-center pt-[min(12vh,7rem)]">
-              <div className="mb-3 flex w-full justify-end">
-                <div className="inline-flex rounded-md border border-border bg-card p-0.5">
+            <div className="mx-auto flex w-full max-w-[880px] flex-col pt-[min(7vh,4rem)]">
+              <div className="mb-4 flex items-end justify-between gap-4">
+                <div className="min-w-0">
+                  <h1 className="text-[20px] font-semibold tracking-[-0.01em] text-foreground">
+                    Research workspace
+                  </h1>
+                  <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+                    Ask a question or start with a guided task.
+                  </p>
+                </div>
+                <div className="inline-flex shrink-0 rounded-md border border-border bg-card p-0.5">
                   {(["chat", "guided"] as const).map((p) => (
                     <button
                       key={p}
@@ -177,35 +201,50 @@ function ResearchPage() {
                   ))}
                 </div>
               </div>
-              <div className="w-full">
-                <HeroComposer
-                  onSubmit={sendScoped}
-                  disabled={busy}
-                  initialValue={prefill}
-                  onPickSkill={(s) => {
-                    setSkill(s);
-                    setPrefill("");
-                  }}
-                  matter={matter}
-                  onMatterChange={setMatter}
-                  seedMode={seedMode}
-                />
-              </div>
+              <HeroComposer
+                onSubmit={sendScoped}
+                disabled={busy}
+                initialValue={prefill}
+                onPickSkill={(s) => {
+                  setSkill(s);
+                  setPrefill("");
+                }}
+                matter={matter}
+                onMatterChange={setMatter}
+                selectedDocs={selectedDocs}
+                onDocsChange={setSelectedDocs}
+                focusOnly={focusOnly}
+                onFocusOnlyChange={setFocusOnly}
+                seedMode={seedMode}
+              />
               {pane === "guided" ? (
                 <GuidedSetup matter={matter} onMatterChange={setMatter} onFill={handleGuidedFill} />
               ) : (
-                <ResearchLanding
-                  onSend={(text) => {
-                    setSkill(null);
-                    sendScoped(text);
-                  }}
-                  onPrefill={(text) => {
-                    setSkill(null);
-                    setPrefill(text);
-                  }}
-                  skill={skill}
-                  onSkill={setSkill}
-                />
+                <>
+                  {skill && (
+                    <div className="mt-3">
+                      <SkillForm
+                        skill={skill}
+                        onCancel={() => setSkill(null)}
+                        onRun={(text) => {
+                          setSkill(null);
+                          sendScoped(text);
+                        }}
+                      />
+                    </div>
+                  )}
+                  <ResearchToolkit
+                    onPrefill={(text) => {
+                      setSkill(null);
+                      setPrefill(text);
+                    }}
+                    onSend={(text) => {
+                      setSkill(null);
+                      sendScoped(text);
+                    }}
+                    onOpenConversation={openConversation}
+                  />
+                </>
               )}
             </div>
           </motion.main>
@@ -225,6 +264,11 @@ function ResearchPage() {
               onNewChat={reset}
               sessionId={sessionId}
               matter={matter}
+              onMatterChange={setMatter}
+              selectedDocs={selectedDocs}
+              onDocsChange={setSelectedDocs}
+              focusOnly={focusOnly}
+              onFocusOnlyChange={setFocusOnly}
               conversationId={conversationId}
             />
           </motion.div>
@@ -241,6 +285,10 @@ function HeroComposer({
   onPickSkill,
   matter = null,
   onMatterChange,
+  selectedDocs = [],
+  onDocsChange,
+  focusOnly = false,
+  onFocusOnlyChange,
   seedMode = null,
 }: {
   onSubmit: (
@@ -252,6 +300,10 @@ function HeroComposer({
   onPickSkill: (skill: ResearchSkill) => void;
   matter?: MatterScope | null;
   onMatterChange?: (m: MatterScope | null) => void;
+  selectedDocs?: SelectedDoc[];
+  onDocsChange?: (docs: SelectedDoc[]) => void;
+  focusOnly?: boolean;
+  onFocusOnlyChange?: (v: boolean) => void;
   seedMode?: ComposerMode | null;
 }) {
   const [v, setV] = useState(initialValue);
@@ -309,6 +361,18 @@ function HeroComposer({
             onPickSkill(s);
           }}
         />
+        {matter && (
+          <div className="flex justify-end px-3 pt-2.5">
+            <MatterChip
+              matter={matter}
+              onClear={() => {
+                onMatterChange?.(null);
+                onDocsChange?.([]);
+                onFocusOnlyChange?.(false);
+              }}
+            />
+          </div>
+        )}
         <FileChips files={files} onRemove={removeFile} className="px-3 pt-2.5" />
         <div className="px-3 pt-2.5">
           <textarea
@@ -330,9 +394,16 @@ function HeroComposer({
         </div>
         <div className="mt-1.5 flex items-center justify-between gap-1 border-t border-border/60 px-2 py-1.5">
           <div className="flex items-center gap-1">
-            {onMatterChange && (
-              <MatterScopePicker value={matter} onChange={onMatterChange} disabled={disabled} />
-            )}
+            <ComposerScope
+              matter={matter}
+              onMatterChange={onMatterChange ?? (() => {})}
+              selectedDocs={selectedDocs}
+              onDocsChange={onDocsChange ?? (() => {})}
+              focusOnly={focusOnly}
+              onFocusOnlyChange={onFocusOnlyChange ?? (() => {})}
+              uploads={files}
+              disabled={disabled}
+            />
             <ModeDropdown mode={mode} onChange={setMode} disabled={disabled} />
           </div>
           <div className="flex items-center gap-1">
