@@ -1639,7 +1639,16 @@ export function useDeposition() {
       };
 
       try {
-        if (opts.scope === "full") {
+        // "auto" (the default) resolves here: a saved deposition set with a
+        // hybrid index answers from the KB (adaptive RAG); otherwise the
+        // in-browser full-text scan runs, unchanged. Explicit scopes override.
+        const resolvedScope: DiscoveryScope =
+          opts.scope === "full" || opts.scope === "relevant"
+            ? opts.scope
+            : savedRef.current.status === "ready" && savedRef.current.hybridAsk
+              ? "relevant"
+              : "full";
+        if (resolvedScope === "full") {
           lastScan.current = { query, fileIds: opts.fileIds ? [...opts.fileIds] : undefined };
           const selected = transcriptsRef.current.filter(
             (t) => !opts.fileIds || opts.fileIds.includes(t.fileId),

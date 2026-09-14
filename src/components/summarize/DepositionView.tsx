@@ -133,9 +133,9 @@ export function DepositionView() {
     if (id) void reloadWorkspace(id);
   }, [reloadWorkspace]);
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("summary");
-  // Whole-document analysis always; the scan-scope toggle ("full / relevant")
-  // and per-transcript scoping were removed to declutter the workspace.
-  const queryOptions = { scope: "full" as const, fileIds: undefined };
+  // Ask scope resolves in the hook: a saved deposition set with a hybrid index
+  // answers from the KB (adaptive RAG); otherwise the full-text scan runs.
+  const queryOptions = { scope: "auto" as const, fileIds: undefined };
   const [mobilePane, setMobilePane] = useState<"transcript" | "analysis">("analysis");
   const [transcriptOpen, setTranscriptOpen] = useState(() =>
     readLayoutPreference(DEPOSITION_TRANSCRIPT_KEY, true),

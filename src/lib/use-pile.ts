@@ -1029,7 +1029,16 @@ export function usePile() {
       step({ id: "ask", label: "Retrieving pages and drafting", status: "running" });
       try {
         const sess = sessionRef.current;
-        if (opts.scope === "full") {
+        // "auto" (the default) resolves here: a saved/indexed set answers from the
+        // KB (adaptive RAG); an unsaved pile keeps the in-browser full-text scan,
+        // byte-for-byte unchanged. Explicit "full"/"relevant" still override.
+        const resolvedScope: DiscoveryScope =
+          opts.scope === "full" || opts.scope === "relevant"
+            ? opts.scope
+            : completeSavedWorkspace(sess)
+              ? "relevant"
+              : "full";
+        if (resolvedScope === "full") {
           lastScan.current = {
             query: q,
             opts: { ...opts, fileIds: opts.fileIds ? [...opts.fileIds] : undefined },

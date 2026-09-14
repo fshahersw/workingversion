@@ -31,6 +31,7 @@ import { takeWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { flattenFolders, ROOT_FOLDER, type LibraryFolder } from "@/lib/library/folder-tree";
 import { listFoldersFn } from "@/lib/library/folders.functions";
 import { suggestQuestions } from "@/lib/pile/suggest-questions";
+import { completeSavedWorkspace } from "@/lib/pile/kb-binding";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
 import type { PileFile, PileFileHits } from "@/lib/pile/types";
 import { useSharedPile } from "@/lib/pile-context";
@@ -91,10 +92,9 @@ export function SummarizeView() {
   const [formats, setFormats] = useState<Set<string>>(new Set());
   const [restrictIds, setRestrictIds] = useState<Set<string>>(new Set());
   const [followUp, setFollowUp] = useState(false);
-  // Discovery Ask always runs a full text scan; the relevant-passages mode was
-  // removed at the firm's request. Fixed to "full" but kept as the union type so
-  // the (now inert) relevant-passages branches below still type-check.
-  const scope = "full" as DiscoveryScope;
+  // Ask scope is resolved in the hook: a saved/indexed set answers from the KB
+  // (adaptive RAG); an unsaved pile keeps the full-text scan. "auto" selects.
+  const scope = "auto" as DiscoveryScope;
   const [refineOpen, setRefineOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
@@ -108,6 +108,9 @@ export function SummarizeView() {
   const ingesting = state.phase === "reading" || state.phase === "indexing";
   const busy = ingesting || state.phase === "asking" || state.adding;
   const files = state.session?.files ?? [];
+  // A saved/indexed set answers from the KB (adaptive RAG); an unsaved pile runs
+  // the full-text scan. Drives the mode label so it reflects what actually runs.
+  const savedSet = Boolean(completeSavedWorkspace(state.session ?? null));
 
   useEffect(() => {
     writeLayoutPreference(WORKING_SET_FILES_KEY, filesOpen);
@@ -557,9 +560,13 @@ export function SummarizeView() {
 
                   {mode === "ask" && (
                     <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
-                      <span className="font-medium text-slate-800">Full text scan</span>
+                      <span className="font-medium text-slate-800">
+                        {savedSet ? "Indexed retrieval" : "Full text scan"}
+                      </span>
                       <span>
-                        · every available text page across {fileIds?.length ?? files.length} document
+                        ·{" "}
+                        {savedSet ? "relevant passages across" : "every available text page across"}{" "}
+                        {fileIds?.length ?? files.length} document
                         {(fileIds?.length ?? files.length) === 1 ? "" : "s"}
                       </span>
                     </div>

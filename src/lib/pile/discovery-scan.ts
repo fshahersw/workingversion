@@ -1,7 +1,9 @@
 import { HttpStatusError, isRetryableHttp, mapPool, parseRetryAfterMs, sleep } from "./async.ts";
 import type { PilePage } from "./types.ts";
 
-export type DiscoveryScope = "relevant" | "full";
+// "auto" is resolved in the ask hooks: a saved/indexed set -> "relevant" (KB
+// RAG), an unsaved pile -> "full" (the in-browser full-text scan, unchanged).
+export type DiscoveryScope = "relevant" | "full" | "auto";
 export type ScanFile = { id: string; name: string; pageCount: number };
 export type ScanWindow = { id: string; fileId: string; fileName: string; pages: PilePage[] };
 export type ScanFinding = { finding: string; quote: string; page: number };
