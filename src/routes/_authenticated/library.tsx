@@ -11,9 +11,11 @@ import {
   MessageSquare,
   Mic,
   PenLine,
+  Search,
   Table2,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -149,6 +151,23 @@ const TABS = [
 type TabKey = (typeof TABS)[number]["key"];
 const SURFACE_TABS = new Set<TabKey>(["workingset", "deposition", "review"]);
 
+/**
+ * Sections grouped for the left rail. "Case work" opens in the Discovery
+ * workspace; "My library" is the current user's private, owner-scoped store.
+ * (Everything here is `PK=USER#<principal>` — there is no team/shared scope, so
+ * the rail does not pretend to offer one.)
+ */
+const SECTION_GROUPS: { title: string; keys: TabKey[] }[] = [
+  { title: "Case work", keys: ["workingset", "deposition", "review"] },
+  { title: "My library", keys: ["draft", "chats", "output", "prompt", "file"] },
+];
+
+/** Case-insensitive substring match; an empty query matches everything. */
+function hit(text: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  return !q || text.toLowerCase().includes(q);
+}
+
 function relative(iso: string): string {
   if (!iso) return "";
   const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
@@ -172,52 +191,123 @@ function prettySize(bytes?: number): string {
 
 function LibraryPage() {
   const [tab, setTab] = useState<TabKey>("workingset");
+  const [query, setQuery] = useState("");
+  const active = TABS.find((t) => t.key === tab) ?? TABS[0];
+  const select = (key: TabKey) => {
+    setTab(key);
+    setQuery("");
+  };
   return (
     <AppShell>
-      <div className="mx-auto flex h-full w-full max-w-[900px] flex-col px-4 py-6 sm:px-6">
-        <h1 className="text-[19px] font-semibold tracking-[-0.01em] text-foreground">Library</h1>
-        <p className="mt-1 text-[12.5px] text-muted-foreground">
-          Saved conversations, outputs, and uploads. Chats auto-expire after 3 days unless kept.
-        </p>
+      <div className="flex h-full min-h-0 w-full">
+        {/* Section rail: navigation on the left */}
+        <aside className="hidden w-[190px] shrink-0 flex-col border-r border-border/60 bg-muted/30 md:flex">
+          <div className="flex h-[46px] shrink-0 items-center px-4">
+            <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-foreground">Library</h1>
+          </div>
+          <nav className="wr-app-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+            {SECTION_GROUPS.map((g) => (
+              <div key={g.title} className="mb-3">
+                <p className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                  {g.title}
+                </p>
+                <div className="space-y-0.5">
+                  {g.keys.map((key) => {
+                    const t = TABS.find((x) => x.key === key);
+                    if (!t) return null;
+                    const isActive = tab === key;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => select(key)}
+                        aria-current={isActive ? "page" : undefined}
+                        className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] font-medium transition-colors ${
+                          isActive
+                            ? "bg-brand-blue-soft text-brand-navy"
+                            : "text-muted-foreground hover:bg-brand-blue-soft/50 hover:text-brand-navy"
+                        }`}
+                      >
+                        <t.icon className="h-4 w-4 shrink-0" strokeWidth={1.9} />
+                        <span className="truncate">{t.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </nav>
+        </aside>
 
-        <div className="mt-4 flex flex-wrap gap-1 border-b border-border/60">
-          {TABS.map((t) => {
-            const active = tab === t.key;
-            return (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => setTab(t.key)}
-                className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-[12.5px] font-medium transition-colors ${
-                  active
-                    ? "border-brand-navy text-brand-navy"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <t.icon className="h-3.5 w-3.5" strokeWidth={1.9} />
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
+        {/* Work column: breadcrumb-style header, search toolbar, then the list */}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* Mobile section switcher (the rail is hidden below md) */}
+          <div className="flex gap-1 overflow-x-auto border-b border-border/60 px-3 py-2 md:hidden">
+            {TABS.map((t) => {
+              const isActive = tab === t.key;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => select(t.key)}
+                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-medium ${
+                    isActive
+                      ? "border-brand-navy bg-brand-navy text-white"
+                      : "border-border bg-card text-muted-foreground"
+                  }`}
+                >
+                  <t.icon className="h-3.5 w-3.5" strokeWidth={1.9} />
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
 
-        <div className="wr-app-scroll mt-4 min-h-0 flex-1 overflow-y-auto">
-          {tab === "chats" ? (
-            <ChatsList />
-          ) : tab === "draft" ? (
-            <DraftsList />
-          ) : SURFACE_TABS.has(tab) ? (
-            <WorkspacesList surface={tab as WorkspaceSurface} />
-          ) : (
-            <ItemsList kind={tab as ItemKind} />
-          )}
+          <div className="flex h-[46px] shrink-0 items-center gap-3 border-b border-border/60 px-4">
+            <div className="flex min-w-0 items-center gap-2">
+              <active.icon className="h-4 w-4 shrink-0 text-brand-navy/60" strokeWidth={1.9} />
+              <h2 className="truncate text-[14px] font-semibold text-foreground">{active.label}</h2>
+            </div>
+            <div className="relative ml-auto w-full max-w-[280px]">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={`Search ${active.label.toLowerCase()}`}
+                aria-label={`Search ${active.label.toLowerCase()}`}
+                className="h-8 w-full rounded-md border border-border bg-card pl-8 pr-7 text-[12.5px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-brand-navy/40"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="wr-app-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            {tab === "chats" ? (
+              <ChatsList query={query} />
+            ) : tab === "draft" ? (
+              <DraftsList query={query} />
+            ) : SURFACE_TABS.has(tab) ? (
+              <WorkspacesList surface={tab as WorkspaceSurface} query={query} />
+            ) : (
+              <ItemsList kind={tab as ItemKind} query={query} />
+            )}
+          </div>
         </div>
       </div>
     </AppShell>
   );
 }
 
-function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
+function WorkspacesList({ surface, query = "" }: { surface: WorkspaceSurface; query?: string }) {
   const navigate = useNavigate();
   const [items, setItems] = useState<WorkspaceSummary[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -261,7 +351,7 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
   const counts = new Map<string, number>();
   for (const w of items)
     counts.set(folderOf(w.folderId), (counts.get(folderOf(w.folderId)) ?? 0) + 1);
-  const shown = items.filter((w) => folders.inView(w.folderId));
+  const shown = items.filter((w) => folders.inView(w.folderId) && hit(w.name, query));
   const emptyLabel =
     surface === "deposition"
       ? "No saved depositions yet. Drop transcripts in Discovery › Depositions; they save automatically."
@@ -283,7 +373,13 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
       {!items.length ? (
         <EmptyState label={emptyLabel} />
       ) : !shown.length ? (
-        <EmptyState label="Nothing in this folder yet. Use Move on an item to file it here." />
+        <EmptyState
+          label={
+            query.trim()
+              ? `No saved items match "${query.trim()}".`
+              : "Nothing in this folder yet. Use Move on an item to file it here."
+          }
+        />
       ) : null}
       <ul className="space-y-1.5">
         {shown.map((w) => (
@@ -349,7 +445,7 @@ function WorkspacesList({ surface }: { surface: WorkspaceSurface }) {
   );
 }
 
-function DraftsList() {
+function DraftsList({ query = "" }: { query?: string }) {
   const navigate = useNavigate();
   const [items, setItems] = useState<OfficeDocSummary[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -383,7 +479,7 @@ function DraftsList() {
   const counts = new Map<string, number>();
   for (const d of items)
     counts.set(folderOf(d.folderId), (counts.get(folderOf(d.folderId)) ?? 0) + 1);
-  const shown = items.filter((d) => folders.inView(d.folderId));
+  const shown = items.filter((d) => folders.inView(d.folderId) && hit(d.title, query));
   return (
     <div className="space-y-3">
       <FolderBar
@@ -399,7 +495,13 @@ function DraftsList() {
       {!items.length ? (
         <EmptyState label="No drafts yet. Start one from Drafts; it saves as you write." />
       ) : !shown.length ? (
-        <EmptyState label="Nothing in this folder yet. Use Move on a draft to file it here." />
+        <EmptyState
+          label={
+            query.trim()
+              ? `No drafts match "${query.trim()}".`
+              : "Nothing in this folder yet. Use Move on a draft to file it here."
+          }
+        />
       ) : null}
       <ul className="space-y-1.5">
         {shown.map((d) => (
@@ -475,7 +577,7 @@ function Loading() {
   );
 }
 
-function ChatsList() {
+function ChatsList({ query = "" }: { query?: string }) {
   const navigate = useNavigate();
   const [items, setItems] = useState<ConversationSummary[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -504,7 +606,7 @@ function ChatsList() {
   const counts = new Map<string, number>();
   for (const c of items)
     counts.set(folderOf(c.folderId), (counts.get(folderOf(c.folderId)) ?? 0) + 1);
-  const shown = items.filter((c) => folders.inView(c.folderId));
+  const shown = items.filter((c) => folders.inView(c.folderId) && hit(c.title, query));
 
   return (
     <div className="space-y-3">
@@ -521,7 +623,13 @@ function ChatsList() {
       {items.length === 0 ? (
         <EmptyState label="No conversations yet." />
       ) : shown.length === 0 ? (
-        <EmptyState label="Nothing in this folder yet. Use Move on a conversation to file it here." />
+        <EmptyState
+          label={
+            query.trim()
+              ? `No conversations match "${query.trim()}".`
+              : "Nothing in this folder yet. Use Move on a conversation to file it here."
+          }
+        />
       ) : null}
       <div className="space-y-1">
         {shown.map((c) => (
@@ -600,7 +708,7 @@ function ChatsList() {
   );
 }
 
-function ItemsList({ kind }: { kind: ItemKind }) {
+function ItemsList({ kind, query = "" }: { kind: ItemKind; query?: string }) {
   const isFile = kind === "file";
   const [items, setItems] = useState<LibItem[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -697,7 +805,9 @@ function ItemsList({ kind }: { kind: ItemKind }) {
   for (const it of items ?? []) {
     counts.set(folderOf(it.folderId), (counts.get(folderOf(it.folderId)) ?? 0) + 1);
   }
-  const shown = (items ?? []).filter((it) => folders.inView(it.folderId));
+  const shown = (items ?? []).filter(
+    (it) => folders.inView(it.folderId) && (hit(it.name, query) || hit(it.preview ?? "", query)),
+  );
 
   return (
     <div className="space-y-2">
@@ -742,7 +852,13 @@ function ItemsList({ kind }: { kind: ItemKind }) {
       ) : items.length === 0 ? (
         <EmptyState label={emptyLabel} />
       ) : shown.length === 0 ? (
-        <EmptyState label="Nothing in this folder yet. Use Move on an item to file it here." />
+        <EmptyState
+          label={
+            query.trim()
+              ? `No ${isFile ? "uploads" : kind === "prompt" ? "prompts" : "saved outputs"} match "${query.trim()}".`
+              : "Nothing in this folder yet. Use Move on an item to file it here."
+          }
+        />
       ) : (
         <div className="space-y-1">
           {shown.map((it) => (
