@@ -10,6 +10,7 @@ import tableGuide from './prompts/guides/table.md?raw'
 import pivotGuide from './prompts/guides/pivot.md?raw'
 import shapeImageGuide from './prompts/guides/shape-image.md?raw'
 import litigationWorkbookGuide from './prompts/guides/litigation-workbook.md?raw'
+import queryGuide from './prompts/guides/query.md?raw'
 
 /**
  * On-demand prompt guides: the base system prompt stays small, the load_guide
@@ -23,6 +24,11 @@ export interface GuideEntry {
 }
 
 export const GUIDE_CATALOG: Readonly<Record<string, GuideEntry>> = {
+  query: {
+    description:
+      'Deterministic data ops: query_range (filter/sort/select/distinct/groupBy+aggregates over a block, engine-computed, written as values — the op for subsets, top-N, rollups and unique values on large data) and import_file (land a CSV/TSV the Python sandbox wrote via its platform-file handle)',
+    content: queryGuide,
+  },
   writing: {
     description:
       'Content writing: field definitions for set_cell/set_formula/set_range/clear_*, formula rules, share columns and value/unit conventions',

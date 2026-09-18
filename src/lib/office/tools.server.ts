@@ -24,7 +24,7 @@ import {
 } from "@/lib/agents/code-interpreter.server";
 import { courtlistenerConfigured, lookupCitations } from "@/lib/agents/courtlistener.server";
 import { generateDocument } from "@/lib/agents/docgen.server";
-import { fetchPage } from "@/lib/agents/fetch-page.server";
+import { readPage } from "@/lib/agents/page-read.server";
 
 import { createOfficeDoc } from "./office.server";
 import type { OfficeDocSummary } from "./types";
@@ -719,7 +719,9 @@ export async function verifyOfficeCitations(text: string): Promise<string> {
 // --- Web page -------------------------------------------------------------------------------------------
 
 export async function readOfficePage(url: string, maxChars = 12_000): Promise<string> {
-  const page = await fetchPage(String(url ?? ""), {
+  // Direct fetch first; a deterministic block (403/429, bot challenge,
+  // consent or JS shell) escalates to the rendering scrapers. PDFs return text.
+  const page = await readPage(String(url ?? ""), {
     maxChars: Math.min(Math.max(1000, maxChars), 60_000),
     timeoutMs: 25_000,
   });

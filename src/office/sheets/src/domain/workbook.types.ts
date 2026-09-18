@@ -6,7 +6,9 @@ import type {
   CopyRangeOperation,
   FillRangeOperation,
   FindReplaceOperation,
+  ImportFileOperation,
   LayoutOperation,
+  QueryRangeOperation,
   SortRangeOperation,
   StructuralOperation,
 } from './workbook-dsl'
@@ -81,14 +83,17 @@ export interface SheetRename {
 }
 
 export interface StructuralChange {
-  /** range-level bulk ops (fill_range, copy_range, convert_to_values, large
-   * clear_range / find_replace / sort_range) ride here too: applied by the
-   * executors, like layout ops (no per-cell before-state) */
+  /** range-level bulk ops (fill_range, copy_range, query_range, import_file,
+   * convert_to_values, large clear_range / find_replace / sort_range) ride
+   * here too: applied by the executors, like layout ops (no per-cell
+   * before-state) */
   readonly op:
     | StructuralOperation
     | LayoutOperation
     | FillRangeOperation
     | CopyRangeOperation
+    | QueryRangeOperation
+    | ImportFileOperation
     | ConvertToValuesOperation
     | ClearRangeOperation
     | FindReplaceOperation

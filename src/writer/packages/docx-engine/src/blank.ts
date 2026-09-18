@@ -61,6 +61,16 @@ const stylesXml = (eastAsiaFont?: string): string =>
   '<w:pPr><w:ind w:left="720"/><w:contextualSpacing/></w:pPr></w:style>' +
   '<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/>' +
   '<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>' +
+  // Word's implicit default table style. Without it every table in the file
+  // gets zero cell margins in Word (text flush against the borders); with it,
+  // cells inherit Word's 0.08" (108 twip) left/right padding — the same value
+  // the editor renders — unless the table sets its own w:tblCellMar.
+  '<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/>' +
+  '<w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>' +
+  '<w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar>' +
+  '<w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>' +
+  '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>' +
+  '</w:tblCellMar></w:tblPr></w:style>' +
   Array.from({ length: 9 }, (_, i) => tocStyle(i + 1)).join('') +
   '</w:styles>'
 

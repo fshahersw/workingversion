@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { runQuery, type QueryResult, type Scalar as QueryScalar } from '@/lib/sheets/query-range'
 import { ADDABLE_SHAPE_TYPES } from '../shared/shape-types'
 import { columnIndex, columnLabel, formatAddress, parseRange, rangeCellCount } from './cell-address'
 import { computeSortChanges } from './sort-range'
@@ -825,6 +826,94 @@ const findReplaceSchema = z.object({
   wholeCell: z.boolean().optional(),
 })
 
+// Deterministic query over a block: filter / sort / project / distinct /
+// group + aggregate, computed by the engine (src/lib/sheets/query-range.ts)
+// and written as STATIC VALUES at `target` (top-left cell; the result's
+// height and width are only known once the source is read). Columns are
+// letters or, with hasHeader, header names. Range-level like copy_range:
+// the executor reads the source chunk by chunk and writes the result the
+// same way, so a 200,000-cell source is fine.
+const queryColumnSchema = z.string().trim().min(1).max(255)
+const queryScalarSchema = z.union([z.string().max(32_767), z.number().finite(), z.boolean(), z.null()])
+const queryPredicateSchema = z.object({
+  column: queryColumnSchema,
+  op: z.enum([
+    'eq',
+    'neq',
+    'gt',
+    'gte',
+    'lt',
+    'lte',
+    'between',
+    'contains',
+    'notContains',
+    'startsWith',
+    'endsWith',
+    'in',
+    'notIn',
+    'blank',
+    'notBlank',
+    'matches',
+  ]),
+  value: queryScalarSchema.optional(),
+  value2: queryScalarSchema.optional(),
+  values: z.array(queryScalarSchema).min(1).max(500).optional(),
+})
+const queryRangeSchema = z.object({
+  op: z.literal('query_range'),
+  /** sheet the RESULT is written to */
+  sheetId: z.string().min(1),
+  /** block to query, header row included when hasHeader (default true) */
+  source: cellRangeSchema,
+  /** sheet the source lives on; defaults to the target sheet */
+  sourceSheetId: z.string().min(1).optional(),
+  hasHeader: z.boolean().optional(),
+  where: z
+    .object({
+      all: z.array(queryPredicateSchema).max(20).optional(),
+      any: z.array(queryPredicateSchema).max(20).optional(),
+    })
+    .optional(),
+  orderBy: z
+    .array(z.object({ column: queryColumnSchema, direction: z.enum(['asc', 'desc']).optional() }))
+    .max(3)
+    .optional(),
+  select: z.array(queryColumnSchema).min(1).max(64).optional(),
+  distinct: z.boolean().optional(),
+  groupBy: z.array(queryColumnSchema).max(4).optional(),
+  aggregates: z
+    .array(
+      z.object({
+        column: queryColumnSchema,
+        fn: z.enum(['sum', 'count', 'countDistinct', 'avg', 'min', 'max', 'first']),
+        as: z.string().trim().max(255).optional(),
+      }),
+    )
+    .max(8)
+    .optional(),
+  limit: z.number().int().min(0).max(1_000_000).optional(),
+  offset: z.number().int().min(0).max(1_000_000).optional(),
+  /** emit the result's header row (default true) */
+  writeHeader: z.boolean().optional(),
+  /** top-left cell of the result */
+  target: cellAddressSchema,
+})
+
+// Land a file the Python sandbox wrote (run_python returns a platform-file
+// handle) in the grid as static typed values, starting at `target`. CSV/TSV
+// only; delimiter sniffed unless given. Range-level for the same reason as
+// query_range: the height is known only once the file is parsed.
+const importFileSchema = z.object({
+  op: z.literal('import_file'),
+  sheetId: z.string().min(1),
+  /** platform-file:<id> handle from a run_python result */
+  file: z.string().regex(/^platform-file:[A-Za-z0-9-]{4,32}$/),
+  target: cellAddressSchema,
+  delimiter: z.enum([',', ';', '\t', '|', 'auto']).optional(),
+  /** keep every value as text (ids, codes) instead of typing numbers/booleans */
+  asText: z.boolean().optional(),
+})
+
 export const workbookOperationSchema = z.discriminatedUnion('op', [
   setCellSchema,
   setFormulaSchema,
@@ -833,6 +922,8 @@ export const workbookOperationSchema = z.discriminatedUnion('op', [
   clearRangeSchema,
   fillRangeSchema,
   copyRangeSchema,
+  queryRangeSchema,
+  importFileSchema,
   convertToValuesSchema,
   formatRangeSchema,
   sortRangeSchema,
@@ -890,6 +981,8 @@ export type SetFormulaOperation = z.infer<typeof setFormulaSchema>
 export type ClearCellOperation = z.infer<typeof clearCellSchema>
 export type ClearRangeOperation = z.infer<typeof clearRangeSchema>
 export type FillRangeOperation = z.infer<typeof fillRangeSchema>
+export type QueryRangeOperation = z.infer<typeof queryRangeSchema>
+export type ImportFileOperation = z.infer<typeof importFileSchema>
 export type FormatRangeOperation = z.infer<typeof formatRangeSchema>
 export type CellFormatPatch = z.infer<typeof formatPatchSchema>
 export type BorderPatch = z.infer<typeof borderPatchSchema>
@@ -974,6 +1067,8 @@ export type PrimitiveOperation =
   | FormatRangeOperation
   | FillRangeOperation
   | CopyRangeOperation
+  | QueryRangeOperation
+  | ImportFileOperation
   | ConvertToValuesOperation
   | ClearRangeOperation
   | FindReplaceOperation
@@ -1040,6 +1135,8 @@ const CELL_CONTENT_OPS = new Set([
   'clear_range',
   'fill_range',
   'copy_range',
+  'query_range',
+  'import_file',
   'convert_to_values',
   'format_range',
   'sort_range',
@@ -1244,6 +1341,102 @@ function validateCopyRange(operation: CopyRangeOperation): void {
   }
 }
 
+/// query_range geometry guards. The result's height is unknown until the
+/// source is read, so only the anchor column span is checked here; the
+/// executor fails loud when the result would run past the sheet grid.
+function validateQueryRange(operation: QueryRangeOperation): void {
+  const source = parseRange(operation.source)
+  if (rangeCellCount(source) > MAX_RANGE_OP_CELLS) {
+    throw new Error(
+      `query_range source covers more than ${MAX_RANGE_OP_CELLS.toLocaleString('en-US')} cells — query a smaller block, or split it by column range.`,
+    )
+  }
+  const hasHeader = operation.hasHeader !== false
+  if (hasHeader && source.endRow === source.startRow) {
+    throw new Error(
+      'query_range source is a single row but hasHeader is true (the default) — include the data rows below the header, or pass hasHeader:false.',
+    )
+  }
+  const grouped = (operation.groupBy?.length ?? 0) > 0 || (operation.aggregates?.length ?? 0) > 0
+  if (grouped && (operation.select?.length || operation.distinct)) {
+    throw new Error(
+      'query_range: select/distinct do not combine with groupBy/aggregates — a grouped result already has one row per group and the group + aggregate columns.',
+    )
+  }
+  if ((operation.groupBy?.length ?? 0) > 0 && !(operation.aggregates?.length ?? 0)) {
+    throw new Error('query_range groupBy needs at least one aggregate (e.g. {column:"Amount",fn:"sum"}).')
+  }
+  const target = parseRange(operation.target)
+  const sameSheet =
+    operation.sourceSheetId === undefined || operation.sourceSheetId === operation.sheetId
+  // The result is written downward from the anchor across the output
+  // columns; an anchor inside or above-left of the source would overwrite
+  // rows the executor is still reading. Require the anchor to sit strictly
+  // right of, or strictly below, the source block when they share a sheet.
+  if (
+    sameSheet &&
+    !(target.startColumn > source.endColumn || target.startRow > source.endRow)
+  ) {
+    throw new Error(
+      `query_range target ${operation.target} would overlap its source ${operation.source} — write the result to the right of the source, below it, or on another sheet (add_sheet first).`,
+    )
+  }
+}
+
+/** The pure query the executors run once the source block is in memory. */
+export function computeQueryRange(
+  operation: QueryRangeOperation,
+  sourceRows: QueryScalar[][],
+): QueryResult {
+  const source = parseRange(operation.source)
+  const columns: string[] = []
+  for (let column = source.startColumn; column <= source.endColumn; column += 1) {
+    columns.push(columnLabel(column))
+  }
+  return runQuery(
+    { columns, rows: sourceRows },
+    {
+      hasHeader: operation.hasHeader !== false,
+      ...(operation.where ? { where: operation.where } : {}),
+      ...(operation.orderBy ? { orderBy: operation.orderBy } : {}),
+      ...(operation.select ? { select: operation.select } : {}),
+      ...(operation.distinct !== undefined ? { distinct: operation.distinct } : {}),
+      ...(operation.groupBy ? { groupBy: operation.groupBy } : {}),
+      ...(operation.aggregates ? { aggregates: operation.aggregates } : {}),
+      ...(operation.limit !== undefined ? { limit: operation.limit } : {}),
+      ...(operation.offset !== undefined ? { offset: operation.offset } : {}),
+      writeHeader: operation.writeHeader !== false,
+    },
+  )
+}
+
+/** Result rows plus the optional header, as the matrix the executor writes. */
+export function queryResultMatrix(result: QueryResult): QueryScalar[][] {
+  return result.header ? [result.header, ...result.rows] : result.rows
+}
+
+/** One-line receipt for the tool result / preview chip. */
+export function queryResultSummary(operation: QueryRangeOperation, result: QueryResult): string {
+  const written = queryResultMatrix(result)
+  const width = written[0]?.length ?? 0
+  const grouped = (operation.groupBy?.length ?? 0) > 0 || (operation.aggregates?.length ?? 0) > 0
+  const paged =
+    result.rows.length !== result.resultRows
+      ? ` (rows ${(operation.offset ?? 0) + 1}–${(operation.offset ?? 0) + result.rows.length} of ${result.resultRows})`
+      : ''
+  return (
+    `query_range: ${result.matched.toLocaleString('en-US')} of ${result.total.toLocaleString('en-US')} source rows matched; ` +
+    `wrote ${result.rows.length.toLocaleString('en-US')} ${grouped ? 'group' : 'result'} row(s)${paged} × ${width} column(s)` +
+    `${result.header ? ' plus a header row' : ''} at ${operation.target}.`
+  )
+}
+
+/// import_file guards: the file itself is only reachable in the browser, so
+/// this checks the request shape; the executor validates the parsed table.
+function validateImportFile(operation: ImportFileOperation): void {
+  parseRange(operation.target)
+}
+
 /**
  * Batch-order hazard guard: convert_to_values freezes what the grid holds
  * NOW, but same-batch formula writes land through a different plan lane
@@ -1307,6 +1500,21 @@ export function convertToValuesBatchError(operations: readonly WorkbookOperation
 
 export function fillOpLabel(op: FillRangeOperation): string {
   return `Fill ${op.source} → ${op.target}`
+}
+
+export function queryOpLabel(op: QueryRangeOperation): string {
+  const parts: string[] = []
+  const n = (op.where?.all?.length ?? 0) + (op.where?.any?.length ?? 0)
+  if (n) parts.push(`${n} filter${n === 1 ? '' : 's'}`)
+  if (op.groupBy?.length) parts.push(`grouped by ${op.groupBy.join(', ')}`)
+  if (op.orderBy?.length) parts.push(`sorted by ${op.orderBy.map((o) => o.column).join(', ')}`)
+  if (op.distinct) parts.push('distinct')
+  if (op.limit !== undefined) parts.push(`limit ${op.limit}`)
+  return `Query ${op.source}${parts.length ? ` (${parts.join('; ')})` : ''} → ${op.target}`
+}
+
+export function importFileOpLabel(op: ImportFileOperation): string {
+  return `Import file ${op.file} → ${op.target}`
 }
 
 export function copyOpLabel(op: CopyRangeOperation): string {
@@ -1467,6 +1675,14 @@ export function expandToPrimitiveOps(
       expanded.push(operation)
     } else if (operation.op === 'copy_range') {
       validateCopyRange(operation)
+      expanded.push(operation)
+    } else if (operation.op === 'query_range') {
+      // Range-level: the executor reads the source (chunk-loading streamed
+      // regions) and writes the computed result as static values.
+      validateQueryRange(operation)
+      expanded.push(operation)
+    } else if (operation.op === 'import_file') {
+      validateImportFile(operation)
       expanded.push(operation)
     } else if (operation.op === 'convert_to_values') {
       // Range-level: the executor reads each cell's computed value from the

@@ -133,6 +133,9 @@ export function proposeOperations(
           recordPendingWrite(operation.sheetId, parseRange(operation.target))
         } else if (operation.op === 'copy_range') {
           recordPendingWrite(operation.sheetId, copyTargetBounds(operation))
+        } else if (operation.op === 'query_range' || operation.op === 'import_file') {
+          // Height/width unknown until executed: record the anchor cell.
+          recordPendingWrite(operation.sheetId, parseRange(operation.target))
         }
         // Every sheet-addressed op must reference an existing sheet BEFORE the
         // batch starts applying: apply routes through sheetById and a mid-batch
@@ -404,16 +407,19 @@ export function proposeOperations(
           operation.op === 'fill_range' ||
           operation.op === 'clear_range' ||
           operation.op === 'copy_range' ||
+          operation.op === 'query_range' ||
+          operation.op === 'import_file' ||
           operation.op === 'convert_to_values' ||
           operation.op === 'find_replace' ||
           operation.op === 'sort_range'
         ) {
-          // Range-level bulk ops (fill / copy / convert / large clear,
-          // find_replace and sort_range): validate the whole target rectangle
-          // at once — the per-cell checks below would never see these because
-          // they are not expanded. (find_replace / sort_range only arrive
-          // here above the expansion cap.) Unloaded target regions are fine:
-          // the apply executor loads them chunk by chunk.
+          // Range-level bulk ops (fill / copy / query / import / convert /
+          // large clear, find_replace and sort_range): validate the whole
+          // target rectangle at once — the per-cell checks below would never
+          // see these because they are not expanded. (find_replace /
+          // sort_range only arrive here above the expansion cap.) Unloaded
+          // target regions are fine: the apply executor loads them chunk by
+          // chunk.
           const sheetMeta = state.file.sheets.find((sheet) => sheet.id === operation.sheetId)
           const targetSheet = workbook?.getSheetBySheetId(operation.sheetId)
           if (!targetSheet || isSheetRemoved(state.editJournal, operation.sheetId)) {
@@ -424,12 +430,16 @@ export function proposeOperations(
               ? parseRange(operation.target)
               : operation.op === 'copy_range'
                 ? copyTargetBounds(operation)
-                : parseRange(operation.range)
-          // A filtered copy's height is only known once the source is read;
-          // check the anchor row + column span here, the matched-row fit at
-          // apply time (which fails loud with the actual counts).
+                : operation.op === 'query_range' || operation.op === 'import_file'
+                  ? parseRange(operation.target)
+                  : parseRange(operation.range)
+          // A filtered copy's (or a query's / import's) height is only known
+          // once the source is read; check the anchor row + column span here,
+          // the fit at apply time (which fails loud with the actual counts).
           const gridBounds =
-            operation.op === 'copy_range' && operation.filterColumn !== undefined
+            (operation.op === 'copy_range' && operation.filterColumn !== undefined) ||
+            operation.op === 'query_range' ||
+            operation.op === 'import_file'
               ? { ...bounds, endRow: bounds.startRow }
               : bounds
           if (
@@ -492,6 +502,28 @@ export function proposeOperations(
                   `The source range ${operation.source} extends beyond the source sheet grid ` +
                   `(${sourceSheet.getMaxRows()} rows × ${sourceSheet.getMaxColumns()} columns) — ` +
                   'copy only cells that exist.',
+              }
+            }
+          }
+          if (operation.op === 'query_range') {
+            // Like copy_range: the source is read chunk by chunk at apply
+            // time, so only its sheet and grid fit are checked here.
+            const sourceSheetId = operation.sourceSheetId ?? operation.sheetId
+            const sourceSheet = workbook?.getSheetBySheetId(sourceSheetId)
+            if (!sourceSheet || isSheetRemoved(state.editJournal, sourceSheetId)) {
+              return { ok: false, error: `Unknown sheet: ${sourceSheetId}` }
+            }
+            const sourceBounds = parseRange(operation.source)
+            if (
+              sourceBounds.endRow >= sourceSheet.getMaxRows() ||
+              sourceBounds.endColumn >= sourceSheet.getMaxColumns()
+            ) {
+              return {
+                ok: false,
+                error:
+                  `The query source ${operation.source} extends beyond the source sheet grid ` +
+                  `(${sourceSheet.getMaxRows()} rows × ${sourceSheet.getMaxColumns()} columns) — ` +
+                  'query only cells that exist.',
               }
             }
           }
@@ -885,6 +917,8 @@ export function runDeterministicPlan(
         if (
           operation.op === 'fill_range' ||
           operation.op === 'copy_range' ||
+          operation.op === 'query_range' ||
+          operation.op === 'import_file' ||
           operation.op === 'convert_to_values' ||
           operation.op === 'clear_range' ||
           operation.op === 'find_replace' ||

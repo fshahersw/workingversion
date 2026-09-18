@@ -139,12 +139,17 @@ import {
 } from '@genoffice/agent-core'
 import type { AiSettings } from '@genoffice/ai-provider'
 import {
+  computeQueryRange,
   copyTargetBounds,
   filteredCopySourceRows,
   matchableCellText,
+  queryResultMatrix,
+  queryResultSummary,
   replaceOccurrences,
   type WorkbookOperation,
 } from '../domain/workbook-dsl'
+import { parseDelimited } from '@/lib/sheets/delimited'
+import { getPlatformFile, textOf as platformFileText } from '@/office/shared/file-store'
 import { offsetFormulaRefs } from '../domain/formula-shift'
 import { computeSortedRowOrder } from '../domain/sort-range'
 import {
@@ -478,6 +483,12 @@ function richCellText(cell: unknown): string | null {
 
 export function App(): React.JSX.Element {
   const adapterRef = useRef(new InMemoryWorkbookAdapter(initialSnapshot))
+  // import_file on a blank (in-memory) workbook reads the sandbox file from the
+  // browser session store; the domain adapter only sees a resolver.
+  adapterRef.current.setFileResolver((handle) => {
+    const file = getPlatformFile(handle)
+    return file ? platformFileText(file) : null
+  })
   const univerRef = useRef<UniverRuntime | null>(null)
   const lazyWorkbookRef = useRef<LazyWorkbookState | null>(null)
   /// Univer undo/redo stack occupancy (subscribed at mount): drives the QAT button gray states
@@ -4084,6 +4095,126 @@ export function App(): React.JSX.Element {
             },
             setMessage,
             { neighborColumns: copyWritesFormulas },
+          )
+        } else if (op.op === 'query_range' || op.op === 'import_file') {
+          // Deterministic block writes: query_range reads its source chunk by
+          // chunk (display text, so dates/currency compare the way the user
+          // sees them) and computes the result in the engine; import_file
+          // parses a sandbox-written CSV/TSV. Both land as static values from
+          // the anchor down — never through the model.
+          const targetSheet = sheetById(op.sheetId)
+          const anchor = parseAddress(op.target)
+          let matrix: (string | number | boolean | null)[][]
+          if (op.op === 'query_range') {
+            const sourceSheet = sheetById(op.sourceSheetId ?? op.sheetId)
+            const src = parseRange(op.source)
+            const sourceRows: (string | number | boolean | null)[][] = []
+            await applyRangeInLoadedChunks(
+              runtime,
+              lazyWorkbookRef,
+              sourceSheet,
+              src,
+              (chunk) => {
+                const values = sourceSheet
+                  .getRange(
+                    chunk.startRow,
+                    chunk.startColumn,
+                    chunk.endRow - chunk.startRow + 1,
+                    chunk.endColumn - chunk.startColumn + 1,
+                  )
+                  .getValues() as (string | number | boolean | null)[][]
+                for (let row = chunk.startRow; row <= chunk.endRow; row += 1) {
+                  const rowOut = (sourceRows[row - src.startRow] ??= [])
+                  for (let column = chunk.startColumn; column <= chunk.endColumn; column += 1) {
+                    rowOut[column - src.startColumn] =
+                      values[row - chunk.startRow]?.[column - chunk.startColumn] ?? null
+                  }
+                }
+              },
+              setMessage,
+              { neighborColumns: false },
+            )
+            const width = src.endColumn - src.startColumn + 1
+            for (let row = 0; row <= src.endRow - src.startRow; row += 1) {
+              const rowOut = (sourceRows[row] ??= [])
+              for (let column = 0; column < width; column += 1) rowOut[column] ??= null
+            }
+            const result = computeQueryRange(op, sourceRows)
+            matrix = queryResultMatrix(result)
+            notices.push(queryResultSummary(op, result))
+            if (result.matched === 0) {
+              notices.push(
+                'query_range matched no rows — only the header (if any) was written. Read the filter column (read_range / aggregate_range) to check the actual values before retrying.',
+              )
+            }
+          } else {
+            const file = getPlatformFile(op.file)
+            if (!file) {
+              throw new Error(
+                `import_file: ${op.file} is not available in this session — run the Python step again and use the handle from its result.`,
+              )
+            }
+            const parsed = parseDelimited(platformFileText(file), {
+              ...(op.delimiter ? { delimiter: op.delimiter } : {}),
+              ...(op.asText ? { asText: true } : {}),
+            })
+            matrix = parsed.rows
+            notices.push(
+              `import_file: wrote ${parsed.rows.length.toLocaleString('en-US')} row(s) × ${parsed.columns} column(s) from ${file.name} at ${op.target}` +
+                (parsed.warnings.length ? ` (${parsed.warnings.join(' ')})` : '') +
+                '.',
+            )
+          }
+          const height = matrix.length
+          const width = matrix[0]?.length ?? 0
+          if (height === 0 || width === 0) {
+            // nothing to write (e.g. writeHeader:false and no matching rows)
+            continue
+          }
+          const writeBounds = {
+            startRow: anchor.row,
+            endRow: anchor.row + height - 1,
+            startColumn: anchor.column,
+            endColumn: anchor.column + width - 1,
+          }
+          if (
+            writeBounds.endRow >= targetSheet.getMaxRows() ||
+            writeBounds.endColumn >= targetSheet.getMaxColumns()
+          ) {
+            throw new Error(
+              `${op.op} result is ${height} × ${width} cells, but the target sheet grid (${targetSheet.getMaxRows()} rows × ${targetSheet.getMaxColumns()} columns) cannot hold it from ${op.target} — ` +
+                'add a sheet with enough rows (add_sheet rows) or insert_rows first, then retry.',
+            )
+          }
+          await applyRangeInLoadedChunks(
+            runtime,
+            lazyWorkbookRef,
+            targetSheet,
+            writeBounds,
+            (chunk) => {
+              const block: { v: string | number | boolean | null; f: null; si: null }[][] = []
+              for (let row = chunk.startRow; row <= chunk.endRow; row += 1) {
+                const rowOut: (typeof block)[number] = []
+                for (let column = chunk.startColumn; column <= chunk.endColumn; column += 1) {
+                  rowOut.push({
+                    v: matrix[row - anchor.row]?.[column - anchor.column] ?? null,
+                    f: null,
+                    si: null,
+                  })
+                }
+                block.push(rowOut)
+              }
+              targetSheet
+                .getRange(
+                  chunk.startRow,
+                  chunk.startColumn,
+                  chunk.endRow - chunk.startRow + 1,
+                  chunk.endColumn - chunk.startColumn + 1,
+                )
+                .setValues(block)
+            },
+            setMessage,
+            { neighborColumns: false },
           )
         } else if (op.op === 'convert_to_values') {
           // Freeze formulas into their computed values, chunk by chunk. The

@@ -9,7 +9,7 @@
 // ============================================================================
 import type { ToolDef } from "./anthropic.server";
 import { AGENT_TOOLS, SourceBook, executeTool, type ToolOutcome } from "./tools.server";
-import { fetchPage } from "./fetch-page.server";
+import { readPage } from "./page-read.server";
 import { memoTTL, toolCacheKey, TOOL_CACHE_TTL_MS } from "./run-state.server";
 import { courtlistenerConfigured, lookupCitations } from "./courtlistener.server";
 import {
@@ -214,7 +214,9 @@ async function fetchPageTool(input: Record<string, unknown>, book: SourceBook): 
   const url = str(input["url"]);
   if (!/^https?:\/\//i.test(url)) return { text: "Provide an absolute http(s) url.", hits: 0, refs: [] };
   try {
-    const p = await memoTTL(toolCacheKey("fetch_page", { url }), TOOL_CACHE_TTL_MS, () => fetchPage(url, { maxChars: 6000 }));
+    // readPage climbs direct → Firecrawl → Tavily on a deterministic block
+    // (403/429, bot challenge, consent or JS shell); PDFs come back as text.
+    const p = await memoTTL(toolCacheKey("fetch_page", { url }), TOOL_CACHE_TTL_MS, () => readPage(url, { maxChars: 6000 }));
     if (p.note && !p.text) return { text: `${url}: ${p.note}`, hits: 0, refs: [] };
     if (!p.text.trim()) return { text: `No readable text extracted from ${url} (status ${p.status}).`, hits: 0, refs: [] };
     const src = book.add(
@@ -230,8 +232,9 @@ async function fetchPageTool(input: Record<string, unknown>, book: SourceBook): 
       { fullText: p.text },
     );
     const links = p.links.slice(0, 12).map((l) => `- ${l.text || l.href} — ${l.href}`).join("\n");
+    const note = p.note ? `\n(${p.note})` : "";
     return {
-      text: `[${src.ref}] ${p.title || p.finalUrl}\n${trunc(p.text, 3500)}${links ? `\n\nLINKS:\n${links}` : ""}`,
+      text: `[${src.ref}] ${p.title || p.finalUrl}${note}\n${trunc(p.text, 3500)}${links ? `\n\nLINKS:\n${links}` : ""}`,
       hits: 1,
       refs: [src.ref],
     };

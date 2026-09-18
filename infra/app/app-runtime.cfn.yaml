@@ -1634,6 +1634,16 @@ Resources:
             CloudWatchMetricsEnabled: true
             MetricName: !Sub "${NamePrefix}-${Environment}-rate-limit"
             SampledRequestsEnabled: false
+        # Both managed groups skip authenticated Office/Writer binary uploads
+        # (DOCX/XLSX/PPTX/PDF bodies PUT or POSTed under /api/). Those bodies
+        # are DEFLATE-compressed archives whose bytes trip the body-inspecting
+        # rules at random (CrossSiteScripting_BODY blocked the Writer's
+        # 30-second recovery snapshot on every tick, and saves intermittently,
+        # while GenericLFI_BODY / ReactJSRCE_BODY hit other saves). The app
+        # layer already gates these routes: a Cognito session is required for
+        # every non-public /api/ route, bodies are size-capped and validated as
+        # archives before anything is stored. Every other request, including
+        # all JSON APIs and every unauthenticated path, is still inspected.
         - Name: AwsManagedCommon
           Priority: 10
           OverrideAction:
@@ -1646,6 +1656,48 @@ Resources:
                 - Name: SizeRestrictions_BODY
                   ActionToUse:
                     Count: {}
+              ScopeDownStatement:
+                NotStatement:
+                  Statement:
+                    AndStatement:
+                      Statements:
+                        - ByteMatchStatement:
+                            FieldToMatch:
+                              UriPath: {}
+                            PositionalConstraint: STARTS_WITH
+                            SearchString: /api/
+                            TextTransformations:
+                              - Priority: 0
+                                Type: LOWERCASE
+                        - OrStatement:
+                            Statements:
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/vnd.openxmlformats-officedocument
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/pdf
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/octet-stream
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
           VisibilityConfig:
             CloudWatchMetricsEnabled: true
             MetricName: !Sub "${NamePrefix}-${Environment}-common"
@@ -1658,6 +1710,48 @@ Resources:
             ManagedRuleGroupStatement:
               VendorName: AWS
               Name: AWSManagedRulesKnownBadInputsRuleSet
+              ScopeDownStatement:
+                NotStatement:
+                  Statement:
+                    AndStatement:
+                      Statements:
+                        - ByteMatchStatement:
+                            FieldToMatch:
+                              UriPath: {}
+                            PositionalConstraint: STARTS_WITH
+                            SearchString: /api/
+                            TextTransformations:
+                              - Priority: 0
+                                Type: LOWERCASE
+                        - OrStatement:
+                            Statements:
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/vnd.openxmlformats-officedocument
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/pdf
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/octet-stream
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
           VisibilityConfig:
             CloudWatchMetricsEnabled: true
             MetricName: !Sub "${NamePrefix}-${Environment}-known-bad"

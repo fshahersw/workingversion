@@ -6,9 +6,11 @@ import {
   fillOpLabel,
   findReplaceOpLabel,
   formatOpLabel,
+  importFileOpLabel,
   isLayoutOp,
   isStructuralOp,
   layoutOpLabel,
+  queryOpLabel,
   sortOpLabel,
   structuralOpLabel,
   type WorkbookCommandBatch,
@@ -39,6 +41,10 @@ export function buildLazyChangePlan(
       structuralChanges.push({ op: operation, label: fillOpLabel(operation) })
     } else if (operation.op === 'copy_range') {
       structuralChanges.push({ op: operation, label: copyOpLabel(operation) })
+    } else if (operation.op === 'query_range') {
+      structuralChanges.push({ op: operation, label: queryOpLabel(operation) })
+    } else if (operation.op === 'import_file') {
+      structuralChanges.push({ op: operation, label: importFileOpLabel(operation) })
     } else if (operation.op === 'convert_to_values') {
       structuralChanges.push({ op: operation, label: convertToValuesOpLabel(operation) })
     } else if (operation.op === 'clear_range') {

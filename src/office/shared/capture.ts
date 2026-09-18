@@ -84,7 +84,12 @@ export async function captureElement(el: HTMLElement, options: CaptureOptions = 
     width: fullWidth,
     height: renderHeight,
     cacheBust: false,
-    skipFonts: false,
+    // Web-font embedding walks every stylesheet's cssRules; the cross-origin
+    // Google Fonts sheet throws and its fallback fetch fails, logging two
+    // console errors per capture and costing a network round trip. Document
+    // text renders in document fonts (Calibri, Times …), not the UI webfonts,
+    // so the captures the model reads are unaffected.
+    skipFonts: true,
   });
   const out = document.createElement("canvas");
   out.width = Math.max(1, Math.round(clip.width * scale));

@@ -65,7 +65,14 @@ The runtime consumes foundation and KB outputs as parameters and creates:
   rules plus a configurable per-IP rate rule. The common group's
   `SizeRestrictions_BODY` rule is count-only because the current authenticated
   KB ingest route accepts bounded document text; API Gateway and application
-  size limits remain enforced.
+  size limits remain enforced. Both managed groups carry a scope-down that
+  skips authenticated Office/Writer binary uploads (`/api/*` requests whose
+  `Content-Type` is an OOXML document, PDF or octet-stream): those bodies are
+  compressed archives whose bytes trip the body-inspecting rules at random
+  (`CrossSiteScripting_BODY` blocked every Writer recovery snapshot and
+  intermittent saves). The app requires a Cognito session on every non-public
+  `/api/` route and size-caps and archive-validates those bodies; all JSON
+  APIs and every unauthenticated path remain fully inspected.
 - Retained KMS-encrypted Lambda and API access log groups. Staging retains logs
   for 30 days and prod for 365 days.
 - Lambda error, throttle, and duration alarms plus API 5xx and latency alarms.

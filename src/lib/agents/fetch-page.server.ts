@@ -396,11 +396,11 @@ async function cancelBody(response: Response): Promise<void> {
   await response.body?.cancel().catch(() => undefined);
 }
 
-async function readBoundedBody(
+async function readBoundedBytes(
   response: Response,
   maxBytes: number,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<Uint8Array> {
   const contentLength = response.headers.get("content-length");
   if (contentLength) {
     const declaredBytes = Number(contentLength);
@@ -409,12 +409,11 @@ async function readBoundedBody(
       throw new Error(`Response exceeds the ${maxBytes}-byte limit`);
     }
   }
-  if (!response.body) return "";
+  if (!response.body) return new Uint8Array(0);
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const chunks: Uint8Array[] = [];
   let bytesRead = 0;
-  let output = "";
   try {
     while (true) {
       const { done, value } = await withAbort(reader.read(), signal);
@@ -423,15 +422,63 @@ async function readBoundedBody(
       if (bytesRead > maxBytes) {
         throw new Error(`Response exceeds the ${maxBytes}-byte limit`);
       }
-      output += decoder.decode(value, { stream: true });
+      chunks.push(value);
     }
-    return output + decoder.decode();
   } catch (error) {
     await reader.cancel().catch(() => undefined);
     throw error;
   } finally {
     reader.releaseLock();
   }
+  const out = new Uint8Array(bytesRead);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+async function readBoundedBody(
+  response: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<string> {
+  const bytes = await readBoundedBytes(response, maxBytes, signal);
+  return new TextDecoder().decode(bytes);
+}
+
+/** PDFs are read up to this size (court opinions and agency documents run large). */
+export const MAX_PDF_BYTES = 12_000_000;
+
+/**
+ * Text of a PDF response through the server-side extractor (text layer only;
+ * scanned pages come back empty). Pages are separated with `[page N]` markers
+ * so a citation can point at the page.
+ */
+async function pdfText(
+  bytes: Uint8Array,
+  maxChars: number,
+): Promise<{ text: string; truncated: boolean; note?: string }> {
+  const { extractPdf } = await import("@/lib/ingest/pdf.server");
+  const { pageCount, pages } = await extractPdf(bytes);
+  const joined = pages
+    .map((page, i) => (page.trim() ? `[page ${i + 1}]\n${page.trim()}` : ""))
+    .filter(Boolean)
+    .join("\n\n");
+  if (!joined.trim()) {
+    return {
+      text: "",
+      truncated: false,
+      note: `This PDF (${pageCount} page${pageCount === 1 ? "" : "s"}) has no extractable text layer (likely a scan). For a court filing, read it via db_read_filing (DocketBird); otherwise look for an HTML or text version of the same document.`,
+    };
+  }
+  const text = joined.slice(0, maxChars);
+  return {
+    text,
+    truncated: joined.length > maxChars,
+    note: `PDF, ${pageCount} page${pageCount === 1 ? "" : "s"}; text layer extracted (page markers [page N]).`,
+  };
 }
 
 function redirectLocation(response: Response): string | null {
@@ -528,18 +575,38 @@ export async function fetchPage(
       const contentType = (response.headers.get("content-type") || "").toLowerCase();
       const finalUrl = target.toString();
 
-      if (contentType.includes("application/pdf")) {
-        await cancelBody(response);
+      if (contentType.includes("application/pdf") || /\.pdf(?:$|[?#])/i.test(target.pathname)) {
+        // Official sources (opinions, orders, agency documents, labels) are
+        // overwhelmingly PDFs: extract the text layer instead of giving up.
+        let bytes: Uint8Array;
+        try {
+          bytes = await readBoundedBytes(response, MAX_PDF_BYTES, controller.signal);
+        } catch (error) {
+          throwIfAborted(controller.signal);
+          return {
+            url,
+            finalUrl,
+            status: response.status,
+            contentType,
+            title: "",
+            text: "",
+            links: [],
+            truncated: false,
+            note: `This PDF could not be read: ${error instanceof Error ? error.message : "download failed"}. For a court filing, read it via db_read_filing (DocketBird).`,
+          };
+        }
+        const pdf = await pdfText(bytes, maxChars);
+        const nameFromPath = decodeURIComponent(target.pathname.split("/").pop() ?? "").replace(/\.pdf$/i, "");
         return {
           url,
           finalUrl,
           status: response.status,
-          contentType,
-          title: "",
-          text: "",
+          contentType: contentType || "application/pdf",
+          title: nameFromPath,
+          text: pdf.text,
           links: [],
-          truncated: false,
-          note: "This is a PDF. For a court filing, read its text via db_read_filing (DocketBird); general PDFs are not yet text-extracted here.",
+          truncated: pdf.truncated,
+          ...(pdf.note ? { note: pdf.note } : {}),
         };
       }
 
