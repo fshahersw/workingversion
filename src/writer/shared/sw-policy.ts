@@ -47,6 +47,8 @@ const READ = [
   "read_attachment",
   "view_page",
   "list_templates",
+  // Deterministic Bluebook form check; reads document text only.
+  "check_bluebook_citations",
   ...PLATFORM_READ,
 ];
 // The Writer's generate_image places the picture in the document, so it is an edit here.
@@ -61,8 +63,12 @@ const WRITE = [
   "insert_image",
   "insert_table",
   "edit_table",
+  "set_table_properties",
   "insert_page_break",
+  "set_page_setup",
   "set_header_footer",
+  "insert_footnote",
+  "apply_court_style",
   "reply_comment",
   "resolve_comment",
   "create_document",

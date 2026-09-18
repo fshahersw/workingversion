@@ -11,7 +11,12 @@ import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
 import type { PmNode } from '../editor/convert'
 import { countWords, findNumId, type NumIds } from './protocol'
 import { DOC_NAV_SCHEME, navigateToBlock, parseDocNavHref } from './doc-nav'
-import { markDocSeen, type AiCommentsAccess, type AiHeaderFooterAccess } from './tools'
+import {
+  markDocSeen,
+  type AiCommentsAccess,
+  type AiDocumentAccess,
+  type AiHeaderFooterAccess,
+} from './tools'
 import { createDocsSkill } from './docs-skill'
 import { EditQueueCard } from './EditQueueCard'
 import {
@@ -296,6 +301,8 @@ interface AiPanelProps {
   commentsAccess?: AiCommentsAccess
   /** header/footer state for the set_header_footer tool and per-turn context */
   hfAccess?: AiHeaderFooterAccess
+  /** page setup + footnotes for set_page_setup / apply_court_style / insert_footnote */
+  docAccess?: AiDocumentAccess
 }
 
 const WRITER_MODE_NOTE: Record<WriterMode, string> = {
@@ -324,6 +331,7 @@ export function AiPanel({
   onQueueConsume,
   commentsAccess,
   hfAccess,
+  docAccess,
 }: AiPanelProps) {
   const { t, lang } = useI18n()
   // Panel chrome follows the UI language; message text follows its own content (dir=auto below)
@@ -503,6 +511,8 @@ export function AiPanel({
   commentsAccessRef.current = commentsAccess
   const hfAccessRef = useRef(hfAccess)
   hfAccessRef.current = hfAccess
+  const docAccessRef = useRef(docAccess)
+  docAccessRef.current = docAccess
 
   /** drop every aiChanged flag; silent = skip undo history (auto-accept path) */
   const clearAiHighlights = (silent = false) => {
@@ -660,6 +670,7 @@ export function AiPanel({
           () => (trackChangesRef.current ? { author: AI_REVISION_AUTHOR } : undefined),
           () => commentsAccessRef.current,
           () => hfAccessRef.current,
+          () => docAccessRef.current,
         ),
         createFilesSkill(availableAttachments),
       ]), () => writerModeRef.current),

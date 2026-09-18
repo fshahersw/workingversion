@@ -9,6 +9,7 @@ import dataAttributionGuide from './prompts/guides/data-attribution.md?raw'
 import tableGuide from './prompts/guides/table.md?raw'
 import pivotGuide from './prompts/guides/pivot.md?raw'
 import shapeImageGuide from './prompts/guides/shape-image.md?raw'
+import litigationWorkbookGuide from './prompts/guides/litigation-workbook.md?raw'
 
 /**
  * On-demand prompt guides: the base system prompt stays small, the load_guide
@@ -76,6 +77,11 @@ export const GUIDE_CATALOG: Readonly<Record<string, GuideEntry>> = {
     description:
       'Shapes & images: add_shape shapes/text boxes, SPARKLINE in-cell mini charts, embedded IMAGE/HYPERLINK',
     content: shapeImageGuide,
+  },
+  'litigation-workbook': {
+    description:
+      'Litigation deliverables (privilege logs, exhibit/witness lists, deadline trackers, damages and settlement models): title/header/freeze/filter skeleton, column widths, date/currency/Bates formats, status dropdowns + conditional formats, totals with SUBTOTAL, print-ready page setup, confidentiality legends',
+    content: litigationWorkbookGuide,
   },
 }
 

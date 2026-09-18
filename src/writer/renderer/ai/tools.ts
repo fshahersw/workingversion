@@ -1,7 +1,24 @@
 import { navigateDocument } from "@/lib/writer/document-navigation";
+import { findTextMatches } from "@/lib/writer/text-matches";
+import {
+  PAPER_TWIPS,
+  TWIPS_PER_INCH,
+  TWIPS_PER_POINT,
+  applyPageSetupPatch,
+  twipsToInches,
+  type PageSetupPatch,
+} from "@/lib/writer/page-setup";
+import { checkBluebook } from "@/lib/legal/bluebook";
+import { describeCourtStyle, findCourtStyle, listCourtStyles } from "@/lib/legal/court-styles";
 import type { Editor } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import type { ChartDisplay, CommentInfo, NewChart, TableCell } from "@genoffice/docx-engine";
+import type {
+  ChartDisplay,
+  CommentInfo,
+  NewChart,
+  SectionSettings,
+  TableCell,
+} from "@genoffice/docx-engine";
 import { TABLE_HEADER_FILL } from "@genoffice/docx-engine";
 import { tableModelToPmNode } from "../editor/convert";
 import type { Command as PmCommand } from "@tiptap/pm/state";
@@ -14,8 +31,9 @@ import {
   addRowBefore,
   deleteColumn,
   deleteRow,
+  mergeCells,
 } from "@tiptap/pm/tables";
-import { applyTablePreset } from "../editor/table-properties";
+import { applyTablePreset, setTableAutoFit } from "../editor/table-properties";
 import type { AgentToolCall, AgentToolDef, CreateDocumentType } from "../../shared/ipc";
 import type { AgentImage, ToolDisplay } from "@genoffice/agent-core";
 import { createPlatformSkill } from "@/office/shared/platform-skill";
@@ -503,6 +521,166 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     },
   },
   {
+    name: "set_page_setup",
+    description:
+      "Page layout for the cursor's section or every section: orientation (portrait/landscape), paper size (letter/legal/a4), margins in inches, and the number of text columns. Only the fields given change; a call with no fields reports the current layout without changing anything. Use applyTo 'all' for a whole-document change (the usual case for a filing); 'current' for one section, e.g. a landscape exhibit or schedule section that was already split off with a section break.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        orientation: { type: "string", enum: ["portrait", "landscape"] },
+        paperSize: { type: "string", enum: ["letter", "legal", "a4"] },
+        margins: {
+          type: "object",
+          description: "margins in inches; give only the sides to change (0.5–2.0)",
+          properties: {
+            top: { type: "number" },
+            right: { type: "number" },
+            bottom: { type: "number" },
+            left: { type: "number" },
+          },
+        },
+        columns: { type: "integer", description: "number of text columns, 1–3" },
+        applyTo: {
+          type: "string",
+          enum: ["current", "all"],
+          description: "which sections to change (default 'current')",
+        },
+      },
+    },
+  },
+  {
+    name: "set_table_properties",
+    description:
+      "Table-level layout for an existing table (by block index), the properties Word keeps under Table Properties: repeatHeaderRows (the first row — or headerRowCount rows — repeats at the top of every page the table spans; essential for long schedules, privilege logs, exhibit lists), alignment (left/center/right), widthPercent of the text width, autoFit (contents/window/fixed), a border scheme (all/outside/horizontal/headerRule/none) with an optional hex borderColor, cellPadding in points, and mergeCells (a rectangular range merged into one cell; only one merge per call). Cell TEXT and row/column add/delete are edit_table; visual fill presets are edit_table restyle. Only the fields given change.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        blockIndex: {
+          type: "integer",
+          description: 'block index of the target table (type "table" in the block list)',
+        },
+        repeatHeaderRows: {
+          type: "boolean",
+          description: "true = header row(s) repeat on each page; false = stop repeating",
+        },
+        headerRowCount: {
+          type: "integer",
+          description: "how many leading rows form the header (default 1; used with repeatHeaderRows)",
+        },
+        alignment: { type: "string", enum: ["left", "center", "right"] },
+        widthPercent: {
+          type: "number",
+          description: "preferred table width as a percentage of the text width (10–100)",
+        },
+        autoFit: { type: "string", enum: ["contents", "window", "fixed"] },
+        borders: {
+          type: "string",
+          enum: ["all", "outside", "horizontal", "headerRule", "none"],
+          description:
+            "all = full grid; outside = box only; horizontal = rules between rows only; headerRule = a rule under the header and under the last row only (court-filing style); none = no borders",
+        },
+        borderColor: {
+          type: "string",
+          description: "6-digit hex without '#' for the border scheme (default 000000)",
+        },
+        borderWidthPt: {
+          type: "number",
+          description: "border line width in points (0.25–3; default 0.5)",
+        },
+        cellPadding: {
+          type: "object",
+          description: "cell margins in points; give only the sides to change",
+          properties: {
+            top: { type: "number" },
+            right: { type: "number" },
+            bottom: { type: "number" },
+            left: { type: "number" },
+          },
+        },
+        mergeCells: {
+          type: "object",
+          description: "merge the rectangle from (fromRow, fromCol) to (toRow, toCol), 0-based inclusive",
+          properties: {
+            fromRow: { type: "integer" },
+            fromCol: { type: "integer" },
+            toRow: { type: "integer" },
+            toCol: { type: "integer" },
+          },
+          required: ["fromRow", "fromCol", "toRow", "toCol"],
+        },
+      },
+      required: ["blockIndex"],
+    },
+  },
+  {
+    name: "insert_footnote",
+    description:
+      "Insert a footnote (or endnote) whose reference mark sits immediately after a piece of body text. afterText is a literal phrase in the document (usually the end of the sentence the note supports, including its closing punctuation — Bluebook puts the reference after the period); blockIndex narrows the search to one block when the phrase occurs more than once; occurrence picks the Nth match (1-based). text is the note body (plain text; cite in Bluebook form). Returns the note number.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        afterText: { type: "string", description: "literal document text the reference follows" },
+        text: { type: "string", description: "the note text" },
+        blockIndex: { type: "integer", description: "restrict the search to this block" },
+        occurrence: { type: "integer", description: "which match to use when several (default 1)" },
+        matchCase: { type: "boolean", description: "default true" },
+        kind: { type: "string", enum: ["footnote", "endnote"], description: "default footnote" },
+      },
+      required: ["afterText", "text"],
+    },
+  },
+  {
+    name: "check_bluebook_citations",
+    readOnly: true,
+    description:
+      "Deterministic Bluebook FORM check of the document text (or of blockIndexes / the given text): reporter abbreviations and spacing (F.3d, F. Supp. 3d, S. Ct.), 2d/3d ordinals, court-and-year parentheticals (circuit for F.3d/F.4th, district for F. Supp.), full dates for WL/LEXIS cites, T12 month abbreviations, Id./Ibid. short forms, See, e.g., signals, 'at p.' pinpoints, § spacing, U.S.C./C.F.R./Fed. R. Civ. P. abbreviations. Each finding has the rule, the exact text found, and where mechanical a drop-in suggestion plus its occurrence count — apply those with apply_commands replaceAllText (set expectedOccurrences to the count). It checks form only; use verify_citations to confirm a case exists and read the source before relying on it. It does not judge case-name italics or proposition support.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        blockIndexes: {
+          type: "array",
+          items: { type: "integer" },
+          description: "check only these blocks (default: whole document)",
+        },
+        text: { type: "string", description: "check this text instead of the document" },
+        maxFindings: { type: "integer", description: "cap on findings returned (default 60)" },
+      },
+    },
+  },
+  {
+    name: "apply_court_style",
+    description:
+      "Apply a court's brief-formatting rule to the whole document — typeface, body size, line spacing and page margins — from a rule-cited profile (frap = U.S. Courts of Appeals FRAP 32; scotus-booklet / scotus-8x11 = Supreme Court Rule 33; sdny-edny = S.D.N.Y./E.D.N.Y. Local Civil Rule 11.1; cal-superior = California Rules of Court 2.104–2.108; conservative-default = 12-pt serif, double-spaced, 1-inch margins), or from explicit custom values. Headings keep single spacing; footnote text size is reported, not changed. dryRun true returns the profile's requirements without changing anything. The profile text ends with a verification note — always relay it: local rules and judges' standing orders change.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        court: {
+          type: "string",
+          description: "profile id: frap | scotus-booklet | scotus-8x11 | sdny-edny | cal-superior | conservative-default",
+        },
+        custom: {
+          type: "object",
+          description: "explicit values instead of (or overriding) the profile",
+          properties: {
+            fontFamily: { type: "string" },
+            bodySizePt: { type: "number" },
+            lineSpacing: { type: "number", description: "1, 1.5 or 2" },
+            marginsIn: {
+              type: "object",
+              properties: {
+                top: { type: "number" },
+                right: { type: "number" },
+                bottom: { type: "number" },
+                left: { type: "number" },
+              },
+            },
+          },
+        },
+        dryRun: { type: "boolean", description: "report the requirements only" },
+      },
+    },
+  },
+  {
     name: "create_document",
     description:
       "Create a NEW separate document in the Library and return a link to open it; the current document is not modified. Use when the user asks to put content into a new/separate document (a memo from these notes, a deck summarizing this brief). " +
@@ -598,6 +776,44 @@ export interface AiHeaderFooterAccess {
   read(): AiHfState;
   /** returns an error message, or null on success */
   set(kind: "header" | "footer", view: "default" | "first" | "even", text: string): string | null;
+}
+
+/**
+ * App-owned page layout (sectPr) state for the set_page_setup and
+ * apply_court_style tools. Writes go through the same path as the Layout
+ * ribbon (per-section settings, final-section geometry, dirty flags).
+ */
+export { applyPageSetupPatch, type PageSetupPatch } from "@/lib/writer/page-setup";
+
+export interface AiPageSetupAccess {
+  read(): {
+    /** settings of the cursor's section (or the single section) */
+    section: SectionSettings | null;
+    sectionCount: number;
+    /** 0-based index of the cursor's section */
+    activeSection: number;
+    locked: boolean;
+  };
+  /** returns an error message, or null on success */
+  set(patch: PageSetupPatch, applyTo: "current" | "all"): string | null;
+}
+
+/**
+ * App-owned footnote/endnote store for insert_footnote. The note text lives in
+ * app state; the reference mark is an inline node the App inserts at `pos` so
+ * numbering and the docx save path match the Insert Footnote ribbon action.
+ */
+export interface AiNotesAccess {
+  list(kind: "footnote" | "endnote"): { id: string; text: string }[];
+  /** insert a new note whose reference mark goes at document position `pos`;
+   *  returns the note's number, or an error message */
+  insert(kind: "footnote" | "endnote", text: string, pos: number): { num: number } | string;
+}
+
+/** Document-level app state the Writer tools may reach beyond the PM doc. */
+export interface AiDocumentAccess {
+  pageSetup?: AiPageSetupAccess;
+  notes?: AiNotesAccess;
 }
 
 /**
@@ -701,6 +917,8 @@ const INDEX_WRITE_SUMMARIES: Record<string, () => string> = {
   insert_table: () => t("aiSumInsertContent"),
   insert_page_break: () => t("aiSumInsertContent"),
   edit_table: () => t("aiSumInsertContent"),
+  set_table_properties: () => t("aiSumInsertContent"),
+  insert_footnote: () => t("aiSumInsertContent"),
 };
 
 const STALE_DOC_ERROR =
@@ -875,6 +1093,129 @@ function setTableCellText(
     .insertContent(text.replace(/\r?\n/g, " "))
     .run();
   return true;
+}
+
+// --- Table property helpers --------------------------------------------------
+
+/** Patch top-level attributes of the table at block `idx` (no selection needed). */
+function patchTableAttrs(editor: Editor, idx: number, patch: Record<string, unknown>): boolean {
+  const info = docTableAt(editor, idx);
+  if (!info) return false;
+  const pos = info.tableStart - 1;
+  editor.view.dispatch(
+    editor.state.tr.setNodeMarkup(pos, undefined, { ...info.node.attrs, ...patch }),
+  );
+  return true;
+}
+
+/** Mark the first `count` rows as repeating header rows (0 = none). */
+function setRepeatHeaderRows(editor: Editor, idx: number, count: number, rows: number): boolean {
+  const info = docTableAt(editor, idx);
+  if (!info) return false;
+  let tr = editor.state.tr;
+  info.node.forEach((row, offset, index) => {
+    if (index >= rows) return;
+    const repeat = index < count;
+    if (row.attrs.repeatHeader === repeat && row.attrs.repeatHeaderEdited) return;
+    tr = tr.setNodeMarkup(info.tableStart + offset, undefined, {
+      ...row.attrs,
+      repeatHeader: repeat,
+      repeatHeaderEdited: true,
+    });
+  });
+  if (!tr.docChanged) return true;
+  editor.view.dispatch(tr);
+  return true;
+}
+
+type BorderScheme = "all" | "outside" | "horizontal" | "headerRule" | "none";
+const BORDER_SCHEMES = new Set<string>(["all", "outside", "horizontal", "headerRule", "none"]);
+
+/**
+ * Per-cell borders for a scheme, written the same way the visual presets do
+ * (direct cell formatting, portable without a table style). `szEighths` is the
+ * OOXML line width in eighths of a point.
+ */
+function applyBorderScheme(
+  editor: Editor,
+  idx: number,
+  scheme: BorderScheme,
+  color: string,
+  szEighths: number,
+): boolean {
+  const info = docTableAt(editor, idx);
+  if (!info) return false;
+  const { map, tableStart, node } = info;
+  const line = { style: "single", szEighths, color };
+  const none = null;
+  let tr = editor.state.tr;
+  const lastRow = map.height - 1;
+  node.forEach((row, rowOffset, rowIndex) => {
+    row.forEach((cell, cellOffset) => {
+      const cellPos = tableStart + rowOffset + 1 + cellOffset;
+      const rect = map.findCell(cellPos - tableStart);
+      const top = rect.top === 0;
+      const bottom = rect.bottom === map.height;
+      const left = rect.left === 0;
+      const right = rect.right === map.width;
+      let borders: Record<string, unknown> | null;
+      switch (scheme) {
+        case "all":
+          borders = { top: line, right: line, bottom: line, left: line };
+          break;
+        case "outside":
+          borders = { top: top ? line : none, right: right ? line : none, bottom: bottom ? line : none, left: left ? line : none };
+          break;
+        case "horizontal":
+          borders = { top: line, bottom: line, left: none, right: none };
+          break;
+        case "headerRule":
+          borders = {
+            top: none,
+            left: none,
+            right: none,
+            bottom: rowIndex === 0 || rect.bottom - 1 === lastRow ? line : none,
+          };
+          break;
+        default:
+          borders = null;
+      }
+      tr = tr.setNodeMarkup(cellPos, undefined, { ...cell.attrs, borders });
+    });
+  });
+  // Table-level borders would otherwise draw over cleared cell borders.
+  tr = tr.setNodeMarkup(tableStart - 1, undefined, { ...node.attrs, borders: null, tblStyleId: null });
+  editor.view.dispatch(tr);
+  return true;
+}
+
+/** Merge the rectangle (r0,c0)–(r1,c1) through prosemirror-tables' mergeCells. */
+function mergeTableCells(editor: Editor, idx: number, r0: number, c0: number, r1: number, c1: number): boolean {
+  const info = docTableAt(editor, idx);
+  if (!info) return false;
+  const { map, tableStart } = info;
+  const anchor = tableStart + map.map[r0 * map.width + c0]!;
+  const head = tableStart + map.map[r1 * map.width + c1]!;
+  editor.view.focus();
+  editor.view.dispatch(
+    editor.state.tr.setSelection(CellSelection.create(editor.state.doc, anchor, head)),
+  );
+  return mergeCells(editor.state, editor.view.dispatch);
+}
+
+/** Plain text of one top-level block (table cells joined with tabs, rows with newlines). */
+function blockPlainText(block: ProseMirrorNode): string {
+  if (block.type.name === "docProtected" || isTrackedDeleted(block)) return "";
+  if (block.type.name === "docTable") {
+    const rows: string[] = [];
+    block.forEach((row) => {
+      const cells: string[] = [];
+      row.forEach((cell) => cells.push(cell.textContent));
+      rows.push(cells.join("\t"));
+    });
+    return rows.join("\n");
+  }
+  return block.textContent;
 }
 
 /** Place a single-cell CellSelection at (row,col) then run a prosemirror-tables command. */
@@ -1192,6 +1533,7 @@ export function executeTool(
   frozen?: FrozenSelection | null,
   comments?: AiCommentsAccess,
   hf?: AiHeaderFooterAccess,
+  app?: AiDocumentAccess,
 ): ToolExecution | Promise<ToolExecution> {
   const scope = frozen && frozen.doc === editor.state.doc ? frozen.scope : null;
   activeEditor = editor;
@@ -1231,7 +1573,7 @@ export function executeTool(
   ) {
     return executeAsyncTool(editor, call, signal);
   }
-  return settle(executeSyncTool(editor, call, numIds, track, scope, comments, hf));
+  return settle(executeSyncTool(editor, call, numIds, track, scope, comments, hf, app));
 }
 
 function executeSyncTool(
@@ -1242,6 +1584,7 @@ function executeSyncTool(
   scope?: SelectionScope | null,
   comments?: AiCommentsAccess,
   hf?: AiHeaderFooterAccess,
+  app?: AiDocumentAccess,
 ): ToolExecution {
   switch (call.name) {
     case "read_document_outline":
@@ -1839,6 +2182,355 @@ function executeSyncTool(
         output: `Updated the ${kind}${view !== "default" ? ` (${view}-page variant)` : ""}.`,
         mutated: false, // app state only, saved with the document; not part of the PM doc
         summary: summaryOf(),
+      };
+    }
+
+    case "set_page_setup": {
+      const summary = t("aiSumInsertContent");
+      const access = app?.pageSetup;
+      if (!access) return fail(summary, "page setup is not available here");
+      const current = access.read();
+      if (current.locked) return fail(summary, "the document is read-only; page setup cannot be changed");
+      if (!current.section) return fail(summary, "no page section is available (open a document first)");
+      const applyTo = call.input.applyTo === "all" ? "all" : "current";
+      const patch: PageSetupPatch = {};
+      const done: string[] = [];
+
+      const paper = call.input.paperSize !== undefined ? String(call.input.paperSize) : null;
+      if (paper) {
+        const size = PAPER_TWIPS[paper];
+        if (!size) return fail(summary, 'paperSize must be "letter", "legal" or "a4"');
+        patch.paper = size;
+        done.push(`paper ${paper}`);
+      }
+      const orientation = call.input.orientation !== undefined ? String(call.input.orientation) : null;
+      if (orientation) {
+        if (orientation !== "portrait" && orientation !== "landscape")
+          return fail(summary, 'orientation must be "portrait" or "landscape"');
+        patch.orientation = orientation;
+        done.push(orientation);
+      }
+      const margins = call.input.margins as Record<string, unknown> | null | undefined;
+      if (margins && typeof margins === "object") {
+        const m: NonNullable<PageSetupPatch["margins"]> = {};
+        for (const [side, key] of [
+          ["top", "marginTop"],
+          ["right", "marginRight"],
+          ["bottom", "marginBottom"],
+          ["left", "marginLeft"],
+        ] as const) {
+          if (margins[side] === undefined || margins[side] === null) continue;
+          const inches = Number(margins[side]);
+          if (!Number.isFinite(inches) || inches < 0.5 || inches > 2)
+            return fail(summary, `margins.${side} must be between 0.5 and 2.0 inches`);
+          m[key] = Math.round(inches * TWIPS_PER_INCH);
+        }
+        if (Object.keys(m).length) {
+          patch.margins = m;
+          done.push(
+            `margins ${(["top", "right", "bottom", "left"] as const)
+              .filter((s) => margins[s] !== undefined && margins[s] !== null)
+              .map((s) => `${s} ${Number(margins[s])}"`)
+              .join(", ")}`,
+          );
+        }
+      }
+      if (call.input.columns !== undefined && call.input.columns !== null) {
+        const cols = Number(call.input.columns);
+        if (!Number.isInteger(cols) || cols < 1 || cols > 3)
+          return fail(summary, "columns must be an integer from 1 to 3");
+        patch.columns = cols;
+        done.push(`${cols} column${cols === 1 ? "" : "s"}`);
+      }
+      // Preview on the cursor's section: drives validation and the receipt.
+      const next = applyPageSetupPatch(current.section, patch);
+      if (!done.length) {
+        // No fields: report the current layout instead of failing.
+        const s = current.section;
+        return {
+          output: `Current page setup (${current.sectionCount > 1 ? `section ${current.activeSection + 1} of ${current.sectionCount}` : "single section"}): ${s.orientation}, ${twipsToInches(s.pageWidth)}" × ${twipsToInches(s.pageHeight)}", margins T ${twipsToInches(s.marginTop)}" R ${twipsToInches(s.marginRight)}" B ${twipsToInches(s.marginBottom)}" L ${twipsToInches(s.marginLeft)}", ${s.columns} column${s.columns === 1 ? "" : "s"}. Nothing was changed.`,
+          mutated: false,
+          summary: "Read page setup",
+        };
+      }
+      // Text area must remain usable after the change (Word refuses margins
+      // that leave less than about an inch of text width).
+      if (next.pageWidth - next.marginLeft - next.marginRight < TWIPS_PER_INCH)
+        return fail(summary, "these margins leave no usable text width on the page");
+      if (next.pageHeight - next.marginTop - next.marginBottom < TWIPS_PER_INCH)
+        return fail(summary, "these margins leave no usable text height on the page");
+      const error = access.set(patch, applyTo);
+      if (error) return fail(summary, error);
+      const where =
+        applyTo === "all"
+          ? current.sectionCount > 1
+            ? `all ${current.sectionCount} sections`
+            : "the document"
+          : current.sectionCount > 1
+            ? `section ${current.activeSection + 1} of ${current.sectionCount}`
+            : "the document";
+      return {
+        output: `Page setup updated for ${where}: ${done.join("; ")}. Now ${next.orientation}, ${twipsToInches(next.pageWidth)}" × ${twipsToInches(next.pageHeight)}", margins T ${twipsToInches(next.marginTop)}" R ${twipsToInches(next.marginRight)}" B ${twipsToInches(next.marginBottom)}" L ${twipsToInches(next.marginLeft)}", ${next.columns} column${next.columns === 1 ? "" : "s"}.`,
+        mutated: false, // app-level section state, saved with the document
+        summary,
+      };
+    }
+
+    case "set_table_properties": {
+      const summary = t("aiSumInsertContent");
+      const idx = Number(call.input.blockIndex);
+      const info = docTableAt(editor, idx);
+      if (!info)
+        return fail(summary, `block ${call.input.blockIndex} is not a table (type "table" in the block list)`);
+      const done: string[] = [];
+      const rows = info.map.height;
+      const cols = info.map.width;
+
+      if (call.input.repeatHeaderRows !== undefined && call.input.repeatHeaderRows !== null) {
+        const on = Boolean(call.input.repeatHeaderRows);
+        const count = call.input.headerRowCount === undefined ? 1 : Number(call.input.headerRowCount);
+        if (!Number.isInteger(count) || count < 1 || count >= rows)
+          return fail(summary, `headerRowCount must be between 1 and ${Math.max(1, rows - 1)} for this table`);
+        if (setRepeatHeaderRows(editor, idx, on ? count : 0, rows))
+          done.push(on ? `first ${count} row${count === 1 ? "" : "s"} repeat on each page` : "header rows no longer repeat");
+      }
+      const alignment = call.input.alignment !== undefined ? String(call.input.alignment) : null;
+      if (alignment) {
+        if (!["left", "center", "right"].includes(alignment))
+          return fail(summary, 'alignment must be "left", "center" or "right"');
+        if (patchTableAttrs(editor, idx, { tblAlign: alignment, tblFloat: null }))
+          done.push(`aligned ${alignment}`);
+      }
+      if (call.input.widthPercent !== undefined && call.input.widthPercent !== null) {
+        const pct = Number(call.input.widthPercent);
+        if (!Number.isFinite(pct) || pct < 10 || pct > 100)
+          return fail(summary, "widthPercent must be between 10 and 100");
+        if (patchTableAttrs(editor, idx, { widthPct: pct, widthPx: null, tblAutoFit: "window", tblAutoFitEdited: true }))
+          done.push(`width ${pct}%`);
+      }
+      const autoFit = call.input.autoFit !== undefined ? String(call.input.autoFit) : null;
+      if (autoFit) {
+        if (autoFit !== "contents" && autoFit !== "window" && autoFit !== "fixed")
+          return fail(summary, 'autoFit must be "contents", "window" or "fixed"');
+        const contentWidthPx = Math.max(300, editor.view.dom.clientWidth || 0) || 624;
+        if (runTableCellCommand(editor, idx, 0, 0, setTableAutoFit(autoFit, contentWidthPx)))
+          done.push(`autofit ${autoFit}`);
+      }
+      const borders = call.input.borders !== undefined ? String(call.input.borders) : null;
+      if (borders) {
+        if (!BORDER_SCHEMES.has(borders))
+          return fail(summary, 'borders must be "all", "outside", "horizontal", "headerRule" or "none"');
+        const color = String(call.input.borderColor ?? "000000").replace(/^#/, "");
+        if (!/^[0-9a-fA-F]{6}$/.test(color)) return fail(summary, "borderColor must be a 6-digit hex value");
+        const widthPt = call.input.borderWidthPt === undefined ? 0.5 : Number(call.input.borderWidthPt);
+        if (!Number.isFinite(widthPt) || widthPt < 0.25 || widthPt > 3)
+          return fail(summary, "borderWidthPt must be between 0.25 and 3");
+        if (applyBorderScheme(editor, idx, borders as BorderScheme, color.toUpperCase(), Math.round(widthPt * 8)))
+          done.push(`borders ${borders}`);
+      }
+      const padding = call.input.cellPadding as Record<string, unknown> | null | undefined;
+      if (padding && typeof padding === "object") {
+        const current = (info.node.attrs.cellMar as Record<string, number> | null) ?? {};
+        const mar: Record<string, number> = { ...current };
+        let any = false;
+        for (const side of ["top", "right", "bottom", "left"] as const) {
+          if (padding[side] === undefined || padding[side] === null) continue;
+          const pt = Number(padding[side]);
+          if (!Number.isFinite(pt) || pt < 0 || pt > 36) return fail(summary, `cellPadding.${side} must be 0–36 points`);
+          mar[side] = Math.round(pt * TWIPS_PER_POINT);
+          any = true;
+        }
+        if (any && patchTableAttrs(editor, idx, { cellMar: mar, cellMarEdited: true })) done.push("cell padding");
+      }
+      const merge = call.input.mergeCells as Record<string, unknown> | null | undefined;
+      if (merge && typeof merge === "object") {
+        const r0 = Number(merge.fromRow);
+        const c0 = Number(merge.fromCol);
+        const r1 = Number(merge.toRow);
+        const c1 = Number(merge.toCol);
+        if (![r0, c0, r1, c1].every(Number.isInteger) || r0 < 0 || c0 < 0 || r1 >= rows || c1 >= cols || r1 < r0 || c1 < c0)
+          return fail(summary, `mergeCells must be a rectangle inside the table (${rows} rows × ${cols} columns, 0-based)`);
+        if (r0 === r1 && c0 === c1) return fail(summary, "mergeCells needs at least two cells");
+        if (!mergeTableCells(editor, idx, r0, c0, r1, c1))
+          return fail(summary, "those cells cannot be merged (the range may cross an existing merged cell)");
+        done.push(`merged (${r0},${c0})–(${r1},${c1})`);
+      }
+      if (!done.length) return fail(summary, "no table property was given, or none applied");
+      return {
+        output: `Table at block ${idx}: ${done.join("; ")}.${merge ? " The merge changed the cell grid; call get_document_context before further cell edits on this table." : ""}`,
+        mutated: true,
+        summary,
+      };
+    }
+
+    case "insert_footnote": {
+      const summary = t("aiSumInsertContent");
+      const notes = app?.notes;
+      if (!notes) return fail(summary, "footnotes are not available here");
+      const kind = call.input.kind === "endnote" ? "endnote" : "footnote";
+      const afterText = String(call.input.afterText ?? "");
+      const noteText = String(call.input.text ?? "").trim();
+      if (!afterText.trim()) return fail(summary, "afterText must not be empty");
+      if (!noteText) return fail(summary, "text (the note body) must not be empty");
+      if (noteText.length > 4000) return fail(summary, "the note text is too long (4000 characters max)");
+      const matchCase = call.input.matchCase === undefined ? true : Boolean(call.input.matchCase);
+      let matches;
+      if (call.input.blockIndex !== undefined && call.input.blockIndex !== null) {
+        const bi = Number(call.input.blockIndex);
+        if (!Number.isInteger(bi) || bi < 0 || bi >= editor.state.doc.childCount)
+          return fail(summary, rangeError(editor));
+        const { from } = blockRangePositions(editor, bi, bi);
+        matches = findTextMatches(editor.state.doc.child(bi), from, afterText, matchCase);
+      } else {
+        matches = findTextMatches(editor.state.doc, -1, afterText, matchCase);
+      }
+      if (!matches.length)
+        return fail(summary, `"${afterText.slice(0, 80)}" was not found in the ${call.input.blockIndex !== undefined ? "block" : "document"}; copy the phrase exactly as it appears (search_document shows exact text)`);
+      const occurrence = call.input.occurrence === undefined ? 1 : Number(call.input.occurrence);
+      if (!Number.isInteger(occurrence) || occurrence < 1 || occurrence > matches.length)
+        return fail(summary, `occurrence must be between 1 and ${matches.length} (${matches.length} match${matches.length === 1 ? "" : "es"} found; pass blockIndex to narrow)`);
+      const at = matches[occurrence - 1]!.to;
+      const result = notes.insert(kind, noteText, at);
+      if (typeof result === "string") return fail(summary, result);
+      return {
+        output: `Inserted ${kind} ${result.num} after "${afterText.slice(0, 60)}"${matches.length > 1 ? ` (match ${occurrence} of ${matches.length})` : ""}.`,
+        mutated: true,
+        summary,
+      };
+    }
+
+    case "check_bluebook_citations": {
+      const summary = "Checked Bluebook form";
+      let text: string;
+      let scopeNote: string;
+      if (typeof call.input.text === "string" && call.input.text.trim()) {
+        text = call.input.text;
+        scopeNote = "the supplied text";
+      } else if (Array.isArray(call.input.blockIndexes) && call.input.blockIndexes.length) {
+        const idxs = (call.input.blockIndexes as unknown[]).map(Number);
+        if (!idxs.every((i) => Number.isInteger(i) && i >= 0 && i < editor.state.doc.childCount))
+          return fail(summary, rangeError(editor));
+        text = idxs.map((i) => blockPlainText(editor.state.doc.child(i))).join("\n");
+        scopeNote = `blocks ${idxs.join(", ")}`;
+      } else {
+        const parts: string[] = [];
+        editor.state.doc.forEach((block) => parts.push(blockPlainText(block)));
+        text = parts.join("\n");
+        scopeNote = "the whole document";
+      }
+      const maxFindings = call.input.maxFindings === undefined ? undefined : Number(call.input.maxFindings);
+      const report = checkBluebook(text, {
+        ...(Number.isInteger(maxFindings) ? { maxFindings: maxFindings as number } : {}),
+      });
+      return {
+        output: JSON.stringify({
+          scope: scopeNote,
+          summary: report.summary,
+          findings: report.findings.map((f) => ({
+            severity: f.severity,
+            kind: f.kind,
+            rule: f.rule,
+            found: f.found,
+            ...(f.suggestion !== undefined ? { suggestion: f.suggestion } : {}),
+            occurrences: f.occurrences,
+            message: f.message,
+          })),
+          citationsScanned: report.citations.length,
+          howToFix:
+            "For each finding with a suggestion, run apply_commands replaceAllText { containsText: found, replaceText: suggestion, matchCase: true, expectedOccurrences: occurrences }. Findings without a suggestion need the attorney's input (a court or year is missing — never invent one). This checks form only: run verify_citations on any case you have not confirmed.",
+        }),
+        mutated: false,
+        summary,
+      };
+    }
+
+    case "apply_court_style": {
+      const summary = t("aiSumApplyCommands");
+      const courtId = call.input.court !== undefined ? String(call.input.court) : "";
+      const custom = (call.input.custom ?? null) as Record<string, unknown> | null;
+      const profile = courtId ? findCourtStyle(courtId) : null;
+      if (courtId && !profile)
+        return fail(
+          summary,
+          `unknown court profile "${courtId}"; available: ${listCourtStyles()
+            .map((s) => `${s.id} (${s.label})`)
+            .join("; ")}`,
+        );
+      if (!profile && !custom) return fail(summary, "give a court profile id or custom values");
+
+      const fontFamily = String(custom?.fontFamily ?? profile?.fontFamily ?? "").trim();
+      const bodySizePt = Number(custom?.bodySizePt ?? profile?.bodySizePt ?? NaN);
+      const lineSpacing = Number(custom?.lineSpacing ?? profile?.lineSpacing ?? NaN);
+      const marginsRaw = (custom?.marginsIn as Record<string, unknown> | undefined) ?? profile?.marginsIn;
+      if (!fontFamily || fontFamily.length > 64) return fail(summary, "fontFamily is required (1–64 characters)");
+      if (!Number.isFinite(bodySizePt) || bodySizePt < 8 || bodySizePt > 18)
+        return fail(summary, "bodySizePt must be between 8 and 18");
+      if (![1, 1.5, 2].includes(lineSpacing)) return fail(summary, "lineSpacing must be 1, 1.5 or 2");
+      const margins = { top: 1, right: 1, bottom: 1, left: 1 };
+      for (const side of ["top", "right", "bottom", "left"] as const) {
+        const v = Number(marginsRaw?.[side] ?? 1);
+        if (!Number.isFinite(v) || v < 0.5 || v > 2) return fail(summary, `marginsIn.${side} must be 0.5–2.0`);
+        margins[side] = v;
+      }
+      const requirements = profile
+        ? describeCourtStyle(profile)
+        : `Custom style: ${fontFamily} ${bodySizePt} pt, ${lineSpacing === 2 ? "double" : lineSpacing === 1.5 ? "1.5" : "single"}-spaced, margins T ${margins.top}" R ${margins.right}" B ${margins.bottom}" L ${margins.left}".`;
+      if (call.input.dryRun === true) {
+        return { output: `Requirements (not applied): ${requirements}`, mutated: false, summary: "Read court style" };
+      }
+
+      const notes: string[] = [];
+      // 1. Page margins on every section (a filing is one layout throughout).
+      const access = app?.pageSetup;
+      if (access) {
+        const cur = access.read();
+        if (cur.locked) return fail(summary, "the document is read-only");
+        if (cur.section) {
+          const err = access.set(
+            {
+              margins: {
+                marginTop: Math.round(margins.top * TWIPS_PER_INCH),
+                marginRight: Math.round(margins.right * TWIPS_PER_INCH),
+                marginBottom: Math.round(margins.bottom * TWIPS_PER_INCH),
+                marginLeft: Math.round(margins.left * TWIPS_PER_INCH),
+              },
+            },
+            "all",
+          );
+          if (err) notes.push(`margins not applied: ${err}`);
+        } else notes.push("margins not applied: no page section available");
+      } else notes.push("margins not applied: page setup is not available here");
+
+      // 2. Typeface and size on every text block; body spacing on paragraphs
+      //    and list items (headings stay single-spaced, as every profile allows).
+      const styleCmds: Command[] = (["docParagraph", "docListItem", "docHeading"] as const).map((nodeType) => ({
+        updateTextStyle: {
+          target: { nodeType },
+          style: { font: fontFamily, sizeHalfPoints: Math.round(bodySizePt * 2) },
+          fields: ["font", "sizeHalfPoints"],
+        },
+      }));
+      const spacingCmds: Command[] = (["docParagraph", "docListItem"] as const).map((nodeType) => ({
+        updateParagraphStyle: {
+          target: { nodeType },
+          style: { lineSpacing },
+          fields: ["lineSpacing"],
+        },
+      }));
+      const outcome = executeCommands(editor, { commands: [...styleCmds, ...spacingCmds] }, { numIds, track, selection: null });
+      if (!outcome.ok) return fail(summary, outcome.error ?? "formatting commands failed");
+      const changed = outcome.results.reduce((sum, r) => sum + r.changed, 0);
+      if (profile && profile.footnoteSizePt !== profile.bodySizePt)
+        notes.push(`footnote text should be ${profile.footnoteSizePt} pt (not changed by this tool)`);
+      if (profile?.paper === "booklet") notes.push("booklet page size not applied (see profile notes)");
+      return {
+        output:
+          `Applied ${profile ? profile.label : "custom court style"}: ${fontFamily} ${bodySizePt} pt on ${changed} block${changed === 1 ? "" : "s"}, ` +
+          `${lineSpacing === 2 ? "double" : lineSpacing === 1.5 ? "1.5" : "single"} spacing on body text, margins T ${margins.top}" R ${margins.right}" B ${margins.bottom}" L ${margins.left}".` +
+          (notes.length ? ` Notes: ${notes.join("; ")}.` : "") +
+          ` Requirements: ${requirements}`,
+        mutated: changed > 0,
+        summary,
       };
     }
 

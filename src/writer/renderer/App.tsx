@@ -22,6 +22,7 @@ import {
   BLANK_ORDERED_NUM_ID,
   DEFAULT_SECTION,
   applySectionSettings,
+  nextNoteId,
   verifyProtectionPassword,
   type Block,
   type CommentInfo,
@@ -41,7 +42,12 @@ import {
 import type { AiDocContent, AiSettings, OpenDocxResult } from '../shared/ipc'
 import { WriterHeader } from './components/WriterHeader'
 import { AiPanel, AI_REVISION_AUTHOR } from './ai/AiPanel'
-import type { AiCommentsAccess, AiHeaderFooterAccess } from './ai/tools'
+import {
+  applyPageSetupPatch,
+  type AiCommentsAccess,
+  type AiDocumentAccess,
+  type AiHeaderFooterAccess,
+} from './ai/tools'
 import { applyHfText, hfEditText } from './editor/hf-text'
 import { textColorValue } from './editor/text-color'
 import { AiAskPopover } from './components/AiAskPopover'
@@ -4198,6 +4204,98 @@ export function App() {
     [],
   )
 
+  // Page setup + footnotes for the AI tools (set_page_setup, apply_court_style,
+  // insert_footnote). Same ref-bundle pattern as the header/footer access: the
+  // tool executor holds one stable object, the bundle is refreshed every render,
+  // and writes run the Layout-ribbon / Insert-Footnote code paths.
+  const aiDocCtx = {
+    editor,
+    section,
+    sections,
+    activeSection,
+    footnotes,
+    endnotes,
+    locked: isProtected || readMode,
+  }
+  const aiDocCtxRef = useRef(aiDocCtx)
+  aiDocCtxRef.current = aiDocCtx
+  const aiDocAccess = useMemo<AiDocumentAccess>(
+    () => ({
+      pageSetup: {
+        read: () => {
+          const ctx = aiDocCtxRef.current
+          return {
+            section: ctx.sections[ctx.activeSection]?.settings ?? ctx.section,
+            sectionCount: Math.max(1, ctx.sections.length),
+            activeSection: ctx.activeSection,
+            locked: ctx.locked,
+          }
+        },
+        set: (patch, applyTo) => {
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked) return 'the document is read-only; page setup cannot be changed'
+          const current = ctx.sections[ctx.activeSection]?.settings ?? ctx.section
+          if (!current) return 'no page section is available'
+          if (applyTo === 'all' && ctx.sections.length > 1) {
+            // The patch is semantic, so each section orients its own paper and
+            // keeps whatever the patch does not mention (a landscape exhibit
+            // section stays landscape when only the margins change).
+            setSections((prev) =>
+              prev.map((s) => ({ ...s, settings: applyPageSetupPatch(s.settings, patch) })),
+            )
+            setSectionsDirty(ctx.sections.map((_, i) => i))
+            const last = ctx.sections[ctx.sections.length - 1]?.settings ?? current
+            setSection(applyPageSetupPatch(last, patch))
+            setSectionDirty(true)
+            return null
+          }
+          // one section (or single-section document): same path as the ribbon
+          const next = applyPageSetupPatch(current, patch)
+          setSections((prev) =>
+            prev.map((s, i) => (i === ctx.activeSection ? { ...s, settings: next } : s)),
+          )
+          if (ctx.sections.length <= 1 || ctx.activeSection === ctx.sections.length - 1) {
+            setSection(next)
+            setSectionDirty(true)
+          } else {
+            setSectionsDirty((d) => (d.includes(ctx.activeSection) ? d : [...d, ctx.activeSection]))
+          }
+          return null
+        },
+      },
+      notes: {
+        list: (kind) =>
+          (kind === 'footnote' ? aiDocCtxRef.current.footnotes : aiDocCtxRef.current.endnotes).map(
+            (n) => ({ id: n.id, text: n.text }),
+          ),
+        insert: (kind, text, pos) => {
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked) return 'the document is read-only; notes cannot be inserted'
+          const ed = ctx.editor
+          if (!ed) return 'the editor is not available'
+          if (pos < 0 || pos > ed.state.doc.content.size) return 'the note position is outside the document'
+          const list = kind === 'footnote' ? ctx.footnotes : ctx.endnotes
+          const setList = kind === 'footnote' ? setFootnotes : setEndnotes
+          const id = nextNoteId(list)
+          const num = list.length + 1
+          setList([...list, { id, text }])
+          const ok = ed
+            .chain()
+            .setTextSelection(pos)
+            .insertContent({ type: 'docNoteRef', attrs: { kind, id, num } } as never)
+            .run()
+          if (!ok) {
+            setList(list)
+            return 'the note reference could not be inserted at that position'
+          }
+          setNotesDirty(true)
+          return { num }
+        },
+      },
+    }),
+    [],
+  )
+
   const ribbonActions = useStableCallbacks({
     allocateNumId: (kind: 'bullet' | 'ordered') => allocateListNumId(kind),
     createListDef: (levels: CustomNumberingLevel[]) => createCustomListDef(levels),
@@ -4549,6 +4647,7 @@ export function App() {
               onQueueConsume={queueConsume}
               commentsAccess={aiCommentsAccess}
               hfAccess={aiHfAccess}
+              docAccess={aiDocAccess}
             />
           </div>
         )}
