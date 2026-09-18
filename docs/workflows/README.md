@@ -2,7 +2,7 @@
 
 This adds **only Workflows** to the Seeger Weiss AI platform. It does not integrate the MCO application, its records, dashboards, calendars, reconciliation, credentials, or data. The Workflows UI uses this repository's native `AppShell`, tokens, authentication and Office service.
 
-**Deployment state:** disabled unless explicitly configured. A successful local build is not evidence that the production AWS account, model, IAM policies or tools have been validated. Complete [STAGING.md](./STAGING.md) before enabling a shared environment. See [AGENT_CONTEXT.md](./AGENT_CONTEXT.md) for future maintenance.
+**Deployment state:** live on testing (`SW_WORKFLOWS_ENABLED=true`); gated by that flag per environment. A successful local build is not evidence that the production AWS account, model, IAM policies or tools have been validated.
 
 ## What is implemented
 
