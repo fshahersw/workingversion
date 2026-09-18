@@ -196,11 +196,15 @@ export function normalizeReporter(raw: string): string | null {
 // The pin group also admits the wrong "at p. 12" / "at pp. 12-13" so it can be
 // reported rather than silently cutting the citation short.
 const CASE_CITE_RE = new RegExp(
-  String.raw`\b(\d{1,4})\s+(${REPORTER_ALTERNATION})\s+(\d{1,6})((?:\s*,\s*(?:at\s+(?:pp?\.\s*)?)?(?:\*?\d{1,6}(?:\s*[-–]\s*\*?\d{1,6})?|n\.\s*\d+))*)(\s*\(([^()]{2,120})\))?`,
+  // page admits up to 8 digits: Westlaw document numbers are 7 digits ("2023 WL 4567890")
+  String.raw`\b(\d{1,4})\s+(${REPORTER_ALTERNATION})\s+(\d{1,8})((?:\s*,\s*(?:at\s+(?:pp?\.\s*)?)?(?:\*?\d{1,6}(?:\s*[-–]\s*\*?\d{1,6})?|n\.\s*\d+))*)(\s*\(([^()]{2,120})\))?`,
   "g",
 );
 
 const YEAR_RE = /\b(1[89]\d{2}|20\d{2})\b/;
+/** Month (full or T12 abbreviation, right or wrong) + day + year: a full decision date. */
+const FULL_DATE_RE =
+  /\b(?:Jan(?:\.|uary)?|Feb(?:\.|ruary)?|Mar(?:\.|ch)?|Apr(?:\.|il)?|May|Jun(?:\.|e)?|Jul(?:\.|y)?|Aug(?:\.|ust)?|Sep(?:t\.?|\.|tember)?|Oct(?:\.|ober)?|Nov(?:\.|ember)?|Dec(?:\.|ember)?)\s+\d{1,2},?\s+(?:1[89]|20)\d{2}\b/;
 const CIRCUIT_RE = /\b(?:\d{1,2}(?:st|d|th)|Fed\.|D\.C\.)\s*Cir\./;
 const DISTRICT_RE =
   /\b(?:[NSEWCM]\.\s?)?D\.\s?[A-Z]|\bD\.\s?(?:Md|Del|Mass|Conn|Minn|Colo|Nev|Ariz|Kan|Neb|Utah|Idaho|Or|Mont|Wyo|Alaska|Haw|Me|Vt|R\.I|N\.J|N\.H|N\.M|S\.C|P\.R|V\.I|D\.C)\b/;
@@ -217,10 +221,28 @@ function countOccurrences(text: string, needle: string): number {
 }
 
 function push(findings: Finding[], text: string, f: Omit<Finding, "occurrences">): void {
-  if (f.suggestion !== undefined && f.suggestion === f.found) return;
+  let { found, suggestion } = f;
+  if (suggestion !== undefined && suggestion === found) return;
+  // A wrong form that is a prefix of its own fix ("U.S.C" -> "U.S.C.", "Jan" ->
+  // "Jan.", "Cf" -> "Cf.", "See, e.g." -> "See, e.g.,") would, as a bare find
+  // string, also match every CORRECT instance, and a replace-all would turn
+  // "U.S.C." into "U.S.C..". Bind such findings to the character that follows
+  // them in the text so the find string only ever matches the wrong form.
+  if (suggestion !== undefined && suggestion.startsWith(found)) {
+    const next = text[f.offset + found.length];
+    if (next === undefined) return; // at the very end of the text: nothing to bind to
+    if (next === suggestion[found.length]) return; // actually already correct
+    found += next;
+    suggestion += next;
+  }
   // one finding per distinct `found` string: the fix is a find & replace
-  if (findings.some((x) => x.found === f.found && x.kind === f.kind)) return;
-  findings.push({ ...f, occurrences: countOccurrences(text, f.found) });
+  if (findings.some((x) => x.found === found && x.kind === f.kind)) return;
+  findings.push({
+    ...f,
+    found,
+    ...(suggestion !== undefined ? { suggestion } : {}),
+    occurrences: countOccurrences(text, found),
+  });
 }
 
 /** Months as Bluebook T12 abbreviates them inside citations. */
@@ -356,6 +378,17 @@ function checkCaseCitations(text: string, citations: CaseCitation[], findings: F
             rule: "R10.5(a), R18.3.1",
             message:
               "The parenthetical of an unreported decision must give the full date, including the year.",
+            offset: offset + full.indexOf(`(${parenInner})`),
+          });
+        } else if (!FULL_DATE_RE.test(parenInner)) {
+          // Year alone is not enough for WL/LEXIS: month, day and year are required.
+          push(findings, text, {
+            kind: "parenthetical",
+            severity: "error",
+            found: `(${parenInner})`,
+            rule: "R18.3.1, R10.5(a)",
+            message:
+              "An unreported (WL/LEXIS) decision is cited with its exact date — month, day and year (e.g. Mar. 3, 2024), not the year alone.",
             offset: offset + full.indexOf(`(${parenInner})`),
           });
         }

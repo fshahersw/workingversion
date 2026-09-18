@@ -57,6 +57,27 @@ test("mergeUserMemory counts each conversation once and increments across chats"
   assert.equal(mem.anchors[0]!.lastChat, "conv-2");
 });
 
+test("a chat's first turn (no id yet) and its later turns count as ONE chat", () => {
+  // Turn 1 arrives before the server has assigned a conversation id.
+  let mem = mergeUserMemory(
+    emptyUserMemory(NOW),
+    ledger([["Zantac MDL 2924", "matter"]], ["keep this memo under a page"]),
+    undefined as unknown as string,
+    daysAgo(1),
+  );
+  assert.equal(mem.anchors[0]!.chats, 1);
+  // Turn 2 of the same chat names itself: adopt the id, do not count again.
+  mem = mergeUserMemory(mem, ledger([["Zantac MDL 2924", "matter"]], ["keep this memo under a page"]), "conv-1", NOW);
+  assert.equal(mem.anchors[0]!.chats, 1);
+  assert.equal(mem.anchors[0]!.lastChat, "conv-1");
+  assert.equal(mem.preferences[0]!.chats, 1);
+  assert.deepEqual(standingPreferences(mem), [], "a one-off instruction must not become standing");
+  // A genuinely new chat (first turn, again id-less) does count.
+  mem = mergeUserMemory(mem, ledger([["Zantac MDL 2924", "matter"]], ["keep this memo under a page"]), "", NOW);
+  assert.equal(mem.anchors[0]!.chats, 2);
+  assert.deepEqual(standingPreferences(mem), ["keep this memo under a page"]);
+});
+
 test("mergeUserMemory keeps the most recent anchors within the cap and drops stale ones", () => {
   let mem = emptyUserMemory(NOW);
   for (let i = 0; i < USER_MEMORY_MAX_ANCHORS + 5; i++) {

@@ -4232,6 +4232,10 @@ export function App() {
           }
         },
         set: (patch, applyTo) => {
+          // The agent loop runs several write tools in one turn with no render
+          // between them, so state is updated functionally (each call composes
+          // on the previous one) and the ref is mirrored synchronously so the
+          // next call (or a read) in the same turn sees this change.
           const ctx = aiDocCtxRef.current
           if (ctx.locked) return 'the document is read-only; page setup cannot be changed'
           const current = ctx.sections[ctx.activeSection]?.settings ?? ctx.section
@@ -4240,25 +4244,40 @@ export function App() {
             // The patch is semantic, so each section orients its own paper and
             // keeps whatever the patch does not mention (a landscape exhibit
             // section stays landscape when only the margins change).
+            const nextSections = ctx.sections.map((s) => ({
+              ...s,
+              settings: applyPageSetupPatch(s.settings, patch),
+            }))
             setSections((prev) =>
               prev.map((s) => ({ ...s, settings: applyPageSetupPatch(s.settings, patch) })),
             )
             setSectionsDirty(ctx.sections.map((_, i) => i))
-            const last = ctx.sections[ctx.sections.length - 1]?.settings ?? current
-            setSection(applyPageSetupPatch(last, patch))
+            setSection((prev) => applyPageSetupPatch(prev ?? current, patch))
             setSectionDirty(true)
+            aiDocCtxRef.current = {
+              ...ctx,
+              sections: nextSections,
+              section: applyPageSetupPatch(ctx.section ?? current, patch),
+            }
             return null
           }
           // one section (or single-section document): same path as the ribbon
           const next = applyPageSetupPatch(current, patch)
+          const active = ctx.activeSection
           setSections((prev) =>
-            prev.map((s, i) => (i === ctx.activeSection ? { ...s, settings: next } : s)),
+            prev.map((s, i) => (i === active ? { ...s, settings: applyPageSetupPatch(s.settings, patch) } : s)),
           )
-          if (ctx.sections.length <= 1 || ctx.activeSection === ctx.sections.length - 1) {
-            setSection(next)
+          const isLast = ctx.sections.length <= 1 || active === ctx.sections.length - 1
+          if (isLast) {
+            setSection((prev) => applyPageSetupPatch(prev ?? current, patch))
             setSectionDirty(true)
           } else {
-            setSectionsDirty((d) => (d.includes(ctx.activeSection) ? d : [...d, ctx.activeSection]))
+            setSectionsDirty((d) => (d.includes(active) ? d : [...d, active]))
+          }
+          aiDocCtxRef.current = {
+            ...ctx,
+            sections: ctx.sections.map((s, i) => (i === active ? { ...s, settings: next } : s)),
+            section: isLast ? next : ctx.section,
           }
           return null
         },
@@ -4278,16 +4297,20 @@ export function App() {
           const setList = kind === 'footnote' ? setFootnotes : setEndnotes
           const id = nextNoteId(list)
           const num = list.length + 1
-          setList([...list, { id, text }])
           const ok = ed
             .chain()
             .setTextSelection(pos)
             .insertContent({ type: 'docNoteRef', attrs: { kind, id, num } } as never)
             .run()
-          if (!ok) {
-            setList(list)
-            return 'the note reference could not be inserted at that position'
-          }
+          if (!ok) return 'the note reference could not be inserted at that position'
+          // Append functionally and mirror into the ref: several insert_footnote
+          // calls in one model turn run before React re-renders, and each must
+          // see the notes the previous one added (distinct id and number).
+          const note = { id, text }
+          setList((prev) => (prev.some((n) => n.id === id) ? prev : [...prev, note]))
+          const nextList = [...list, note]
+          aiDocCtxRef.current =
+            kind === 'footnote' ? { ...ctx, footnotes: nextList } : { ...ctx, endnotes: nextList }
           setNotesDirty(true)
           return { num }
         },

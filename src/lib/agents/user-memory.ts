@@ -58,6 +58,9 @@ const ANCHOR_KINDS = new Set(["matter", "court", "judge", "statute"]);
 const DURABLE_PREFERENCE_RE =
   /\b(always|never|from now on|by default|going forward|in (?:every|all) (?:answer|response|chat)s?|whenever|every time|prefer)\b/i;
 
+/** Placeholder chat key for a turn that arrived before the chat had an id. */
+const UNKNOWN_CHAT = "unknown";
+
 const s = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const clip = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
 
@@ -158,7 +161,13 @@ export function mergeUserMemory(
   now = new Date(),
 ): UserMemory {
   const nowIso = now.toISOString();
-  const conv = clip(s(conversationId), 64) || "unknown";
+  const conv = clip(s(conversationId), 64) || UNKNOWN_CHAT;
+  // The first turn of a chat has no id yet (the server assigns one when the
+  // turn is saved), so an entry last touched by an id-less turn belongs to the
+  // chat that now names itself: adopt the id, do not count a new chat. When
+  // in doubt the count stays low, so a one-off instruction is never promoted
+  // to a standing preference by the same chat naming itself twice.
+  const sameChat = (lastChat: string) => lastChat === conv || lastChat === UNKNOWN_CHAT;
 
   const anchors = new Map<string, UserAnchor>();
   for (const a of prev.anchors) anchors.set(a.label.toLowerCase(), { ...a });
@@ -174,7 +183,7 @@ export function mergeUserMemory(
       anchors.set(key, {
         ...cur,
         kind: cur.kind || kind,
-        chats: cur.lastChat === conv ? cur.chats : cur.chats + 1,
+        chats: sameChat(cur.lastChat) ? cur.chats : cur.chats + 1,
         lastSeen: nowIso,
         lastChat: conv,
       });
@@ -193,7 +202,7 @@ export function mergeUserMemory(
     } else {
       prefs.set(key, {
         ...cur,
-        chats: cur.lastChat === conv ? cur.chats : cur.chats + 1,
+        chats: sameChat(cur.lastChat) ? cur.chats : cur.chats + 1,
         lastSeen: nowIso,
         lastChat: conv,
       });

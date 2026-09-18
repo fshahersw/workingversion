@@ -129,11 +129,87 @@ function stripFrame(q: string): string {
   return q.replace(/^\s*\[[^\]]*\]\s*/, "").trim();
 }
 
+// --- Preference provenance --------------------------------------------------
+//
+// The memory refresh reads the answer (built from retrieved documents) as well
+// as the question, and whatever it returns as "preferences" is later rendered
+// as standing instructions from the attorney. An instruction-shaped sentence
+// quoted from a source must never get that authority, so a NEW preference is
+// admitted only when its content words come from something the user typed.
+
+const PREF_STOPWORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "into", "when", "then", "than", "them",
+  "they", "have", "will", "would", "should", "could", "shall", "must", "always", "never", "please",
+  "only", "just", "also", "each", "every", "your", "yours", "their", "there", "these", "those",
+  "about", "after", "before", "under", "over", "answer", "answers", "response", "responses",
+  "want", "wants", "prefer", "prefers", "like", "likes", "keep", "make", "give", "include", "user",
+  "attorney", "lawyer", "chat", "going", "forward", "default", "whenever", "time", "instead",
+]);
+
+function contentWords(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z][a-z0-9'’-]{3,}/g) ?? [])
+    .map((w) => w.replace(/['’]s$/, ""))
+    .filter((w) => !PREF_STOPWORDS.has(w));
+}
+
+/**
+ * True when the preference's content words are (mostly) present in what the
+ * user wrote. Short preferences need every word; longer ones need two thirds.
+ * A preference with no content words at all is never grounded.
+ */
+export function groundedInUserTurns(preference: string, userTurns: readonly string[]): boolean {
+  const words = [...new Set(contentWords(preference))];
+  if (!words.length) return false;
+  const hay = new Set(userTurns.flatMap((t) => contentWords(stripFrame(t))));
+  if (!hay.size) return false;
+  const hits = words.filter((w) => hay.has(w)).length;
+  const needed = words.length <= 3 ? words.length : Math.ceil((words.length * 2) / 3);
+  return hits >= needed;
+}
+
+/** Anchors a question names: MDL/docket numbers and proper-noun tokens, lower-cased. */
+export function questionAnchors(question: string): string[] {
+  const q = stripFrame(question);
+  const out = new Set<string>();
+  for (const m of q.matchAll(new RegExp(MDL_OR_DOCKET_RE.source, "gi"))) {
+    out.add(m[0].replace(/\s+/g, " ").toLowerCase());
+  }
+  for (const m of q.matchAll(new RegExp(PROPER_NOUN_RE.source, "g"))) {
+    const tok = m[0]
+      .replace(/^[\s(]/, "")
+      .replace(/(?:'s|’s)$/i, "")
+      .replace(/[.,;:!?)]+$/, "")
+      .toLowerCase();
+    if (tok.length >= 3) out.add(tok);
+  }
+  return [...out];
+}
+
+/**
+ * True when EVERY anchor the question names already appears in the session's
+ * known text (entity labels, running summary). A standalone question whose
+ * anchors are all known continues the current topic, so the rewrite/topic-shift
+ * model call can be skipped safely. Any unknown anchor (a new matter, a new
+ * MDL number) means the model must judge whether the subject changed.
+ */
+export function anchorsCovered(question: string, known: readonly string[]): boolean {
+  const anchors = questionAnchors(question);
+  if (!anchors.length) return false;
+  const hay = known
+    .filter((k): k is string => typeof k === "string" && k.trim().length > 0)
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+  if (!hay) return false;
+  return anchors.every((a) => hay.includes(a));
+}
+
 /**
  * True when the question likely depends on prior turns and should be rewritten
- * to standalone before routing/retrieval. False when it is self-contained, in
- * which case the rewrite model call is skipped (topicShift stays false, so the
- * established ledger is kept — the safe default).
+ * to standalone before routing/retrieval. False when it is self-contained; the
+ * caller then skips the rewrite model call only when anchorsCovered() also
+ * holds, so a self-contained question about a NEW subject still gets the
+ * model's topic-shift judgment.
  */
 export function needsResolution(question: string): boolean {
   const q = stripFrame(question);

@@ -2289,8 +2289,15 @@ function executeSyncTool(
       if (call.input.repeatHeaderRows !== undefined && call.input.repeatHeaderRows !== null) {
         const on = Boolean(call.input.repeatHeaderRows);
         const count = call.input.headerRowCount === undefined ? 1 : Number(call.input.headerRowCount);
-        if (!Number.isInteger(count) || count < 1 || count >= rows)
-          return fail(summary, `headerRowCount must be between 1 and ${Math.max(1, rows - 1)} for this table`);
+        // Turning the repeat OFF needs no header count; only a request to
+        // repeat rows is bounded by the table's height.
+        if (on && (!Number.isInteger(count) || count < 1 || count >= rows))
+          return fail(
+            summary,
+            rows <= 1
+              ? "a one-row table has no body rows to repeat a header over"
+              : `headerRowCount must be between 1 and ${rows - 1} for this table`,
+          );
         if (setRepeatHeaderRows(editor, idx, on ? count : 0, rows))
           done.push(on ? `first ${count} row${count === 1 ? "" : "s"} repeat on each page` : "header rows no longer repeat");
       }
@@ -2386,6 +2393,14 @@ function executeSyncTool(
       }
       if (!matches.length)
         return fail(summary, `"${afterText.slice(0, 80)}" was not found in the ${call.input.blockIndex !== undefined ? "block" : "document"}; copy the phrase exactly as it appears (search_document shows exact text)`);
+      // An ambiguous anchor is refused rather than resolved to the first hit:
+      // a note landing after the wrong "Id." is a silent error in a brief.
+      const scoped = call.input.blockIndex !== undefined && call.input.blockIndex !== null;
+      if (matches.length > 1 && call.input.occurrence === undefined && !scoped)
+        return fail(
+          summary,
+          `"${afterText.slice(0, 80)}" appears ${matches.length} times; pass blockIndex (the paragraph it is in) or occurrence (1-${matches.length}) to say which one gets the note`,
+        );
       const occurrence = call.input.occurrence === undefined ? 1 : Number(call.input.occurrence);
       if (!Number.isInteger(occurrence) || occurrence < 1 || occurrence > matches.length)
         return fail(summary, `occurrence must be between 1 and ${matches.length} (${matches.length} match${matches.length === 1 ? "" : "es"} found; pass blockIndex to narrow)`);
@@ -2461,14 +2476,17 @@ function executeSyncTool(
       const fontFamily = String(custom?.fontFamily ?? profile?.fontFamily ?? "").trim();
       const bodySizePt = Number(custom?.bodySizePt ?? profile?.bodySizePt ?? NaN);
       const lineSpacing = Number(custom?.lineSpacing ?? profile?.lineSpacing ?? NaN);
-      const marginsRaw = (custom?.marginsIn as Record<string, unknown> | undefined) ?? profile?.marginsIn;
+      // Custom margins override the profile side by side: {top: 1.5} on a
+      // profile keeps that profile's other three sides (not 1" defaults).
+      const customMargins = (custom?.marginsIn as Record<string, unknown> | undefined) ?? undefined;
+      const marginsRaw: Record<string, unknown> = { ...(profile?.marginsIn ?? {}), ...(customMargins ?? {}) };
       if (!fontFamily || fontFamily.length > 64) return fail(summary, "fontFamily is required (1–64 characters)");
       if (!Number.isFinite(bodySizePt) || bodySizePt < 8 || bodySizePt > 18)
         return fail(summary, "bodySizePt must be between 8 and 18");
       if (![1, 1.5, 2].includes(lineSpacing)) return fail(summary, "lineSpacing must be 1, 1.5 or 2");
       const margins = { top: 1, right: 1, bottom: 1, left: 1 };
       for (const side of ["top", "right", "bottom", "left"] as const) {
-        const v = Number(marginsRaw?.[side] ?? 1);
+        const v = Number(marginsRaw[side] ?? 1);
         if (!Number.isFinite(v) || v < 0.5 || v > 2) return fail(summary, `marginsIn.${side} must be 0.5–2.0`);
         margins[side] = v;
       }
@@ -2510,16 +2528,40 @@ function executeSyncTool(
           fields: ["font", "sizeHalfPoints"],
         },
       }));
-      const spacingCmds: Command[] = (["docParagraph", "docListItem"] as const).map((nodeType) => ({
-        updateParagraphStyle: {
-          target: { nodeType },
-          style: { lineSpacing },
-          fields: ["lineSpacing"],
-        },
-      }));
+      // Body spacing skips indented paragraphs (>= 0.5"): block quotations
+      // are single-spaced under every profile. Table cells are not top-level
+      // blocks, so they are never touched by these commands.
+      const bodyParagraphs: number[] = [];
+      let quoteBlocks = 0;
+      editor.state.doc.forEach((block, _pos, index) => {
+        if (block.type.name !== "docParagraph") return;
+        if (Number(block.attrs.indentLeft ?? 0) >= 720) quoteBlocks++;
+        else bodyParagraphs.push(index);
+      });
+      const spacingCmds: Command[] = [
+        ...(bodyParagraphs.length
+          ? [
+              {
+                updateParagraphStyle: {
+                  target: { nodeType: "docParagraph" as const, blockIndexes: bodyParagraphs },
+                  style: { lineSpacing },
+                  fields: ["lineSpacing"],
+                },
+              } as Command,
+            ]
+          : []),
+        {
+          updateParagraphStyle: {
+            target: { nodeType: "docListItem" as const },
+            style: { lineSpacing },
+            fields: ["lineSpacing"],
+          },
+        } as Command,
+      ];
       const outcome = executeCommands(editor, { commands: [...styleCmds, ...spacingCmds] }, { numIds, track, selection: null });
       if (!outcome.ok) return fail(summary, outcome.error ?? "formatting commands failed");
       const changed = outcome.results.reduce((sum, r) => sum + r.changed, 0);
+      if (quoteBlocks) notes.push(`${quoteBlocks} indented paragraph${quoteBlocks === 1 ? "" : "s"} (block quotations) kept their spacing`);
       if (profile && profile.footnoteSizePt !== profile.bodySizePt)
         notes.push(`footnote text should be ${profile.footnoteSizePt} pt (not changed by this tool)`);
       if (profile?.paper === "booklet") notes.push("booklet page size not applied (see profile notes)");

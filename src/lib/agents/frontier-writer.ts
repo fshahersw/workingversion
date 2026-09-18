@@ -119,6 +119,9 @@ export function buildWriterUser(
   lines.push(`REQUEST: ${ctx.userMessage}`);
   lines.push(`CURRENT DATE: ${ctx.currentDateIso}`);
 
+  if (ctx.userContext?.trim()) {
+    lines.push("", ctx.userContext.trim());
+  }
   if (ctx.conversationSummary?.trim()) {
     lines.push("", `CONVERSATION SUMMARY: ${ctx.conversationSummary.trim()}`);
   }

@@ -22,7 +22,7 @@ import type { Source } from "@/lib/chat-types";
 import { BEDROCK_AGENT_MODEL, bedrockChat, bedrockEnabled, userText } from "./bedrock.server";
 import { agentError, trunc } from "./log.server";
 import { parseJsonBlock } from "./json-extract";
-import { fitTail, needsResolution, TAIL_RECENT_CHARS } from "./memory-budget";
+import { anchorsCovered, fitTail, groundedInUserTurns, needsResolution, TAIL_RECENT_CHARS } from "./memory-budget";
 import { temporalContext } from "@/lib/system-prompt";
 
 export type HistoryTurn = { role: "user" | "assistant"; content: string };
@@ -212,11 +212,16 @@ export async function resolveQuestion(
   const fallback: Resolved = { query: question, topicShift: false };
   if (!hasContext(mem) || !bedrockEnabled()) return fallback;
   // A question that already names its subject (a matter, an MDL number, a
-  // judge) needs no rewrite; skipping the model call here removes a full
-  // Bedrock round trip from the critical path on most named follow-ups. The
-  // ledger is kept (topicShift=false) — the loop's own prompt handles a real
-  // change of subject, and a wrongly-cleared ledger is the costlier mistake.
-  if (!needsResolution(question)) return fallback;
+  // judge) needs no rewrite. The model call is skipped only when every anchor
+  // it names is already in the session (ledger or summary): that continues
+  // the current topic, so keeping the ledger (topicShift=false) is right and a
+  // full Bedrock round trip leaves the critical path. A standalone question
+  // about a subject the session has NOT seen still goes to the model, whose
+  // topic_shift verdict is the only thing that clears stale sources/facts.
+  if (!needsResolution(question)) {
+    const known = [...mem.entities.map((e) => e.label), mem.summary ?? ""];
+    if (anchorsCovered(question, known)) return fallback;
+  }
 
   const facts = mem.entities.length
     ? mem.entities.map((e) => `- ${e.kind}: ${e.label}`).join("\n")
@@ -405,8 +410,16 @@ export async function updateMemory(
     const threads = Array.isArray(parsed["open_threads"])
       ? stringList(parsed["open_threads"], MEM_MAX_THREADS, MEM_THREAD_CHARS)
       : mem.threads;
+    // A preference is rendered later as a standing instruction from the
+    // attorney, so a NEW one must be grounded in words the user actually typed
+    // (this tail's user turns); an instruction-shaped sentence that only occurs
+    // in retrieved/answer text is dropped. Previously recorded ones carry over.
+    const userTurns = tail.filter((t) => t.role === "user").map((t) => t.content);
+    const known = new Set(mem.preferences.map((p) => p.toLowerCase()));
     const preferences = Array.isArray(parsed["preferences"])
-      ? stringList(parsed["preferences"], MEM_MAX_PREFERENCES, MEM_PREFERENCE_CHARS)
+      ? stringList(parsed["preferences"], MEM_MAX_PREFERENCES, MEM_PREFERENCE_CHARS).filter(
+          (p) => known.has(p.toLowerCase()) || groundedInUserTurns(p, userTurns),
+        )
       : mem.preferences;
 
     return {

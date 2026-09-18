@@ -90,7 +90,8 @@ test("short forms, signals, pinpoints, statutes and rules", () => {
   assert.equal(pairs.get("Id., at"), "Id. at");
   assert.equal(pairs.get("Ibid."), "Id.");
   assert.equal(pairs.get("See e.g."), "See, e.g.,");
-  assert.equal(pairs.get("Cf"), "Cf.");
+  // "Cf" is a prefix of its fix, so the finding is bound to the following space
+  assert.equal(pairs.get("Cf "), "Cf. ");
   assert.equal(pairs.get("USC"), "U.S.C.");
   assert.equal(pairs.get("§1983"), "§ 1983");
   assert.equal(pairs.get("CFR"), "C.F.R.");
@@ -99,6 +100,38 @@ test("short forms, signals, pinpoints, statutes and rules", () => {
   assert.equal(pairs.get(", at p. 960"), ", at 960");
   // prose "id at" without a locator is left alone
   assert.equal(checkBluebook("the user id at the top of the form").findings.length, 0);
+});
+
+test("a fix never matches an already-correct citation (prefix-shaped findings are delimiter-bound)", () => {
+  const text =
+    "See 42 U.S.C. § 1983 and 28 U.S.C §1331; 21 C.F.R. § 201.57 and 21 C.F.R §314.80. Cf. Smith; Cf Doe. " +
+    "See, e.g., Roe; See, e.g. Poe. Argued (Jan. 3, 2024); decided 2024 WL 1 (Jan 5, 2024).";
+  const { findings } = checkBluebook(text);
+  for (const f of findings) {
+    if (f.suggestion === undefined) continue;
+    // Applying the fix as a plain replace-all must leave every correct form intact.
+    const fixed = text.split(f.found).join(f.suggestion);
+    assert.ok(!fixed.includes("U.S.C.."), `${JSON.stringify(f.found)} mangled U.S.C.`);
+    assert.ok(!fixed.includes("C.F.R.."), `${JSON.stringify(f.found)} mangled C.F.R.`);
+    assert.ok(!fixed.includes("Cf.."), `${JSON.stringify(f.found)} mangled Cf.`);
+    assert.ok(!fixed.includes("e.g.,,"), `${JSON.stringify(f.found)} mangled See, e.g.,`);
+    assert.ok(!fixed.includes("Jan.."), `${JSON.stringify(f.found)} mangled Jan.`);
+    // and the occurrence count is the number of wrong instances the replace will touch
+    assert.equal(f.occurrences, text.split(f.found).length - 1);
+  }
+  const pairs = new Map(findings.map((f) => [f.found, f.suggestion]));
+  assert.equal(pairs.get("U.S.C "), "U.S.C. ");
+  assert.equal(pairs.get("C.F.R "), "C.F.R. ");
+  assert.equal(pairs.get("Cf "), "Cf. ");
+  assert.equal(pairs.get("See, e.g. "), "See, e.g., ");
+  assert.equal(pairs.get("Jan "), "Jan. ");
+});
+
+test("WL cites with 7-digit document numbers are parsed and want a full date", () => {
+  const { citations, findings } = checkBluebook("Smith v. Jones, 2023 WL 4567890 (S.D.N.Y. 2023).");
+  assert.equal(citations.length, 1);
+  assert.equal(citations[0]!.page, "4567890");
+  assert.ok(findings.some((f) => /full date|exact date|date/i.test(f.message)), "WL cite without a full date must be flagged");
 });
 
 test("findings are capped and errors sort before warnings", () => {

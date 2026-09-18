@@ -96,11 +96,20 @@ export function FileDropZone({
     });
   };
 
+  // The intake strips inside the zone handle their own drops and stop
+  // propagation, so the bubbling onDrop above never runs for them; a successful
+  // drop fires no dragleave and OS file drags fire no dragend, which would leave
+  // the overlay up. Capture phase runs before the child's handler: clear it here.
+  const onDropCapture = (e: React.DragEvent<HTMLDivElement>) => {
+    if (hasFileDrag(e.dataTransfer)) reset();
+  };
+
   return (
     <div
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
+      onDropCapture={onDropCapture}
       onDrop={onDrop}
       className={["relative", className].filter(Boolean).join(" ")}
       data-drop-active={active ? "true" : undefined}

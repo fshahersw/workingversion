@@ -27,6 +27,8 @@ const PK = (sub: string) => `USER#${sub}`;
 const SK = "MEMORY#research";
 /** Loading must never hold up the turn; past this the turn runs without it. */
 const LOAD_CAP_MS = Number(process.env["RESEARCH_USER_MEMORY_LOAD_MS"] ?? "450");
+/** Per-step cap for the post-answer write (read, then put); best-effort. */
+const RECORD_CAP_MS = Number(process.env["RESEARCH_USER_MEMORY_RECORD_MS"] ?? "1500");
 const RECENT_CHATS = 6;
 
 export function userMemoryEnabled(
@@ -117,16 +119,27 @@ export async function recordUserMemory(
   if (!sub || !userMemoryEnabled()) return;
   if (!ledger.entities.length && !ledger.preferences.length) return;
   try {
-    const prev = await loadUserMemory(sub);
+    // Capped so a throttled table cannot hold the streamed response open past
+    // the answer. A read that times out skips the write entirely: merging into
+    // an empty base would erase the profile.
+    const prev = await withCap<UserMemory | null>(loadUserMemory(sub), RECORD_CAP_MS, null);
+    if (!prev) {
+      agentError("user_memory_record_skipped", { reason: "load_timeout", cap_ms: RECORD_CAP_MS });
+      return;
+    }
     const next = mergeUserMemory(prev, ledger, conversationId || "unknown");
-    await putItem({
-      PK: PK(sub),
-      SK,
-      entity: "user_memory",
-      owner: sub,
-      profile: next,
-      updatedAt: next.updatedAt,
-    });
+    await withCap(
+      putItem({
+        PK: PK(sub),
+        SK,
+        entity: "user_memory",
+        owner: sub,
+        profile: next,
+        updatedAt: next.updatedAt,
+      }),
+      RECORD_CAP_MS,
+      undefined,
+    );
   } catch (err) {
     agentError("user_memory_record_failed", { error: trunc(String(err), 160) });
   }
