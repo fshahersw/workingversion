@@ -15,6 +15,7 @@ import {
   reduceChatMessages,
   type ChatAction,
 } from "@/lib/chat-reducer";
+import { fitTail } from "@/lib/agents/memory-budget";
 
 // The reducer lives in chat-reducer.ts (pure, unit-tested); these re-exports
 // keep the historical import path working for other hooks.
@@ -40,6 +41,8 @@ type Tail = { role: "user" | "assistant"; content: string }[];
  * (the server's copy rides on the `memory` event, which can still be in flight
  * when the next question is sent). An answered clarification is carried as a
  * marker on its question so the detectors treat that fork as settled later.
+ * The result is budget-fitted (memory-budget.fitTail): up to four turns, older
+ * answers trimmed harder, the newest exchange always intact.
  */
 export function buildTail(messages: Message[]): Tail {
   const tail: Tail = [];
@@ -57,7 +60,7 @@ export function buildTail(messages: Message[]): Tail {
     }
     if (m.answer.trim()) tail.push({ role: "assistant", content: m.answer.slice(0, 4000) });
   }
-  return tail;
+  return fitTail(tail);
 }
 
 export function useChat(sessionId: string) {
@@ -275,7 +278,7 @@ export function useChat(sessionId: string) {
         const carriedSources = Array.from(
           new Map(snapshot.flatMap((m) => (m.sources ?? []).map((s) => [s.ref, s] as const))).values(),
         ).slice(-24);
-        const tail = buildTail(prior).slice(-4);
+        const tail = buildTail(prior);
         const memory = (memoryRef.current as Record<string, unknown> | null) ?? null;
         const outboundMemory = memory
           ? { ...memory, tail, sources: carriedSources }
@@ -291,6 +294,10 @@ export function useChat(sessionId: string) {
             query: text,
             session_id: sessionId,
             stream: true,
+            // Saved conversation id (second turn on) so the server can count
+            // this chat once in the cross-chat memory and drop it from the
+            // recent-chats list. Absent on a brand-new chat.
+            ...(conversationRef.current ? { conversation_id: conversationRef.current } : {}),
             ...(outboundMemory ? { memory: outboundMemory } : {}),
             ...(matter ? { matter_id: matter.matterId, matter_label: matter.label } : {}),
             ...(sendOpts.mode && sendOpts.mode !== "auto" ? { mode: sendOpts.mode } : {}),

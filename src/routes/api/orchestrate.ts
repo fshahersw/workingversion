@@ -6,6 +6,7 @@ import { runFrontierAgent } from "@/lib/agents/frontier-controller.server";
 import { frontierEnabled } from "@/lib/agents/research-models";
 import type { Attachment } from "@/lib/chat-types";
 import { normalizeChoiceAnswer } from "@/lib/agents/clarify";
+import { currentPrincipal } from "@/lib/agents/interpreter-context.server";
 import { startSseHeartbeat } from "@/lib/sse.server";
 
 function sseHeaders() {
@@ -29,6 +30,7 @@ export const Route = createFileRoute("/api/orchestrate")({
           mode?: string;
           attachments?: Attachment[];
           choice?: unknown;
+          conversation_id?: string;
         } = {};
         try {
           body = (await request.json()) as typeof body;
@@ -39,6 +41,13 @@ export const Route = createFileRoute("/api/orchestrate")({
         if (!query) return new Response("query is required", { status: 400 });
         const matterId = (body.matter_id ?? "").trim();
         const matterLabel = (body.matter_label ?? "").trim();
+        // Identity comes from the verified session set by apiAuthMiddleware,
+        // never from the body. The conversation id is an opaque client key.
+        const principal = currentPrincipal();
+        const conversationId =
+          typeof body.conversation_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.conversation_id)
+            ? body.conversation_id
+            : undefined;
         // "auto" (or anything else) leaves the automatic classifier in charge.
         const forceMode = body.mode === "fast" || body.mode === "think" ? body.mode : undefined;
         const attachments = Array.isArray(body.attachments)
@@ -72,6 +81,8 @@ export const Route = createFileRoute("/api/orchestrate")({
                   query,
                   history: body.history,
                   memory: body.memory,
+                  ...(principal ? { principal } : {}),
+                  ...(conversationId ? { conversationId } : {}),
                   signal: request.signal,
                   ...(forceMode ? { forceMode } : {}),
                   ...(attachments && attachments.length ? { attachments } : {}),

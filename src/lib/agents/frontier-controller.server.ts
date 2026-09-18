@@ -31,6 +31,7 @@ import { streamGrokWriter } from "./frontier-writer.server.ts";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
 import { normalizeMemory, tailMessages, updateMemory } from "./memory.server";
+import { recordUserMemory } from "./user-memory.server";
 import { checkFaithfulness, judgeEnabled } from "./faithfulness.server";
 import { checkCitations, factCheck, kindLabel, unverified } from "@/lib/fact-check";
 import { agentError, agentLog, since, trunc } from "./log.server";
@@ -139,6 +140,13 @@ async function streamAndFinish(opts: {
     const memory = normalizeMemory(input.memory);
     const next = await updateMemory(memory, input.query, answerText, sources, input.signal);
     emit("memory", { memory: next });
+    // Same cross-chat profile the legacy loop maintains (user-memory.server).
+    if (input.principal) {
+      await recordUserMemory(input.principal, input.conversationId, {
+        entities: next.entities.map((e) => ({ label: e.label, kind: e.kind })),
+        preferences: next.preferences,
+      });
+    }
   } catch (err) {
     agentError("frontier_memory_failed", { run: runId, error: trunc(errorMessage(err), 160) });
   }

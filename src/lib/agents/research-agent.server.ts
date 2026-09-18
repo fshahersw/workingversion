@@ -37,6 +37,7 @@ import {
   updateMemory,
   type SessionMemory,
 } from "./memory.server";
+import { loadUserContext, recordUserMemory, type UserContext } from "./user-memory.server";
 
 /** THINK loop + writer model (Sonnet 5 by default; override via BEDROCK_RESEARCH_MODEL).
  *  FAST runs its tool loop on loadFastModel() (Nemotron on dev / opt-in on prod)
@@ -229,8 +230,26 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
   // Session memory (rolling summary, entity ledger, tail, carried sources).
   let memory: SessionMemory = normalizeMemory(input.memory);
   if (!hasContext(memory) && input.history?.length) {
-    memory = { ...memory, tail: input.history.slice(-2).map((h) => ({ role: h.role, content: h.content })) };
+    memory = { ...memory, tail: input.history.slice(-8).map((h) => ({ role: h.role, content: h.content })) };
   }
+  // Cross-chat user memory (anchors + standing preferences from earlier
+  // chats). Started now so the two small DynamoDB reads overlap the classify /
+  // rewrite work below; hard-capped inside loadUserContext so it can never
+  // hold up the turn. Null when there is no verified principal (scripts).
+  const userCtxPromise: Promise<UserContext | null> = input.principal
+    ? loadUserContext(input.principal, {
+        ...(input.conversationId ? { excludeConversationId: input.conversationId } : {}),
+      }).catch(() => null)
+    : Promise.resolve(null);
+  // Fold the refreshed ledger into the user profile. Awaited (briefly) so the
+  // write completes before the streamed response closes on Lambda.
+  const persistUserMemory = async (mem: SessionMemory) => {
+    if (!input.principal) return;
+    await recordUserMemory(input.principal, input.conversationId, {
+      entities: mem.entities.map((e) => ({ label: e.label, kind: e.kind })),
+      preferences: mem.preferences,
+    });
+  };
 
   try {
     // --- Conversational short-circuit -------------------------------------
@@ -277,6 +296,7 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
       agentLog("run_done", { run: runId, status: "complete", engine: "conversational", answer_chars: convo.length, total_ms: since(runStart) });
       const convMemory = await updateMemory(memory, input.query, convo, [], input.signal);
       emit("memory", { memory: convMemory });
+      await persistUserMemory(convMemory);
       return;
     }
 
@@ -321,11 +341,15 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
     // conversational context, and dropping them here (before `history` is
     // computed below) is what silently defeated the tail injection whenever
     // resolveQuestion misfired topicShift on an empty ledger.
-    if (resolved.topicShift) memory = { ...emptyMemory(), tail: memory.tail, turns: memory.turns };
+    // Standing instructions ("always Bluebook", "NJ only") are about HOW to
+    // answer, not WHAT the chat is about, so they survive a topic shift too.
+    if (resolved.topicShift)
+      memory = { ...emptyMemory(), tail: memory.tail, preferences: memory.preferences, turns: memory.turns };
 
     const memBlock = memoryBlock(memory);
     const history = tailMessages(memory).map((h) => ({ role: h.role, content: h.content }));
     book.seed(memory.sources);
+    const userCtx = await userCtxPromise;
 
     // Effort mode on the STANDALONE query; never fall back to conversational
     // here (a resolved follow-up is a real question). FAST = tighter budget,
@@ -362,9 +386,12 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
       q: trunc(input.query, 200),
       history_turns: history.length,
       carried_sources: book.all().length,
+      user_ctx_chars: userCtx?.block.length ?? 0,
     });
 
-    const contextBlock = memBlock;
+    // Cross-chat background first (small, clearly labelled as background),
+    // then this conversation's own working memory.
+    const contextBlock = [userCtx?.block ?? "", memBlock].filter(Boolean).join("\n\n");
     emit("agent", { round: 1, agent: "research", focus: input.query, status: "running" });
 
     // --- The single research loop (Sonnet 5, tools, parallel calls) --------
@@ -829,6 +856,7 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
     // Refresh session memory off the critical path (answer is already done).
     const nextMemory = await updateMemory(memory, input.query, answerText, sources, input.signal);
     emit("memory", { memory: nextMemory });
+    await persistUserMemory(nextMemory);
   } catch (err) {
     agentError("run_failed", { run: runId, total_ms: since(runStart), error: trunc(errorMessage(err), 240) });
     emit("error", { message: errorMessage(err) });
