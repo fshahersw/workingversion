@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useImperativeHandle, useRef, useState, type Ref } from "react";
 import { FileText, Loader2, UploadCloud, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { collectDroppedFiles } from "@/lib/pile/drop-files";
 import { DEP_MAX_BYTES, DEP_MAX_FILES, DEP_MAX_PAGES } from "@/lib/pile/limits";
 
 function bytes(value: number): string {
@@ -23,14 +24,19 @@ function isTranscriptFile(file: File) {
   );
 }
 
+/** Imperative surface so a whole-tab drop zone can stage files into this queue. */
+export type DepositionDropPanelHandle = { addFiles: (files: File[]) => void };
+
 export function DepositionDropPanel({
   onStart,
   busy,
   files,
+  ref,
 }: {
   onStart: (files: File[], instructions: string) => void;
   busy: boolean;
   files: { name: string; pages: number; done: number; status: string }[];
+  ref?: Ref<DepositionDropPanelHandle>;
 }) {
   const [dragging, setDragging] = useState(false);
   const [picked, setPicked] = useState<File[]>([]);
@@ -38,7 +44,7 @@ export function DepositionDropPanel({
   const [intakeError, setIntakeError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const add = (list: FileList | null) => {
+  const add = (list: FileList | File[] | null) => {
     if (!list) return;
     const incoming = Array.from(list);
     // Computed against the current queue outside the updater so the updater
@@ -75,6 +81,8 @@ export function DepositionDropPanel({
         : null,
     );
   };
+
+  useImperativeHandle(ref, () => ({ addFiles: (incoming: File[]) => add(incoming) }));
 
   if (busy) {
     const done = files.reduce((sum, file) => sum + file.done, 0);
@@ -128,11 +136,18 @@ export function DepositionDropPanel({
           e.preventDefault();
           setDragging(true);
         }}
-        onDragLeave={() => setDragging(false)}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDragging(false);
+        }}
         onDrop={(e) => {
           e.preventDefault();
+          // Handled here; the tab-wide FileDropZone must not stage them twice.
+          e.stopPropagation();
           setDragging(false);
-          add(e.dataTransfer.files);
+          void collectDroppedFiles(e.dataTransfer).then((files) => {
+            if (files.length) add(files);
+          });
         }}
         onClick={() => inputRef.current?.click()}
         onKeyDown={(event) => {

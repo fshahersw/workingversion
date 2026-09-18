@@ -10,10 +10,11 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DocumentReader } from "./DocumentReader";
-import { DropPanel } from "./DropPanel";
+import { DropPanel, type DropPanelHandle } from "./DropPanel";
+import { FileDropZone } from "./FileDropZone";
 import { IngestProgress } from "./IngestProgress";
 import { ReasoningRail } from "./ReasoningRail";
 import { docTypeOf, fileFormat, RefineRail } from "./RefineRail";
@@ -108,6 +109,36 @@ export function SummarizeView() {
   const ingesting = state.phase === "reading" || state.phase === "indexing";
   const busy = ingesting || state.phase === "asking" || state.adding;
   const files = state.session?.files ?? [];
+
+  // Adding documents to an OPEN working set (RefineRail "Add files" and a
+  // whole-tab drop share this): extract structure locally, then upload + save
+  // so the new pages are indexed for Ask. See the RefineRail comment below.
+  const dropPanelRef = useRef<DropPanelHandle>(null);
+  const addToOpenSet = useCallback(
+    (incoming: File[]) => {
+      if (!incoming.length) return;
+      void (async () => {
+        await addFiles(incoming, { skipOcr: true });
+        const base = incoming[0]?.name?.replace(/\.[^.]+$/, "") ?? "Discovery documents";
+        const name = (incoming.length > 1 ? `${base} +${incoming.length - 1} more` : base).slice(
+          0,
+          120,
+        );
+        await saveWorkspace({ name });
+      })();
+    },
+    [addFiles, saveWorkspace],
+  );
+  // Whole-tab drop: before a set is open the files land in the intake queue
+  // (same validation and limits as "Select documents"); once open they are
+  // added to the set.
+  const onTabDrop = useCallback(
+    (dropped: File[]) => {
+      if (!started) dropPanelRef.current?.addFiles(dropped);
+      else addToOpenSet(dropped);
+    },
+    [started, addToOpenSet],
+  );
   // A saved/indexed set answers from the KB (adaptive RAG); an unsaved pile runs
   // the full-text scan. Coverage drives the mode label so it reflects what runs,
   // including a partial set (some documents still indexing).
@@ -267,20 +298,11 @@ export function SummarizeView() {
         setRestrictIds(new Set());
       }}
       onOpen={openPage}
-      onAddFiles={(incoming) => {
-        // Discovery uploads always go through the server BDA ingest: extract
-        // structure locally (no capped on-device OCR), then upload + BDA
-        // (uncapped, every-page OCR). saveWorkspace polls to ready and swaps
-        // the complete ingested text back in for the full-text-scan Ask.
-        void (async () => {
-          await addFiles(incoming, { skipOcr: true });
-          const base = incoming[0]?.name?.replace(/\.[^.]+$/, "") ?? "Discovery documents";
-          const name = (
-            incoming.length > 1 ? `${base} +${incoming.length - 1} more` : base
-          ).slice(0, 120);
-          await saveWorkspace({ name });
-        })();
-      }}
+      // Discovery uploads always go through the server ingest: extract
+      // structure locally (no capped on-device OCR), then upload + index
+      // (BDA OCRs true scans). saveWorkspace polls to ready and swaps the
+      // complete ingested text back in.
+      onAddFiles={addToOpenSet}
       onClose={() => {
         if (desktopLayout) setFilesOpen(false);
         else setRefineOpen(false);
@@ -321,7 +343,15 @@ export function SummarizeView() {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <FileDropZone
+      onFiles={onTabDrop}
+      disabled={ingesting || state.adding}
+      label={
+        started ? "Drop to add to this working set" : "Drop documents to add them to the intake"
+      }
+      hint="PDF, Word, Excel, PowerPoint, and text — folders are expanded"
+      className="flex h-full min-h-0 flex-col overflow-hidden"
+    >
       {started ? (
         <header className="flex shrink-0 items-center gap-2.5 px-0.5 pb-3">
           <FileStack className="h-3.5 w-3.5 shrink-0 text-brand-navy/45" strokeWidth={1.75} />
@@ -454,6 +484,7 @@ export function SummarizeView() {
               className="w-full max-w-[880px]"
             >
               <DropPanel
+                ref={dropPanelRef}
                 onStart={(f, i) =>
                   void (async () => {
                     // Auto-save + index on upload: extract structure locally
@@ -760,6 +791,6 @@ export function SummarizeView() {
           ) : null}
         </div>
       )}
-    </div>
+    </FileDropZone>
   );
 }

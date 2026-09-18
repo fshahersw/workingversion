@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+} from "react";
 import {
   ChevronDown,
   FileSpreadsheet,
@@ -13,6 +21,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { fileKind } from "@/lib/extract-text";
+import { collectDroppedFiles } from "@/lib/pile/drop-files";
 import { MAX_BYTES, MAX_FILES } from "@/lib/pile/limits";
 
 const FOCUS_EXAMPLES = [
@@ -48,12 +57,17 @@ type AddResult = {
   overByteLimit: number;
 };
 
+/** Imperative surface so a whole-tab drop zone can stage files into this queue. */
+export type DropPanelHandle = { addFiles: (files: File[]) => void };
+
 export function DropPanel({
   onStart,
   busy,
+  ref,
 }: {
   onStart: (files: File[], instructions: string) => void;
   busy: boolean;
+  ref?: Ref<DropPanelHandle>;
 }) {
   const [dragging, setDragging] = useState(false);
   const [picked, setPicked] = useState<File[]>([]);
@@ -140,39 +154,20 @@ export function DropPanel({
     [mergeFiles],
   );
 
-  const traverseEntry = async (entry: FileSystemEntry): Promise<File[]> => {
-    if (entry.isFile) {
-      const file = await new Promise<File>((resolve) =>
-        (entry as FileSystemFileEntry).file(resolve),
-      );
-      return [file];
-    }
-    if (entry.isDirectory) {
-      const dirReader = (entry as FileSystemDirectoryEntry).createReader();
-      const entries = await new Promise<FileSystemEntry[]>((resolve) =>
-        dirReader.readEntries(resolve),
-      );
-      const nested = await Promise.all(entries.map(traverseEntry));
-      return nested.flat();
-    }
-    return [];
-  };
+  useImperativeHandle(ref, () => ({ addFiles: mergeFiles }), [mergeFiles]);
 
   const handleDrop = useCallback(
-    async (e: React.DragEvent<HTMLDivElement>) => {
+    (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
+      // This strip handles its own drop; the surrounding tab-wide zone
+      // (FileDropZone) must not stage the same files a second time.
+      e.stopPropagation();
       setDragging(false);
-      if (!e.dataTransfer.items?.length) {
-        handleFiles(e.dataTransfer.files);
-        return;
-      }
-      const entries = Array.from(e.dataTransfer.items)
-        .map((item) => item.webkitGetAsEntry())
-        .filter(Boolean) as FileSystemEntry[];
-      const files = (await Promise.all(entries.map(traverseEntry))).flat();
-      mergeFiles(files);
+      void collectDroppedFiles(e.dataTransfer).then((files) => {
+        if (files.length) mergeFiles(files);
+      });
     },
-    [handleFiles, mergeFiles],
+    [mergeFiles],
   );
 
   return (
@@ -183,7 +178,11 @@ export function DropPanel({
             e.preventDefault();
             setDragging(true);
           }}
-          onDragLeave={() => setDragging(false)}
+          onDragLeave={(e) => {
+            // Leaving for a child element is not leaving the strip.
+            if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+            setDragging(false);
+          }}
           onDrop={handleDrop}
           className={`flex min-h-28 flex-col items-start gap-4 border px-4 py-4 text-left transition-colors sm:flex-row sm:items-center sm:px-5 ${
             dragging
