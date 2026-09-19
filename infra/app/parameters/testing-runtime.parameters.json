@@ -21,11 +21,11 @@
   },
   {
     "ParameterKey": "ArtifactObjectKey",
-    "ParameterValue": "releases/ab9ae0d6cd5b8cccde775e285a467e678b61a2daaea00d3e8ff9b20bbae397c5/app-runtime.zip"
+    "ParameterValue": "releases/2879e509ce8ce1fa0c379a0b8bd4c5de77fb79e694a11e947e070fd822f43d28/app-runtime.zip"
   },
   {
     "ParameterKey": "ArtifactObjectVersion",
-    "ParameterValue": "gnfSwxKYdgLOS_LYgcWJ1qDgVVMJwi7I"
+    "ParameterValue": "LyOarGQo51Bi_y_RqXlaM2j3_Hc1.kuu"
   },
   {
     "ParameterKey": "Architecture",
@@ -238,5 +238,25 @@
   {
     "ParameterKey": "RuntimeSecretRevision",
     "ParameterValue": "1789266729455"
+  },
+  {
+    "ParameterKey": "OfficeRouter",
+    "ParameterValue": "typesafe"
+  },
+  {
+    "ParameterKey": "ResearchEffortRouter",
+    "ParameterValue": "typesafe"
+  },
+  {
+    "ParameterKey": "ResearchTopicShift",
+    "ParameterValue": "typesafe"
+  },
+  {
+    "ParameterKey": "TypeSafeModel",
+    "ParameterValue": "jev-1.13.0"
+  },
+  {
+    "ParameterKey": "TypeSafeTimeoutMs",
+    "ParameterValue": "800"
   }
 ]
