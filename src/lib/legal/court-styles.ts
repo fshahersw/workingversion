@@ -10,6 +10,9 @@
 // ordinary formatting commands; nothing here is a substitute for reading the
 // current rule before filing.
 // ============================================================================
+import { courtInfo } from "@/lib/courts";
+
+import { courtDirectory, describeCourtLinks } from "./court-directory";
 
 export type MarginsIn = { top: number; right: number; bottom: number; left: number };
 
@@ -32,6 +35,13 @@ export type CourtStyle = {
   marginsIn: MarginsIn;
   paper: "letter" | "legal" | "a4" | "booklet";
   notes: string[];
+  /**
+   * Federal court ids (CourtListener/DocketBird convention) the profile
+   * governs, used to attach the courts' official local-rules and standing-order
+   * pages from the public-law court directory. Empty for state courts and for
+   * profiles that span the whole federal system.
+   */
+  courtIds?: string[];
 };
 
 const ONE_INCH: MarginsIn = { top: 1, right: 1, bottom: 1, left: 1 };
@@ -116,6 +126,7 @@ export const COURT_STYLES: readonly CourtStyle[] = [
       "Many S.D.N.Y. judges impose individual practices (page limits, fonts). Check the assigned judge's rules.",
       VERIFY,
     ],
+    courtIds: ["nysd", "nyed"],
   },
   {
     id: "cal-superior",
@@ -190,5 +201,21 @@ export function describeCourtStyle(style: CourtStyle): string {
         : "") +
       `; margins ${margins}; ${style.paper} paper.`,
     ...style.notes,
+    ...officialLinks(style),
   ].join(" ");
+}
+
+/**
+ * Official local-rules / standing-orders / judges' pages for the profile's
+ * courts, from the public-law court directory (registry-verified, no fetch).
+ * One line per court; nothing when the profile names no federal court id.
+ */
+export function officialLinks(style: CourtStyle): string[] {
+  const out: string[] = [];
+  for (const id of style.courtIds ?? []) {
+    const entry = courtDirectory(id);
+    if (!entry) continue;
+    out.push(describeCourtLinks(entry, courtInfo(id).short, ["rules", "orders", "judges"]) + ".");
+  }
+  return out;
 }

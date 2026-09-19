@@ -9,6 +9,8 @@
 // ============================================================================
 import type { ToolDef } from "./anthropic.server";
 import { AGENT_TOOLS, SourceBook, executeTool, type ToolOutcome } from "./tools.server";
+import { sourceNote } from "@/lib/legal/source-registry";
+
 import { readPage } from "./page-read.server";
 import { memoTTL, toolCacheKey, TOOL_CACHE_TTL_MS } from "./run-state.server";
 import { courtlistenerConfigured, lookupCitations } from "./courtlistener.server";
@@ -232,9 +234,13 @@ async function fetchPageTool(input: Record<string, unknown>, book: SourceBook): 
       { fullText: p.text },
     );
     const links = p.links.slice(0, 12).map((l) => `- ${l.text || l.href} — ${l.href}`).join("\n");
-    const note = p.note ? `\n(${p.note})` : "";
+    // Provenance from the public-law source registry (no fetch): tells the
+    // writer whether this is an official source and whether the registry saw
+    // it live, so citations can say so honestly.
+    const provenance = sourceNote(p.finalUrl || url);
+    const note = [provenance, p.note].filter(Boolean).join("; ");
     return {
-      text: `[${src.ref}] ${p.title || p.finalUrl}${note}\n${trunc(p.text, 3500)}${links ? `\n\nLINKS:\n${links}` : ""}`,
+      text: `[${src.ref}] ${p.title || p.finalUrl}${note ? `\n(${note})` : ""}\n${trunc(p.text, 3500)}${links ? `\n\nLINKS:\n${links}` : ""}`,
       hits: 1,
       refs: [src.ref],
     };

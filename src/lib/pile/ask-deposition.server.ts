@@ -15,6 +15,40 @@ export type DepAskPage = {
 
 const GLM = "zai.glm-5";
 const NEMOTRON = "nvidia.nemotron-super-3-120b";
+const CLAUDE_FALLBACK = "us.anthropic.claude-sonnet-5";
+
+/**
+ * Model chain for the deposition passes, first to last. Default keeps the
+ * live order (GLM-5, then Nemotron Super) and adds Claude Sonnet 5 as the final
+ * fallback, so a GLM/Nemotron access or capacity failure degrades to a slower,
+ * costlier answer instead of an error. Override with a comma list in
+ * DEPOSITION_MODELS; DEPOSITION_FALLBACK_MODEL=off drops the Claude rung.
+ */
+export function depositionModelChain(env: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  const explicit = (env["DEPOSITION_MODELS"] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const chain = explicit.length ? explicit : [GLM, NEMOTRON];
+  const fallback = (env["DEPOSITION_FALLBACK_MODEL"] ?? CLAUDE_FALLBACK).trim();
+  if (fallback && fallback.toLowerCase() !== "off" && !chain.includes(fallback)) chain.push(fallback);
+  return chain;
+}
+
+/**
+ * Whether a Bedrock failure should move to the next model. Access/model errors
+ * (400/403/404) always do; so do throttling (429) and 5xx capacity errors,
+ * which previously threw straight to the user with the rest of the chain
+ * untried. A client abort never falls through.
+ */
+export function shouldFallThrough(err: unknown): boolean {
+  if (err instanceof Error && err.name === "AbortError") return false;
+  if (err instanceof BedrockError) {
+    const s = err.status;
+    return s === 400 || s === 403 || s === 404 || s === 408 || s === 429 || (s >= 500 && s < 600);
+  }
+  return false;
+}
 
 export async function writeDepositionAnalysis(
   input: {
@@ -128,7 +162,7 @@ async function converseDepAnswer(input: {
   maxTokens: number;
   signal?: AbortSignal;
 }): Promise<{ text: string; model: string }> {
-  const models = [GLM, NEMOTRON];
+  const models = depositionModelChain();
   let lastErr: unknown;
   for (const model of models) {
     try {
@@ -137,16 +171,14 @@ async function converseDepAnswer(input: {
         system: input.system,
         messages: [userText(input.user)],
         maxTokens: input.maxTokens,
-        temperature: 0.1,
+        // Sonnet 5 rejects `temperature` (reasoning model); the others accept it.
+        ...(/anthropic\.claude/.test(model) ? {} : { temperature: 0.1 }),
         ...(input.signal ? { signal: input.signal } : {}),
       });
       return { text: res.text, model };
     } catch (err) {
       lastErr = err;
-      const denied =
-        err instanceof BedrockError &&
-        (err.status === 400 || err.status === 403 || err.status === 404);
-      if (denied) continue;
+      if (shouldFallThrough(err)) continue;
       throw err;
     }
   }

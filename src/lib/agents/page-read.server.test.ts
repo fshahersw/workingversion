@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { readPage, type ScrapeResult } from "./page-read.server.ts";
+import { firecrawlScrape, readPage, resetReadPageBreakers, type ScrapeResult } from "./page-read.server.ts";
 
 const body = "The court held that ".repeat(80);
 
@@ -102,4 +102,72 @@ test("SSRF refusals still throw instead of being scraped", async () => {
     readPage("http://169.254.169.254/latest/meta-data/", { firecrawl: async () => ({ title: "", text: body }) }),
     /Blocked|private|metadata|link-local/i,
   );
+});
+
+test("registry crawl policy: a never-crawl host is not handed to any scraper", async () => {
+  let calls = 0;
+  const r = await readPage("https://www.law.cornell.edu/uscode/text/28/1407", {
+    fetchImpl: fetchStub(403, "<html><body>Access denied</body></html>") as typeof fetch,
+    resolver,
+    firecrawl: async () => {
+      calls++;
+      return { title: "x", text: body };
+    },
+    tavily: async () => {
+      calls++;
+      return { title: "x", text: body };
+    },
+  });
+  assert.equal(calls, 0);
+  assert.equal(r.via, "direct");
+  assert.ok(r.blocked?.blocked);
+  assert.equal(r.source.policy, "never");
+  assert.match(r.note ?? "", /crawl policy \(never\)/);
+});
+
+test("results carry source-registry provenance without any fetch", async () => {
+  const r = await readPage("https://www.fda.gov/advisory-committees", {
+    fetchImpl: fetchStub(200, `<html><head><title>FDA</title></head><body><p>${body}</p></body></html>`) as typeof fetch,
+    resolver,
+  });
+  assert.equal(r.via, "direct");
+  assert.ok(r.source.known && r.source.official && r.source.domain === "fda.gov");
+  const u = await readPage("https://unknown-host.example/page", {
+    fetchImpl: fetchStub(200, `<html><body><p>${body}</p></body></html>`) as typeof fetch,
+    resolver,
+  });
+  assert.equal(u.source.known, false);
+});
+
+test("provider breaker: three auth/quota failures pause a scraper rung; success resets it", async () => {
+  resetReadPageBreakers();
+  process.env["FIRECRAWL_API_KEY"] = "test-key";
+  const realFetch = globalThis.fetch;
+  let hits = 0;
+  globalThis.fetch = (async () => {
+    hits++;
+    return new Response("{}", { status: 402 });
+  }) as typeof fetch;
+  try {
+    for (let i = 0; i < 3; i++) assert.equal(await firecrawlScrape("https://example.com/a", 1000), null);
+    assert.equal(hits, 3);
+    // The rung is now paused: readPage skips Firecrawl and goes straight to Tavily.
+    let tavilyCalls = 0;
+    const r = await readPage("https://example.com/blocked", {
+      fetchImpl: fetchStub(403, "<html><body>Access denied</body></html>") as typeof fetch,
+      resolver,
+      // firecrawl seam deliberately NOT injected: the real rung must be skipped by the breaker
+      tavily: async () => {
+        tavilyCalls++;
+        return { title: "Rendered", text: body };
+      },
+    });
+    assert.equal(hits, 3, "paused rung made no network call");
+    assert.equal(tavilyCalls, 1);
+    assert.equal(r.via, "tavily");
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env["FIRECRAWL_API_KEY"];
+    resetReadPageBreakers();
+  }
 });

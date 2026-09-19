@@ -6,6 +6,7 @@ import {
   describeCourtStyle,
   findCourtStyle,
   listCourtStyles,
+  officialLinks,
 } from "./court-styles.ts";
 
 test("every profile is complete, rule-cited and carries the verification note", () => {
@@ -50,4 +51,14 @@ test("describeCourtStyle is a single readable paragraph with sizes and margins",
   assert.match(text, /Local Civil Rule 11\.1/);
   const cal = describeCourtStyle(findCourtStyle("cal-superior")!);
   assert.match(cal, /right 0\.5"/);
+});
+
+test("S.D.N.Y./E.D.N.Y. profile attaches the courts' official rules pages from the court directory", () => {
+  const style = findCourtStyle("sdny-edny")!;
+  const text = describeCourtStyle(style);
+  assert.match(text, /S\.D\.N\.Y\. official: https:\/\/www\.nysd\.uscourts\.gov\//);
+  assert.match(text, /E\.D\.N\.Y\. official: https:\/\/www\.nyed\.uscourts\.gov\//);
+  assert.match(text, /local rules: https:\/\//);
+  // profiles without a federal court id add nothing
+  assert.deepEqual(officialLinks(findCourtStyle("cal-superior")!), []);
 });

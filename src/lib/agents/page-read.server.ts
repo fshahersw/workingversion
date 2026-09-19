@@ -15,6 +15,8 @@
 // before browsing) — an AgentCore Browser rung belongs after these, capped,
 // once their failure rate is measured.
 // ============================================================================
+import { scrapeAllowed, sourceTrust } from "@/lib/legal/source-registry";
+
 import { fetchPage, type FetchPageOptions, type FetchedPage } from "./fetch-page.server";
 import { agentLog, trunc } from "./log.server";
 import { classifyPage, viaNote, type BlockVerdict } from "./page-block";
@@ -25,6 +27,12 @@ export type ReadPageResult = FetchedPage & {
   via: ReadVia;
   /** why the direct fetch was not used (null when it was) */
   blocked: BlockVerdict | null;
+  /**
+   * Source-registry provenance for the host: official/nonprofit/commercial,
+   * liveness share at the registry's verification date, crawl policy. Unknown
+   * hosts report known=false; nothing here is fetched.
+   */
+  source: ReturnType<typeof sourceTrust>;
 };
 
 export type ReadPageOptions = FetchPageOptions & {
@@ -45,6 +53,51 @@ const DEFAULT_FALLBACK_MS = 12_000;
 
 function key(name: string): string {
   return process.env[name]?.trim() ?? "";
+}
+
+/** RESEARCH_SOURCE_REGISTRY=off disables the registry crawl-policy overlay. */
+function registryPolicyEnabled(): boolean {
+  return (process.env["RESEARCH_SOURCE_REGISTRY"] ?? "on").trim().toLowerCase() !== "off";
+}
+
+// --- Provider circuit breaker ---------------------------------------------------
+//
+// A scraper whose key is exhausted or revoked answers every call with 401/402/403
+// in a few hundred ms. Without a breaker each blocked page pays that round trip
+// before the next rung; with one, the rung is skipped for a cooling period after
+// a few consecutive auth/quota failures and re-tried afterwards. Only auth/quota
+// statuses trip it: a 5xx or a timeout is a transient the next call may not see.
+
+const BREAKER_TRIP_AFTER = 3;
+const BREAKER_COOL_MS = Number(process.env["RESEARCH_SCRAPER_BREAKER_MS"]) || 10 * 60_000;
+type Breaker = { failures: number; openUntil: number; lastStatus: number };
+const breakers = new Map<ReadVia, Breaker>();
+
+function breaker(via: ReadVia): Breaker {
+  let b = breakers.get(via);
+  if (!b) breakers.set(via, (b = { failures: 0, openUntil: 0, lastStatus: 0 }));
+  return b;
+}
+function breakerOpen(via: ReadVia): boolean {
+  return breaker(via).openUntil > Date.now();
+}
+function noteProviderStatus(via: ReadVia, status: number): void {
+  const b = breaker(via);
+  if (status === 401 || status === 402 || status === 403) {
+    b.failures++;
+    b.lastStatus = status;
+    if (b.failures >= BREAKER_TRIP_AFTER && b.openUntil <= Date.now()) {
+      b.openUntil = Date.now() + BREAKER_COOL_MS;
+      agentLog("read_page_provider_paused", { via, status, cool_ms: BREAKER_COOL_MS });
+    }
+  } else if (status >= 200 && status < 300) {
+    b.failures = 0;
+    b.openUntil = 0;
+  }
+}
+/** Test seam: clear breaker state. */
+export function resetReadPageBreakers(): void {
+  breakers.clear();
 }
 
 function withTimeout(ms: number, parent?: AbortSignal): { signal: AbortSignal; done: () => void } {
@@ -84,6 +137,7 @@ export async function firecrawlScrape(
       }),
       signal: t.signal,
     });
+    noteProviderStatus("firecrawl", res.status);
     if (!res.ok) return null;
     const json = (await res.json()) as {
       success?: boolean;
@@ -119,6 +173,7 @@ export async function tavilyExtract(
       body: JSON.stringify({ urls: [url], extract_depth: "advanced", format: "markdown" }),
       signal: t.signal,
     });
+    noteProviderStatus("tavily", res.status);
     if (!res.ok) return null;
     const json = (await res.json()) as {
       results?: { url?: string; raw_content?: string; title?: string }[];
@@ -152,6 +207,7 @@ function fromScrape(
     ...(note ? { note } : {}),
     via,
     blocked: verdict,
+    source: sourceTrust(base.url),
   };
 }
 
@@ -193,13 +249,32 @@ export async function readPage(url: string, opts?: ReadPageOptions): Promise<Rea
     ? { blocked: true, reason: "http-status", detail: trunc(transportError.message, 120), retryable: true }
     : classifyPage(direct);
 
+  const source = sourceTrust(url);
   if (!verdict.blocked) {
-    return { ...direct, via: "direct", blocked: null };
+    return { ...direct, via: "direct", blocked: null, source };
   }
   const fallbacks = opts?.fallbacks ?? true;
   if (!fallbacks || !verdict.retryable) {
     agentLog("read_page_blocked", { host: safeHost(url), reason: verdict.reason, retryable: verdict.retryable });
-    return { ...direct, via: "direct", blocked: verdict };
+    return { ...direct, via: "direct", blocked: verdict, source };
+  }
+  // The public-law source registry marks a few hosts as never-crawl (the site
+  // forbids automated retrieval) or verify-only. Those are read directly or not
+  // at all; they are never handed to a third-party scraper.
+  if (registryPolicyEnabled() && !scrapeAllowed(url)) {
+    agentLog("read_page_policy", { host: safeHost(url), policy: source.policy, reason: verdict.reason });
+    return {
+      ...direct,
+      note: [
+        `The page could not be read directly (${verdict.detail}), and this source's registry crawl policy (${source.policy}) does not permit a rendering scraper. Cite it by URL or use its official search instead.`,
+        direct.note,
+      ]
+        .filter(Boolean)
+        .join(" "),
+      via: "direct",
+      blocked: verdict,
+      source,
+    };
   }
 
   const ms = opts?.fallbackTimeoutMs ?? DEFAULT_FALLBACK_MS;
@@ -208,6 +283,7 @@ export async function readPage(url: string, opts?: ReadPageOptions): Promise<Rea
     ["tavily", opts?.tavily ?? tavilyExtract],
   ];
   for (const [via, run] of rungs) {
+    if (breakerOpen(via)) continue; // key exhausted/revoked a moment ago; skip the round trip
     const scraped = await run(url, ms, opts?.signal);
     if (!scraped) continue;
     const probe = classifyPage({
@@ -237,6 +313,7 @@ export async function readPage(url: string, opts?: ReadPageOptions): Promise<Rea
       .join(" "),
     via: "direct",
     blocked: verdict,
+    source,
   };
 }
 
