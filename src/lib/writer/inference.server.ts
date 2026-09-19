@@ -37,6 +37,9 @@ import {
   retryAfterMsFrom,
   signedBedrockFetch,
 } from "@/lib/agents/bedrock-sign.server";
+import { agentLog } from "@/lib/agents/log.server";
+import { decideOfficeClass, officeRouteQuestions, officeRouteState } from "@/lib/agents/typesafe-questions";
+import { systemOne, typesafeConfigured } from "@/lib/agents/typesafe.server";
 
 export type WriterProfile = "standard" | "thorough";
 export type WriterMode = "write" | "ask" | "review" | "research";
@@ -621,24 +624,24 @@ function heuristicClass(instruction: string): TaskClass | null {
 }
 
 /**
- * Class the run's instruction. Router failures and timeouts return null, and
- * the caller falls back to the main tier (never a weaker one).
+ * Which model classes the run. OFFICE_ROUTER:
+ *   bedrock  (default) the Haiku one-word router below, unchanged.
+ *   shadow   Haiku decides; Jev (TypeSafe) is asked in parallel and the two
+ *            verdicts, latencies and confidence are logged (office_router_shadow)
+ *            so thresholds in typesafe-questions.ts can be tuned on real traffic
+ *            before anything changes for users.
+ *   typesafe Jev decides inside TYPESAFE_TIMEOUT_MS; no opinion or failure
+ *            falls back to Haiku, then to the main tier. Never a weaker tier.
+ * Either non-default mode silently behaves as `bedrock` without TYPESAFE_API_KEY.
  */
-export async function classifyTask(
-  app: OfficeApp,
-  instruction: string,
-  signal?: AbortSignal,
-): Promise<TaskClass | null> {
-  const text = instruction.trim();
-  if (!text) return null;
-  const key = hashKey(app, text);
-  const cached = routeCache.get(key);
-  if (cached) return cached;
-  const quick = heuristicClass(text);
-  if (quick) {
-    cacheRoute(key, quick);
-    return quick;
-  }
+export type OfficeRouterMode = "bedrock" | "shadow" | "typesafe";
+export function officeRouterMode(): OfficeRouterMode {
+  const v = env("OFFICE_ROUTER").toLowerCase();
+  return v === "typesafe" || v === "shadow" ? v : "bedrock";
+}
+
+/** The Haiku one-word router (the pre-TypeSafe path). Null on any failure. */
+async function classifyWithBedrock(app: OfficeApp, text: string, signal?: AbortSignal): Promise<TaskClass | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 4_000);
   const onAbort = () => controller.abort();
@@ -669,7 +672,6 @@ export async function classifyTask(
       .toLowerCase()
       .replace(/[^a-z_]/g, "");
     if (!TASK_CLASSES.has(word as TaskClass)) return null;
-    cacheRoute(key, word as TaskClass);
     return word as TaskClass;
   } catch {
     return null;
@@ -677,6 +679,83 @@ export async function classifyTask(
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
+}
+
+/** Jev (TypeSafe) typed router: one request, three questions, hard budget. */
+async function classifyWithTypeSafe(
+  app: OfficeApp,
+  text: string,
+  signal?: AbortSignal,
+): Promise<{ taskClass: TaskClass | null; confidence: number | null; reason: string; ms: number }> {
+  const started = Date.now();
+  const res = await systemOne({
+    purpose: "office_route",
+    state: officeRouteState(app, text),
+    questions: officeRouteQuestions(),
+    ...(signal ? { signal } : {}),
+  });
+  const decision = decideOfficeClass(res);
+  return {
+    taskClass: decision?.taskClass ?? null,
+    confidence: decision?.confidence ?? null,
+    reason: decision?.reason ?? (res ? "no opinion" : "unavailable"),
+    ms: Date.now() - started,
+  };
+}
+
+/**
+ * Class the run's instruction. Router failures and timeouts return null, and
+ * the caller falls back to the main tier (never a weaker one).
+ */
+export async function classifyTask(
+  app: OfficeApp,
+  instruction: string,
+  signal?: AbortSignal,
+): Promise<TaskClass | null> {
+  const text = instruction.trim();
+  if (!text) return null;
+  const key = hashKey(app, text);
+  const cached = routeCache.get(key);
+  if (cached) return cached;
+  const quick = heuristicClass(text);
+  if (quick) {
+    cacheRoute(key, quick);
+    return quick;
+  }
+  const mode = officeRouterMode();
+  const remember = (cls: TaskClass | null): TaskClass | null => {
+    if (cls) cacheRoute(key, cls);
+    return cls;
+  };
+  if (mode === "bedrock" || !typesafeConfigured()) {
+    return remember(await classifyWithBedrock(app, text, signal));
+  }
+  if (mode === "shadow") {
+    const t0 = Date.now();
+    const [jev, haiku] = await Promise.all([
+      classifyWithTypeSafe(app, text, signal),
+      classifyWithBedrock(app, text, signal).then((cls) => ({ cls, ms: Date.now() - t0 })),
+    ]);
+    agentLog("office_router_shadow", {
+      app,
+      jev: jev.taskClass ?? "none",
+      haiku: haiku.cls ?? "none",
+      agree: jev.taskClass !== null && jev.taskClass === haiku.cls,
+      jev_ms: jev.ms,
+      haiku_ms: haiku.ms,
+      confidence: jev.confidence === null ? -1 : Math.round(jev.confidence * 100) / 100,
+      reason: jev.reason,
+    });
+    return remember(haiku.cls);
+  }
+  const jev = await classifyWithTypeSafe(app, text, signal);
+  if (jev.taskClass) {
+    agentLog("office_router", { app, via: "typesafe", cls: jev.taskClass, ms: jev.ms, reason: jev.reason });
+    return remember(jev.taskClass);
+  }
+  const haiku = await classifyWithBedrock(app, text, signal);
+  agentLog("office_router", { app, via: "bedrock_fallback", cls: haiku ?? "none", jev_reason: jev.reason, jev_ms: jev.ms });
+  return remember(haiku);
 }
 
 export type RouteDecision = { model: string; tier: ModelTier; taskClass: TaskClass | null };

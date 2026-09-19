@@ -90,6 +90,14 @@ Metadata:
           - OfficeThoroughModel
           - OfficeTiering
       - Label:
+          default: Router model (TypeSafe Jev)
+        Parameters:
+          - OfficeRouter
+          - ResearchEffortRouter
+          - ResearchTopicShift
+          - TypeSafeModel
+          - TypeSafeTimeoutMs
+      - Label:
           default: API, edge, and WAF controls
         Parameters:
           - ApiStageName
@@ -446,7 +454,7 @@ Parameters:
     Description: >
       Existing secret containing the runtime's third-party credentials as JSON
       keys: CORPUS_SERVICE_KEY, BRAVE_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY,
-      COURTLISTENER_API_TOKEN, DOCKETBIRD_API_KEY (each key must exist; an empty
+      COURTLISTENER_API_TOKEN, DOCKETBIRD_API_KEY, TYPESAFE_API_KEY (each key must exist; an empty
       value disables that integration. NCBI_API_KEY and OPENFDA_API_KEY may be
       present and empty). CloudFormation resolves each key without accepting
       credentials as plaintext parameters.
@@ -494,6 +502,58 @@ Parameters:
       - "on"
       - "off"
     Description: off sends every Office assistant turn to the main tier.
+
+  OfficeRouter:
+    Type: String
+    Default: bedrock
+    AllowedValues:
+      - bedrock
+      - shadow
+      - typesafe
+    Description: >-
+      Which model classes each Office assistant turn (src/lib/writer/inference.server.ts
+      classifyTask). bedrock = the Haiku one-word router (unchanged). shadow = Haiku
+      decides, TypeSafe Jev is asked in parallel and both verdicts are logged
+      (office_router_shadow) for threshold tuning. typesafe = Jev decides within
+      TypeSafeTimeoutMs, falling back to Haiku then the main tier. Needs the
+      TYPESAFE_API_KEY key in the corpus secret; without it every mode behaves as bedrock.
+
+  ResearchEffortRouter:
+    Type: String
+    Default: heuristic
+    AllowedValues:
+      - heuristic
+      - shadow
+      - typesafe
+    Description: >-
+      Research fast/think/conversational router (src/lib/agents/effort-router.server.ts).
+      heuristic = the regex classifier (unchanged). shadow = heuristic decides, Jev is
+      logged (effort_router_shadow). typesafe = Jev decides; the regex legal-signal veto
+      and the heuristic fallback stay in place.
+
+  ResearchTopicShift:
+    Type: String
+    Default: model
+    AllowedValues:
+      - model
+      - typesafe
+    Description: >-
+      Who judges a topic shift for a standalone question that names a new anchor
+      (src/lib/agents/memory.server.ts resolveQuestion). model = the Haiku rewrite
+      (unchanged). typesafe = a Jev yes/no with an uncertain band that falls back to Haiku.
+
+  TypeSafeModel:
+    Type: String
+    Default: jev-1.13.0
+    Description: >-
+      Pinned TypeSafe model id. Thresholds in src/lib/agents/typesafe-questions.ts were
+      tuned on this version; move deliberately (jev-latest is an alias that shifts on release).
+
+  TypeSafeTimeoutMs:
+    Type: String
+    Default: "800"
+    AllowedPattern: "^[0-9]{3,5}$"
+    Description: Hard wall-clock budget per router call in milliseconds; a late answer is a no-opinion.
 
   WorkflowsEnabled:
     Type: String
@@ -1030,6 +1090,15 @@ Resources:
           OFFICE_INSPECT_MODEL: !If [HasOfficeInspectModel, !Ref OfficeInspectModel, !Ref AWS::NoValue]
           OFFICE_THOROUGH_MODEL: !If [HasOfficeThoroughModel, !Ref OfficeThoroughModel, !Ref AWS::NoValue]
           OFFICE_TIERING: !Ref OfficeTiering
+          # TypeSafe Jev router (src/lib/agents/typesafe.server.ts). The key lives in
+          # the corpus secret under TYPESAFE_API_KEY (an empty value disables every
+          # router mode). Routers are hard-capped at TYPESAFE_TIMEOUT_MS and fail open.
+          TYPESAFE_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:TYPESAFE_API_KEY}}"
+          TYPESAFE_MODEL: !Ref TypeSafeModel
+          TYPESAFE_TIMEOUT_MS: !Ref TypeSafeTimeoutMs
+          OFFICE_ROUTER: !Ref OfficeRouter
+          RESEARCH_EFFORT_ROUTER: !Ref ResearchEffortRouter
+          RESEARCH_TOPIC_SHIFT: !Ref ResearchTopicShift
           # Workflows subsystem (src/lib/workflows). Dark unless SW_WORKFLOWS_ENABLED
           # is "true"; queued/scheduled runs need SW_WORKFLOWS_QUEUE_URL (the workflows
           # stack QueueUrl output); Python steps need an AgentCore interpreter id.

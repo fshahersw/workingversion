@@ -9,7 +9,9 @@
 import type { Emit, OrchestrateInput } from "./orchestration-types";
 import { researchAgentPrompt, fastRouterPrompt, fastWriterPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
-import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
+import { detectDocRequest, type EffortMode } from "@/lib/research-intent";
+
+import { routeEffort } from "./effort-router.server";
 import {
   applyChoice,
   clarifyEnabled,
@@ -258,7 +260,7 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
     // (this also skips the resolve Bedrock call). The fix for "user typed
     // thanks -> full 18-call tool loop". Conservative by design: only an
     // unmistakable social/meta phrasing with no legal signal lands here.
-    const rawDecision = classifyEffort(input.query, memory.tail.length);
+    const rawDecision = await routeEffort(input.query, memory.tail.length, input.signal);
     // The composer's Fast/Think choice persists in localStorage, so a forced mode
     // is the steady state for many users, not a per-message signal. It governs
     // how hard a real question is researched; it must not turn "thanks" into a
@@ -354,7 +356,10 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
     // Effort mode on the STANDALONE query; never fall back to conversational
     // here (a resolved follow-up is a real question). FAST = tighter budget,
     // THINK = the validated full loop, ambiguous defaults to THINK.
-    const decision = classifyEffort(resolved.query, history.length);
+    // The raw decision already covers this query when no rewrite happened;
+    // only a rewritten standalone query is classed again.
+    const decision =
+      resolved.query === input.query ? rawDecision : await routeEffort(resolved.query, history.length, input.signal);
     const autoMode: EffortMode = decision.mode === "conversational" ? "fast" : decision.mode;
     let mode: EffortMode = input.forceMode ?? autoMode;
     // A file deliverable (PDF/Word/Excel report) needs the fuller research +

@@ -20,9 +20,16 @@
 // ============================================================================
 import type { Source } from "@/lib/chat-types";
 import { BEDROCK_AGENT_MODEL, bedrockChat, bedrockEnabled, userText } from "./bedrock.server";
-import { agentError, trunc } from "./log.server";
+import { agentError, agentLog, trunc } from "./log.server";
 import { parseJsonBlock } from "./json-extract";
 import { anchorsCovered, fitTail, groundedInUserTurns, needsResolution, TAIL_RECENT_CHARS } from "./memory-budget";
+import { decideTopicShift, topicShiftQuestions, topicShiftState } from "./typesafe-questions";
+import { systemOne, typesafeConfigured } from "./typesafe.server";
+
+/** RESEARCH_TOPIC_SHIFT=typesafe routes the standalone-question topic check to Jev. */
+function topicShiftViaTypeSafe(): boolean {
+  return (process.env["RESEARCH_TOPIC_SHIFT"] ?? "").trim().toLowerCase() === "typesafe" && typesafeConfigured();
+}
 import { temporalContext } from "@/lib/system-prompt";
 
 export type HistoryTurn = { role: "user" | "assistant"; content: string };
@@ -221,6 +228,24 @@ export async function resolveQuestion(
   if (!needsResolution(question)) {
     const known = [...mem.entities.map((e) => e.label), mem.summary ?? ""];
     if (anchorsCovered(question, known)) return fallback;
+    // Standalone question naming an anchor the session has not seen: the only
+    // open judgment is topic_shift, a yes/no — a typed-decision model answers
+    // it in ~150 ms with a calibrated probability, where the Haiku rewrite
+    // costs a full generative round trip. RESEARCH_TOPIC_SHIFT=typesafe; an
+    // uncertain or unavailable answer falls through to the model rewrite.
+    if (topicShiftViaTypeSafe()) {
+      const res = await systemOne({
+        purpose: "topic_shift",
+        state: topicShiftState(question, mem.entities.map((e) => e.label), mem.summary ?? ""),
+        questions: topicShiftQuestions(),
+        ...(signal ? { signal } : {}),
+      });
+      const shift = decideTopicShift(res);
+      if (shift !== null) {
+        agentLog("memory_topic_shift", { via: "typesafe", shift, ms: res?.ms ?? 0 });
+        return { query: question, topicShift: shift };
+      }
+    }
   }
 
   const facts = mem.entities.length
