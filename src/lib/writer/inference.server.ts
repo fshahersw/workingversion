@@ -226,6 +226,7 @@ const WRITER_READ = [
   "list_templates",
   // Deterministic Bluebook form check (browser-side, reads document text only).
   "check_bluebook_citations",
+  "audit_document",
 ];
 const WRITER_WRITE = [
   ...WRITER_READ,
@@ -707,10 +708,29 @@ async function classifyWithTypeSafe(
  * Class the run's instruction. Router failures and timeouts return null, and
  * the caller falls back to the main tier (never a weaker one).
  */
+export type ClassifyTaskOptions = {
+  /**
+   * The turn carries image content. Jev is text-only, so an image-bearing
+   * turn never reaches it (in any mode, shadow included: a verdict it made
+   * without seeing the image would be a false comparison); the vision-capable
+   * Bedrock router classes the turn instead. Computed once by routeTurn with
+   * conversationHasImages, the same detector that guards the fast tier.
+   */
+  hasImages?: boolean;
+  /** test seam for the Bedrock router */
+  bedrockRouter?: (app: OfficeApp, text: string, signal?: AbortSignal) => Promise<TaskClass | null>;
+};
+
+/** Which router may class this turn: Jev only for text-only turns when a non-default mode is on and configured. */
+export function jevRouterEligible(mode: OfficeRouterMode, configured: boolean, hasImages: boolean): boolean {
+  return mode !== "bedrock" && configured && !hasImages;
+}
+
 export async function classifyTask(
   app: OfficeApp,
   instruction: string,
   signal?: AbortSignal,
+  opts?: ClassifyTaskOptions,
 ): Promise<TaskClass | null> {
   const text = instruction.trim();
   if (!text) return null;
@@ -723,18 +743,23 @@ export async function classifyTask(
     return quick;
   }
   const mode = officeRouterMode();
+  const bedrockRouter = opts?.bedrockRouter ?? classifyWithBedrock;
   const remember = (cls: TaskClass | null): TaskClass | null => {
     if (cls) cacheRoute(key, cls);
     return cls;
   };
-  if (mode === "bedrock" || !typesafeConfigured()) {
-    return remember(await classifyWithBedrock(app, text, signal));
+  const hasImages = opts?.hasImages === true;
+  if (!jevRouterEligible(mode, typesafeConfigured(), hasImages)) {
+    if (hasImages && mode !== "bedrock" && typesafeConfigured()) {
+      agentLog("office_router_skip_images", { app, mode });
+    }
+    return remember(await bedrockRouter(app, text, signal));
   }
   if (mode === "shadow") {
     const t0 = Date.now();
     const [jev, haiku] = await Promise.all([
       classifyWithTypeSafe(app, text, signal),
-      classifyWithBedrock(app, text, signal).then((cls) => ({ cls, ms: Date.now() - t0 })),
+      bedrockRouter(app, text, signal).then((cls) => ({ cls, ms: Date.now() - t0 })),
     ]);
     agentLog("office_router_shadow", {
       app,
@@ -753,7 +778,7 @@ export async function classifyTask(
     agentLog("office_router", { app, via: "typesafe", cls: jev.taskClass, ms: jev.ms, reason: jev.reason });
     return remember(jev.taskClass);
   }
-  const haiku = await classifyWithBedrock(app, text, signal);
+  const haiku = await bedrockRouter(app, text, signal);
   agentLog("office_router", { app, via: "bedrock_fallback", cls: haiku ?? "none", jev_reason: jev.reason, jev_ms: jev.ms });
   return remember(haiku);
 }
@@ -766,6 +791,8 @@ export async function routeTurn(req: {
   profile: WriterProfile;
   messages: readonly AgentMessage[];
   signal?: AbortSignal;
+  /** test seam, passed through to classifyTask */
+  bedrockRouter?: ClassifyTaskOptions["bedrockRouter"];
 }): Promise<RouteDecision> {
   if (req.profile === "thorough") {
     return { model: OFFICE_THOROUGH_MODEL, tier: "main", taskClass: null };
@@ -773,11 +800,17 @@ export async function routeTurn(req: {
   if (!TIERING_ON) {
     return { model: WRITER_MODEL, tier: "main", taskClass: null };
   }
-  const taskClass = await classifyTask(req.app, currentInstruction(req.messages), req.signal);
+  // One image detection for the whole route: it keeps an image-bearing turn
+  // away from the text-only Jev router and, below, away from a fast tier that
+  // cannot see images.
+  const hasImages = conversationHasImages(req.messages);
+  const taskClass = await classifyTask(req.app, currentInstruction(req.messages), req.signal, {
+    hasImages,
+    ...(req.bedrockRouter ? { bedrockRouter: req.bedrockRouter } : {}),
+  });
   if (!taskClass || taskClass === "draft" || taskClass === "analyze") {
     return { model: WRITER_MODEL, tier: "main", taskClass };
   }
-  const hasImages = conversationHasImages(req.messages);
   if (OFFICE_INSPECT_MODEL && INSPECT_CLASSES.has(taskClass)) {
     if (!hasImages || supportsVision(OFFICE_INSPECT_MODEL)) {
       return { model: OFFICE_INSPECT_MODEL, tier: "inspect", taskClass };

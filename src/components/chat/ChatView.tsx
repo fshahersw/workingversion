@@ -28,6 +28,7 @@ import {
 } from "./composer-kit";
 import { MicButton } from "./MicButton";
 import { ActivityPanel } from "./ActivityPanel";
+import { composerPlaceholder } from "@/lib/chat/composer-placeholder";
 import { AnswerMarkdown } from "./AnswerMarkdown";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { AnswerActions } from "./AnswerActions";
@@ -165,10 +166,23 @@ export function ChatView({
 
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [isMobile, setIsMobile] = useState<boolean>(false);
-  const lastUserId = useMemo(
-    () => [...messages].reverse().find((m) => m.role === "user")?.id,
-    [messages],
-  );
+  const lastUser = useMemo(() => [...messages].reverse().find((m) => m.role === "user"), [messages]);
+  const lastUserId = lastUser?.id;
+  // Composer nudge from context already here (matter label, the last
+  // question's subject); recomputed when a turn lands, never repeated back to
+  // back, and it rotates every couple of days. Pure helper, no storage.
+  const previousPlaceholderRef = useRef<string | null>(null);
+  const placeholder = useMemo(() => {
+    const next = composerPlaceholder({
+      matterLabel: matter?.label ?? null,
+      lastQuestion: lastUser?.text ?? null,
+      turnCount: messages.filter((m) => m.role === "user").length,
+      previous: previousPlaceholderRef.current,
+    });
+    previousPlaceholderRef.current = next;
+    return next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new turn or matter should change the nudge
+  }, [matter?.label, lastUser?.id]);
   const { allSources, sourcesByRef } = useSourceIndex(messages);
   const lastAssistant = useMemo(
     () => [...messages].reverse().find((m) => m.role === "assistant"),
@@ -441,7 +455,7 @@ export function ChatView({
               ref={scrollRef}
               className="wr-app-scroll h-full overflow-y-auto overscroll-contain px-4 pb-[168px] pt-4 sm:px-7 lg:px-8"
             >
-              <div className="mx-auto w-full max-w-[820px]">
+              <div className="mx-auto w-full max-w-[880px]">
                 {messages.map((m, i) => {
                   if (m.role === "user") {
                     return <UserMessage key={m.id} msg={m} />;
@@ -519,6 +533,7 @@ export function ChatView({
                 onDocsChange={onDocsChange}
                 focusOnly={focusOnly}
                 onFocusOnlyChange={onFocusOnlyChange}
+                placeholder={placeholder}
               />
             </div>
           </div>
@@ -641,6 +656,7 @@ function ChatComposer({
   onDocsChange,
   focusOnly = false,
   onFocusOnlyChange,
+  placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -655,6 +671,8 @@ function ChatComposer({
   onDocsChange?: (docs: SelectedDoc[]) => void;
   focusOnly?: boolean;
   onFocusOnlyChange?: (v: boolean) => void;
+  /** context-aware nudge from the parent (composerPlaceholder); falls back to the classic prompt */
+  placeholder?: string;
 }) {
   const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
   const setMode = useCallback((m: ComposerMode) => {
@@ -778,7 +796,7 @@ function ChatComposer({
             }
           }}
           rows={1}
-          placeholder={busy ? "Type your next question…" : "Ask a follow-up about MDLs, bellwethers, or precedent…"}
+          placeholder={busy ? "Type your next question…" : placeholder || "Ask a follow-up about MDLs, bellwethers, or precedent…"}
           className="block max-h-[220px] min-h-[44px] w-full resize-none bg-transparent px-1.5 py-1.5 text-[14px] leading-[1.55] placeholder:text-muted-foreground/80 focus:outline-none"
         />
       </div>

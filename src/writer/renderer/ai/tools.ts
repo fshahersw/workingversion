@@ -41,7 +41,9 @@ import { captureElement } from "@/office/shared/capture";
 import { getPlatformImage, isPlatformImage } from "@/office/shared/image-store";
 import { t } from "../i18n/locale";
 import { FIRM_PALETTE } from "../../shared/design";
+import { PLATFORM_TOOL_CONTRAST, WRITER_TOOL_CONTRAST, withToolContrast } from "@/lib/agents/tool-contrast";
 import { executeCommands, type Command, type CommandEnvelope } from "./commands";
+import { auditLiveDocument, formatDocAudit } from "./document-audit";
 import {
   blockRangePositions,
   buildCommentsContext,
@@ -93,10 +95,17 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     }),
   ),
   {
+    name: "audit_document",
+    readOnly: true,
+    description:
+      "Deterministic format/structure audit of the document model (no rendering, instant): footnote parity (definitions with no reference mark, dangling marks, one authority defined twice), headings faked with inline bold instead of a Heading style, non-black body or citation text, paper size / margins / a table wider than the text area, runs of empty paragraphs, headings with no body, inconsistent alignment. Use for: a self-check before declaring a drafting or formatting task done, or when the user asks whether the document is clean. Not for: how the page LOOKS (that is view_page) or citation form (check_bluebook_citations). Each finding names the blocks and the tool that fixes it. Runs automatically at the end of every editing run as well.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
     name: "view_page",
     readOnly: true,
     description:
-      "Capture a rendering of the document as it looks on screen (PNG) so you can check layout, fonts, tables, alignment and spacing visually. Optionally limit the capture to a block range; without a range the capture starts at the top of the document. Use after formatting edits to verify the result, or when the user asks about how something looks. The image is attached to the result.",
+      "VISUAL layout inspection: a PNG of the document as rendered, for what only rendering shows — text overflow, page balance and where pages break, spacing and whitespace, alignment of tables and images, font appearance. Use for: verifying the look after formatting edits, or when the user asks how something looks. Not for: reading content (read_blocks), finding text (search_document), or structural checks such as footnote parity, heading styles, colors and margins (audit_document is exact and instant for those). Optionally limit the capture to a block range; without a range it starts at the top. Examples: \"does the table fit the page?\", \"is there a stranded heading at the bottom of page 2?\". The image is attached to the result.",
     inputSchema: {
       type: "object",
       properties: {
@@ -615,7 +624,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: "insert_footnote",
     description:
-      "Insert a footnote (or endnote) whose reference mark sits immediately after a piece of body text. afterText is a literal phrase in the document (usually the end of the sentence the note supports, including its closing punctuation — Bluebook puts the reference after the period); blockIndex narrows the search to one block when the phrase occurs more than once; occurrence picks the Nth match (1-based). text is the note body (plain text; cite in Bluebook form). Returns the note number.",
+      "CREATE one NEW numbered footnote (or endnote) and anchor its reference mark immediately after a piece of body text. Every call adds another note: calling it twice for the same authority produces a duplicate definition and an orphan, so cite an authority in full ONCE and use a short form (Id., supra) in later notes. Not for: changing an existing note's text (edit the note through read_blocks/replace_blocks on the footnote, or apply_commands replaceAllText scoped to it), moving a mark, or adding a second mark to a note that already exists. afterText is a literal phrase in the document (usually the end of the sentence the note supports, including its closing punctuation — Bluebook puts the reference after the period); when the phrase occurs more than once pass blockIndex or occurrence (the tool refuses an ambiguous anchor). text is the note body (plain text; cite in Bluebook form). Returns the note number. Example: afterText \"was inadequate as a matter of law.\", text \"Hardeman v. Monsanto Co., 997 F.3d 941, 960 (9th Cir. 2021).\"",
     inputSchema: {
       type: "object",
       properties: {
@@ -764,6 +773,9 @@ const platformSkill = createPlatformSkill({
   },
 });
 AGENT_TOOLS.push(...platformSkill.tools);
+// Contrastive "use for / not for / examples" blocks on every tool: the main
+// lever on tool-call accuracy (src/lib/agents/tool-contrast.ts is the catalog).
+AGENT_TOOLS.splice(0, AGENT_TOOLS.length, ...withToolContrast(AGENT_TOOLS, { ...PLATFORM_TOOL_CONTRAST, ...WRITER_TOOL_CONTRAST }));
 export const PLATFORM_SYSTEM_PROMPT = platformSkill.systemPrompt;
 const PLATFORM_TOOL_NAMES = new Set(platformSkill.tools.map((tool) => tool.name));
 
@@ -2411,6 +2423,15 @@ function executeSyncTool(
         output: `Inserted ${kind} ${result.num} after "${afterText.slice(0, 60)}"${matches.length > 1 ? ` (match ${occurrence} of ${matches.length})` : ""}.`,
         mutated: true,
         summary,
+      };
+    }
+
+    case "audit_document": {
+      const issues = auditLiveDocument(editor, app);
+      return {
+        output: `Audited ${editor.state.doc.childCount} blocks.${formatDocAudit(issues, { fixInstruction: issues.length > 0 })}`,
+        mutated: false,
+        summary: issues.length ? `Audit: ${issues.length} finding${issues.length === 1 ? "" : "s"}` : "Audit passed",
       };
     }
 

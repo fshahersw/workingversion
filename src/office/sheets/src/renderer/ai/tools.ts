@@ -504,6 +504,7 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
       'Field definitions for the remaining operations live in the guides — load_guide before using them: ' +
       'writing(set_range/fill_range/copy_range/convert_to_values/clear_range/find_replace) | ' +
       'query(query_range: filter/sort/select/distinct/groupBy+aggregates over a block, computed by the engine and written as values — THE op for "show me the rows where…", "top N by…", "totals by custodian", "unique values of…" on large data; import_file: land a CSV/TSV the Python sandbox wrote, by its platform-file handle) | ' +
+      'finishing(finish_table: LAST op after building or extending any table — fits every column to its real content, wraps prose columns, top-aligns; {sheetId, range incl. header, headerRows?}) | ' +
       'formatting(format_range) | ' +
       'layout(sort_range/merge_cells/unmerge_cells/set_row_height/set_col_width/set_rows_hidden/set_cols_hidden/set_freeze/set_page_setup) | ' +
       'structure(insert_rows/delete_rows/insert_cols/delete_cols/add_sheet/delete_sheet/' +

@@ -18,6 +18,8 @@ import type {
   ToolExecution,
 } from "@genoffice/agent-core";
 
+import { PLATFORM_TOOL_CONTRAST, withToolContrast } from "@/lib/agents/tool-contrast";
+
 import { askClarification, type ClarifyQuestion } from "./clarify-card";
 import {
   dataUrlOf,
@@ -487,7 +489,11 @@ const SYSTEM_PROMPT = `## Platform tools
 
 export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
   const exclude = new Set(options.exclude ?? []);
-  const tools = toolDefs(options.app, !!options.templates).filter((t) => !exclude.has(t.name));
+  // Contrastive "use for / not for" on every platform tool (src/lib/agents/tool-contrast.ts).
+  const tools = withToolContrast(
+    toolDefs(options.app, !!options.templates).filter((t) => !exclude.has(t.name)),
+    PLATFORM_TOOL_CONTRAST,
+  );
   let taskScope = crypto.randomUUID() as string;
   const app = options.app;
   const kind = KIND[app];

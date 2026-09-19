@@ -49,6 +49,7 @@ const READ = [
   "list_templates",
   // Deterministic Bluebook form check; reads document text only.
   "check_bluebook_citations",
+  "audit_document",
   ...PLATFORM_READ,
 ];
 // The Writer's generate_image places the picture in the document, so it is an edit here.

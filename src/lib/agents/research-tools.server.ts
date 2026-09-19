@@ -12,6 +12,7 @@ import { AGENT_TOOLS, SourceBook, executeTool, type ToolOutcome } from "./tools.
 import { sourceNote } from "@/lib/legal/source-registry";
 
 import { readPage } from "./page-read.server";
+import { RESEARCH_TOOL_CONTRAST, withToolContrast } from "./tool-contrast";
 import { memoTTL, toolCacheKey, TOOL_CACHE_TTL_MS } from "./run-state.server";
 import { courtlistenerConfigured, lookupCitations } from "./courtlistener.server";
 import {
@@ -51,7 +52,7 @@ const FETCH_PAGE_TOOL: ToolDef = {
 const VERIFY_CITATIONS_TOOL: ToolDef = {
   name: "verify_citations",
   description:
-    "Verify reporter-style legal citations (e.g. '576 U.S. 644', '2023 WL 12345', F.3d / F. Supp. 3d) against CourtListener's opinion database. Pass a block of TEXT (a paragraph of your draft, or a list of cites) and each citation resolves to a real case or is flagged not-found / ambiguous. Use to CONFIRM a case citation is real before you rely on it. For docket/PACER filings use db_* instead.",
+    "Call before finalizing ANY legal citation. Verifies reporter-style citations (e.g. '576 U.S. 644', '2023 WL 12345', F.3d / F. Supp. 3d) against CourtListener's opinion database: pass a block of TEXT (the paragraph of your answer or draft that carries the cites, or a list of them) and each citation resolves to a real case with its name and link, or is flagged not-found / ambiguous. A citation that does not resolve must not appear in the answer as authority. It confirms existence, not what the case holds — read the source for that.",
   input_schema: {
     type: "object",
     properties: { text: { type: "string", description: "Text containing one or more legal citations to resolve." } },
@@ -193,22 +194,26 @@ const CREATE_DOCUMENT_TOOL: ToolDef = {
   },
 };
 
-/** The full flat tool list the single agent sees. */
-export const RESEARCH_TOOLS: ToolDef[] = [
-  ...AGENT_TOOLS.legal_research, // the single web_search tool (16 category domain-sets + general_web)
-  FETCH_PAGE_TOOL,
-  VERIFY_CITATIONS_TOOL,
-  FDA_SEARCH_TOOL,
-  FED_REGISTER_TOOL,
-  ECFR_TOOL,
-  PUBMED_TOOL,
-  SEC_SEARCH_TOOL,
-  CLINICALTRIALS_TOOL,
-  RUN_PYTHON_TOOL,
-  READ_DOCUMENT_TOOL,
-  CREATE_DOCUMENT_TOOL,
-  ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
-];
+/** The full flat tool list the single agent sees, each description carrying a
+ *  contrastive "use for / not for / examples" block (src/lib/agents/tool-contrast.ts). */
+export const RESEARCH_TOOLS: ToolDef[] = withToolContrast(
+  [
+    ...AGENT_TOOLS.legal_research, // the single web_search tool (16 category domain-sets + general_web)
+    FETCH_PAGE_TOOL,
+    VERIFY_CITATIONS_TOOL,
+    FDA_SEARCH_TOOL,
+    FED_REGISTER_TOOL,
+    ECFR_TOOL,
+    PUBMED_TOOL,
+    SEC_SEARCH_TOOL,
+    CLINICALTRIALS_TOOL,
+    RUN_PYTHON_TOOL,
+    READ_DOCUMENT_TOOL,
+    CREATE_DOCUMENT_TOOL,
+    ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
+  ],
+  RESEARCH_TOOL_CONTRAST,
+);
 
 // --- New tool handlers -----------------------------------------------------
 

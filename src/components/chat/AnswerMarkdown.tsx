@@ -5,6 +5,7 @@ import { isValidElement, memo, useCallback, useMemo, useRef, type ReactNode } fr
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import type { Source } from "@/lib/chat-types";
 import { splitMarkdownBlocks } from "@/lib/markdown-blocks";
+import { cellClassFor } from "@/lib/markdown-table-cells";
 import { useSmoothText } from "@/lib/use-smooth-text";
 import { hostOf } from "@/lib/host";
 import { Favicon } from "./Favicon";
@@ -59,25 +60,33 @@ function AnswerMarkdownImpl({
   return (
     <div
       className={[
-        "wr-memo w-full min-w-0 text-[14.5px] leading-[1.65] text-foreground/90 [overflow-wrap:anywhere] [word-break:break-word]",
-        "[&_h1]:mt-0 [&_h1]:mb-2.5 [&_h1]:text-[19px] [&_h1]:font-semibold [&_h1]:tracking-tight [&_h1]:text-brand-navy",
-        "[&_h2]:mt-5 [&_h2]:mb-2 [&_h2]:text-[15.5px] [&_h2]:font-semibold [&_h2]:tracking-tight [&_h2]:text-brand-navy [&_h2]:border-b [&_h2]:border-border [&_h2]:pb-1",
-        "[&_h3]:mt-4 [&_h3]:mb-1.5 [&_h3]:text-[13px] [&_h3]:font-semibold [&_h3]:uppercase [&_h3]:tracking-[0.06em] [&_h3]:text-brand-navy/85",
-        "[&_p]:my-2.5 [&_p]:leading-[1.65]",
+        // Slightly more compact than before (14 px / 1.6) so a research answer
+        // reads like a memo, not a chat bubble; the column itself is widened
+        // in ChatView. Word-breaking stays on prose only; table cells opt out
+        // below so an atomic value (a date, a docket number) never wraps.
+        "wr-memo w-full min-w-0 text-[14px] leading-[1.6] text-foreground/90 [overflow-wrap:anywhere] [word-break:break-word]",
+        "[&_h1]:mt-0 [&_h1]:mb-2 [&_h1]:text-[18.5px] [&_h1]:font-semibold [&_h1]:tracking-tight [&_h1]:text-brand-navy",
+        "[&_h2]:mt-4.5 [&_h2]:mb-1.5 [&_h2]:text-[15px] [&_h2]:font-semibold [&_h2]:tracking-tight [&_h2]:text-brand-navy [&_h2]:border-b [&_h2]:border-border [&_h2]:pb-1",
+        "[&_h3]:mt-3.5 [&_h3]:mb-1 [&_h3]:text-[12.5px] [&_h3]:font-semibold [&_h3]:uppercase [&_h3]:tracking-[0.06em] [&_h3]:text-brand-navy/85",
+        "[&_p]:my-2 [&_p]:leading-[1.6]",
         "[&_strong]:font-semibold [&_strong]:text-brand-navy",
         "[&_em]:text-foreground/80",
-        "[&_ul]:my-2.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-1 [&_ul]:marker:text-brand-navy/40",
-        "[&_ol]:my-2.5 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:space-y-1 [&_ol]:marker:text-brand-navy/60 [&_ol]:marker:font-semibold",
-        "[&_li]:pl-1 [&_li]:leading-[1.6]",
+        "[&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-0.5 [&_ul]:marker:text-brand-navy/40",
+        "[&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:space-y-0.5 [&_ol]:marker:text-brand-navy/60 [&_ol]:marker:font-semibold",
+        "[&_li]:pl-1 [&_li]:leading-[1.55]",
         "[&_a]:text-primary [&_a]:underline-offset-2 hover:[&_a]:underline [&_a]:break-words",
-        "[&_blockquote]:my-3 [&_blockquote]:border-l-2 [&_blockquote]:border-brand-orange/60 [&_blockquote]:bg-brand-orange-soft/30 [&_blockquote]:px-3 [&_blockquote]:py-1 [&_blockquote]:text-[13.5px] [&_blockquote]:text-foreground/85",
-        "[&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[12.5px] [&_code]:font-mono [&_code]:break-words",
+        "[&_blockquote]:my-2.5 [&_blockquote]:border-l-2 [&_blockquote]:border-brand-orange/60 [&_blockquote]:bg-brand-orange-soft/30 [&_blockquote]:px-3 [&_blockquote]:py-1 [&_blockquote]:text-[13px] [&_blockquote]:text-foreground/85",
+        "[&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[12px] [&_code]:font-mono [&_code]:break-words",
         "[&_pre]:overflow-x-auto",
-        "[&_hr]:my-4 [&_hr]:border-border",
-        "[&>*:has(>table)]:overflow-x-auto",
-        "[&_table]:my-3 [&_table]:w-full [&_table]:border-collapse [&_table]:text-[13px]",
-        "[&_th]:border [&_th]:border-border [&_th]:bg-muted/50 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:text-brand-navy",
-        "[&_td]:border [&_td]:border-border [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top",
+        "[&_hr]:my-3.5 [&_hr]:border-border",
+        // Tables: the scroll wrapper is rendered by the `table` component below
+        // (a :has() selector on the parent never matched, which is why columns
+        // used to collapse). Auto layout + per-cell min widths + nowrap on
+        // atomic cells; wider than the column => horizontal scroll, not crush.
+        "[&_table]:my-0 [&_table]:min-w-full [&_table]:border-collapse [&_table]:text-[12.5px] [&_table]:leading-[1.45] [&_table]:[table-layout:auto]",
+        "[&_th]:border [&_th]:border-border [&_th]:bg-muted/50 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:align-bottom [&_th]:font-semibold [&_th]:text-brand-navy [&_th]:[overflow-wrap:normal] [&_th]:[word-break:normal]",
+        "[&_td]:border [&_td]:border-border [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_td]:[overflow-wrap:normal] [&_td]:[word-break:normal]",
+        "[&_tbody_tr:nth-child(even)_td]:bg-muted/20",
       ].join(" ")}
     >
       {blocks.map((block, i) => (
@@ -100,7 +109,15 @@ const MarkdownBlock = memo(function MarkdownBlock({ text, ctx }: { text: string;
         li: ({ children }) => <li>{mapNodes(children, ctx)}</li>,
         h2: ({ children }) => <h2>{mapNodes(children, ctx)}</h2>,
         h3: ({ children }) => <h3>{mapNodes(children, ctx)}</h3>,
-        td: ({ children }) => <td>{mapNodes(children, ctx)}</td>,
+        // Scroll container per table: on overflow the table scrolls sideways
+        // instead of squeezing a column to a few characters.
+        table: ({ children }) => (
+          <div className="wr-table-scroll my-3 max-w-full overflow-x-auto rounded-md border border-border/70 [scrollbar-width:thin] [&_table]:border-0 [&_td:first-child]:border-l-0 [&_td:last-child]:border-r-0 [&_th:first-child]:border-l-0 [&_th:last-child]:border-r-0 [&_tr:first-child_th]:border-t-0 [&_tr:last-child_td]:border-b-0">
+            <table>{children}</table>
+          </div>
+        ),
+        th: ({ children }) => <th className={cellClass(children, true)}>{mapNodes(children, ctx)}</th>,
+        td: ({ children }) => <td className={cellClass(children, false)}>{mapNodes(children, ctx)}</td>,
         // A ```mermaid fenced block renders as a diagram; any other code block
         // falls through to the normal <pre> styling.
         pre: ({ children }) => {
@@ -122,6 +139,22 @@ const MarkdownBlock = memo(function MarkdownBlock({ text, ctx }: { text: string;
     </ReactMarkdown>
   );
 });
+
+/** Plain text of a cell's React children (citation markers excluded). */
+function cellText(children: ReactNode): string {
+  if (children == null || typeof children === "boolean") return "";
+  if (typeof children === "string" || typeof children === "number") return String(children);
+  if (Array.isArray(children)) return children.map(cellText).join("");
+  if (isValidElement(children)) return cellText((children.props as { children?: ReactNode }).children);
+  return "";
+}
+
+/** Width policy per cell (src/lib/markdown-table-cells.ts): atomic values never wrap, prose gets a floor and a ceiling. */
+function cellClass(children: ReactNode, header: boolean): string {
+  const text = cellText(children).replace(/\[S\d+\]/g, "").trim();
+  if (!text) return "";
+  return cellClassFor(text, header);
+}
 
 function mapNodes(children: ReactNode, ctx: CiteContext): ReactNode {
   if (Array.isArray(children))

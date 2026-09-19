@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { runQuery, type QueryResult, type Scalar as QueryScalar } from '@/lib/sheets/query-range'
+import { fitTableColumns } from '@/lib/sheets/table-finish'
 import { ADDABLE_SHAPE_TYPES } from '../shared/shape-types'
 import { columnIndex, columnLabel, formatAddress, parseRange, rangeCellCount } from './cell-address'
 import { computeSortChanges } from './sort-range'
@@ -914,6 +915,25 @@ const importFileSchema = z.object({
   asText: z.boolean().optional(),
 })
 
+// Finishing pass for a built table: fit every column to its content (atomic
+// columns snug and unwrapped, prose columns wide and wrapped, a total budget),
+// wrap the long columns and top-align the block. Expands at plan time into
+// set_col_width + format_range from the current cell contents, so the widths
+// are exact for what is in the grid — never estimated by the model.
+const finishTableSchema = z.object({
+  op: z.literal('finish_table'),
+  sheetId: z.string().min(1),
+  /** the table block, header row(s) included */
+  range: cellRangeSchema,
+  headerRows: z.number().int().min(0).max(5).default(1),
+  /** ceiling for a prose column (default 420 px) */
+  maxColWidthPx: z.number().min(80).max(1200).optional(),
+  /** ceiling for the sum of column widths (default 1600 px ≈ a landscape page) */
+  maxTotalWidthPx: z.number().min(300).max(6000).optional(),
+  /** vertical alignment applied to the whole block (default top) */
+  verticalAlign: z.enum(['top', 'center', 'bottom']).default('top'),
+})
+
 export const workbookOperationSchema = z.discriminatedUnion('op', [
   setCellSchema,
   setFormulaSchema,
@@ -924,6 +944,7 @@ export const workbookOperationSchema = z.discriminatedUnion('op', [
   copyRangeSchema,
   queryRangeSchema,
   importFileSchema,
+  finishTableSchema,
   convertToValuesSchema,
   formatRangeSchema,
   sortRangeSchema,
@@ -983,6 +1004,7 @@ export type ClearRangeOperation = z.infer<typeof clearRangeSchema>
 export type FillRangeOperation = z.infer<typeof fillRangeSchema>
 export type QueryRangeOperation = z.infer<typeof queryRangeSchema>
 export type ImportFileOperation = z.infer<typeof importFileSchema>
+export type FinishTableOperation = z.infer<typeof finishTableSchema>
 export type FormatRangeOperation = z.infer<typeof formatRangeSchema>
 export type CellFormatPatch = z.infer<typeof formatPatchSchema>
 export type BorderPatch = z.infer<typeof borderPatchSchema>
@@ -1437,6 +1459,67 @@ function validateImportFile(operation: ImportFileOperation): void {
   parseRange(operation.target)
 }
 
+/** Range cap for the finishing pass: the fitter samples rows, so this bounds the read, not the estimate. */
+export const FINISH_TABLE_MAX_CELLS = 60_000
+
+/**
+ * finish_table -> set_col_width per column + format_range (wrap on the prose
+ * columns, vertical alignment on the block). Reads the block through the
+ * expander's cell reader (display text where available) and fits with the
+ * pure engine in src/lib/sheets/table-finish.ts.
+ */
+export function expandFinishTable(
+  operation: FinishTableOperation,
+  readCell: ExpandCellReader,
+): PrimitiveOperation[] {
+  const bounds = parseRange(operation.range)
+  const cells = rangeCellCount(bounds)
+  if (cells > FINISH_TABLE_MAX_CELLS) {
+    throw new Error(
+      `finish_table covers ${cells.toLocaleString('en-US')} cells; the limit is ${FINISH_TABLE_MAX_CELLS.toLocaleString('en-US')} — pass the table's header plus a representative slice of rows (the widths apply to whole columns anyway).`,
+    )
+  }
+  const rows: (string | number | boolean | null)[][] = []
+  for (let row = bounds.startRow; row <= bounds.endRow; row += 1) {
+    const out: (string | number | boolean | null)[] = []
+    for (let column = bounds.startColumn; column <= bounds.endColumn; column += 1) {
+      const cell = readCell(formatAddress(row, column), operation.sheetId)
+      out.push(cell.value ?? null)
+    }
+    rows.push(out)
+  }
+  const fits = fitTableColumns(rows, {
+    headerRows: operation.headerRows,
+    ...(operation.maxColWidthPx !== undefined ? { maxColWidthPx: operation.maxColWidthPx } : {}),
+    ...(operation.maxTotalWidthPx !== undefined ? { maxTotalWidthPx: operation.maxTotalWidthPx } : {}),
+  })
+  const out: PrimitiveOperation[] = []
+  for (const fit of fits) {
+    const columnLetter = columnLabel(bounds.startColumn + fit.column)
+    out.push({ op: 'set_col_width', sheetId: operation.sheetId, column: columnLetter, count: 1, widthPx: fit.widthPx })
+    if (fit.wrap) {
+      out.push({
+        op: 'format_range',
+        sheetId: operation.sheetId,
+        range: `${columnLetter}${bounds.startRow + 1}:${columnLetter}${bounds.endRow + 1}`,
+        format: { wrapText: true },
+      })
+    }
+  }
+  out.push({
+    op: 'format_range',
+    sheetId: operation.sheetId,
+    range: operation.range,
+    format: { verticalAlign: operation.verticalAlign },
+  })
+  return out
+}
+
+/** Human label for the plan preview. */
+export function finishTableOpLabel(op: FinishTableOperation): string {
+  return `Fit the columns of ${op.range} to their content (wrap long text, ${op.verticalAlign}-align)`
+}
+
 /**
  * Batch-order hazard guard: convert_to_values freezes what the grid holds
  * NOW, but same-batch formula writes land through a different plan lane
@@ -1684,6 +1767,11 @@ export function expandToPrimitiveOps(
     } else if (operation.op === 'import_file') {
       validateImportFile(operation)
       expanded.push(operation)
+    } else if (operation.op === 'finish_table') {
+      // Fit columns from the cells that are actually in the grid, then emit the
+      // ordinary width/format primitives the executors already handle.
+      if (!readCell) throw new Error('finish_table needs the current cell contents to fit the columns.')
+      expanded.push(...expandFinishTable(operation, readCell))
     } else if (operation.op === 'convert_to_values') {
       // Range-level: the executor reads each cell's computed value from the
       // live grid (chunk-loading streamed regions first) — expansion here

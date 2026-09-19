@@ -16,6 +16,7 @@ import {
   fitDeckOutline,
   type OutlineSlide,
 } from '@/lib/office/deck-outline-budget'
+import { SLIDES_TOOL_CONTRAST, withToolContrast } from '@/lib/agents/tool-contrast'
 
 /**
  * Slides capability as an AgentSkill: deck outline context + three tools (read structure /
@@ -856,6 +857,8 @@ const TOOLS: AgentToolDef[] = [
     },
   },
 ]
+// Contrastive "use for / not for / examples" on every tool (src/lib/agents/tool-contrast.ts).
+TOOLS.splice(0, TOOLS.length, ...withToolContrast(TOOLS, SLIDES_TOOL_CONTRAST))
 
 /** Collect readable text of nodes (including nested group children); returns a list of [sourceId, type, text] */
 /** Find one node by id in the node tree (including groups). */
