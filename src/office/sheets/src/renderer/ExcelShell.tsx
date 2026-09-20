@@ -35,6 +35,7 @@ import { isGridKeyTarget, shouldInterceptClearSelection } from './clear-selectio
 
 import type { ChartSeriesVisualState } from '../domain/chart-visual'
 import type { ChangePlan } from '../domain/workbook.types'
+import type { RunSnapshot } from '@/lib/sheets/run-snapshot'
 import type { AttachmentMeta } from '../shared/desktop-api'
 import { AiChatPanel, type AiChatMessage } from './ai/AiChatPanel'
 import { AiSelectionAsk } from './ai/AiSelectionAsk'
@@ -187,6 +188,8 @@ interface ExcelShellProps {
   readonly onStop: () => void
   readonly onNewChat: () => void
   readonly onUndo: (steps?: number) => void
+  /** restore an agent run from its pre-run snapshot (AI panel [Undo]) */
+  readonly onRollback?: (snapshot: RunSnapshot, fallbackSteps: number) => void
   /// A1 notation of the multi-cell selection the AI composer offers as this
   /// run's scope, or null when the resting single-cell selection carries none.
   readonly aiScopeRange: string | null
@@ -353,6 +356,7 @@ export function ExcelShell({
   onStop,
   onNewChat,
   onUndo,
+  onRollback,
   aiScopeRange,
   aiScopeColumns,
   aiScopeLocked,
@@ -673,6 +677,7 @@ export function ExcelShell({
           onStop={onStop}
           onNewChat={onNewChat}
           onUndo={onUndo}
+          onRollback={onRollback}
           scopeRange={aiScopeRange}
           scopeColumns={aiScopeColumns}
           scopeLocked={aiScopeLocked}

@@ -1,6 +1,7 @@
 // Server-only readers/writers for the litigation intelligence feed and the
 // corpus-backed signal tabs on the home terminal.
 import { corpusUrl } from "@/lib/corpus";
+import { faviconProxyUrl, shouldSkipFaviconFetch } from "@/lib/favicon-policy";
 import { toRow, type IntelFeed, type IntelRow } from "@/lib/intel-schema";
 import type {
   CorpusSignal,
@@ -260,7 +261,9 @@ export async function loadIntelFeed(input: {
           summary: h.snippet,
           sourceDomain: h.source_domain,
           sourceName: h.source_domain,
-          faviconUrl: h.source_domain ? `https://icons.duckduckgo.com/ip3/${h.source_domain}.ico` : null,
+          // Hosts known to 404 at the icon proxy (courts, agencies) get no URL: the card renders without an icon instead of logging a failed request.
+          faviconUrl:
+            h.source_domain && !shouldSkipFaviconFetch(h.source_domain) ? faviconProxyUrl(h.source_domain) : null,
           imageUrl: h.image_url,
           imageKind: h.image_url ? "editorial" : null,
           imageAlt: null,

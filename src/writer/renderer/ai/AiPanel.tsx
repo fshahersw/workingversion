@@ -16,6 +16,7 @@ import {
   type AiCommentsAccess,
   type AiDocumentAccess,
   type AiHeaderFooterAccess,
+  type WriterSnapshot,
 } from './tools'
 import { createDocsSkill } from './docs-skill'
 import { EditQueueCard } from './EditQueueCard'
@@ -95,7 +96,7 @@ interface ChatEntry {
   /** model tier status line for this segment (UI only) */
   status?: string
   /** document state before this turn's first edit — rendered as an inline roll-back action */
-  snapshot?: PmNode
+  snapshot?: WriterSnapshot
   /** attachments consumed from the composer by this user message (read-only echo chips) */
   attachments?: AttachmentMeta[]
 }
@@ -536,7 +537,7 @@ export function AiPanel({
   const instructionRef = useRef('')
   /** document state before the run's first edit — attached to the turn's final
       segment at run end (mid-turn segments never show the action toolbar) */
-  const runSnapshotRef = useRef<PmNode | null>(null)
+  const runSnapshotRef = useRef<WriterSnapshot | null>(null)
   /** last sent instruction, for one-click retry */
   const lastInstructionRef = useRef('')
   /** Tool activity of the whole run (with args/output, accumulated across turns) — for full
@@ -653,13 +654,13 @@ export function AiPanel({
     })
   }
 
-  const loopRef = useRef<AgentLoop<PmNode> | null>(null)
+  const loopRef = useRef<AgentLoop<WriterSnapshot> | null>(null)
   if (!loopRef.current) {
     const numIds = (): NumIds => ({
       bullet: findNumId(blocksRef.current, 'bullet') ?? numIdFallbackRef.current?.bullet ?? null,
       ordered: findNumId(blocksRef.current, 'ordered') ?? numIdFallbackRef.current?.ordered ?? null,
     })
-    loopRef.current = new AgentLoop<PmNode>({
+    loopRef.current = new AgentLoop<WriterSnapshot>({
       transport: createElectronTransport(() => settingsRef.current),
       systemSuffix: aiLangDirective,
       get maxTurns() { return writerProfileRef.current==='thorough'?200:100 },
@@ -674,7 +675,12 @@ export function AiPanel({
         ),
         createFilesSkill(availableAttachments),
       ]), () => writerModeRef.current),
-      captureSnapshot: () => editorRef.current.getJSON() as PmNode,
+      // Full rollback point: the ProseMirror document plus the out-of-editor
+      // state (notes, page setup, header/footer) the tools can change.
+      captureSnapshot: (): WriterSnapshot => ({
+        doc: editorRef.current.getJSON() as PmNode,
+        extras: docAccessRef.current?.snapshotExtras?.() ?? null,
+      }),
       events: {
         onText: (text) => patchLastAssistant({ text }),
         onReasoning: (text) => patchLastAssistant({ reasoning: text }),
@@ -760,6 +766,20 @@ export function AiPanel({
           }
         },
         onError: (error) => {
+          // A failed run must not leave a half-applied document: rewind to the
+          // pre-run point (document + notes + page setup) when the run mutated
+          // anything. The rollback point stays on the message so the user can
+          // see what was reverted; there is nothing further to roll back.
+          const failedSnapshot = runSnapshotRef.current
+          let reverted = false
+          if (failedSnapshot) {
+            try {
+              restoreSnapshot(failedSnapshot)
+              reverted = true
+            } catch {
+              /* keep the partial edits rather than fail twice */
+            }
+          }
           setChat(previous => settleRunMessages(previous))
           setChat((prev) => {
             const next = [...prev]
@@ -768,9 +788,9 @@ export function AiPanel({
               next[next.length - 1] = {
                 ...last,
                 streaming: false,
-                error,
+                error: reverted ? `${error} The run's changes were rolled back.` : error,
                 tools: last.tools?.filter((tl) => !tl.running),
-                snapshot: runSnapshotRef.current ?? undefined,
+                snapshot: reverted ? undefined : (failedSnapshot ?? undefined),
               }
             }
             return next
@@ -1058,9 +1078,15 @@ export function AiPanel({
     if (!next) acceptChanges()
   }
 
-  const rollback = (entryIdx: number, snapshot: PmNode) => {
+  /** Restore a rollback point: the document, then notes / page setup / header-footer. */
+  const restoreSnapshot = (snapshot: WriterSnapshot) => {
+    editor.commands.setContent(snapshot.doc as never)
+    if (snapshot.extras) docAccessRef.current?.restoreExtras?.(snapshot.extras)
+  }
+
+  const rollback = (entryIdx: number, snapshot: WriterSnapshot) => {
     if(!window.confirm('Restore the document to before this response? Later manual and assistant changes will also be replaced. Save a copy first to keep them.'))return
-    editor.commands.setContent(snapshot as never)
+    restoreSnapshot(snapshot)
     // The document rewound to before this turn, so this and every later
     // rollback point now describe discarded futures
     setChat((prev) =>

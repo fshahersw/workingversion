@@ -4315,6 +4315,70 @@ export function App() {
           return { num }
         },
       },
+      // Rollback point for everything that is NOT in editor.getJSON(): note
+      // text, section list / active page setup, header & footer variants.
+      // Captured before a run's first mutation, restored with the document.
+      snapshotExtras: () => {
+        const ctx = aiDocCtxRef.current
+        const hf = aiHfCtxRef.current
+        const hfRaw: Record<string, unknown> = {}
+        for (const kind of ['header', 'footer'] as const) {
+          for (const view of ['default', 'first', 'even'] as const) {
+            const value = hf.valueOf(kind, view)
+            if (value !== undefined && value !== null) hfRaw[`${kind}:${view}`] = structuredClone(value)
+          }
+        }
+        return {
+          footnotes: structuredClone(ctx.footnotes),
+          endnotes: structuredClone(ctx.endnotes),
+          section: ctx.section ? structuredClone(ctx.section) : null,
+          sections: structuredClone(ctx.sections),
+          headerFooter: aiHfAccess.read(),
+          hfRaw,
+          titlePg: hf.titlePg,
+          evenOddHf: hf.evenOddHf,
+        }
+      },
+      restoreExtras: (extras) => {
+        const notesNow = aiDocCtxRef.current
+        const footnotes = structuredClone(extras.footnotes) as NoteInfo[]
+        const endnotes = structuredClone(extras.endnotes) as NoteInfo[]
+        setFootnotes(footnotes)
+        setEndnotes(endnotes)
+        setNotesDirty(true)
+        const sections = structuredClone(extras.sections) as SectionInfo[]
+        setSections(sections)
+        setSectionsDirty(sections.map((_, i) => i))
+        if (extras.section) {
+          setSection(structuredClone(extras.section))
+          setSectionDirty(true)
+        }
+        aiDocCtxRef.current = {
+          ...notesNow,
+          footnotes,
+          endnotes,
+          sections,
+          section: extras.section ? structuredClone(extras.section) : notesNow.section,
+        }
+        const hf = aiHfCtxRef.current
+        if (extras.hfRaw) {
+          if (typeof extras.titlePg === 'boolean' && extras.titlePg !== hf.titlePg) {
+            setTitlePg(extras.titlePg)
+            setTitlePgDirty(true)
+            hf.titlePg = extras.titlePg
+          }
+          if (typeof extras.evenOddHf === 'boolean' && extras.evenOddHf !== hf.evenOddHf) {
+            setEvenOddHf(extras.evenOddHf)
+            setEvenOddHfDirty(true)
+            hf.evenOddHf = extras.evenOddHf
+          }
+          for (const [key, value] of Object.entries(extras.hfRaw)) {
+            const [kind, view] = key.split(':') as ['header' | 'footer', HfView]
+            hf.commit(kind, structuredClone(value) as never, view)
+            hf.overlay.set(key, structuredClone(value) as never)
+          }
+        }
+      },
     }),
     [],
   )

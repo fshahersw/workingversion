@@ -1,10 +1,19 @@
-import { FileText } from "lucide-react";
+import { FileText, Landmark } from "lucide-react";
 import { useState } from "react";
 
+import {
+  faviconProxyUrl,
+  isInstitutionalHost,
+  rememberFaviconMiss,
+  shouldSkipFaviconFetch,
+} from "@/lib/favicon-policy";
+
 /**
- * Site favicon with a monogram fallback; internal sources get a document glyph.
- * Prefers a provider-supplied favicon URL, else DuckDuckGo's icon service (it
- * returns a 200 default for unknown hosts, so there are no console 404s).
+ * Site favicon with a graceful fallback; internal sources get a document glyph.
+ * Prefers a provider-supplied favicon URL, else DuckDuckGo's icon proxy. Hosts
+ * known to have no icon there (courts, agencies) and hosts that already failed
+ * this session are never requested, so a long answer does not spam 404s; they
+ * render a landmark glyph (government / court) or a monogram instead.
  * Shared by the source list, the citation hover card, and the tool timeline.
  */
 export function Favicon({
@@ -33,10 +42,23 @@ export function Favicon({
     );
   }
 
-  const proxy = `https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico`;
+  const proxy = faviconProxyUrl(host);
+  const skipProxy = shouldSkipFaviconFetch(host);
   const url = src && !failed ? src : proxy;
+  const noIcon = (!src || failed) && (proxyFailed || skipProxy);
 
-  if ((!src || failed) && proxyFailed) {
+  if (noIcon) {
+    if (isInstitutionalHost(host)) {
+      return (
+        <span
+          style={{ width: px, height: px }}
+          className={`grid shrink-0 place-items-center rounded-[4px] bg-brand-navy/10 ${className}`}
+          title={host}
+        >
+          <Landmark className="h-2.5 w-2.5 text-brand-navy/80" />
+        </span>
+      );
+    }
     return (
       <span
         style={{ width: px, height: px }}
@@ -56,7 +78,14 @@ export function Favicon({
       width={size}
       height={size}
       title={host}
-      onError={() => (url === proxy ? setProxyFailed(true) : setFailed(true))}
+      onError={() => {
+        if (url === proxy) {
+          rememberFaviconMiss(host);
+          setProxyFailed(true);
+        } else {
+          setFailed(true);
+        }
+      }}
       style={{ width: px, height: px }}
       className={`shrink-0 rounded-[4px] bg-white object-contain ring-1 ring-border/50 ${className}`}
     />

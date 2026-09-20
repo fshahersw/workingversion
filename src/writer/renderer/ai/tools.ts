@@ -823,9 +823,39 @@ export interface AiNotesAccess {
 }
 
 /** Document-level app state the Writer tools may reach beyond the PM doc. */
+/**
+ * App state that lives OUTSIDE the ProseMirror document but belongs to the
+ * same rollback point: footnote/endnote text, the section (page setup) list
+ * and the header/footer variants. Captured with editor.getJSON() before a
+ * run's first mutation and restored together with it, so a rollback never
+ * leaves orphan note definitions or a changed page layout behind.
+ */
+export interface DocSnapshotExtras {
+  footnotes: Array<{ id: string; text: string }>;
+  endnotes: Array<{ id: string; text: string }>;
+  section: SectionSettings | null;
+  sections: unknown[];
+  /** text view of the header/footer variants (for display); restore uses hfRaw */
+  headerFooter: AiHfState | null;
+  /** raw header/footer values keyed "<kind>:<view>", restored verbatim (formatting kept) */
+  hfRaw?: Record<string, unknown>;
+  titlePg?: boolean;
+  evenOddHf?: boolean;
+}
+
 export interface AiDocumentAccess {
   pageSetup?: AiPageSetupAccess;
   notes?: AiNotesAccess;
+  /** deep copies of the out-of-editor state for a rollback point */
+  snapshotExtras?: () => DocSnapshotExtras;
+  /** restore what snapshotExtras captured (dirty flags set so the save path persists it) */
+  restoreExtras?: (extras: DocSnapshotExtras) => void;
+}
+
+/** Complete Writer rollback point: the document plus the out-of-editor state. */
+export interface WriterSnapshot {
+  doc: unknown;
+  extras: DocSnapshotExtras | null;
 }
 
 /**

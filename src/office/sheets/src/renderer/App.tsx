@@ -59,6 +59,21 @@ import {
   type UniverRuntime,
   type UniverWorksheet,
 } from './univer-state'
+import {
+  captureBlock,
+  captureForPlan,
+  emptyRunSnapshot,
+  restoreRunSnapshot,
+  type RunSnapshot,
+} from './run-snapshot-capture'
+
+// Rollback copy (plain English, like the Writer's confirm; the locale table is strict across 19 languages).
+const ROLLBACK_CONFIRM =
+  'Restore the workbook to before this response? Later manual and assistant changes to the same cells will also be replaced. Save a copy first to keep them.'
+const ROLLED_BACK = 'Rolled back to the state before this response.'
+const FAILED_RUN_ROLLED_BACK = 'The run failed; its changes were rolled back.'
+const rollbackUnavailable = (reason: string): string =>
+  `The changes could not be rolled back automatically: ${reason}`
 import { pushBulkFillUndo } from './bulk-fill-undo'
 import {
   applyAiPivotAdd,
@@ -1108,6 +1123,8 @@ export function App(): React.JSX.Element {
   const runLastTextRef = useRef('')
   /** true once any tool of the run mutated the workbook */
   const runMutatedRef = useRef(false)
+  /** pre-run state of everything this run writes (file-backed workbooks); see run-snapshot-capture.ts */
+  const runSnapshotRef = useRef<RunSnapshot | null>(null)
 
   const agentLoopRef = useRef<AgentLoop | null>(null)
   if (!agentLoopRef.current) {
@@ -1321,6 +1338,24 @@ export function App(): React.JSX.Element {
             }
             return next
           })
+          // A failed run must not leave half of its edits behind: restore the
+          // pre-run snapshot when the run mutated a file-backed workbook, and
+          // say so (or say why it could not).
+          const snap = runSnapshotRef.current
+          const runtime = univerRef.current
+          const workbook = runtime?.univerAPI.getActiveWorkbook()
+          if (runMutatedRef.current && snap && lazyWorkbookRef.current && runtime && workbook) {
+            void restoreRunSnapshot({ runtime, lazyWorkbookRef, workbook, setMessage }, snap).then((result) => {
+              patchLastAssistant((entry) => ({
+                ...entry,
+                text: `${entry.text}\n\n${
+                  result.ok
+                    ? `${FAILED_RUN_ROLLED_BACK}${result.caveat ? ` ${result.caveat}` : ''}`
+                    : rollbackUnavailable(result.reason)
+                }`,
+              }))
+            })
+          }
           // Request errors lead to the local Connection panel; never to an external account.
           setAiRunScope(undefined)
           void autoSaveCompletedAiRun().finally(() => setAiBusy(false))
@@ -1379,6 +1414,10 @@ export function App(): React.JSX.Element {
     aiApplyPromisesRef.current = []
     runLastTextRef.current = ''
     runMutatedRef.current = false
+    // One pre-run snapshot for the whole run: every batch the run applies
+    // captures the prior state of what it writes into this object, and [Undo]
+    // / a failed run restore from it regardless of the native undo history.
+    runSnapshotRef.current = emptyRunSnapshot()
     setAiBusy(true)
     setMessage(t('appAiThinking'))
     appendChat({ role: 'assistant', text: '', tools: [], streaming: true })
@@ -3065,13 +3104,16 @@ export function App(): React.JSX.Element {
       const apply = handleLazyApply(state).then((outcome) => {
         if (outcome.ok) {
           const undoSteps = Math.max(0, undoStackDepth(univerRef.current) - undoDepthBefore)
-          // Patch last assistant message with inline undo button.
+          // Patch last assistant message with the inline rollback button. The
+          // run snapshot (shared by every batch of the run) is the primary
+          // rollback mechanism; the undo-step count is the legacy fallback.
           patchLastAssistant((entry) => ({
             ...entry,
             autoApplied: {
               opCount: (entry.autoApplied?.opCount ?? 0) + opCount,
               undoSteps: (entry.autoApplied?.undoSteps ?? 0) + undoSteps,
             },
+            ...(runSnapshotRef.current ? { runSnapshot: runSnapshotRef.current } : {}),
           }))
         } else {
           // No manual-apply entry point: the failure reason is already in the
@@ -3299,6 +3341,18 @@ export function App(): React.JSX.Element {
         isError: true,
       }))
       return { ok: false, reason }
+    }
+    // Pre-batch snapshot of everything this plan writes (cells, formats,
+    // widths, heights, merges, names) into the run's snapshot. Rollback and
+    // failed-run recovery restore from it, so a batch too large for the undo
+    // history is still fully revertible. A capture failure only marks the
+    // snapshot untrustworthy; it never blocks the apply.
+    const snapshotCtx = { runtime, lazyWorkbookRef, workbook, setMessage }
+    const runSnap = (runSnapshotRef.current ??= emptyRunSnapshot())
+    try {
+      await captureForPlan(snapshotCtx, runSnap, stored.plan)
+    } catch {
+      runSnap.truncated = true
     }
     // All commands of one propose merge into a single undo item (⌘Z / [Undo]
     // rolls back the whole batch in one step)
@@ -4186,6 +4240,12 @@ export function App(): React.JSX.Element {
                 'add a sheet with enough rows (add_sheet rows) or insert_rows first, then retry.',
             )
           }
+          // The write bounds are only known now: capture the prior cells for rollback.
+          try {
+            await captureBlock(snapshotCtx, runSnap, op.sheetId, writeBounds, op.op)
+          } catch {
+            runSnap.truncated = true
+          }
           await applyRangeInLoadedChunks(
             runtime,
             lazyWorkbookRef,
@@ -4606,13 +4666,42 @@ export function App(): React.JSX.Element {
     }
   }
 
+  /**
+   * Roll an agent run back from its pre-run snapshot (file-backed workbooks).
+   * Independent of the undo history, so a bulk batch that was dropped from it
+   * still reverts completely. Refuses with the reason when the snapshot cannot
+   * be trusted (structural ops, cap exceeded) and offers the legacy undo.
+   */
+  async function rollbackRun(snapshot: RunSnapshot, fallbackSteps: number): Promise<void> {
+    const runtime = univerRef.current
+    const workbook = runtime?.univerAPI.getActiveWorkbook()
+    if (!runtime || !workbook) return
+    if (!window.confirm(ROLLBACK_CONFIRM)) return
+    const result = await restoreRunSnapshot({ runtime, lazyWorkbookRef, workbook, setMessage }, snapshot)
+    if (result.ok) {
+      setMessage(ROLLED_BACK)
+      patchLastAssistant(({ autoApplied: _autoApplied, runSnapshot: _snap, ...entry }) => ({
+        ...entry,
+        text: `${entry.text}\n\n${ROLLED_BACK}${result.caveat ? ` ${result.caveat}` : ''}`,
+      }))
+      return
+    }
+    if (fallbackSteps > 0) {
+      handleUndo(fallbackSteps)
+      setMessage(result.reason)
+      return
+    }
+    setMessage(result.reason)
+    patchLastAssistant((entry) => ({ ...entry, text: `${entry.text}\n\n${rollbackUnavailable(result.reason)}` }))
+  }
+
   function handleUndo(steps?: number): void {
     const count =
       typeof steps === 'number' && Number.isFinite(steps) ? Math.max(1, Math.floor(steps)) : 1
     const fromAiBatch = typeof steps === 'number'
     const clearInlineUndo = () => {
       if (!fromAiBatch) return
-      patchLastAssistant(({ autoApplied: _autoApplied, ...entry }) => entry)
+      patchLastAssistant(({ autoApplied: _autoApplied, runSnapshot: _snap, ...entry }) => entry)
     }
     // Mirror ⌘Z: interactive grid edits live on Univer's undo stack even in a
     // blank in-memory workbook, so drain that stack first; the adapter's
@@ -5546,6 +5635,7 @@ export function App(): React.JSX.Element {
         onStop={handleStopAgent}
         onNewChat={handleNewChat}
         onUndo={handleUndo}
+        onRollback={(snapshot, fallbackSteps) => void rollbackRun(snapshot, fallbackSteps)}
         aiScopeRange={aiScopeChip.range}
         aiScopeColumns={aiScopeChip.columns ?? null}
         aiScopeLocked={aiScopeChip.locked}
