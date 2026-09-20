@@ -154,8 +154,7 @@ function startBuild(project, imageTag, archiveCommit) {
 // value into the gateway task and the platform Lambda by name.
 function ensureAppKeySecret(name) {
   try {
-    aws(["secretsmanager", "describe-secret", "--secret-id", name]);
-    return;
+    return awsJson(["secretsmanager", "describe-secret", "--secret-id", name]).ARN;
   } catch {
     /* absent: create */
   }
@@ -163,12 +162,15 @@ function ensureAppKeySecret(name) {
   const file = resolve(repoRoot, "infra/legal-archive/artifacts/app-key.json");
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, JSON.stringify({ ARCHIVE_APP_KEY: key }));
+  let arn;
   try {
-    aws(["secretsmanager", "create-secret", "--name", name, "--description", "Legal Archive gateway app key (X-Archive-App-Key)", "--secret-string", `file://${file.replace(/\\/g, "/")}`]);
+    // No --description: the Windows shell path does not quote argv, so spaces would split it.
+    arn = awsJson(["secretsmanager", "create-secret", "--name", name, "--secret-string", `file://${file.replace(/\\/g, "/")}`]).ARN;
   } finally {
     writeFileSync(file, "{}");
   }
   console.log(`Created secret ${name}`);
+  return arn;
 }
 
 async function main() {
@@ -217,7 +219,8 @@ async function main() {
 
   // 4. second key for the gateway (dedicated secret; created, never read)
   const appKeySecretName = `${namePrefix}/${environment}/legal-archive-app-key`;
-  ensureAppKeySecret(appKeySecretName);
+  const appKeySecretArn = ensureAppKeySecret(appKeySecretName);
+  if (!appKeySecretArn) throw new Error(`could not resolve the ARN of ${appKeySecretName}`);
 
   // 5. network: the archive instance shares the engine's VPC and first task subnet
   const vpcId = officeParams.VpcId;
@@ -236,7 +239,7 @@ async function main() {
     OriginAccessSecretArn: originSecretArn,
     ArchiveImageUri: `${buildOutputs.ArchiveRepositoryUri}:${buildOutputs.tag}`,
     GatewayImageUri: `${buildOutputs.GatewayRepositoryUri}:${buildOutputs.tag}`,
-    AppKeySecretName: appKeySecretName,
+    AppKeySecretArn: appKeySecretArn,
   };
   deployStack(serviceStack, "infra/legal-archive/legal-archive.cfn.yaml", parameters);
   const service = stackOutputs(serviceStack);
