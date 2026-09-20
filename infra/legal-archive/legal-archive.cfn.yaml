@@ -333,8 +333,10 @@ Resources:
             grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /data xfs defaults,nofail,noatime 0 2" >> /etc/fstab
             mountpoint -q /data || mount /data
             chmod 755 /data
-            # The ECS agent starts after user data; make sure it picks up the cluster config.
-            systemctl restart ecs || true
+            # Do NOT start or restart the ECS agent here: ecs.service is ordered
+            # After=cloud-final (this script), so a blocking systemctl call
+            # deadlocks both. The agent starts on its own once user data exits
+            # and reads the cluster name written above.
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
