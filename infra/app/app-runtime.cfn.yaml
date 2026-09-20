@@ -1135,6 +1135,14 @@ Resources:
           OFFICE_ENGINE_PUBLIC_URL: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
           OFFICE_ENGINE_JWT_ISSUER: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
           OFFICE_ENGINE_JWT_SECRET_ARN: !If [HasOfficeEngine, !Ref OfficeEngineJwtSecretArn, !Ref AWS::NoValue]
+          # Legal Archive + Corpus Workbench (legal-archive stack), reached
+          # server-side through this distribution's /archive-api and
+          # /workbench-api behaviors. LEGAL_ARCHIVE_URL is the distribution
+          # origin (same as the Office engine public URL); ARCHIVE_APP_KEY is the
+          # gateway's second key (src/lib/archive/client.server.ts). Empty key =
+          # archive features dark.
+          LEGAL_ARCHIVE_URL: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
+          ARCHIVE_APP_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:ARCHIVE_APP_KEY}}"
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -1949,6 +1957,35 @@ Resources:
                 - GET
                 - HEAD
               Compress: false
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+            - !Ref AWS::NoValue
+          # Legal Archive and Corpus Workbench JSON APIs (legal-archive stack)
+          # share the Office engine ALB origin: the ALB path rule requires the
+          # origin key, and the archive gateway additionally requires the
+          # platform's app key, which only the app's server side sends. Never
+          # cached; GET/HEAD plus the workbench's gated POST /api/handoff.
+          - !If
+            - HasOfficeEngine
+            - PathPattern: /archive-api/*
+              TargetOriginId: OfficeEngineAlb
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [GET, HEAD, OPTIONS]
+              CachedMethods: [GET, HEAD]
+              Compress: true
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+            - !Ref AWS::NoValue
+          - !If
+            - HasOfficeEngine
+            - PathPattern: /workbench-api/*
+              TargetOriginId: OfficeEngineAlb
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+              CachedMethods: [GET, HEAD]
+              Compress: true
               CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
               OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
               ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy

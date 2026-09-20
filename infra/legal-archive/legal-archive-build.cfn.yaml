@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Build infrastructure for the Seeger Weiss Legal Archive images: two ECR
+  repositories (archive runtime, loopback gateway) and one CodeBuild project
+  that builds both from services/legal-archive/ (zipped into the artifact
+  bucket) and pushes them. The archive image clones the public externalcorpus
+  repository at build time (ARCHIVE_COMMIT pins the code); the data itself
+  never enters an image, it is restored onto the instance volume by the
+  refresher task (legal-archive.cfn.yaml).
+
+Parameters:
+  NamePrefix:
+    Type: String
+    MinLength: 3
+    MaxLength: 16
+    AllowedPattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+  Environment:
+    Type: String
+    AllowedValues: [testing, staging, prod]
+  ArtifactBucketName:
+    Type: String
+    Description: Existing versioned artifact bucket (app-foundation / testing-hosting output).
+  SourceObjectKey:
+    Type: String
+    Default: legal-archive/source.zip
+    Description: Object key of the services/legal-archive source zip inside the artifact bucket.
+  ArtifactKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: KMS key the artifact bucket objects are encrypted with (grants decrypt to the build role).
+  ArchiveRepoUrl:
+    Type: String
+    Default: https://github.com/fshahersw/externalcorpus.git
+  ArchiveCommit:
+    Type: String
+    Default: main
+    Description: Branch, tag or commit of the externalcorpus repository baked into the seed copy inside the image.
+
+Conditions:
+  HasKms: !Not [!Equals [!Ref ArtifactKmsKeyArn, ""]]
+
+Resources:
+  ArchiveRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${NamePrefix}-${Environment}-legal-archive"
+      ImageScanningConfiguration: { ScanOnPush: true }
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep the last 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+  GatewayRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${NamePrefix}-${Environment}-legal-archive-gateway"
+      ImageScanningConfiguration: { ScanOnPush: true }
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep the last 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/codebuild/${NamePrefix}-${Environment}-legal-archive"
+      RetentionInDays: 30
+
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-legal-archive-build"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${BuildLogGroup.Arn}:*"
+              - Sid: SourceRead
+                Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub "arn:aws:s3:::${ArtifactBucketName}/${SourceObjectKey}"
+              - !If
+                - HasKms
+                - Sid: SourceDecrypt
+                  Effect: Allow
+                  Action: [kms:Decrypt, kms:DescribeKey]
+                  Resource: !Ref ArtifactKmsKeyArn
+                - !Ref AWS::NoValue
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource:
+                  - !GetAtt ArchiveRepository.Arn
+                  - !GetAtt GatewayRepository.Arn
+
+  Project:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-legal-archive"
+      Description: Builds and pushes the Legal Archive runtime and gateway images.
+      ServiceRole: !GetAtt BuildRole.Arn
+      TimeoutInMinutes: 45
+      Source:
+        Type: S3
+        Location: !Sub "${ArtifactBucketName}/${SourceObjectKey}"
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ARCHIVE_REPOSITORY_URI"
+                - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$GATEWAY_REPOSITORY_URI"
+                - export IMAGE_TAG="${IMAGE_TAG:-$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-12)}"
+                - echo "Building $ARCHIVE_REPOSITORY_URI:$IMAGE_TAG and $GATEWAY_REPOSITORY_URI:$IMAGE_TAG"
+            build:
+              commands:
+                - DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg "ARCHIVE_REPO=$ARCHIVE_REPO" --build-arg "ARCHIVE_COMMIT=$ARCHIVE_COMMIT" -t "$ARCHIVE_REPOSITORY_URI:$IMAGE_TAG" -t "$ARCHIVE_REPOSITORY_URI:latest" archive
+                - DOCKER_BUILDKIT=1 docker build --progress=plain -t "$GATEWAY_REPOSITORY_URI:$IMAGE_TAG" -t "$GATEWAY_REPOSITORY_URI:latest" gateway
+            post_build:
+              commands:
+                - docker push "$ARCHIVE_REPOSITORY_URI:$IMAGE_TAG"
+                - docker push "$ARCHIVE_REPOSITORY_URI:latest"
+                - docker push "$GATEWAY_REPOSITORY_URI:$IMAGE_TAG"
+                - docker push "$GATEWAY_REPOSITORY_URI:latest"
+                - printf '{"archive":"%s","gateway":"%s"}\n' "$ARCHIVE_REPOSITORY_URI:$IMAGE_TAG" "$GATEWAY_REPOSITORY_URI:$IMAGE_TAG" > image-uris.json
+                - cat image-uris.json
+          artifacts:
+            files: [image-uris.json]
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ARCHIVE_REPOSITORY_URI
+            Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ArchiveRepository}"
+          - Name: GATEWAY_REPOSITORY_URI
+            Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${GatewayRepository}"
+          - Name: ARCHIVE_REPO
+            Value: !Ref ArchiveRepoUrl
+          - Name: ARCHIVE_COMMIT
+            Value: !Ref ArchiveCommit
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref BuildLogGroup
+
+Outputs:
+  ArchiveRepositoryUri:
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ArchiveRepository}"
+  GatewayRepositoryUri:
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${GatewayRepository}"
+  ProjectName:
+    Value: !Ref Project

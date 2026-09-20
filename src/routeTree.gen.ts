@@ -38,6 +38,7 @@ import { Route as AuthenticatedMattersIndexRouteImport } from './routes/_authent
 import { Route as AuthenticatedDraftsIndexRouteImport } from './routes/_authenticated/drafts.index'
 import { Route as ApiWriterStreamRouteImport } from './routes/api/writer/stream'
 import { Route as ApiWriterDocsRouteImport } from './routes/api/writer/docs'
+import { Route as ApiWorkbenchSplatRouteImport } from './routes/api/workbench/$'
 import { Route as ApiReviewCellRouteImport } from './routes/api/review/cell'
 import { Route as ApiPileStructureRouteImport } from './routes/api/pile/structure'
 import { Route as ApiPileRerankRouteImport } from './routes/api/pile/rerank'
@@ -52,8 +53,10 @@ import { Route as ApiKbDocumentsRouteImport } from './routes/api/kb/documents'
 import { Route as ApiKbAskRouteImport } from './routes/api/kb/ask'
 import { Route as ApiDiscoveryAnalyzeRouteImport } from './routes/api/discovery/analyze'
 import { Route as ApiAuthMeRouteImport } from './routes/api/auth/me'
+import { Route as ApiArchiveSplatRouteImport } from './routes/api/archive/$'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
 import { Route as AuthenticatedDraftsDraftIdRouteImport } from './routes/_authenticated/drafts.$draftId'
+import { Route as AuthenticatedArchiveSourcesRouteImport } from './routes/_authenticated/archive.sources'
 import { Route as AuthenticatedOfficeSlidesIndexRouteImport } from './routes/_authenticated/office.slides.index'
 import { Route as AuthenticatedOfficeSheetsIndexRouteImport } from './routes/_authenticated/office.sheets.index'
 import { Route as AuthenticatedOfficeDraftsIndexRouteImport } from './routes/_authenticated/office.drafts.index'
@@ -225,6 +228,11 @@ const ApiWriterDocsRoute = ApiWriterDocsRouteImport.update({
   path: '/api/writer/docs',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiWorkbenchSplatRoute = ApiWorkbenchSplatRouteImport.update({
+  id: '/api/workbench/$',
+  path: '/api/workbench/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiReviewCellRoute = ApiReviewCellRouteImport.update({
   id: '/api/review/cell',
   path: '/api/review/cell',
@@ -295,6 +303,11 @@ const ApiAuthMeRoute = ApiAuthMeRouteImport.update({
   path: '/api/auth/me',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiArchiveSplatRoute = ApiArchiveSplatRouteImport.update({
+  id: '/api/archive/$',
+  path: '/api/archive/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthenticatedMattersSlugRoute =
   AuthenticatedMattersSlugRouteImport.update({
     id: '/matters/$slug',
@@ -305,6 +318,12 @@ const AuthenticatedDraftsDraftIdRoute =
   AuthenticatedDraftsDraftIdRouteImport.update({
     id: '/drafts/$draftId',
     path: '/drafts/$draftId',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedArchiveSourcesRoute =
+  AuthenticatedArchiveSourcesRouteImport.update({
+    id: '/archive/sources',
+    path: '/archive/sources',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedOfficeSlidesIndexRoute =
@@ -458,8 +477,10 @@ export interface FileRoutesByFullPath {
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
+  '/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
+  '/api/archive/$': typeof ApiArchiveSplatRoute
   '/api/auth/me': typeof ApiAuthMeRoute
   '/api/discovery/analyze': typeof ApiDiscoveryAnalyzeRoute
   '/api/kb/ask': typeof ApiKbAskRoute
@@ -474,6 +495,7 @@ export interface FileRoutesByFullPath {
   '/api/pile/rerank': typeof ApiPileRerankRoute
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
+  '/api/workbench/$': typeof ApiWorkbenchSplatRoute
   '/api/writer/docs': typeof ApiWriterDocsRouteWithChildren
   '/api/writer/stream': typeof ApiWriterStreamRoute
   '/drafts/': typeof AuthenticatedDraftsIndexRoute
@@ -526,8 +548,10 @@ export interface FileRoutesByTo {
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/': typeof AuthenticatedIndexRoute
+  '/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
+  '/api/archive/$': typeof ApiArchiveSplatRoute
   '/api/auth/me': typeof ApiAuthMeRoute
   '/api/discovery/analyze': typeof ApiDiscoveryAnalyzeRoute
   '/api/kb/ask': typeof ApiKbAskRoute
@@ -542,6 +566,7 @@ export interface FileRoutesByTo {
   '/api/pile/rerank': typeof ApiPileRerankRoute
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
+  '/api/workbench/$': typeof ApiWorkbenchSplatRoute
   '/api/writer/docs': typeof ApiWriterDocsRouteWithChildren
   '/api/writer/stream': typeof ApiWriterStreamRoute
   '/drafts': typeof AuthenticatedDraftsIndexRoute
@@ -596,8 +621,10 @@ export interface FileRoutesById {
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/_authenticated/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/_authenticated/matters/$slug': typeof AuthenticatedMattersSlugRoute
+  '/api/archive/$': typeof ApiArchiveSplatRoute
   '/api/auth/me': typeof ApiAuthMeRoute
   '/api/discovery/analyze': typeof ApiDiscoveryAnalyzeRoute
   '/api/kb/ask': typeof ApiKbAskRoute
@@ -612,6 +639,7 @@ export interface FileRoutesById {
   '/api/pile/rerank': typeof ApiPileRerankRoute
   '/api/pile/structure': typeof ApiPileStructureRoute
   '/api/review/cell': typeof ApiReviewCellRoute
+  '/api/workbench/$': typeof ApiWorkbenchSplatRoute
   '/api/writer/docs': typeof ApiWriterDocsRouteWithChildren
   '/api/writer/stream': typeof ApiWriterStreamRoute
   '/_authenticated/drafts/': typeof AuthenticatedDraftsIndexRoute
@@ -666,8 +694,10 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
+    | '/archive/sources'
     | '/drafts/$draftId'
     | '/matters/$slug'
+    | '/api/archive/$'
     | '/api/auth/me'
     | '/api/discovery/analyze'
     | '/api/kb/ask'
@@ -682,6 +712,7 @@ export interface FileRouteTypes {
     | '/api/pile/rerank'
     | '/api/pile/structure'
     | '/api/review/cell'
+    | '/api/workbench/$'
     | '/api/writer/docs'
     | '/api/writer/stream'
     | '/drafts/'
@@ -734,8 +765,10 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/logout'
     | '/'
+    | '/archive/sources'
     | '/drafts/$draftId'
     | '/matters/$slug'
+    | '/api/archive/$'
     | '/api/auth/me'
     | '/api/discovery/analyze'
     | '/api/kb/ask'
@@ -750,6 +783,7 @@ export interface FileRouteTypes {
     | '/api/pile/rerank'
     | '/api/pile/structure'
     | '/api/review/cell'
+    | '/api/workbench/$'
     | '/api/writer/docs'
     | '/api/writer/stream'
     | '/drafts'
@@ -803,8 +837,10 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/logout'
     | '/_authenticated/'
+    | '/_authenticated/archive/sources'
     | '/_authenticated/drafts/$draftId'
     | '/_authenticated/matters/$slug'
+    | '/api/archive/$'
     | '/api/auth/me'
     | '/api/discovery/analyze'
     | '/api/kb/ask'
@@ -819,6 +855,7 @@ export interface FileRouteTypes {
     | '/api/pile/rerank'
     | '/api/pile/structure'
     | '/api/review/cell'
+    | '/api/workbench/$'
     | '/api/writer/docs'
     | '/api/writer/stream'
     | '/_authenticated/drafts/'
@@ -859,6 +896,7 @@ export interface RootRouteChildren {
   ApiTranscribeRoute: typeof ApiTranscribeRoute
   ApiUploadRoute: typeof ApiUploadRoute
   ApiWorkflowsRoute: typeof ApiWorkflowsRoute
+  ApiArchiveSplatRoute: typeof ApiArchiveSplatRoute
   ApiAuthMeRoute: typeof ApiAuthMeRoute
   ApiDiscoveryAnalyzeRoute: typeof ApiDiscoveryAnalyzeRoute
   ApiKbAskRoute: typeof ApiKbAskRoute
@@ -873,6 +911,7 @@ export interface RootRouteChildren {
   ApiPileRerankRoute: typeof ApiPileRerankRoute
   ApiPileStructureRoute: typeof ApiPileStructureRoute
   ApiReviewCellRoute: typeof ApiReviewCellRoute
+  ApiWorkbenchSplatRoute: typeof ApiWorkbenchSplatRoute
   ApiWriterDocsRoute: typeof ApiWriterDocsRouteWithChildren
   ApiWriterStreamRoute: typeof ApiWriterStreamRoute
   ApiPublicCalendarSyncRoute: typeof ApiPublicCalendarSyncRoute
@@ -1091,6 +1130,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiWriterDocsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/workbench/$': {
+      id: '/api/workbench/$'
+      path: '/api/workbench/$'
+      fullPath: '/api/workbench/$'
+      preLoaderRoute: typeof ApiWorkbenchSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/review/cell': {
       id: '/api/review/cell'
       path: '/api/review/cell'
@@ -1189,6 +1235,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAuthMeRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/archive/$': {
+      id: '/api/archive/$'
+      path: '/api/archive/$'
+      fullPath: '/api/archive/$'
+      preLoaderRoute: typeof ApiArchiveSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_authenticated/matters/$slug': {
       id: '/_authenticated/matters/$slug'
       path: '/matters/$slug'
@@ -1201,6 +1254,13 @@ declare module '@tanstack/react-router' {
       path: '/drafts/$draftId'
       fullPath: '/drafts/$draftId'
       preLoaderRoute: typeof AuthenticatedDraftsDraftIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/archive/sources': {
+      id: '/_authenticated/archive/sources'
+      path: '/archive/sources'
+      fullPath: '/archive/sources'
+      preLoaderRoute: typeof AuthenticatedArchiveSourcesRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/office/slides/': {
@@ -1372,6 +1432,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedSummarizeRoute: typeof AuthenticatedSummarizeRoute
   AuthenticatedWorkflowsRoute: typeof AuthenticatedWorkflowsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedArchiveSourcesRoute: typeof AuthenticatedArchiveSourcesRoute
   AuthenticatedDraftsDraftIdRoute: typeof AuthenticatedDraftsDraftIdRoute
   AuthenticatedMattersSlugRoute: typeof AuthenticatedMattersSlugRoute
   AuthenticatedDraftsIndexRoute: typeof AuthenticatedDraftsIndexRoute
@@ -1397,6 +1458,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSummarizeRoute: AuthenticatedSummarizeRoute,
   AuthenticatedWorkflowsRoute: AuthenticatedWorkflowsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedArchiveSourcesRoute: AuthenticatedArchiveSourcesRoute,
   AuthenticatedDraftsDraftIdRoute: AuthenticatedDraftsDraftIdRoute,
   AuthenticatedMattersSlugRoute: AuthenticatedMattersSlugRoute,
   AuthenticatedDraftsIndexRoute: AuthenticatedDraftsIndexRoute,
@@ -1497,6 +1559,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiTranscribeRoute: ApiTranscribeRoute,
   ApiUploadRoute: ApiUploadRoute,
   ApiWorkflowsRoute: ApiWorkflowsRoute,
+  ApiArchiveSplatRoute: ApiArchiveSplatRoute,
   ApiAuthMeRoute: ApiAuthMeRoute,
   ApiDiscoveryAnalyzeRoute: ApiDiscoveryAnalyzeRoute,
   ApiKbAskRoute: ApiKbAskRoute,
@@ -1511,6 +1574,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPileRerankRoute: ApiPileRerankRoute,
   ApiPileStructureRoute: ApiPileStructureRoute,
   ApiReviewCellRoute: ApiReviewCellRoute,
+  ApiWorkbenchSplatRoute: ApiWorkbenchSplatRoute,
   ApiWriterDocsRoute: ApiWriterDocsRouteWithChildren,
   ApiWriterStreamRoute: ApiWriterStreamRoute,
   ApiPublicCalendarSyncRoute: ApiPublicCalendarSyncRoute,

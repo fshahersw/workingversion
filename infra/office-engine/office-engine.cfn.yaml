@@ -420,3 +420,12 @@ Outputs:
     Value: !Ref Cluster
   ServiceName:
     Value: !GetAtt Service.Name
+  ListenerArn:
+    Description: The listener other services attach path rules to (legal-archive stack).
+    Value: !If [HasCertificate, !Ref HttpsListener, !Ref HttpListener]
+  AlbSecurityGroupId:
+    Description: Security group of the ALB; downstream task security groups allow ingress from it.
+    Value: !Ref AlbSecurityGroup
+  LoadBalancerFullName:
+    Description: app/name/id form for CloudWatch dimensions.
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
