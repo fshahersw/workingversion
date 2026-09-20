@@ -94,10 +94,78 @@ def remote_head() -> str:
     return sha
 
 
+def github_headers() -> dict[str, str]:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "seegerweiss-legal-archive-refresher"}
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def manifest_tag() -> str:
+    """The release that carries data_manifest.json: bootstrap.py's TAG in the served tree, else the default."""
+    override = os.environ.get("ARCHIVE_RELEASE_TAG", "").strip()
+    if override:
+        return override
+    for root in (CURRENT, Path("/opt/archive-seed")):
+        try:
+            text = (root / "bootstrap.py").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("TAG = "):
+                return line.split("=", 1)[1].strip().strip("'\"")
+    return MANIFEST_TAG
+
+
 def fetch_manifest() -> dict:
-    url = f"https://github.com/{REPO_SLUG}/releases/download/{MANIFEST_TAG}/data_manifest.json"
-    with urllib.request.urlopen(url, timeout=60) as response:
+    tag = manifest_tag()
+    url = f"https://github.com/{REPO_SLUG}/releases/download/{tag}/data_manifest.json"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=github_headers()), timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def release_assets(tag: str) -> dict[str, dict]:
+    """name -> {size, digest, state} for every asset of one release, via the paginated REST API."""
+    base = f"https://api.github.com/repos/{REPO_SLUG}/releases/tags/{tag}"
+    with urllib.request.urlopen(urllib.request.Request(base, headers=github_headers()), timeout=60) as response:
+        release_id = json.loads(response.read().decode("utf-8"))["id"]
+    out: dict[str, dict] = {}
+    page = 1
+    while True:
+        url = f"https://api.github.com/repos/{REPO_SLUG}/releases/{release_id}/assets?per_page=100&page={page}"
+        with urllib.request.urlopen(urllib.request.Request(url, headers=github_headers()), timeout=60) as response:
+            rows = json.loads(response.read().decode("utf-8"))
+        for row in rows:
+            out[row["name"]] = {"size": int(row.get("size", 0)), "digest": row.get("digest") or "", "state": row.get("state", "")}
+        if len(rows) < 100:
+            return out
+        page += 1
+
+
+def release_consistent(manifest: dict, units: list[dict]) -> dict:
+    """Same check as the repository's tools/verify_release.py: every part present, same size, GitHub's digest equals the manifest.
+    Refuses to stage when GitHub and the manifest disagree, so a half-pushed release is never pulled."""
+    tags = sorted({u.get("release_tag") or manifest_tag() for u in units})
+    found: dict[str, dict] = {}
+    for tag in tags:
+        found.update(release_assets(tag))
+    missing, wrong_size, wrong_digest, no_digest = [], [], [], 0
+    for unit in units:
+        for part in unit["parts"]:
+            row = found.get(part["name"])
+            if row is None or row["state"] != "uploaded":
+                missing.append(part["name"])
+            elif row["size"] != part["bytes"]:
+                wrong_size.append(part["name"])
+            elif not row["digest"]:
+                no_digest += 1
+            elif row["digest"] != "sha256:" + part["sha256"]:
+                wrong_digest.append(part["name"])
+    result = {"tags": tags, "parts": sum(len(u["parts"]) for u in units), "missing": missing, "wrong_size": wrong_size, "wrong_sha256": wrong_digest, "without_digest": no_digest}
+    if missing or wrong_size or wrong_digest:
+        raise RuntimeError(f"release inconsistent with manifest: {json.dumps({k: (v[:5] if isinstance(v, list) else v) for k, v in result.items()})}")
+    return result
 
 
 def selected_units(manifest: dict) -> list[dict]:
@@ -323,6 +391,9 @@ def cmd_run(force: bool) -> int:
             log("current release is up to date", fingerprint=live[:16], code=code_sha[:12])
             metrics(RefreshRun=1, RefreshChanged=0)
             return 0
+        # GitHub must hold exactly what the manifest describes before anything is downloaded.
+        consistency = release_consistent(manifest, units)
+        log("release consistent with manifest", parts=consistency["parts"], tags=consistency["tags"])
         stamp = utc_stamp()
         log("staging release", stamp=stamp, code=code_sha[:12], units=len(units), manifest_written=manifest.get("written_at"))
         staging = stage(stamp)
