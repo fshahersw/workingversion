@@ -37,12 +37,13 @@ const zipPath = resolve(repoRoot, "infra/legal-archive/artifacts/source.zip");
 
 function parseArgs(argv) {
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
-  const allowed = new Set(["--pull", "--skip-build", "--dry-run", "--help", "-h", "--archive-commit"]);
+  const allowed = new Set(["--pull", "--skip-build", "--dry-run", "--help", "-h", "--archive-commit", "--keep-on-failure"]);
   for (const f of flags) if (!allowed.has(f.split("=")[0])) throw new Error(`Unknown flag ${f}`);
   const commitFlag = argv.find((a) => a.startsWith("--archive-commit="));
   return {
     pull: flags.has("--pull"),
     skipBuild: flags.has("--skip-build"),
+    keepOnFailure: flags.has("--keep-on-failure"),
     dryRun: flags.has("--dry-run"),
     help: flags.has("--help") || flags.has("-h"),
     archiveCommit: commitFlag ? commitFlag.split("=")[1] : "main",
@@ -104,6 +105,9 @@ function stackExists(name) {
   }
 }
 
+const TEXT_EXT = new Set([".sh", ".py", ".conf", ".template", ".md", ".txt", ".yaml", ".yml", ".json"]);
+const SKIP_DIRS = new Set(["__pycache__", "node_modules", ".pytest_cache"]);
+
 async function zipSource() {
   const zip = new JSZip();
   const fixedDate = new Date(1980, 0, 1, 0, 0, 0);
@@ -111,8 +115,16 @@ async function zipSource() {
     for (const entry of readdirSync(dir).sort()) {
       const full = join(dir, entry);
       const rel = relative(sourceDir, full).replace(/\\/g, "/");
-      if (statSync(full).isDirectory()) walk(full);
-      else zip.file(rel, readFileSync(full), { date: fixedDate, unixPermissions: entry.endsWith(".sh") ? 0o755 : 0o644 });
+      if (statSync(full).isDirectory()) {
+        if (!SKIP_DIRS.has(entry)) walk(full);
+        continue;
+      }
+      let bytes = readFileSync(full);
+      // A Windows checkout (core.autocrlf) turns the shebang into "#!/bin/sh\r" and
+      // breaks nginx directives; the image must always get LF regardless of the checkout.
+      const ext = entry.includes(".") ? entry.slice(entry.lastIndexOf(".")) : "";
+      if (TEXT_EXT.has(ext) || entry === "Dockerfile") bytes = Buffer.from(bytes.toString("utf8").replace(/\r\n/g, "\n"), "utf8");
+      zip.file(rel, bytes, { date: fixedDate, unixPermissions: entry.endsWith(".sh") ? 0o755 : 0o644 });
     }
   };
   walk(sourceDir);
@@ -122,8 +134,10 @@ async function zipSource() {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function deployStack(name, template, parameters, capabilities = ["CAPABILITY_NAMED_IAM"]) {
-  const args = ["cloudformation", "deploy", "--stack-name", name, "--template-file", template, "--no-fail-on-empty-changeset", "--capabilities", ...capabilities];
+function deployStack(name, template, parameters, options = {}) {
+  const args = ["cloudformation", "deploy", "--stack-name", name, "--template-file", template, "--no-fail-on-empty-changeset", "--capabilities", "CAPABILITY_NAMED_IAM"];
+  // Keep a failed create in place (resources, tasks, logs) instead of rolling back, so the cause can be read.
+  if (options.keepOnFailure) args.push("--disable-rollback");
   if (parameters && Object.keys(parameters).length) {
     args.push("--parameter-overrides", ...Object.entries(parameters).map(([k, v]) => `${k}=${v}`));
   }
@@ -241,7 +255,7 @@ async function main() {
     GatewayImageUri: `${buildOutputs.GatewayRepositoryUri}:${buildOutputs.tag}`,
     AppKeySecretArn: appKeySecretArn,
   };
-  deployStack(serviceStack, "infra/legal-archive/legal-archive.cfn.yaml", parameters);
+  deployStack(serviceStack, "infra/legal-archive/legal-archive.cfn.yaml", parameters, { keepOnFailure: args.keepOnFailure });
   const service = stackOutputs(serviceStack);
   console.log(`Service stack ready: cluster ${service.ClusterName}, service ${service.ServiceName}, volume ${service.DataVolumeId}`);
 
