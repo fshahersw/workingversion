@@ -727,6 +727,15 @@ Parameters:
       the environment: Lambda variables are capped at 4 KB). Required with
       OfficeEngineOriginDomain.
 
+  ArchiveAppKeySecretName:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[A-Za-z0-9/_+=.@-]+$"
+    Description: >
+      Name of the dedicated Secrets Manager secret holding {"ARCHIVE_APP_KEY": ...}
+      for the Legal Archive gateway (legal-archive stack). Empty keeps the archive
+      features dark. Requires the Office engine origin, which the archive shares.
+
   AlarmTopicArn:
     Type: String
     Default: ""
@@ -767,6 +776,12 @@ Conditions:
     - !Equals
       - !Ref AlarmTopicArn
       - ""
+  HasLegalArchive: !And
+    - !Condition HasOfficeEngine
+    - !Not
+      - !Equals
+        - !Ref ArchiveAppKeySecretName
+        - ""
   HasOfficeEngine: !And
     - !Not
       - !Equals
@@ -1141,8 +1156,11 @@ Resources:
           # origin (same as the Office engine public URL); ARCHIVE_APP_KEY is the
           # gateway's second key (src/lib/archive/client.server.ts). Empty key =
           # archive features dark.
-          LEGAL_ARCHIVE_URL: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
-          ARCHIVE_APP_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:ARCHIVE_APP_KEY}}"
+          LEGAL_ARCHIVE_URL: !If [HasLegalArchive, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
+          ARCHIVE_APP_KEY: !If
+            - HasLegalArchive
+            - !Sub "{{resolve:secretsmanager:${ArchiveAppKeySecretName}:SecretString:ARCHIVE_APP_KEY}}"
+            - !Ref AWS::NoValue
       Tags:
         - Key: Environment
           Value: !Ref Environment

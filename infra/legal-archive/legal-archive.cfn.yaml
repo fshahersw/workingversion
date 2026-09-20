@@ -17,9 +17,9 @@ Metadata:
       - Label: { default: Network }
         Parameters: [VpcId, SubnetId, AvailabilityZone, AssociatePublicIp]
       - Label: { default: Shared ALB (office-engine stack outputs) }
-        Parameters: [AlbListenerArn, AlbSecurityGroupId, AlbFullName, OriginKeyHeaderValue]
+        Parameters: [AlbListenerArn, AlbSecurityGroupId, AlbFullName, OriginAccessSecretArn]
       - Label: { default: Images and secrets }
-        Parameters: [ArchiveImageUri, GatewayImageUri, AppKeySecretArn]
+        Parameters: [ArchiveImageUri, GatewayImageUri, AppKeySecretName]
       - Label: { default: Instance and data }
         Parameters: [InstanceType, DataVolumeSizeGiB, SnapshotRetainCount]
       - Label: { default: Refresh }
@@ -60,23 +60,23 @@ Parameters:
     Type: String
     AllowedPattern: "^app/.+/.+$"
     Description: Full name of the Office engine ALB for CloudWatch dimensions (office-engine stack output LoadBalancerFullName).
-  OriginKeyHeaderValue:
+  OriginAccessSecretArn:
     Type: String
-    NoEcho: true
-    MinLength: 16
-    MaxLength: 128
-    AllowedPattern: "^[A-Za-z0-9_-]+$"
-    Description: The same X-Office-Origin-Key value the platform distribution sends; the archive path rule requires it too.
+    AllowedPattern: "^arn:aws:secretsmanager:.+$"
+    Description: The platform's CloudFront origin secret; its officeEngineOriginKey value is the X-Office-Origin-Key the archive path rule requires (resolved by CloudFormation, never handled by tooling).
   ArchiveImageUri:
     Type: String
     Description: Runtime image (legal-archive-build stack, ArchiveRepositoryUri:tag).
   GatewayImageUri:
     Type: String
     Description: Gateway image (legal-archive-build stack, GatewayRepositoryUri:tag).
-  AppKeySecretArn:
+  AppKeySecretName:
     Type: String
-    AllowedPattern: "^arn:aws:secretsmanager:.+$"
-    Description: Secrets Manager secret holding the ARCHIVE_APP_KEY JSON key (the platform's CorpusServiceSecretArn). The gateway requires this value in X-Archive-App-Key.
+    Default: ""
+    Description: >
+      Name of the dedicated Secrets Manager secret whose ARCHIVE_APP_KEY value the
+      gateway requires in X-Archive-App-Key. Empty means
+      <NamePrefix>/<Environment>/legal-archive-app-key.
   InstanceType:
     Type: String
     Default: m6i.large
@@ -124,6 +124,7 @@ Parameters:
 
 Conditions:
   HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, ""]]
+  DefaultAppKeySecretName: !Equals [!Ref AppKeySecretName, ""]
 
 Resources:
   # ── Cluster, logs, roles ────────────────────────────────────────────────────
@@ -160,7 +161,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Ref AppKeySecretArn
+                Resource: !Sub
+                  - "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Name}-*"
+                  - Name: !If [DefaultAppKeySecretName, !Sub "${NamePrefix}/${Environment}/legal-archive-app-key", !Ref AppKeySecretName]
 
   # The serving task holds no AWS permissions: it reads the volume and answers HTTP.
   ArchiveTaskRole:
@@ -403,7 +406,10 @@ Resources:
           PortMappings: [{ ContainerPort: 8781, Protocol: tcp }]
           Secrets:
             - Name: ARCHIVE_APP_KEY
-              ValueFrom: !Sub "${AppKeySecretArn}:ARCHIVE_APP_KEY::"
+              # Same-Region secret: ECS accepts the name-based ARN with the JSON key selector.
+              ValueFrom: !Sub
+                - "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Name}:ARCHIVE_APP_KEY::"
+                - Name: !If [DefaultAppKeySecretName, !Sub "${NamePrefix}/${Environment}/legal-archive-app-key", !Ref AppKeySecretName]
           DependsOn:
             - { ContainerName: archive, Condition: START }
           LogConfiguration:
@@ -527,7 +533,8 @@ Resources:
         - Field: http-header
           HttpHeaderConfig:
             HttpHeaderName: X-Office-Origin-Key
-            Values: [!Ref OriginKeyHeaderValue]
+            # Resolved by CloudFormation from the platform's origin secret; tooling never handles the value.
+            Values: [!Sub "{{resolve:secretsmanager:${OriginAccessSecretArn}:SecretString:officeEngineOriginKey}}"]
       Actions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup

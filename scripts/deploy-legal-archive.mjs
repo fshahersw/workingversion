@@ -148,23 +148,27 @@ function startBuild(project, imageTag, archiveCommit) {
   }
 }
 
-function ensureAppKey(secretArn, dryRun) {
-  const current = JSON.parse(awsJson(["secretsmanager", "get-secret-value", "--secret-id", secretArn]).SecretString);
-  if (typeof current.ARCHIVE_APP_KEY === "string" && current.ARCHIVE_APP_KEY.length >= 32) return current.ARCHIVE_APP_KEY;
-  const key = randomBytes(36).toString("base64url");
-  if (dryRun) {
-    console.log("dry-run: would add ARCHIVE_APP_KEY to the corpus secret");
-    return key;
+// The gateway's second key lives in its own secret. This script only checks
+// that the secret exists (metadata) and creates it with a generated value when
+// it does not; it never reads a secret value. CloudFormation resolves the
+// value into the gateway task and the platform Lambda by name.
+function ensureAppKeySecret(name) {
+  try {
+    aws(["secretsmanager", "describe-secret", "--secret-id", name]);
+    return;
+  } catch {
+    /* absent: create */
   }
-  aws(["secretsmanager", "put-secret-value", "--secret-id", secretArn, "--secret-string", JSON.stringify({ ...current, ARCHIVE_APP_KEY: key })]);
-  console.log("Added ARCHIVE_APP_KEY to the corpus secret");
-  return key;
-}
-
-function originKey(originSecretArn) {
-  const secret = JSON.parse(awsJson(["secretsmanager", "get-secret-value", "--secret-id", originSecretArn]).SecretString);
-  if (!secret.officeEngineOriginKey) throw new Error("officeEngineOriginKey missing from the origin secret");
-  return secret.officeEngineOriginKey;
+  const key = randomBytes(36).toString("base64url");
+  const file = resolve(repoRoot, "infra/legal-archive/artifacts/app-key.json");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ ARCHIVE_APP_KEY: key }));
+  try {
+    aws(["secretsmanager", "create-secret", "--name", name, "--description", "Legal Archive gateway app key (X-Archive-App-Key)", "--secret-string", `file://${file.replace(/\\/g, "/")}`]);
+  } finally {
+    writeFileSync(file, "{}");
+  }
+  console.log(`Created secret ${name}`);
 }
 
 async function main() {
@@ -175,7 +179,6 @@ async function main() {
   }
   const runtimeParams = JSON.parse(readFileSync(runtimeParamsPath, "utf8"));
   const bucket = paramValue(runtimeParams, "ArtifactBucketName");
-  const corpusSecretArn = paramValue(runtimeParams, "CorpusServiceSecretArn");
   const originSecretArn = paramValue(runtimeParams, "OriginAccessSecretArn");
 
   // 1. source zip
@@ -187,12 +190,15 @@ async function main() {
     return;
   }
 
-  // 2. images
+  // 2. images. The artifact bucket is KMS-encrypted; the build role needs decrypt on that key.
   const buildOutputs = (() => {
     if (!args.skipBuild) {
       aws(["s3", "cp", zipPath, `s3://${bucket}/${sourceKey}`]);
+      const encryption = awsJson(["s3api", "get-bucket-encryption", "--bucket", bucket]);
+      const kmsKeyArn = encryption?.ServerSideEncryptionConfiguration?.Rules?.[0]?.ApplyServerSideEncryptionByDefault?.KMSMasterKeyID ?? "";
       deployStack(buildStack, "infra/legal-archive/legal-archive-build.cfn.yaml", {
         NamePrefix: namePrefix, Environment: environment, ArtifactBucketName: bucket, SourceObjectKey: sourceKey, ArchiveCommit: args.archiveCommit,
+        ...(kmsKeyArn.startsWith("arn:") ? { ArtifactKmsKeyArn: kmsKeyArn } : {}),
       });
       const outputs = stackOutputs(buildStack);
       startBuild(outputs.ProjectName, imageTag, args.archiveCommit);
@@ -209,8 +215,9 @@ async function main() {
   const officeParams = stackParameters(officeStack);
   for (const k of ["ListenerArn", "AlbSecurityGroupId", "LoadBalancerFullName"]) if (!office[k]) throw new Error(`${officeStack} has no output ${k}`);
 
-  // 4. second key for the gateway
-  ensureAppKey(corpusSecretArn, false);
+  // 4. second key for the gateway (dedicated secret; created, never read)
+  const appKeySecretName = `${namePrefix}/${environment}/legal-archive-app-key`;
+  ensureAppKeySecret(appKeySecretName);
 
   // 5. network: the archive instance shares the engine's VPC and first task subnet
   const vpcId = officeParams.VpcId;
@@ -226,10 +233,10 @@ async function main() {
     AlbListenerArn: office.ListenerArn,
     AlbSecurityGroupId: office.AlbSecurityGroupId,
     AlbFullName: office.LoadBalancerFullName,
-    OriginKeyHeaderValue: originKey(originSecretArn),
+    OriginAccessSecretArn: originSecretArn,
     ArchiveImageUri: `${buildOutputs.ArchiveRepositoryUri}:${buildOutputs.tag}`,
     GatewayImageUri: `${buildOutputs.GatewayRepositoryUri}:${buildOutputs.tag}`,
-    AppKeySecretArn: corpusSecretArn,
+    AppKeySecretName: appKeySecretName,
   };
   deployStack(serviceStack, "infra/legal-archive/legal-archive.cfn.yaml", parameters);
   const service = stackOutputs(serviceStack);

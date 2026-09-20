@@ -24,7 +24,7 @@ refresher task (host network, nightly 03:00 America/New_York + on demand)
 Two keys guard the archive, which has no authentication of its own:
 
 - `X-Office-Origin-Key`: CloudFront adds it; the ALB path rule requires it (the request came through the distribution and its WAF).
-- `X-Archive-App-Key`: the app Lambda adds it from `ARCHIVE_APP_KEY` in the corpus secret; the gateway requires it. Browsers never learn it, so the archive cannot be called around the app's Cognito check.
+- `X-Archive-App-Key`: the app Lambda adds it from the dedicated secret `<prefix>/<env>/legal-archive-app-key` (`{"ARCHIVE_APP_KEY": …}`); the gateway requires it. Browsers never learn it, so the archive cannot be called around the app's Cognito check. The deploy script creates that secret with a generated value when it is absent and never reads it; CloudFormation resolves it into the gateway task and the platform Lambda by name.
 
 ## Data volume layout
 
@@ -61,9 +61,10 @@ bun run deploy:testing --refresh-env     # platform: CloudFront behaviors + LEGA
 The script zips this folder to the artifact bucket, deploys
 `infra/legal-archive/legal-archive-build.cfn.yaml` (ECR + CodeBuild) and runs
 the build, updates the office-engine stack so it exports its listener,
-security group and full name, adds `ARCHIVE_APP_KEY` to the corpus secret when
+security group and full name, creates the dedicated app-key secret when
 missing, then deploys `infra/legal-archive/legal-archive.cfn.yaml` using the
-engine's VPC and first task subnet. `--skip-build` reuses `:latest` images;
+engine's VPC and first task subnet (the origin key is resolved by CloudFormation
+from the platform's origin secret; the script handles no secret values). `--skip-build` reuses `:latest` images;
 `--archive-commit=<sha>` pins the externalcorpus code baked into the seed copy
 (the served code still comes from the release tree).
 

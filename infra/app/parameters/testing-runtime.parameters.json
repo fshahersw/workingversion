@@ -212,6 +212,10 @@
     "ParameterValue": "arn:aws:secretsmanager:us-east-1:475976462949:secret:litai/testing/office-engine-jwt-U06SZ8"
   },
   {
+    "ParameterKey": "ArchiveAppKeySecretName",
+    "ParameterValue": "litai/testing/legal-archive-app-key"
+  },
+  {
     "ParameterKey": "WorkflowsEnabled",
     "ParameterValue": "true"
   },
