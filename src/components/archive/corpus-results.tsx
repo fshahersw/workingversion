@@ -5,15 +5,23 @@ import {
   booleanValue,
   firstNumber,
   firstText,
-  numberValue,
   objectArray,
   rowsAt,
+  scrubSources,
   textValue,
   type JsonObject,
 } from "@/lib/archive/corpus-shapes";
 import { provenanceOf, type JsonValue } from "@/lib/archive/policy";
 
 import { Badge, Structured } from "./corpus-ui";
+
+// Friendly labels for the state-coverage law families (raw keys are snake_case).
+const FAMILY_LABELS: Record<string, string> = {
+  statutes: "Statutes & codes",
+  constitution: "Constitution",
+  regulations: "Regulations",
+  court_rules: "Court rules",
+};
 
 function formatNumber(value: number | null): string {
   return value === null ? "—" : value.toLocaleString("en-US");
@@ -75,16 +83,9 @@ function SourceLink({ url }: { url: string | null }) {
   );
 }
 
-function Qualification({ value }: { value: unknown }) {
-  const qualification = textValue(value);
-  if (!qualification) return null;
-  return (
-    <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-900">
-      {qualification}
-    </p>
-  );
-}
-
+// Compact provenance line: record id, saved collection, captured date and the
+// official-source link. The archive's verbose per-record qualification prose is
+// intentionally not shown here; the page footer carries the standing ground rules.
 function Provenance({
   record,
   date,
@@ -96,20 +97,15 @@ function Provenance({
 }) {
   const provenance = provenanceOf(record);
   const shownDate = provenance.capturedAt ?? date ?? null;
-  if (
-    !provenance.recordId &&
-    !provenance.layer &&
-    !provenance.sourceUrl &&
-    !shownDate &&
-    !provenance.qualification
-  ) {
+  const collection = scrubSources(provenance.layer);
+  if (!provenance.recordId && !collection && !provenance.sourceUrl && !shownDate) {
     return null;
   }
   return (
     <div className="mt-3 border-t border-slate-100 pt-2 text-[11.5px] leading-relaxed text-slate-500">
       <div className="flex flex-wrap gap-x-4 gap-y-1">
         {provenance.recordId ? <span>Record: {provenance.recordId}</span> : null}
-        {provenance.layer ? <span>Layer: {provenance.layer}</span> : null}
+        {collection ? <span>Collection: {collection}</span> : null}
         {shownDate ? (
           <span>
             {provenance.capturedAt ? "Captured" : dateLabel}: {displayDate(shownDate)}
@@ -117,9 +113,6 @@ function Provenance({
         ) : null}
         {provenance.sourceUrl ? <SourceLink url={provenance.sourceUrl} /> : null}
       </div>
-      {provenance.qualification ? (
-        <p className="mt-1 text-slate-600">{provenance.qualification}</p>
-      ) : null}
     </div>
   );
 }
@@ -150,10 +143,7 @@ export function ExploreResults({ value }: { value: JsonValue }) {
       {totals ? (
         <SummaryStats>
           <Stat label="Saved records" value={formatNumber(firstNumber(totals, "total"))} />
-          <Stat
-            label="Publisher records"
-            value={formatNumber(firstNumber(totals, "bulk_records"))}
-          />
+          <Stat label="Bulk records" value={formatNumber(firstNumber(totals, "bulk_records"))} />
           <Stat
             label="Local documents"
             value={formatNumber(firstNumber(totals, "local_documents"))}
@@ -171,10 +161,10 @@ export function ExploreResults({ value }: { value: JsonValue }) {
             className="rounded-md border border-slate-200 p-3"
           >
             <h3 className="text-[13.5px] font-semibold text-slate-900">
-              {firstText(dataset, "label", "id") ?? "Collection"}
+              {scrubSources(firstText(dataset, "label", "id")) ?? "Collection"}
             </h3>
             <p className="mt-1 text-[12px] text-slate-600">
-              {firstText(dataset, "snapshot_label", "source_as_of_label") ??
+              {scrubSources(firstText(dataset, "snapshot_label", "source_as_of_label")) ??
                 "Saved archive collection"}
             </p>
             <div className="mt-2 flex flex-wrap gap-2">
@@ -186,14 +176,6 @@ export function ExploreResults({ value }: { value: JsonValue }) {
           </article>
         ))}
       </div>
-      <Qualification value={root["count_basis"]} />
-      {Array.isArray(root["limitations"]) ? (
-        <ul className="list-disc space-y-1 pl-5 text-[12px] text-slate-600">
-          {stringList(root["limitations"]).map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
-      ) : null}
     </div>
   );
 }
@@ -253,7 +235,6 @@ export function SearchResults({ value }: { value: JsonValue }) {
           );
         })}
       </div>
-      <Qualification value={root["qualification"]} />
     </div>
   );
 }
@@ -318,7 +299,6 @@ export function MdlResults({ value }: { value: JsonValue }) {
           );
         })}
       </div>
-      <Qualification value={root["qualification"]} />
     </div>
   );
 }
@@ -407,7 +387,6 @@ export function CourtResults({ value }: { value: JsonValue }) {
           );
         })}
       </div>
-      <Qualification value={root["note"]} />
     </div>
   );
 }
@@ -486,7 +465,6 @@ export function CfrResults({ value }: { value: JsonValue }) {
           );
         })}
       </div>
-      <Qualification value={asObject(root["publisher_index"])?.["basis"]} />
     </div>
   );
 }
@@ -521,11 +499,10 @@ export function LawOutlineResults({ value }: { value: JsonValue }) {
           </article>
         ))}
       </div>
-      <Qualification value={root["qualification"]} />
       {asObject(root["statute_audit"]) ? (
         <details className="rounded-md border border-slate-200 px-3 py-2">
           <summary className="cursor-pointer text-[12.5px] font-medium text-slate-700">
-            Publisher statute audit
+            Statute audit
           </summary>
           <div className="mt-3">
             <Structured value={root["statute_audit"]} />
@@ -632,7 +609,6 @@ export function AgencyResults({ value }: { value: JsonValue }) {
           );
         })}
       </div>
-      <Qualification value={root?.["qualification"]} />
     </div>
   );
 }
@@ -656,11 +632,10 @@ export function StateCoverageResults({ value }: { value: JsonValue }) {
             value={formatNumber(totals ? firstNumber(totals, "local_documents") : null)}
           />
           <Stat
-            label="Publisher records"
+            label="Bulk records"
             value={formatNumber(totals ? firstNumber(totals, "bulk_records") : null)}
           />
         </SummaryStats>
-        <Qualification value={root["count_basis"]} />
       </div>
     );
   }
@@ -677,13 +652,13 @@ export function StateCoverageResults({ value }: { value: JsonValue }) {
         {firstText(root, "abbr") ? <Badge tone="blue">{firstText(root, "abbr")}</Badge> : null}
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {Object.entries(families).map(([key, value]) => {
-          const family = asObject(value);
+        {Object.entries(families).map(([key, familyValue]) => {
+          const family = asObject(familyValue);
           const official = family ? asObject(family["official_capture"]) : null;
           return (
             <article key={key} className="rounded-md border border-slate-200 p-3">
               <h4 className="text-[12.5px] font-semibold capitalize text-slate-900">
-                {key.replaceAll("_", " ")}
+                {FAMILY_LABELS[key] ?? key.replaceAll("_", " ")}
               </h4>
               <dl className="mt-2 grid gap-2">
                 <Field
@@ -695,7 +670,7 @@ export function StateCoverageResults({ value }: { value: JsonValue }) {
                   value={formatNumber(family ? firstNumber(family, "imported_collection") : null)}
                 />
                 <Field
-                  label="Third-party snapshot"
+                  label="Imported snapshot"
                   value={formatNumber(family ? firstNumber(family, "third_party_snapshot") : null)}
                 />
                 <Field
@@ -738,7 +713,6 @@ export function StateCoverageResults({ value }: { value: JsonValue }) {
           </div>
         </div>
       ) : null}
-      <Qualification value={root["qualification"]} />
     </div>
   );
 }
@@ -852,7 +826,6 @@ export function CountyLitigationResults({ value }: { value: JsonValue }) {
           );
         })}
       </div>
-      <Qualification value={root["qualification"]} />
     </div>
   );
 }

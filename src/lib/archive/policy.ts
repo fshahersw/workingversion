@@ -114,10 +114,10 @@ export function buildUpstreamUrl(base: string, prefix: "/archive-api" | "/workbe
 
 /** The archive's ground rules, in the words every answer built on it must carry. */
 export const ARCHIVE_CAVEATS = {
-  snapshot: "Saved publisher snapshot (Open US Law v2026.08 or an official capture on the stated date); check the edition and current status at the official source.",
+  snapshot: "Saved snapshot (a bulk snapshot or an official capture) as of the stated date; confirm the current edition and status at the official source.",
   incomplete: "The collection is not complete: a missing record means not saved here, not that it does not exist. Known holes: Georgia and North Carolina statutes; Pennsylvania unconsolidated statutes; MA, NH, MI and NC county sources are mostly blocked.",
   counts: "Counts are counts of saved records, not rates, rankings or importance.",
-  limitationPeriods: "Two values: the third-party table period and whether the saved statute wording agrees (outcome). When they differ, report both; the statute controls.",
+  limitationPeriods: "Two values: the summarized limitation period and whether the saved statute wording agrees. When they differ, the statute controls.",
   people: "Judges and attorneys are identified by native ids only; never merged on a name; litigant names are never published.",
   closedLayer: "A layer answering available:false failed its hash or validation check; report that, do not work around it.",
 } as const;

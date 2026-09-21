@@ -84,7 +84,7 @@ function FederalPage() {
       <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-white">
         <CorpusHeader
           title="Federal Law & Agencies"
-          description="The Code of Federal Regulations, the US Code outline and the federal agency hub as saved in the Legal Archive. Saved wording is a publisher snapshot; confirm the current edition and status at the official source."
+          description="The Code of Federal Regulations, the US Code outline and the federal agency hub as saved in the Legal Archive. Saved wording is a snapshot as of its capture date; confirm the current edition and status at the official source."
         />
 
         {health.data && !health.data.configured ? (

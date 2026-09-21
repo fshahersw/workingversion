@@ -162,3 +162,29 @@ export function stateCoverageValues(value: unknown): StateCoverageValue[] {
 export function countBasis(value: unknown): string | null {
   return firstText(asObject(value) ?? {}, "count_basis", "qualification");
 }
+
+// Upstream data-vendor / tooling names are neutralized in any archive-provided
+// text shown in the UI, so the corpus reads as the firm's own Legal Archive.
+// Official government sources (eCFR, GovInfo, Federal Register, JPML, US Code)
+// are deliberately left intact -- those are the authoritative law, not vendors.
+const SOURCE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/open[\s_-]?us[\s_-]?law(?:[\s_-]*v?\d[\d.]*)?/gi, "public law"],
+  [/courtlistener[\s_/-]*recap/gi, "docket data"],
+  [/courtlistener/gi, "docket data"],
+  [/\bRECAP\b/g, "docket data"],
+  [/docketbird/gi, "docket data"],
+  [/trellis(?:\.law)?/gi, "county profiles"],
+  [/firecrawl/gi, "web capture"],
+  [/sw[\s_-]?bulk[\w/-]*/gi, "firm dataset"],
+  [/private firm dataset/gi, "firm dataset"],
+];
+
+/** Remove upstream vendor/tooling names from a display string; returns null if empty after scrubbing. */
+export function scrubSources(value: unknown): string | null {
+  const text = textValue(value);
+  if (!text) return null;
+  let out = text;
+  for (const [pattern, replacement] of SOURCE_REPLACEMENTS) out = out.replace(pattern, replacement);
+  const cleaned = out.replace(/\s{2,}/g, " ").trim();
+  return cleaned ? cleaned : null;
+}

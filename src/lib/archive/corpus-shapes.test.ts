@@ -5,6 +5,7 @@ import {
   countBasis,
   normalizeStateCode,
   rowsAt,
+  scrubSources,
   stateCoverageValues,
   stateSelection,
 } from "./corpus-shapes.ts";
@@ -70,4 +71,19 @@ test("known list envelopes expose rows and unknown shapes fall back cleanly", ()
   ]);
   assert.deepEqual(rowsAt({ items: [] }, "results", "items"), []);
   assert.deepEqual(rowsAt({ unexpected: true }, "results", "items"), []);
+});
+
+test("scrubSources neutralizes vendor/tooling names but keeps official sources", () => {
+  assert.equal(scrubSources("Open US Law bulk snapshot"), "public law bulk snapshot");
+  assert.equal(scrubSources("open_us_law"), "public law");
+  assert.equal(scrubSources("Trellis county profile page"), "county profiles county profile page");
+  assert.equal(
+    scrubSources("Rendered by Firecrawl from CourtListener/RECAP data"),
+    "Rendered by web capture from docket data data",
+  );
+  // Official government sources are preserved verbatim.
+  assert.equal(scrubSources("eCFR versioner titles.json"), "eCFR versioner titles.json");
+  assert.equal(scrubSources("JPML report dated 2026-09-01"), "JPML report dated 2026-09-01");
+  assert.equal(scrubSources(""), null);
+  assert.equal(scrubSources(null), null);
 });
