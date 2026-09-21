@@ -1,3 +1,4 @@
+import type { OfficeChatAppendInput } from "@/lib/office/chat-persistence";
 // Client-callable server functions for Writer documents, gated by requireAuth
 // and scoped to the authenticated Cognito principal. Binary document bytes go
 // through the /api/writer routes; everything JSON-shaped lives here.
@@ -6,7 +7,7 @@ import { createServerFn } from "@tanstack/react-start";
 import type { SwUser } from "@/lib/auth/cognito.server";
 import { requireAuth } from "@/lib/auth/require-auth";
 
-import { isDraftId, type WriterChatMessage } from "./types";
+import { isDraftId } from "./types";
 
 function principalOf(context: unknown): string {
   return (context as { user: SwUser }).user.sub;
@@ -66,7 +67,7 @@ export const loadWriterChatFn = createServerFn({ method: "POST" })
 
 export const appendWriterChatFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { draftId: string; message: Omit<WriterChatMessage, "seq" | "ts"> }) => {
+  .inputValidator((d: { draftId: string; message: OfficeChatAppendInput }) => {
     const m = d?.message;
     if (!m || (m.role !== "user" && m.role !== "assistant") || typeof m.text !== "string") {
       throw new Error("message required");
@@ -76,6 +77,7 @@ export const appendWriterChatFn = createServerFn({ method: "POST" })
       message: {
         role: m.role,
         text: m.text,
+        ...(typeof m.operationId === "string" ? { operationId: m.operationId } : {}),
         ...(Array.isArray(m.tools) ? { tools: m.tools } : {}),
         ...(Array.isArray(m.attachments) ? { attachments: m.attachments } : {}),
       },

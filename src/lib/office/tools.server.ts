@@ -662,7 +662,7 @@ export type LibraryHit = OfficeDocSummary & { url: string };
 
 /** Route that opens a Library document in its editor. */
 export function officeDocUrl(doc: Pick<OfficeDocSummary, "kind" | "draftId">): string {
-  return doc.kind === "pptx"
+  return doc.kind === "pdf" ? `/office/pdf/${doc.draftId}` : doc.kind === "pptx"
     ? `/office/slides/${doc.draftId}`
     : doc.kind === "xlsx"
       ? `/office/sheets/${doc.draftId}`
@@ -676,7 +676,7 @@ export async function searchLibrary(
 ): Promise<LibraryHit[]> {
   const { listOfficeDocs } = await import("./office.server");
   const kind =
-    input.kind === "docx" || input.kind === "xlsx" || input.kind === "pptx"
+    input.kind === "docx" || input.kind === "xlsx" || input.kind === "pptx" || input.kind === "pdf"
       ? input.kind
       : undefined;
   const docs = await listOfficeDocs(principal, kind);

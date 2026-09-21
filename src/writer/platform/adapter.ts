@@ -1,3 +1,4 @@
+import { OrderedChatAppender } from "@/lib/office/chat-persistence";
 // ============================================================================
 // Platform adapter: implements the Writer renderer's `DesktopApi` (the typed
 // preload surface the Electron build exposes) on top of the Seeger Weiss
@@ -439,6 +440,8 @@ async function streamRequest(r: AiStreamRequest): Promise<void> {
 
 // --- Chat history (per document, separate from Research) -------------------------------------------
 
+const chatAppender = new OrderedChatAppender();
+
 function projectApiFor(draftId: string): ProjectApi {
   const ids = { projectId: draftId, chatId: draftId };
   const unsupported = async (): Promise<never> => {
@@ -458,17 +461,13 @@ function projectApiFor(draftId: string): ProjectApi {
       }));
     },
     appendChat: async (args) => {
-      await appendWriterChatFn({
-        data: {
-          draftId,
-          message: {
-            role: args.role,
-            text: args.text,
-            ...(args.tools ? { tools: args.tools } : {}),
-            ...(args.attachments ? { attachments: args.attachments } : {}),
-          },
-        },
+      const message = structuredClone({
+        role: args.role, text: args.text,
+        ...(args.tools ? { tools: args.tools } : {}),
+        ...(args.attachments ? { attachments: args.attachments } : {}),
       });
+      await chatAppender.append(draftId, operationId =>
+        appendWriterChatFn({ data: { draftId, message: { ...message, operationId } } }));
     },
     rebindChat: async () => ids,
     listProjects: async () => [],

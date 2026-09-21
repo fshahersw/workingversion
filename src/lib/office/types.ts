@@ -15,34 +15,37 @@ export const DOC_ID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 export const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{8,100}$/;
 
-export type OfficeKind = "docx" | "xlsx" | "pptx";
-export const OFFICE_KINDS: readonly OfficeKind[] = ["docx", "xlsx", "pptx"];
+export type OfficeKind = "docx" | "xlsx" | "pptx" | "pdf";
+export const OFFICE_KINDS: readonly OfficeKind[] = ["docx", "xlsx", "pptx", "pdf"];
 
 export function isOfficeKind(value: unknown): value is OfficeKind {
-  return value === "docx" || value === "xlsx" || value === "pptx";
+  return value === "docx" || value === "xlsx" || value === "pptx" || value === "pdf";
 }
 
 export const OFFICE_MIME: Record<OfficeKind, string> = {
+  pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 };
 
 /** The OOXML main-part folder each kind must contain. */
-export const OFFICE_MAIN_PART: Record<OfficeKind, string> = {
+export const OFFICE_MAIN_PART: Record<Exclude<OfficeKind, "pdf">, string> = {
   docx: "word/",
   xlsx: "xl/",
   pptx: "ppt/",
 };
 
 export const OFFICE_LABEL: Record<OfficeKind, string> = {
+  pdf: "PDF document",
   docx: "Word document",
   xlsx: "Excel workbook",
   pptx: "PowerPoint deck",
 };
 
 /** Which editor app (and assistant tool policy) serves each kind. */
-export const OFFICE_APP: Record<OfficeKind, "writer" | "sheets" | "slides"> = {
+export const OFFICE_APP: Record<OfficeKind, "writer" | "sheets" | "slides" | "pdf"> = {
+  pdf: "pdf",
   docx: "writer",
   xlsx: "sheets",
   pptx: "slides",
@@ -121,13 +124,13 @@ export function cleanOfficeName(
     .trim()
     .slice(0, MAX_DOC_NAME);
   // Drop any Office extension the user typed, then add the right one.
-  name = name.replace(/\.(docx|xlsx|xlsm|csv|doc|xls|pptx|pptm|ppt)$/i, "");
+  name = name.replace(/\.(docx|xlsx|xlsm|csv|doc|xls|pptx|pptm|ppt|pdf)$/i, "");
   if (!name || /^\.+$/.test(name)) name = fallbackStem;
   return `${name}.${kind}`;
 }
 
 export function titleOf(name: string): string {
-  return name.replace(/\.(docx|xlsx|pptx)$/i, "") || "Untitled";
+  return name.replace(/\.(docx|xlsx|pptx|pdf)$/i, "") || "Untitled";
 }
 
 export function isDocId(value: unknown): value is string {

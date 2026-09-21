@@ -15,14 +15,16 @@
 // default; an optional text-only inspect model such as Nemotron Super can take
 // inspect/format when no images are in play); drafting and analysis go to the
 // main tier (Sonnet 5). The Thorough profile always uses the main tier. The
-// class is cached per instruction so later rounds of the same run route the
-// same way, and the opaque reasoning blob is tagged with the model that made
+// class is cached briefly per complete instruction, context and routing policy.
+// Failed-tool or image-dependent rounds keep the main tier. The opaque
+// reasoning blob is tagged with the model that made
 // it so signed thinking blocks are only ever echoed to that model.
 //
 // Budgets are generous on purpose: output tokens default to 32k/64k, the
 // payload cap tracks the API Gateway request limit, and images are bounded by
 // the provider's own per-image limit rather than anything stricter.
 // ============================================================================
+import { createHash } from "node:crypto";
 import {
   BedrockClaudeError,
   concat,
@@ -38,8 +40,10 @@ import {
   signedBedrockFetch,
 } from "@/lib/agents/bedrock-sign.server";
 import { agentLog } from "@/lib/agents/log.server";
-import { decideOfficeClass, officeRouteQuestions, officeRouteState } from "@/lib/agents/typesafe-questions";
-import { systemOne, typesafeConfigured } from "@/lib/agents/typesafe.server";
+import { decideOfficeClass, officeRouteQuestions, officeRouteState, OFFICE_ROUTING_MAX_CHARS, OFFICE_ROUTING_POLICY_VERSION } from "@/lib/agents/typesafe-questions";
+import { systemOne, typesafeConfigured, typesafeModel, typesafeTimeoutMs } from "@/lib/agents/typesafe.server";
+import { officeLocalProvider, streamOfficeLocalTurn } from "./office-local-provider.server";
+import { localSyntheticEnabled } from "@/lib/local-development";
 
 export type WriterProfile = "standard" | "thorough";
 export type WriterMode = "write" | "ask" | "review" | "research";
@@ -187,10 +191,10 @@ const CACHE_POINT = { cachePoint: { type: "default" } };
 
 // --- Tool policy (mirrors each app's src/shared/sw-policy.ts) ----------------------
 
-export type OfficeApp = "writer" | "sheets" | "slides";
+export type OfficeApp = "writer" | "sheets" | "slides" | "pdf";
 
 export function isOfficeApp(v: unknown): v is OfficeApp {
-  return v === "writer" || v === "sheets" || v === "slides";
+  return v === "writer" || v === "sheets" || v === "slides" || v === "pdf";
 }
 
 // Platform-executed tools (src/office/shared/platform-skill.ts): none of them
@@ -323,6 +327,10 @@ const POLICY: Record<OfficeApp, { read: string[]; write: string[] }> = {
   writer: { read: WRITER_READ, write: WRITER_WRITE },
   sheets: { read: SHEETS_READ, write: SHEETS_WRITE },
   slides: { read: SLIDES_READ, write: SLIDES_WRITE },
+  pdf: {
+    read: ["pdf_read_pages", "pdf_search", "pdf_list_form_fields", "pdf_capture_page"],
+    write: ["pdf_read_pages", "pdf_search", "pdf_list_form_fields", "pdf_capture_page", "pdf_apply_operations", "pdf_highlight_text"],
+  },
 };
 
 export function allowedToolNames(mode: WriterMode, app: OfficeApp = "writer"): Set<string> {
@@ -561,21 +569,22 @@ analyze - work needing careful judgment or multi-step reasoning: legal analysis,
 If the request mixes classes, pick the heaviest: analyze > draft > short_edit > format > inspect.`;
 
 const ROUTE_CACHE_MAX = 2_000;
-const routeCache = new Map<string, TaskClass>();
+const ROUTE_CACHE_TTL_MS = 5 * 60_000;
+const routeCache = new Map<string, { cls: TaskClass; expires: number }>();
 
-function hashKey(app: OfficeApp, text: string): string {
-  // FNV-1a over the first 4k chars: cheap, collision risk irrelevant for a routing hint.
-  let h = 0x811c9dc5;
-  const s = `${app}\u0000${text.slice(0, 4_000)}`;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return `${app}:${h.toString(16)}:${s.length}`;
+function hashKey(app: OfficeApp, text: string, mode: OfficeRouterMode, opts?: ClassifyTaskOptions): string {
+  // Include the full request, safety context and effective policy/provider. No
+  // prompts are retained in the bounded cache or emitted in telemetry.
+  return createHash("sha256").update(JSON.stringify({ app, text, mode,
+    context: opts?.contextKey ?? "", hasImages: opts?.hasImages === true,
+    policy: OFFICE_ROUTING_POLICY_VERSION, rubric: officeRouteQuestions(),
+    jev: typesafeModel(), configured: typesafeConfigured(), budget: typesafeTimeoutMs(),
+    bedrock: OFFICE_ROUTER_MODEL, localProvider: env("OFFICE_LOCAL_PROVIDER"), endpoint: env("TYPESAFE_BASE_URL"),
+  })).digest("hex");
 }
 
 function cacheRoute(key: string, cls: TaskClass): void {
-  routeCache.set(key, cls);
+  routeCache.set(key, { cls, expires: Date.now() + ROUTE_CACHE_TTL_MS });
   if (routeCache.size > ROUTE_CACHE_MAX) {
     const first = routeCache.keys().next().value;
     if (first !== undefined) routeCache.delete(first);
@@ -593,47 +602,21 @@ export function currentInstruction(messages: readonly AgentMessage[]): string {
 
 const TASK_CLASSES = new Set<TaskClass>(["inspect", "format", "short_edit", "draft", "analyze"]);
 
-/** Cheap lexical pre-filter so obvious cases skip the router round-trip. */
+/** Only full-request, explicitly mechanical formatting gets an exact fast path. */
 function heuristicClass(instruction: string): TaskClass | null {
-  const head = instruction.split("\n")[0]?.trim().toLowerCase() ?? "";
-  if (!head) return null;
-  if (head.length > 600) return null;
-  if (
-    /^(what|which|where|who|how many|how much|is there|are there|does|do|did|can you tell|tell me|explain|summari[sz]e|list|find|show me|check|verify|count|compare)\b/.test(
-      head,
-    ) &&
-    head.length < 200
-  )
-    return "inspect";
-  if (/^(fix|correct) (the |a |this )?(typo|spelling|grammar)/.test(head)) return "short_edit";
-  if (
-    /^(bold|italici[sz]e|underline|center|align|indent|change (the )?font|set (the )?font|make (it|this|the (title|heading)s?) (bold|bigger|smaller|larger|red|blue|centered))/.test(
-      head,
-    )
-  )
-    return "format";
-  if (
-    /\b(memo|brief|motion|letter|deck|presentation|report|draft|write|compose|generate|create|build|prepare)\b/.test(
-      head,
-    ) &&
-    /\b(memo|brief|motion|letter|deck|presentation|report|slides|sections?|pages?|chapters?|outline)\b/.test(
-      head,
-    )
-  )
-    return "draft";
+  if (/^(?:bold|italicize|italicise|underline) (?:the )?(?:selection|selected text)[.!]?$/i.test(instruction)) return "format";
   return null;
 }
 
 /**
  * Which model classes the run. OFFICE_ROUTER:
- *   bedrock  (default) the Haiku one-word router below, unchanged.
+ *   bedrock  (default) the bounded Haiku one-word router below.
  *   shadow   Haiku decides; Jev (TypeSafe) is asked in parallel and the two
  *            verdicts, latencies and confidence are logged (office_router_shadow)
  *            so thresholds in typesafe-questions.ts can be tuned on real traffic
  *            before anything changes for users.
- *   typesafe Jev decides inside TYPESAFE_TIMEOUT_MS; no opinion or failure
- *            falls back to Haiku, then to the main tier. Never a weaker tier.
- * Either non-default mode silently behaves as `bedrock` without TYPESAFE_API_KEY.
+ *   typesafe Jev decides inside TYPESAFE_TIMEOUT_MS; missing credentials,
+ *            no opinion or failure keep the main tier without a second call.
  */
 export type OfficeRouterMode = "bedrock" | "shadow" | "typesafe";
 export function officeRouterMode(): OfficeRouterMode {
@@ -641,14 +624,26 @@ export function officeRouterMode(): OfficeRouterMode {
   return v === "typesafe" || v === "shadow" ? v : "bedrock";
 }
 
+async function routerDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(signal.reason ?? new Error("Router cancelled"));
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try { return await Promise.race([work, cancelled]); }
+  finally { signal.removeEventListener("abort", abort); }
+}
+
 /** The Haiku one-word router (the pre-TypeSafe path). Null on any failure. */
 async function classifyWithBedrock(app: OfficeApp, text: string, signal?: AbortSignal): Promise<TaskClass | null> {
+  if (signal?.aborted) return null;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4_000);
+  const timer = setTimeout(() => controller.abort(), Math.min(1_500, typesafeTimeoutMs()));
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort);
   try {
-    const res = await signedBedrockFetch(
+    const res = await routerDeadline(signedBedrockFetch(
       `https://bedrock-runtime.${REGION}.amazonaws.com/model/${encodeURIComponent(OFFICE_ROUTER_MODEL)}/converse`,
       {
         body: JSON.stringify({
@@ -656,23 +651,23 @@ async function classifyWithBedrock(app: OfficeApp, text: string, signal?: AbortS
           messages: [
             {
               role: "user",
-              content: [{ text: `Editor: ${app}\nRequest:\n${text.slice(0, 3_000)}` }],
+              content: [{ text: `Editor: ${app}\nRequest:\n${text}` }],
             },
           ],
           inferenceConfig: { maxTokens: 8 },
         }),
         signal: controller.signal,
       },
-    );
+    ), controller.signal);
     if (!res.ok) return null;
-    const data = (await res.json()) as {
+    const data = (await routerDeadline(res.json(), controller.signal)) as {
       output?: { message?: { content?: Array<{ text?: string }> } };
     };
     const word = (data.output?.message?.content?.[0]?.text ?? "")
       .trim()
       .toLowerCase()
       .replace(/[^a-z_]/g, "");
-    if (!TASK_CLASSES.has(word as TaskClass)) return null;
+    if (controller.signal.aborted || !TASK_CLASSES.has(word as TaskClass)) return null;
     return word as TaskClass;
   } catch {
     return null;
@@ -693,6 +688,7 @@ async function classifyWithTypeSafe(
     purpose: "office_route",
     state: officeRouteState(app, text),
     questions: officeRouteQuestions(),
+    timeoutMs: Math.min(1_500, typesafeTimeoutMs()),
     ...(signal ? { signal } : {}),
   });
   const decision = decideOfficeClass(res);
@@ -709,14 +705,10 @@ async function classifyWithTypeSafe(
  * the caller falls back to the main tier (never a weaker one).
  */
 export type ClassifyTaskOptions = {
-  /**
-   * The turn carries image content. Jev is text-only, so an image-bearing
-   * turn never reaches it (in any mode, shadow included: a verdict it made
-   * without seeing the image would be a false comparison); the vision-capable
-   * Bedrock router classes the turn instead. Computed once by routeTurn with
-   * conversationHasImages, the same detector that guards the fast tier.
-   */
+  /** Neither classifier receives images; image-dependent turns stay on main. */
   hasImages?: boolean;
+  /** Hash of the document/system context and conversation before this run. */
+  contextKey?: string;
   /** test seam for the Bedrock router */
   bedrockRouter?: (app: OfficeApp, text: string, signal?: AbortSignal) => Promise<TaskClass | null>;
 };
@@ -733,33 +725,38 @@ export async function classifyTask(
   opts?: ClassifyTaskOptions,
 ): Promise<TaskClass | null> {
   const text = instruction.trim();
-  if (!text) return null;
-  const key = hashKey(app, text);
+  if (!text || signal?.aborted || opts?.hasImages || text.length > OFFICE_ROUTING_MAX_CHARS) return null;
+  // Conservative promotions examine the entire request, including later lines.
+  // A false positive costs latency, whereas a false down-route costs judgment.
+  if (/\b(?:legal (?:analysis|judgment)|assess|reconcile|litigation strategy|risk assessment|preemption|still supports? (?:our|the) position)\b/i.test(text)) return "analyze";
+  if (/^(?:yes|do (?:it|that)|continue|proceed|same (?:thing|as before)|try again)[.!]?$/i.test(text)) return null;
+  const mode = officeRouterMode();
+  const key = hashKey(app, text, mode, opts);
   const cached = routeCache.get(key);
-  if (cached) return cached;
+  if (cached && cached.expires > Date.now()) return cached.cls;
+  if (cached) routeCache.delete(key);
   const quick = heuristicClass(text);
   if (quick) {
     cacheRoute(key, quick);
     return quick;
   }
-  const mode = officeRouterMode();
   const bedrockRouter = opts?.bedrockRouter ?? classifyWithBedrock;
   const remember = (cls: TaskClass | null): TaskClass | null => {
-    if (cls) cacheRoute(key, cls);
-    return cls;
+    if (signal?.aborted) return null;
+    if (cls && TASK_CLASSES.has(cls)) cacheRoute(key, cls);
+    return cls && TASK_CLASSES.has(cls) ? cls : null;
   };
-  const hasImages = opts?.hasImages === true;
-  if (!jevRouterEligible(mode, typesafeConfigured(), hasImages)) {
-    if (hasImages && mode !== "bedrock" && typesafeConfigured()) {
-      agentLog("office_router_skip_images", { app, mode });
-    }
-    return remember(await bedrockRouter(app, text, signal));
+  if (mode === "bedrock") {
+    // A local direct-provider experiment must not accidentally contact AWS.
+    if (officeLocalProvider()) return null;
+    try { return remember(await bedrockRouter(app, text, signal)); } catch { return null; }
   }
+  if (!typesafeConfigured()) return null;
   if (mode === "shadow") {
     const t0 = Date.now();
     const [jev, haiku] = await Promise.all([
       classifyWithTypeSafe(app, text, signal),
-      bedrockRouter(app, text, signal).then((cls) => ({ cls, ms: Date.now() - t0 })),
+      (officeLocalProvider() ? Promise.resolve(null) : bedrockRouter(app, text, signal)).catch(() => null).then((cls) => ({ cls, ms: Date.now() - t0 })),
     ]);
     agentLog("office_router_shadow", {
       app,
@@ -778,9 +775,8 @@ export async function classifyTask(
     agentLog("office_router", { app, via: "typesafe", cls: jev.taskClass, ms: jev.ms, reason: jev.reason });
     return remember(jev.taskClass);
   }
-  const haiku = await bedrockRouter(app, text, signal);
-  agentLog("office_router", { app, via: "bedrock_fallback", cls: haiku ?? "none", jev_reason: jev.reason, jev_ms: jev.ms });
-  return remember(haiku);
+  agentLog("office_router", { app, via: "main_fallback", cls: "none", jev_reason: jev.reason, jev_ms: jev.ms });
+  return null;
 }
 
 export type RouteDecision = { model: string; tier: ModelTier; taskClass: TaskClass | null };
@@ -791,6 +787,7 @@ export async function routeTurn(req: {
   profile: WriterProfile;
   messages: readonly AgentMessage[];
   signal?: AbortSignal;
+  contextKey?: string;
   /** test seam, passed through to classifyTask */
   bedrockRouter?: ClassifyTaskOptions["bedrockRouter"];
 }): Promise<RouteDecision> {
@@ -804,8 +801,16 @@ export async function routeTurn(req: {
   // away from the text-only Jev router and, below, away from a fast tier that
   // cannot see images.
   const hasImages = conversationHasImages(req.messages);
+  let lastUser = req.messages.length - 1;
+  while (lastUser >= 0 && req.messages[lastUser]?.role !== "user") lastUser--;
+  const runMessages = req.messages.slice(lastUser + 1);
+  if (runMessages.some(m => (m.role === "tool" && m.results.some(r => r.isError))
+    || (m.role === "assistant" && m.toolCalls?.some(c => c.inputError || c.truncated)))) {
+    return { model: WRITER_MODEL, tier: "main", taskClass: null };
+  }
   const taskClass = await classifyTask(req.app, currentInstruction(req.messages), req.signal, {
     hasImages,
+    contextKey: createHash("sha256").update(JSON.stringify([req.contextKey ?? "", req.messages.slice(0, lastUser)])).digest("hex"),
     ...(req.bedrockRouter ? { bedrockRouter: req.bedrockRouter } : {}),
   });
   if (!taskClass || taskClass === "draft" || taskClass === "analyze") {
@@ -869,10 +874,19 @@ export async function streamWriterTurn(
   },
   cb: WriterStreamCallbacks,
 ): Promise<void> {
+  req.signal.throwIfAborted();
+  const localProvider = officeLocalProvider(); // Validate before routing/network.
+  if (localSyntheticEnabled() && !localProvider) throw new Error("Synthetic Office inference requires an explicit local provider; AWS fallback is disabled.");
   const app = req.app ?? "writer";
   const route: RouteDecision = req.model
     ? { model: req.model, tier: "main", taskClass: null }
-    : await routeTurn({ app, profile: req.profile, messages: req.messages, signal: req.signal });
+    : await routeTurn({ app, profile: req.profile, messages: req.messages, signal: req.signal,
+      contextKey: createHash("sha256").update(req.system).digest("hex") });
+  req.signal.throwIfAborted();
+  if (localProvider) {
+    await streamOfficeLocalTurn({ ...req, provider: localProvider, route }, cb);
+    return;
+  }
   const model = route.model;
   const anthropic = isAnthropic(model);
   const cache = PROMPT_CACHE && anthropic;

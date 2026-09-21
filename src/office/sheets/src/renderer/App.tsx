@@ -1,3 +1,4 @@
+import { finalizeFailedRun } from '@/lib/office/finalize-failed-run'
 import { OfficeTaskControls } from '@/office/shared/OfficeTaskControls'
 import {settleRunMessages} from '@genoffice/ui'
 import { SwSheetControls } from './ai/SwSheetControls'
@@ -574,6 +575,8 @@ export function App(): React.JSX.Element {
     () => localStorage.getItem('ai-sheets-auto-save') === '1',
   )
   // Ref mirror for callbacks captured when an AI run starts
+  const aiSaveLockRef = useRef(false)
+  const failedRunNeedsReviewRef = useRef(false)
   const autoSaveRef = useRef(autoSave)
   autoSaveRef.current = autoSave
   useEffect(() => {
@@ -587,7 +590,7 @@ export function App(): React.JSX.Element {
     let saving = false
     const tick = () => {
       const state = lazyWorkbookRef.current
-      if (saving || !state || journalSize(state.editJournal) === 0) return
+      if (saving || aiSaveLockRef.current || failedRunNeedsReviewRef.current || !state || journalSize(state.editJournal) === 0) return
       // Never while the in-cell editor is open (saving reloads the workbook
       // and would wipe the edit), never for converted .xls imports whose
       // first save opens a Save As dialog, and never for CSV sessions —
@@ -615,7 +618,7 @@ export function App(): React.JSX.Element {
     let writing = false
     const tick = () => {
       const state = lazyWorkbookRef.current
-      if (writing || !state || journalSize(state.editJournal) === 0) return
+      if (writing || aiSaveLockRef.current || !state || journalSize(state.editJournal) === 0) return
       // The in-cell editor's pending text is not in the journal yet, a
       // converted import has no original file to recover into, and a restored
       // recovery session is backed by the recovery copy itself.
@@ -1235,12 +1238,14 @@ export function App(): React.JSX.Element {
           patchLastAssistant((entry) => {
             // Swap out the running placeholder pushed by onToolStart (parse-fail calls have none)
             const tools = [...entry.tools]
-            const pending = tools.findIndex(t => t.id === call.id); if (pending >= 0) tools.splice(pending, 1)
+            const pending = tools.findIndex(t => t.id === call.id)
+            const startedAt = pending >= 0 ? tools[pending]?.startedAt : undefined
+            if (pending >= 0) tools.splice(pending, 1)
             return {
               ...entry,
               tools: [
                 ...tools,
-                { id: call.id, mutated: !!execution.mutated, running: false, finishedAt: Date.now(), 
+                { id: call.id, startedAt, display: execution.display, mutated: !!execution.mutated, running: false, finishedAt: Date.now(),
                   summary: execution.summary,
                   isError: !!execution.isError,
                   name: call.name,
@@ -1311,7 +1316,9 @@ export function App(): React.JSX.Element {
             persistChatMessage('assistant', finalText, runToolsRef.current)
           }
           setAiRunScope(undefined)
-          void autoSaveCompletedAiRun().finally(() => setAiBusy(false))
+          void autoSaveCompletedAiRun()
+            .catch(cause => setMessage(cause instanceof Error ? cause.message : 'Automatic save failed.'))
+            .finally(() => { aiSaveLockRef.current = false; setAiBusy(false) })
         },
         onError: (error) => {
           setChat(previous => settleRunMessages(previous))
@@ -1338,27 +1345,48 @@ export function App(): React.JSX.Element {
             }
             return next
           })
-          // A failed run must not leave half of its edits behind: restore the
-          // pre-run snapshot when the run mutated a file-backed workbook, and
-          // say so (or say why it could not).
-          const snap = runSnapshotRef.current
-          const runtime = univerRef.current
-          const workbook = runtime?.univerAPI.getActiveWorkbook()
-          if (runMutatedRef.current && snap && lazyWorkbookRef.current && runtime && workbook) {
-            void restoreRunSnapshot({ runtime, lazyWorkbookRef, workbook, setMessage }, snap).then((result) => {
-              patchLastAssistant((entry) => ({
+          const failedWorkbook = lazyWorkbookRef.current
+          void finalizeFailedRun({
+            settle: async () => {
+              const applies = aiApplyPromisesRef.current
+              aiApplyPromisesRef.current = []
+              return Promise.all(applies)
+            },
+            restore: async () => {
+              // Pending applies may have populated the snapshot: read it only now.
+              if (lazyWorkbookRef.current !== failedWorkbook) {
+                failedRunNeedsReviewRef.current = true
+                return false
+              }
+              if (!runMutatedRef.current) return true
+              const snap = runSnapshotRef.current
+              const runtime = univerRef.current
+              const workbook = runtime?.univerAPI.getActiveWorkbook()
+              if (!snap || !failedWorkbook || !runtime || !workbook) {
+                failedRunNeedsReviewRef.current = true
+                patchLastAssistant(entry => ({ ...entry, text: `${entry.text}\n\nAutomatic rollback was unavailable. Changes remain unsaved for review.` }))
+                return false
+              }
+              const result = await restoreRunSnapshot({ runtime, lazyWorkbookRef, workbook, setMessage }, snap)
+              patchLastAssistant(entry => ({
                 ...entry,
-                text: `${entry.text}\n\n${
-                  result.ok
-                    ? `${FAILED_RUN_ROLLED_BACK}${result.caveat ? ` ${result.caveat}` : ''}`
-                    : rollbackUnavailable(result.reason)
-                }`,
+                text: `${entry.text}\n\n${result.ok
+                  ? `${FAILED_RUN_ROLLED_BACK}${result.caveat ? ` ${result.caveat} Changes remain unsaved for review.` : ''}`
+                  : rollbackUnavailable(result.reason)}`,
               }))
-            })
-          }
-          // Request errors lead to the local Connection panel; never to an external account.
-          setAiRunScope(undefined)
-          void autoSaveCompletedAiRun().finally(() => setAiBusy(false))
+              const restored = result.ok && !result.caveat && lazyWorkbookRef.current === failedWorkbook
+              if (!restored) failedRunNeedsReviewRef.current = true
+              return restored
+            },
+            save: results => autoSaveCompletedAiRun(results),
+            onError: cause => {
+              failedRunNeedsReviewRef.current = true
+              const detail = cause instanceof Error ? cause.message : 'Rollback failed.'
+              setMessage(`${detail} Changes remain unsaved for review.`)
+              patchLastAssistant(entry => ({ ...entry, text: `${entry.text}\n\n${detail} Changes remain unsaved for review.` }))
+            },
+            finish: () => { aiSaveLockRef.current = false; setAiRunScope(undefined); setAiBusy(false) },
+          })
         },
       },
     })
@@ -1405,8 +1433,9 @@ export function App(): React.JSX.Element {
 
   function runAgent(instruction: string, sentAttachments: readonly AttachmentMeta[]): void {
     const loop = agentLoopRef.current
-    if (!instruction.trim() || !loop || loop.busy || runStartingRef.current) return
+    if (!instruction.trim() || !loop || loop.busy || runStartingRef.current || aiSaveLockRef.current) return
     runStartingRef.current = true
+    aiSaveLockRef.current = true
     // Freeze the selection scope for the whole run: users go on clicking around
     // while the AI works, so a live read would retarget "this column" mid-run.
     // Released in onDone/onError, which own the rest of the run teardown.
@@ -1477,6 +1506,7 @@ export function App(): React.JSX.Element {
   }
 
   function handleNewChat(): void {
+    if (aiSaveLockRef.current) return
     agentLoopRef.current?.reset()
     setAiRunScope(undefined)
     setAiBusy(false)
@@ -3042,23 +3072,27 @@ export function App(): React.JSX.Element {
   /** Waits for every plan submitted during one AI run, then persists all
    * successful writes in one save. A canceled/failed Save As leaves both the
    * journal and inline undo available. */
-  async function autoSaveCompletedAiRun(): Promise<void> {
+  async function autoSaveCompletedAiRun(settled?: boolean[]): Promise<void> {
     const applies = aiApplyPromisesRef.current
     aiApplyPromisesRef.current = []
-    if (applies.length === 0) return
-    const results = await Promise.all(applies)
+    const results = settled ?? await Promise.all(applies)
+    if (results.length === 0) return
     if (!results.some(Boolean)) return
     const state = lazyWorkbookRef.current
     if (!state || journalSize(state.editJournal) === 0) return
     // AutoSave off = the user decides when the file is written: the
     // run's edits stay pending in the journal, so the offered Undo / ⌘Z keeps
     // working (saving would reopen the session and reset the undo stack).
+    if (failedRunNeedsReviewRef.current) {
+      setMessage("Automatic save is paused. Review the remaining changes and save when ready.")
+      return
+    }
     if (!autoSaveRef.current) {
       setMessage(t('appAiChangesNotSaved'))
       return
     }
     // AutoSave-driven write after an AI run: silent like the interval autosave.
-    await handleSave('save', true)
+    await handleSave('save', true, true)
     const after = lazyWorkbookRef.current
     if (after && journalSize(after.editJournal) === 0) {
       // Saving reopens the sidecar session and resets Univer's undo stack.
@@ -5358,8 +5392,14 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function handleSave(mode: 'save' | 'save-as' | 'recovery', quiet = false): Promise<void> {
-    return handleSaveImpl(saveContext(), mode, quiet)
+  async function handleSave(mode: 'save' | 'save-as' | 'recovery', quiet = false, finalizingRun = false): Promise<void> {
+    if (aiSaveLockRef.current && !finalizingRun) {
+      if (!quiet) setMessage('Wait for the current run and rollback to finish before saving.')
+      return
+    }
+    await handleSaveImpl(saveContext(), mode, quiet)
+    const after = lazyWorkbookRef.current
+    if (mode !== 'recovery' && after && journalSize(after.editJournal) === 0) failedRunNeedsReviewRef.current = false
   }
   closeSaveRef.current = async () => {
     const state = lazyWorkbookRef.current

@@ -7,6 +7,12 @@ in document-space EMU. They report the new element id in `created`; later ops
 in the same transaction cannot reference it yet, so insert first and style in
 the next call, or pass the style inline where the op supports it.
 
+Use a bounded insert for the element the user requested, including on an existing
+blank or sparse slide. Preserve the exact requested text, formatting, and geometry;
+do not redesign the slide, add decorative content, or create a new deck to insert
+one element. Cloud `generate_deck` is unavailable in this build. For a whole new
+presentation, use the available template tools or `create_presentation`.
+
 ### addElement
 
 `{kind:"textbox"|<preset geometry>,offset:{x,y,cx,cy},paragraphs?,fill?,stroke?,adjustments?:{<gd name>:val},bodyPr?:{autoFit?:"shrink"|"resize"}}`
@@ -62,7 +68,7 @@ Adds a text box, a preset-geometry shape, or a line/connector.
 
 Common mistakes
 
-- Building whole pages element by element on an empty deck: use `generate_deck`; `addElement` is for adding to an already designed page.
+- Replacing or redesigning a slide when the user requested only an inserted element: use the bounded insert on the existing slide, even when it is blank.
 - Pixel frames: convert with the px-to-EMU factor from `read_slide`.
 - `autoFit` values other than `"shrink"`/`"resize"`.
 

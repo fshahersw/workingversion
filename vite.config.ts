@@ -7,7 +7,9 @@
 //     error logger plugins, and sandbox detection (port/host/strictPort).
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { cp } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
@@ -15,7 +17,7 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 // DOCKETBIRD_API_KEY then wins over .env and DocketBird returns 401.
 // Match the pipeline scripts: .env is the local source of truth.
 function applyLocalEnv() {
-  if (process.env["LITAI_LAMBDA_BUILD"] === "true") return;
+  if (process.env["LITAI_LAMBDA_BUILD"] === "true" || process.env["LOCAL_SYNTHETIC_MODE"] === "1") return;
   const path = resolve(process.cwd(), ".env");
   if (!existsSync(path)) return;
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
@@ -105,6 +107,11 @@ const writerAliases = [
 // keeps zod 3.
 const officeTree = (app: string) => resolve(process.cwd(), "src/office", app).replaceAll("\\", "/");
 const OFFICE_TREES = ["sheets", "slides"].map(officeTree);
+const canvasNativePackage = process.platform === "win32"
+  ? `@napi-rs/canvas-win32-${process.arch}-msvc`
+  : process.platform === "linux"
+    ? `@napi-rs/canvas-linux-${process.arch}-${(process.report?.getReport() as { header?: { glibcVersionRuntime?: string } })?.header?.glibcVersionRuntime ? "gnu" : "musl"}`
+    : `@napi-rs/canvas-${process.platform}-${process.arch}`;
 const officeScopedResolver = {
   name: "sw-office-scoped-resolver",
   enforce: "pre" as const,
@@ -142,10 +149,22 @@ export default defineConfig({
   // wrapper otherwise defaults production builds to cloudflare-module.
   nitro: {
     preset: "node-server",
+    // PDF.js loads its worker, font data and native Node canvas dynamically.
+    // Keep package-relative paths intact and include those runtime assets.
+    ...{
+      traceDeps: ["pdfjs-dist*", "@napi-rs/canvas*"],
+      hooks: {
+        // Nitro does not discover optional platform binaries from canvas' dynamic loader.
+        compiled: async (nitro: { options: { output: { serverDir: string } } }) => {
+          const source = dirname(createRequire(import.meta.url).resolve(canvasNativePackage + "/package.json"));
+          await cp(source, resolve(nitro.options.output.serverDir, "node_modules", canvasNativePackage), { recursive: true });
+        },
+      },
+    },
   },
   vite: {
     ...(process.env["LITAI_LAMBDA_BUILD"] === "true" ? { envDir: false } : {}),
-    ssr: { external: ["node:sqlite"] },
+    ssr: { external: ["node:sqlite", "pdfjs-dist", "@napi-rs/canvas"] },
     resolve: { alias: writerAliases },
     plugins: [officeScopedResolver],
     // The Sheets/Slides preloads read this desktop debug flag at module load.

@@ -32,7 +32,8 @@ test("catalog: every question is well formed and state is bounded", () => {
     if (q.type === "choice") assert.ok(Object.keys(q.criteria).length >= 2, id);
   }
   const s = officeRouteState("writer", "x".repeat(10_000)) as { request: { text: string } };
-  assert.equal(s.request.text.length, 3_000);
+  assert.equal(s.request.text.length, 10_000, "routing must not silently discard the tail of a request");
+  assert.throws(() => officeRouteState("writer", "x".repeat(12_001)), /too long/);
   const t = topicShiftState("q", Array.from({ length: 40 }, (_, i) => `f${i}`), "s".repeat(5_000)) as {
     session: { facts: string[]; summary: string };
   };

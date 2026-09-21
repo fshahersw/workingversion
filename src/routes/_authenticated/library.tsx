@@ -539,6 +539,8 @@ function DraftsList({ query = "" }: { query?: string }) {
                   ? navigate({ to: "/office/sheets/$docId", params: { docId: d.draftId } })
                   : d.kind === "pptx"
                     ? navigate({ to: "/office/slides/$docId", params: { docId: d.draftId } })
+                    : d.kind === "pdf"
+                      ? navigate({ to: "/office/pdf/$docId", params: { docId: d.draftId } })
                     : navigate({ to: "/office/drafts/$draftId", params: { draftId: d.draftId } }))
               }
               className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"

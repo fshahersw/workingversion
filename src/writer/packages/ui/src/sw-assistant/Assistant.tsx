@@ -1,6 +1,8 @@
 import React, {useEffect,useLayoutEffect,useRef,useState} from 'react'
 import {createPortal} from 'react-dom'
 import {activityStatus,summarizeActivities,toolLabel,starterActions,type Activity,type AppKind} from './core'
+import {activityDuration} from '../safe-links'
+import {ToolResult} from './ToolResult'
 import './assistant.css'
 export function AssistantIcon({name='spark'}:{name?:string}) {
  const paths:Record<string,string>={plus:'M12 5v14M5 12h14',more:'M5 12h.01M12 12h.01M19 12h.01',close:'m6 6 12 12M6 18 18 6',collapse:'M4 4h16v16H4zM14 4v16m-6-11 3 3-3 3',arrow:'M12 19V5m-6 6 6-6 6 6',chevron:'m8 5 7 7-7 7',check:'m5 12 4 4L19 6',stop:'M7 7h10v10H7z',copy:'M8 8h12v12H8zM16 8V4H4v12h4',scope:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 12h8m-4-4v8',spark:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z'}
@@ -29,13 +31,32 @@ export function AssistantStarters({app,mode,selected,onChoose}:{app:AppKind;mode
 export function AssistantActivity({tools,active=false}:{tools:readonly Activity[];active?:boolean}){
  const [expanded,setExpanded]=useState<boolean|null>(null);const s=summarizeActivities(tools,active);const open=expanded??(s.running>0||s.failed>0||s.stopped>0);const current=[...tools].reverse().find(t=>activityStatus(t)==='running');const state=s.running?'running':s.failed?'failed':s.stopped?'stopped':active?'running':'done'
  if(!tools.length)return null
- return <section className="sw-agent-activity" data-state={state} aria-label="Request activity"><button className="sw-agent-activity-toggle" type="button" aria-expanded={open} onClick={()=>setExpanded(!open)}><span className={`sw-agent-state ${state}`}><AssistantIcon name={state==='done'?'check':state==='running'?'spark':'stop'}/></span><span className="sw-agent-activity-title" role="status" aria-live="polite"><strong>{current?toolLabel(current.name):s.label}</strong><small>{current?s.label:s.updates?`${s.updates} ${s.updates===1?'editing action':'editing actions'} · View activity`:'View activity'}</small></span><span className={open?'sw-agent-chevron open':'sw-agent-chevron'}><AssistantIcon name="chevron"/></span></button>{open&&<ol className="sw-agent-steps">{tools.map((t,i)=>{const status=activityStatus(t);return <li key={t.id??i} data-state={status}><span className={`sw-agent-state ${status}`}><AssistantIcon name={status==='done'?'check':status==='running'?'spark':'stop'}/></span><div><div className="sw-agent-step-line"><span>{toolLabel(t.name)}</span><small>{status==='done'?'Done':status==='running'?'Running':status==='failed'?'Failed':'Stopped'}</small></div>{!t.running&&t.summary&&t.summary!==toolLabel(t.name)&&<p>{t.summary}</p>}{t.output&&<details className="sw-agent-tool-detail"><summary>Details</summary><pre>{t.output}</pre></details>}</div></li>})}</ol>}{s.stopped>0&&<p className="sw-agent-partial">Stopped before all actions finished. Earlier changes may remain; use the available Undo control to restore them.</p>}</section>
+ return <section className="sw-agent-activity" data-state={state} aria-label="Request activity">
+  <button className="sw-agent-activity-toggle" type="button" aria-expanded={open} onClick={()=>setExpanded(!open)}>
+   <span className={`sw-agent-state ${state}`}><AssistantIcon name={state==='done'?'check':state==='running'?'spark':'stop'}/></span>
+   <span className="sw-agent-activity-title" role="status" aria-live="polite"><strong>{s.running>1?`${s.running} actions running in parallel`:current?toolLabel(current.name):s.label}</strong><small>{current?s.label:s.updates?`${s.updates} ${s.updates===1?'editing action':'editing actions'} · View activity`:'View activity'}</small></span>
+   <span className={open?'sw-agent-chevron open':'sw-agent-chevron'}><AssistantIcon name="chevron"/></span>
+  </button>
+  {open&&<ol className="sw-agent-steps">{tools.map((t,i)=>{
+   const status=activityStatus(t), duration=activityDuration(t.startedAt,t.finishedAt)
+   return <li key={t.id??i} data-state={status}>
+    <span className={`sw-agent-state ${status}`}><AssistantIcon name={status==='done'?'check':status==='running'?'spark':'stop'}/></span>
+    <div><div className="sw-agent-step-line"><span>{toolLabel(t.name)}</span><small>{status==='done'?'Done':status==='running'?'Running':status==='failed'?'Failed':'Stopped'}{duration?` · ${duration}`:''}</small></div>
+     {!t.running&&t.summary&&t.summary!==toolLabel(t.name)&&<p>{t.summary}</p>}
+     <ToolResult display={t.display}/>
+     {t.output&&<details className="sw-agent-tool-detail"><summary>Technical details</summary><pre>{t.output}</pre></details>}
+    </div>
+   </li>
+  })}</ol>}
+  {!open&&tools.some(t=>t.display)&&<div className="sw-agent-result-summary">{tools.filter(t=>t.display).map((t,i)=><ToolResult key={t.id??i} display={t.display}/>)}</div>}
+  {s.stopped>0&&<p className="sw-agent-partial">Stopped before all actions finished. Check the document and the available Undo control before continuing.</p>}
+ </section>
 }
 export function AssistantWorking({label='Working on your request'}:{label?:string}){return <div className="sw-agent-working" role="status" aria-live="polite"><span className="sw-agent-state running"><AssistantIcon/></span><span>{label}</span></div>}
 /** Streamed model reasoning and the model-tier status line. While the turn runs the newest reasoning line shows live; afterwards the full text folds behind a toggle. Presentation only: never persisted. */
 export function AssistantReasoning({text,status,active=false}:{text?:string|undefined;status?:string|undefined;active?:boolean}){
  const [open,setOpen]=useState(false);const body=(text??'').trim()
- if(!body&&!status)return null
+ if(!body&&(!status||!active))return null
  const lines=body.split(/\n+/).map(l=>l.trim()).filter(Boolean);const latest=lines.at(-1)??'';const tail=latest.length>220?`…${latest.slice(-220)}`:latest
  return <section className={`sw-agent-reasoning${active?' active':''}`} aria-label="Assistant reasoning"><button type="button" className="sw-agent-reasoning-toggle" aria-expanded={open} onClick={()=>setOpen(!open)} disabled={!body}><span className={`sw-agent-state ${active?'running':'done'}`}><AssistantIcon name={active?'spark':'check'}/></span><span className="sw-agent-reasoning-title"><strong>{active?'Thinking':'Reasoning'}</strong>{status&&<small>{status}</small>}</span>{body&&<span className={open?'sw-agent-chevron open':'sw-agent-chevron'}><AssistantIcon name="chevron"/></span>}</button>{body&&(open?<pre className="sw-agent-reasoning-full">{body}</pre>:active&&tail?<p className="sw-agent-reasoning-live" aria-live="polite">{tail}</p>:null)}</section>
 }

@@ -60,7 +60,7 @@ function parseXml(
   return { text, value: parser.parse(text) as Record<string, unknown> };
 }
 
-const FORMATS: Record<OfficeKind, { main: string; mime: string; label: string }> = {
+const FORMATS: Record<Exclude<OfficeKind, "pdf">, { main: string; mime: string; label: string }> = {
   docx: { main: "word/document.xml", mime: "wordprocessingml.document", label: "Word document" },
   xlsx: { main: "xl/workbook.xml", mime: "spreadsheetml.sheet", label: "Excel workbook" },
   pptx: {
@@ -78,7 +78,7 @@ export type ArchiveReport = { kind: OfficeKind; parts: number; expandedBytes: nu
  */
 export function validateOfficeArchive(
   input: Uint8Array,
-  kind: OfficeKind,
+  kind: Exclude<OfficeKind, "pdf">,
   budget: { expanded: number } = { expanded: 0 },
   depth = 0,
 ): ArchiveReport {

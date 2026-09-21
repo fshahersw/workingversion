@@ -33,9 +33,8 @@ function SheetsPage() {
   useEffect(() => {
     // One AbortController per effect run: a boot that loses its effect (route
     // change, React development double-mount) stops at its next checkpoint and
-    // never installs itself; only a boot that completed is torn down.
+    // never installs itself; cleanup only tears down its own generation.
     const controller = new AbortController();
-    let booted = false;
     setMount(null);
     setError(null);
     dirtyRef.current = false;
@@ -61,7 +60,6 @@ function SheetsPage() {
         controller.signal,
       );
       if (controller.signal.aborted) return;
-      booted = true;
       setMount(() => mod.SheetsMount);
     };
     boot().catch((err: unknown) => {
@@ -71,7 +69,7 @@ function SheetsPage() {
     return () => {
       controller.abort();
       window.removeEventListener("sw-office-open", onOpen);
-      if (booted) void import("@/office/sheets/platform/boot").then((b) => b.teardownSheets());
+      void import("@/office/sheets/platform/boot").then((b) => b.teardownSheets(controller.signal));
     };
   }, [docId, navigate]);
 

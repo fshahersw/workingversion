@@ -9,6 +9,7 @@ import {
   type AuditModel,
   type AuditNoteRef,
   type AuditRun,
+  type AuditOptions,
 } from "@/lib/writer/document-audit";
 
 import { isTrackedDeleted } from "./protocol";
@@ -107,6 +108,6 @@ function toAuditBlock(node: PmNode, index: number): AuditBlock {
 }
 
 /** Run the audit against the live document. */
-export function auditLiveDocument(editor: Editor, app: AiDocumentAccess | undefined): string[] {
-  return auditDocumentModel(extractAuditModel(editor, app));
+export function auditLiveDocument(editor: Editor, app: AiDocumentAccess | undefined, options?: AuditOptions): string[] {
+  return auditDocumentModel(extractAuditModel(editor, app), options);
 }

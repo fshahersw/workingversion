@@ -1,3 +1,4 @@
+import type { ToolDisplay } from '@genoffice/agent-core'
 import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel as assistantScopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
 import React, { useEffect, useRef, useState } from 'react'
@@ -182,6 +183,7 @@ function loadPanelWidth(): number | null {
 }
 
 export interface AiToolChip {
+  readonly display?: ToolDisplay
   readonly id?: string; readonly startedAt?: number; readonly finishedAt?: number; readonly interrupted?: boolean; readonly mutated?: boolean
   readonly summary: string
   readonly isError: boolean

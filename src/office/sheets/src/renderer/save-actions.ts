@@ -35,6 +35,8 @@ import {
   collectNoteStates,
 } from './univer-sync'
 import type { LazyWorkbookState, UniverRuntime } from './univer-state'
+import { isManualCalculation } from './calc-options'
+import { collectLiveFormulaValues, saveJournalSnapshot } from './save-formula-values'
 
 /** The App refs/state the save flow needs; built fresh per call. */
 export interface SaveContext {
@@ -108,6 +110,10 @@ export async function handleSave(
     if (mode !== 'recovery') ctx.setMessage(t('appDemoNoSave'))
     return
   }
+  const runtime = ctx.univerRef.current
+  const journalAtSave = saveJournalSnapshot(state)
+  const saveStillCurrent = () => ctx.lazyWorkbookRef.current === state &&
+    ctx.univerRef.current === runtime && saveJournalSnapshot(state) === journalAtSave
   const edits = toSaveEdits(state.editJournal)
   const bulkConstantFills = toSaveBulkConstantFills(state.editJournal)
   const structuralOps = toSaveStructuralOps(state.editJournal)
@@ -176,7 +182,8 @@ export async function handleSave(
   // separately so the save refreshes each formula cell's cached <v>, keeping its <f>.
   // A journaled formula is excluded: the overlay may still hold the previous
   // formula's result when the user saves immediately after entering a replacement.
-  const formulaValues = [...(state.recalc?.overlay ?? [])].flatMap(([sheetId, cells]) =>
+  const overlayReady = !state.formulaMode && !state.recalc?.timer && !state.recalc?.running && !state.recalc?.failures
+  const formulaValues = [...(overlayReady ? state.recalc?.overlay ?? [] : [])].flatMap(([sheetId, cells]) =>
     isSheetRemoved(state.editJournal, sheetId)
       ? []
       : [...cells].flatMap(([key, cell]) => {
@@ -242,6 +249,17 @@ export async function handleSave(
   const restoreWriteBack = mode === 'save' && state.file.restoredFromRecovery === true
   if (total === 0 && mode !== 'save-as' && !restoreWriteBack) {
     if (mode !== 'recovery') ctx.setMessage(t('appNoEditsToSave'))
+    return
+  }
+  try {
+    formulaValues.push(...await collectLiveFormulaValues(runtime, state, saveStillCurrent, isManualCalculation(runtime)))
+    if (!saveStillCurrent()) throw new Error('The workbook changed while preparing the save. Save again after editing finishes.')
+  } catch (error: unknown) {
+    if (mode !== 'recovery' && ctx.lazyWorkbookRef.current === state) {
+      const failed = error instanceof Error ? error.message : t('appSaveFailed')
+      ctx.setMessage(failed)
+      if (!quiet) showToast(failed, 'error')
+    }
     return
   }
   // CSV session: Save keeps the CSV identity — Excel's "keep this format?"
@@ -310,6 +328,13 @@ export async function handleSave(
     const failed = message || t('appSaveFailed')
     ctx.setMessage(failed)
     if (!quiet) showToast(failed, 'error')
+    return
+  }
+  if (!saveStillCurrent()) {
+    await abortStagedEditsTransfer(window.desktopApi, state.file.sessionId, staged.editsTransferId)
+    if (mode !== 'recovery' && ctx.lazyWorkbookRef.current === state) {
+      ctx.setMessage('The workbook changed while preparing the save. Save again after editing finishes.')
+    }
     return
   }
   const payload = {

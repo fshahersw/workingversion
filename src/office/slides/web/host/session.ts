@@ -1,3 +1,4 @@
+import { OrderedChatAppender } from "@/lib/office/chat-persistence";
 // ============================================================================
 // Platform host for the Slides renderer. The retained preload bridge talks to
 // `ipcRenderer` (shimmed in ./electron); every channel lands here and is
@@ -17,6 +18,7 @@ import {
   openEngineSessionFn,
 } from "@/lib/office/office.functions";
 import type { OfficeDocSummary } from "@/lib/office/types";
+import { OfficeSessionQueue, type SessionGeneration } from "@/lib/office/session-queue";
 import { writerWebSearchFn } from "@/lib/writer/writer.functions";
 
 import { getPlatformImage, handleOf, isPlatformImage, putPlatformImage } from "@/office/shared/image-store";
@@ -63,12 +65,15 @@ const state: State = {
   readOnly: false,
 };
 const observers = new Set<() => void>();
+const chatAppender = new OrderedChatAppender();
 const streams = new Map<string, AbortController>();
 const attachments = new Map<string, File>();
 const attachmentTextCache = new Map<string, Promise<string>>();
 let options: SlidesHostOptions | null = null;
-let engine: EngineSession | null = null;
-let queue: Promise<unknown> = Promise.resolve();
+type EngineBinding = { engine: EngineSession; generation: SessionGeneration; sessionId: string; sequence: number };
+const sessionQueue = new OfficeSessionQueue();
+let activeSession: EngineBinding | null = null;
+let lifecycleSignal: AbortSignal | undefined;
 let initial: { sessionId: string; sequence: number; result: unknown; events?: unknown[] } | null =
   null;
 let settings: Record<string, unknown> = {
@@ -101,6 +106,7 @@ export function command(name: string): void {
   emitHost("slides:menu", name);
 }
 export function engineCredentials(): { engineUrl: string; token: string } | null {
+  const engine = activeSession?.engine;
   return engine ? { engineUrl: engine.engineUrl, token: engine.token } : null;
 }
 
@@ -149,36 +155,46 @@ class EngineError extends Error {
 }
 
 /** Re-mint the engine token when it is close to expiry (tokens live 15 minutes). */
-async function freshEngine(): Promise<EngineSession> {
-  if (!engine || !options) throw new Error("The presentation session is not open.");
-  if (engine.tokenExpiresAt - Date.now() < 3 * 60_000) {
-    const next = await openEngineSessionFn({ data: { docId: options.docId } });
-    engine = { ...engine, token: next.token, tokenExpiresAt: next.tokenExpiresAt };
+async function freshEngine(binding: EngineBinding): Promise<EngineSession> {
+  sessionQueue.assertCurrent(binding.generation);
+  if (binding.engine.tokenExpiresAt - Date.now() < 3 * 60_000) {
+    const next = await openEngineSessionFn({ data: { docId: binding.engine.document.docId } });
+    sessionQueue.assertCurrent(binding.generation);
+    binding.engine = { ...binding.engine, token: next.token, tokenExpiresAt: next.tokenExpiresAt };
   }
-  return engine;
+  return binding.engine;
 }
 
-async function engineJson<T>(path: string, body: unknown): Promise<T> {
-  const e = await freshEngine();
+async function engineJson<T>(binding: EngineBinding, path: string, body: unknown): Promise<T> {
+  const e = await freshEngine(binding);
+  sessionQueue.assertCurrent(binding.generation);
   const res = await fetch(`${e.engineUrl}${path}`, {
     method: "POST",
     headers: { authorization: `Bearer ${e.token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
+    signal: binding.generation.signal,
   });
+  sessionQueue.assertCurrent(binding.generation);
   if (!res.ok) {
     const value = (await res.json().catch(() => ({}))) as { error?: string };
     throw new EngineError(res.status, value.error || "The presentation engine request failed.");
   }
-  return (await res.json()) as T;
+  const result = (await res.json()) as T;
+  sessionQueue.assertCurrent(binding.generation);
+  return result;
 }
 
 export function rpc(channel: string, args: unknown[] = []): Promise<unknown> {
+  const binding = activeSession;
+  if (!binding) return Promise.reject(new Error("The presentation session is not open."));
   const operationId = crypto.randomUUID();
-  const next = queue.then(async () => {
+  const encodedArgs = encode(args);
+  return sessionQueue.enqueue(binding.generation, async () => {
     const response = decode(
       await engineJson(
-        `/engine/${state.sessionId}/rpc`,
-        encode({ channel, args, sequence: state.sequence, operationId }),
+        binding,
+        `/engine/${binding.sessionId}/rpc`,
+        { channel, args: encodedArgs, sequence: binding.sequence, operationId },
       ),
     ) as {
       sequence: number;
@@ -187,6 +203,8 @@ export function rpc(channel: string, args: unknown[] = []): Promise<unknown> {
       events?: unknown[];
       result?: unknown;
     };
+    sessionQueue.assertCurrent(binding.generation);
+    binding.sequence = response.sequence;
     state.sequence = response.sequence;
     if (response.document) {
       state.document = response.document;
@@ -196,8 +214,6 @@ export function rpc(channel: string, args: unknown[] = []): Promise<unknown> {
     applyEvents(response.events);
     return response.result;
   });
-  queue = next.catch(() => {});
-  return next;
 }
 
 // --- Documents -----------------------------------------------------------------------------------------
@@ -231,8 +247,13 @@ async function stream(r: {
   tools?: unknown[];
   settings?: { swMode?: string; swProfile?: string };
 }): Promise<void> {
+  const binding = activeSession;
+  if (!binding) throw new Error("The document session is not open.");
+  sessionQueue.assertCurrent(binding.generation);
   const doc = state.document!;
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  binding.generation.signal.addEventListener("abort", abort, { once: true });
   streams.set(r.requestId, controller);
   state.busy = true;
   publish();
@@ -271,6 +292,7 @@ async function stream(r: {
             throw new Error("Document response mismatch.");
           }
           if (["done", "error"].includes(e.type)) complete = true;
+          sessionQueue.assertCurrent(binding.generation);
           emitHost("ai:stream-chunk", e);
         }
       }
@@ -281,6 +303,7 @@ async function stream(r: {
       reader.releaseLock();
     }
   } catch (error) {
+    if (activeSession !== binding || binding.generation.signal.aborted) return;
     emitHost(
       "ai:stream-chunk",
       controller.signal.aborted
@@ -292,9 +315,12 @@ async function stream(r: {
           },
     );
   } finally {
-    streams.delete(r.requestId);
-    state.busy = streams.size > 0;
-    publish();
+    binding.generation.signal.removeEventListener("abort", abort);
+    if (activeSession === binding && !binding.generation.signal.aborted) {
+      streams.delete(r.requestId);
+      state.busy = streams.size > 0;
+      publish();
+    }
   }
 }
 
@@ -388,17 +414,13 @@ async function project(channel: string, args: unknown[]) {
       tools?: unknown;
       attachments?: unknown;
     };
-    await appendOfficeChatFn({
-      data: {
-        docId,
-        message: {
-          role: r.role,
-          text: r.text,
-          ...(Array.isArray(r.tools) ? { tools: r.tools as never } : {}),
-          ...(Array.isArray(r.attachments) ? { attachments: r.attachments as never } : {}),
-        },
-      },
+    const message = structuredClone({
+      role: r.role, text: r.text,
+      ...(Array.isArray(r.tools) ? { tools: r.tools as never } : {}),
+      ...(Array.isArray(r.attachments) ? { attachments: r.attachments as never } : {}),
     });
+    await chatAppender.append(docId, operationId =>
+      appendOfficeChatFn({ data: { docId, message: { ...message, operationId } } }));
     return;
   }
   if (channel === "project:rebindChat") return { projectId: docId, chatId: docId };
@@ -923,8 +945,6 @@ async function closeEngineSession(e: EngineSession, id: string): Promise<void> {
   }).catch(() => undefined);
 }
 
-const ABORTED = "The deck was closed before it finished opening.";
-
 /**
  * Open the engine session and install the host. `signal` belongs to the route
  * effect that started this boot: when it aborts (navigation, or React's
@@ -932,46 +952,47 @@ const ABORTED = "The deck was closed before it finished opening.";
  * touching shared state, and any engine session it already opened is closed.
  */
 export async function initialize(opts: SlidesHostOptions, signal?: AbortSignal): Promise<void> {
+  // Invalidate before awaiting authentication: queued work can only use its own generation.
+  void teardown();
+  const generation = sessionQueue.begin(signal);
+  lifecycleSignal = signal;
   const session = (await openEngineSessionFn({ data: { docId: opts.docId } })) as EngineSession;
-  if (signal?.aborted) throw new Error(ABORTED);
-  if (session.document.kind !== "pptx") throw new Error("This document is not a presentation.");
+  sessionQueue.assertCurrent(generation);
+  if (session.document.kind !== "pptx") throw new Error("This document is not a deck.");
+  const opened = await sessionQueue.open(generation, async () => {
+    const response = await fetch(`${session.engineUrl}/engine/open`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${session.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        docId: session.document.docId, kind: "pptx", name: session.document.name,
+        version: session.document.version, hash: session.document.hash, source: session.source,
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const value = await response.json();
+    if (!response.ok) {
+      throw new EngineError(response.status, value.error || "The document could not open.");
+    }
+    return decode(value) as NonNullable<typeof initial>;
+  }, opened => closeEngineSession(session, opened.sessionId));
+  try { sessionQueue.assertCurrent(generation); } catch (error) {
+    await closeEngineSession(session, opened.sessionId);
+    throw error;
+  }
+  activeSession = { engine: session, generation, sessionId: opened.sessionId, sequence: opened.sequence };
   options = opts;
-  state.sessionId = "";
-  state.sequence = 0;
   state.dirty = false;
   state.busy = false;
-  engine = session;
   state.readOnly = false;
   state.document = {
-    draftId: session.document.docId,
-    kind: "pptx",
-    name: session.document.name,
-    title: session.document.name.replace(/\.pptx$/i, ""),
-    folderId: "ROOT",
-    version: session.document.version,
-    hash: session.document.hash,
-    size: 0,
-    createdAt: "",
-    updatedAt: "",
-    recovery: null,
+    draftId: session.document.docId, kind: "pptx", name: session.document.name,
+    title: session.document.name.replace(/\.pptx$/i, ""), folderId: "ROOT",
+    version: session.document.version, hash: session.document.hash,
+    size: 0, createdAt: "", updatedAt: "", recovery: null,
   };
-  const opened = decode(
-    await engineJson("/engine/open", {
-      docId: session.document.docId,
-      kind: "pptx",
-      name: session.document.name,
-      version: session.document.version,
-      hash: session.document.hash,
-      source: session.source,
-    }),
-  ) as NonNullable<typeof initial>;
-  if (signal?.aborted) {
-    void closeEngineSession(session, opened.sessionId);
-    throw new Error(ABORTED);
-  }
   initial = opened;
-  state.sessionId = initial.sessionId;
-  state.sequence = initial.sequence;
+  state.sessionId = opened.sessionId;
+  state.sequence = opened.sequence;
   installHost(invoke, notify);
   if (settings["swMode"] === "research") settings = { ...settings, swMode: "write" };
   publish();
@@ -984,15 +1005,24 @@ export async function initialize(opts: SlidesHostOptions, signal?: AbortSignal):
   });
 }
 
-/** Stop streams and release the engine session when the editor unmounts. */
-export async function teardown(): Promise<void> {
+/** Stop only the generation owned by this route effect. */
+export async function teardown(signal?: AbortSignal): Promise<void> {
+  if (signal && signal !== lifecycleSignal) return;
+  sessionQueue.invalidate();
   for (const c of streams.values()) c.abort();
   streams.clear();
-  const id = state.sessionId;
-  const e = engine;
+  saveResolve?.(false);
+  const binding = activeSession;
+  activeSession = null;
+  lifecycleSignal = undefined;
   state.sessionId = "";
+  state.document = null;
+  state.sequence = 0;
+  state.dirty = false;
+  state.busy = false;
   options = null;
-  if (id && e) void closeEngineSession(e, id);
-  engine = null;
   initial = null;
+  attachments.clear();
+  attachmentTextCache.clear();
+  if (binding) void closeEngineSession(binding.engine, binding.sessionId);
 }

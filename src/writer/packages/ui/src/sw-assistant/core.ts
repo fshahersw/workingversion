@@ -1,5 +1,6 @@
+import type { ToolDisplay } from '../../../agent-core/src/types'
 /** Presentation-only helpers. Never changes the model transcript or executes document tools. */
-export interface Activity { id?: string | undefined; name?: string | undefined; summary: string; running?: boolean | undefined; isError?: boolean | undefined; interrupted?: boolean | undefined; mutated?: boolean | undefined; output?: string | undefined; startedAt?: number | undefined; finishedAt?: number | undefined }
+export interface Activity { id?: string | undefined; name?: string | undefined; summary: string; running?: boolean | undefined; isError?: boolean | undefined; interrupted?: boolean | undefined; mutated?: boolean | undefined; output?: string | undefined; startedAt?: number | undefined; finishedAt?: number | undefined; display?: ToolDisplay | undefined }
 export type ActivityState = 'running' | 'done' | 'failed' | 'stopped'
 export interface Message { role: 'user' | 'assistant'; text: string; tools?: readonly Activity[] | undefined; streaming?: boolean | undefined; error?: string | undefined; isError?: boolean | undefined; snapshotId?: number | undefined; snapshot?: unknown; autoApplied?: unknown; deckProgress?: unknown; reasoning?: string | undefined; status?: string | undefined }
 export function activityStatus(t:Activity):ActivityState {return t.interrupted?'stopped':t.isError?'failed':t.running?'running':'done'}

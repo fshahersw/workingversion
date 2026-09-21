@@ -41,7 +41,6 @@ import { createElectronTransport } from './transport'
 import { renderSlidesToPngBase64 } from '../export-render'
 import {
   isQcEnabled,
-  isUnsupportedImageInputError,
   mergeQcPages,
   qcSlidePage,
   QC_MAX_PAGES,
@@ -1460,7 +1459,8 @@ export function AiPanel({
           patchLastAssistant((last) => {
             // Swap out the running placeholder pushed by onToolStart (parse-fail calls have none)
             const tools = [...(last.tools ?? [])]
-            const pending = tools.findIndex(t => t.id === call.id); if (pending >= 0) tools.splice(pending, 1)
+            const pending = tools.findIndex(t => t.id === call.id)
+            if (pending >= 0) { activity.startedAt = tools[pending]?.startedAt; tools.splice(pending, 1) }
             return { tools: [...tools, activity] }
           })
         },
@@ -1687,7 +1687,7 @@ export function AiPanel({
     // runStartingRef: loop.run is called only after attachments are read asynchronously, during which loop.busy is still false,
     // so duplicate triggers must be blocked synchronously (e.g. StrictMode double-running the preset autoRun effect),
     // otherwise two sets of bubbles get pushed and the earlier assistant placeholder stays at "thinking" forever.
-    // qcRunningRef: the post-generation QC pass edits the deck outside the main loop — no concurrent runs
+    // qcRunningRef: wait for the bounded read-only post-generation check to settle.
     if (!instruction || !loop || loop.busy || runStartingRef.current || qcRunningRef.current) return
     runStartingRef.current = true
     setInput('')
@@ -1851,11 +1851,9 @@ export function AiPanel({
   }
 
   /**
-   * Post-generation layout QC: each page landed by this run gets one focused pass in a fresh
-   * AgentLoop. Vision models receive screenshot + inventory; text-only models receive only
-   * deterministic geometry evidence. Each page's edits sit in their own history batch; if the
-   * deterministic audit says the page got worse, that batch is rolled back. Progress streams
-   * into one assistant chat entry.
+   * A post-generation check has no independent editing authority. Keep the user's
+   * completion receipt and exact design intact; explicit audit_layout/view_slide
+   * tools expose findings during the user-scoped workflow.
    */
   const runQcPass = async () => {
     const pages = qcPagesRef.current
@@ -1865,99 +1863,17 @@ export function AiPanel({
     qcRunningRef.current = true
     const controller = new AbortController()
     qcAbortRef.current = controller
-    const capped = pages.slice(0, QC_MAX_PAGES)
-    const transport = createElectronTransport(() => settingsRef.current)
-    const header = tGlobal('aiQcStart', { count: capped.length })
-    const lines: string[] = []
-    const renderEntry = () => [header, ...lines].join('\n')
-    setBusy(true)
-    stickToBottomRef.current = true
-    // The QC entry demotes the run's reply to a mid-turn segment, whose action
-    // toolbar never shows — carry its rollback point onto this entry instead
-    // (settled in the finally below; runSnapshotIdRef keeps the id meanwhile)
-    setChat((prev) => [
-      ...prev.map((e, i) =>
-        i === prev.length - 1 && e.snapshotId != null ? { ...e, snapshotId: undefined } : e,
-      ),
-      { role: 'assistant', text: header, streaming: true },
-    ])
-    // First kept QC batch — the run's own batch takes precedence (it is earlier,
-    // so restoring it rewinds past the QC edits too)
-    let qcSnapshotId: number | null = null
-    // A custom endpoint may claim generic OpenAI-compatible vision support but reject the
-    // first image. Fall back for that page and keep the rest of this pass geometry-only.
-    let forceGeometryOnly = false
     try {
-      for (const page of capped) {
+      for (const page of pages.slice(0, QC_MAX_PAGES)) {
         if (controller.signal.aborted) break
-        const useScreenshot = !forceGeometryOnly && settingsSupportVision(settingsRef.current)
-        const shot = useScreenshot ? await captureSlideShot(page) : null
-        if (useScreenshot && !shot) {
-          if (slidesRef.current[page]) lines.push(tGlobal('aiQcPageSkipped', { n: page + 1 }))
-          continue
-        }
-        const batchOpened = await window.slidesApi.beginHistoryBatch()
-        let result = await qcSlidePage({
-          access,
-          transport,
-          pageIndex: page,
-          screenshot: shot,
-          systemSuffix: aiLangDirective,
-          signal: controller.signal,
-        })
-        if (shot && result.error && isUnsupportedImageInputError(result.error)) {
-          forceGeometryOnly = true
-          result = await qcSlidePage({
-            access,
-            transport,
-            pageIndex: page,
-            screenshot: null,
-            systemSuffix: aiLangDirective,
-            signal: controller.signal,
-          })
-        }
-        const batchId = batchOpened ? await window.slidesApi.endHistoryBatch() : null
-        if (controller.signal.aborted) break
-        if (result.error) {
-          // QC is optional polish. Keep provider/network details in diagnostics instead of
-          // exposing a noisy raw API error in the completed generation transcript.
-          console.warn(`[slides-qc] page ${page + 1} skipped:`, result.error)
-          lines.push(tGlobal('aiQcPageSkipped', { n: page + 1 }))
-        } else if (result.edited && result.postIssues > result.preIssues) {
-          // The fix made the deterministic audit worse — undo this page's batch
-          if (typeof batchId === 'number') {
-            const restored = await window.slidesApi.aiSnapshotRestore(batchId)
-            if (restored)
-              applyDeckRef.current(restored, Math.min(currentRef.current, restored.length - 1))
-          }
-          lines.push(tGlobal('aiQcPageReverted', { n: page + 1 }))
-        } else if (result.edited) {
-          const summary =
-            result.reply && result.reply.toUpperCase() !== 'OK'
-              ? result.reply
-              : tGlobal('aiQcPageFixedDefault')
-          lines.push(tGlobal('aiQcPageFixed', { n: page + 1, summary }))
-          if (typeof batchId === 'number' && qcSnapshotId == null) qcSnapshotId = batchId
-        } else {
-          lines.push(tGlobal('aiQcPageOk', { n: page + 1 }))
-        }
-        patchLastAssistant({ text: renderEntry() })
+        const result = await qcSlidePage({ access, pageIndex: page, signal: controller.signal })
+        // Geometry flags can describe requested overlap/cropping or old defects.
+        // Do not promote them to a new task, model call, history edit or receipt.
+        if (result.findings.length) console.info('[slides-qc] advisory geometry findings', { page: page + 1, count: result.findings.length })
       }
-      if (pages.length > capped.length) {
-        lines.push(tGlobal('aiQcCapped', { count: pages.length - capped.length }))
-      }
-      if (controller.signal.aborted) lines.push(tGlobal('aiQcStopped'))
     } finally {
       qcRunningRef.current = false
       qcAbortRef.current = null
-      const finalText = renderEntry()
-      patchLastAssistant({
-        streaming: false,
-        text: finalText,
-        snapshotId: runSnapshotIdRef.current ?? qcSnapshotId ?? undefined,
-      })
-      persistMessage('assistant', finalText)
-      setBusy(false)
     }
   }
   runQcPassRef.current = runQcPass

@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
 import { loadCognitoConfig } from "../config.server";
+import { localSyntheticRequest } from "../local-development";
 
 const SCOPES = "openid email profile";
 
@@ -225,6 +226,12 @@ async function refreshSession(refreshToken: string): Promise<ResolvedSession | n
  * Null means the user must sign in again.
  */
 export async function resolveSession(request: Request): Promise<ResolvedSession | null> {
+  if (localSyntheticRequest(request)) {
+    return {
+      user: { sub: "local-synthetic-user", email: "local@example.invalid", name: "Local test workspace", emailVerified: true, groups: [], role: "user" },
+      setCookies: [],
+    };
+  }
   loadCognitoConfig();
   const cookies = parseCookies(request.headers.get("cookie"));
   const idToken = cookies[C_ID];

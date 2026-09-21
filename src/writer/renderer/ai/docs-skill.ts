@@ -18,7 +18,8 @@ import {
   type AiHeaderFooterAccess,
   type FrozenSelection,
 } from "./tools";
-import { auditLiveDocument, formatDocAudit } from "./document-audit";
+import { auditLiveDocument, extractAuditModel, formatDocAudit } from "./document-audit";
+import type { AuditModel } from "@/lib/writer/document-audit";
 
 /**
  * The docx capability as an AgentSkill: document skeleton context, the five
@@ -32,11 +33,14 @@ export function createDocsSkill(
   getComments?: () => AiCommentsAccess | undefined,
   getHf?: () => AiHeaderFooterAccess | undefined,
   getApp?: () => AiDocumentAccess | undefined,
+  getInstruction?: () => string,
 ): AgentSkill {
   // Selection frozen per run: tools act on the range the prompt described,
   // not on wherever the user's live selection has wandered mid-run. The doc
   // snapshot bounds the freeze's validity (see FrozenSelection).
   let frozen: FrozenSelection | null = null;
+  let auditBaseline: AuditModel | null = null;
+  let requestedScope = "";
   return {
     id: "docx",
     // Platform build: the shared platform tools (Python, diagrams, citation
@@ -49,6 +53,9 @@ export function createDocsSkill(
       beginOfficeTask(editor);
       markDocSeen(editor); // the context the model receives is the freshness baseline for index-addressed writes
       frozen = { scope: getSelectionScope(editor), doc: editor.state.doc };
+      requestedScope = getInstruction?.() ?? "";
+      try { auditBaseline = structuredClone(extractAuditModel(editor, getApp?.())); }
+      catch { auditBaseline = null; }
       return buildDocContext(editor, frozen.scope, getComments?.()?.list(), getHf?.()?.read());
     },
     executeTool: (call, signal) =>
@@ -63,22 +70,20 @@ export function createDocsSkill(
         getHf?.(),
         getApp?.(),
       ),
-    // Finish step: after a run that changed the document, audit the model
-    // (footnote parity, faked headings, colored body text, page geometry,
-    // empty/orphan paragraphs, alignment). Findings force ONE corrective turn
-    // (the loop caps verifyResponse retries at one per run), so the agent fixes
-    // its own formatting before the receipt instead of the user finding it.
+    // Correct only new structural damage from this run. Requested or existing
+    // style, bare headings, widths and blank paragraphs never force a rewrite.
+    // The explicit audit_document tool still reports those advisory findings.
     verifyResponse: (_finalText, executed) => {
       const wrote = executed.some((c) => !READ_ONLY_TOOLS.has(c.name) && c.ok);
-      if (!wrote) return null;
+      if (!wrote || !auditBaseline) return null;
       let issues: string[];
       try {
-        issues = auditLiveDocument(getEditor(), getApp?.());
+        issues = auditLiveDocument(getEditor(), getApp?.(), { structuralOnly: true, baseline: auditBaseline });
       } catch {
         return null; // the audit must never block a run
       }
       if (!issues.length) return null;
-      return `Before finishing, the document audit found:${formatDocAudit(issues)}`;
+      return `The original user request remains the goal: ${JSON.stringify(requestedScope || "Preserve the scope of the user's most recent instruction.")}. Repair only new structural damage caused by this run; do not restyle, expand, add descriptors, remove requested headings, or fix unrelated pre-existing issues. The final receipt must address the original request, not the audit.${formatDocAudit(issues, { structuralOnly: true })}`;
     },
   };
 }

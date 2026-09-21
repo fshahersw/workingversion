@@ -209,6 +209,6 @@ export function formatAudit(issues: string[], round?: string): string {
   const body = issues.map((s) => `- ${s}`).join('\n')
   const tail = round
     ? `\n${round}\n</layout-audit>`
-    : "\n→ Immediately write another execute_slide_script to fix these issues (don't stop, don't ask the user, don't declare completion). els reflects the new positions after the last apply; compute from it directly. At most 2 fix rounds; only if still unresolved tell the user honestly.\n</layout-audit>"
+    : "\nAdvisory geometry findings only. Preserve the user's requested text, font size, colors, dimensions, positions, and slide count. Overlap or whitespace can be intentional. Do not restyle to clear this audit. Repair an introduced defect only within the original request; otherwise report the conflict without changing the requested design.\n</layout-audit>"
   return head + body + tail
 }

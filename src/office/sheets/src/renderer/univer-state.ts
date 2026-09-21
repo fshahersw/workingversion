@@ -150,18 +150,29 @@ export interface PinnedClosureCell {
 }
 
 /// Data extent in screen coordinates: the file extent shifted by this
-/// session's structural row/column ops. Null when the sheet is unknown.
+/// session's structural row/column ops, unioned with new journaled content.
+/// Null when the sheet is unknown. Journal coordinates are already post-op.
 export function lazySheetScreenExtent(
   state: LazyWorkbookState,
   sheetId: string,
 ): { rows: number; columns: number } | null {
   const sheet = state.file.sheets.find((candidate) => candidate.id === sheetId)
-  if (!sheet) return null
+  if (!sheet && !state.editJournal.sheets.added.has(sheetId)) return null
+  if (state.editJournal.sheets.removed.has(sheetId)) return null
   const ops = state.editJournal.structuralOps.get(sheetId) ?? []
-  return {
-    rows: Math.max(sheet.rowCount + netAxisDelta(ops, 'row'), 0),
-    columns: Math.max(sheet.columnCount + netAxisDelta(ops, 'column'), 0),
+  let rows = Math.max((sheet?.rowCount ?? 0) + netAxisDelta(ops, 'row'), 0)
+  let columns = Math.max((sheet?.columnCount ?? 0) + netAxisDelta(ops, 'column'), 0)
+  for (const entry of state.editJournal.cells.get(sheetId)?.values() ?? []) {
+    if (!entry.formula && (!entry.hasValue || entry.value === null || entry.value === '')) continue
+    rows = Math.max(rows, entry.row + 1)
+    columns = Math.max(columns, entry.column + 1)
   }
+  for (const fill of state.editJournal.bulkConstantFills.get(sheetId) ?? []) {
+    if (fill.value === null || fill.value === '') continue
+    rows = Math.max(rows, fill.endRow + 1)
+    columns = Math.max(columns, fill.endColumn + 1)
+  }
+  return { rows, columns }
 }
 
 /// Budget for closure mode: formula cells plus every precedent they read.

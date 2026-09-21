@@ -18,6 +18,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { loadS3Config } from "../config.server";
+import { localServiceEndpoint } from "../local-development";
 
 const PUT_TTL = 900; // 15 min to start an upload
 const GET_TTL = 300; // 5 min download link
@@ -31,15 +32,17 @@ export function bucketName(): string {
 
 export function s3(): S3Client {
   const { region } = loadS3Config();
-  if (!_s3 || _s3Region !== region) {
+  const endpoint = localServiceEndpoint("s3");
+  const cacheKey = `${region}:${endpoint ?? "aws"}`;
+  if (!_s3 || _s3Region !== cacheKey) {
     // requestChecksumCalculation: "WHEN_REQUIRED" is REQUIRED for browser
     // presigned PUTs. aws-sdk-js-v3 >= 3.729 defaults to "WHEN_SUPPORTED",
     // which injects a default (CRC32) checksum the browser fetch cannot supply,
     // breaking every presigned upload (deposition originals, Working Set,
     // Office attachments). The explicit ChecksumSHA256 we sign for integrity is
     // still honored under WHEN_REQUIRED.
-    _s3 = new S3Client({ region, requestChecksumCalculation: "WHEN_REQUIRED" });
-    _s3Region = region;
+    _s3 = new S3Client({ region, requestChecksumCalculation: "WHEN_REQUIRED", ...(endpoint ? { endpoint, forcePathStyle: true, credentials: { accessKeyId: "S3RVER", secretAccessKey: "S3RVER" } } : {}) });
+    _s3Region = cacheKey;
   }
   return _s3;
 }

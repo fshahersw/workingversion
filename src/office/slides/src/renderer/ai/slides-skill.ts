@@ -7,7 +7,7 @@ import type {
   ShapeRenderNode,
 } from '@genoffice/pptx-render'
 import type { AgentToolCall, AgentToolDef } from '../../shared/ipc'
-import { OP_GROUPS, opGuide, opGuideCatalog, opSignatureIndex } from '../../shared/op-docs'
+import { OP_DOCS, OP_GROUPS, opGuide, opGuideCatalog, opSignatureIndex } from '../../shared/op-docs'
 import { auditSlideLayout, formatAudit } from './layout-audit'
 import { runLayoutScript, type LayoutScriptElement } from './layout-script'
 import { t } from '../i18n/locale'
@@ -824,7 +824,25 @@ const TOOLS: AgentToolDef[] = [
       properties: {
         ops: {
           type: 'array',
-          items: { type: 'object' },
+          minItems: 1,
+          maxItems: APPLY_OPS_MAX,
+          items: {
+            type: 'object',
+            properties: {
+              op: { type: 'string', enum: Object.entries(OP_DOCS).filter(([, doc]) => doc.aiCallable !== false && !doc.pending).map(([name]) => name), description: 'Canonical operation name, e.g. addElement; not a tool name.' },
+              target: {
+                type: 'object',
+                description: 'Required for element/slide operations such as addElement; omit for deck-wide operations such as setSlideSize.',
+                properties: {
+                  slide: { anyOf: [{ type: 'integer', minimum: 0 }, { type: 'string', pattern: '^s_[0-9]+$' }] },
+                  el: { type: 'string', description: 'Existing element ID; omit for inserts.' },
+                },
+                required: ['slide'],
+              },
+            },
+            required: ['op'],
+            additionalProperties: true,
+          },
           description: `The op list, applied in order as one transaction (at most ${APPLY_OPS_MAX}; split larger batches page by page)`,
         },
         dry_run: { type: 'boolean', description: 'Validate the plan only; the deck is untouched' },
@@ -1220,40 +1238,6 @@ interface SkillState {
 }
 
 /**
- * [Hard constraint against "hand-building from scratch"] Sometimes the AI skips the HTML
- * pipeline and assembles a whole deck element by element with addElement/addSmartArt ops —
- * such hand-built pages look crude and the layout falls apart (root cause of screenshot issues).
- * "From-scratch" detection: this session hasn't used the HTML pipeline (!htmlGenerated) AND the
- * deck has almost no real content (≤ 2 non-decoration elements with text, i.e. blank/initial
- * template). If so, reject and steer toward generate_deck. Adding a single element to an
- * existing rich deck / fine-tuning after the HTML pipeline are unaffected.
- */
-function blockScratchBuild(
-  kind: 'element' | 'smartart',
-  slides: RenderSlide[],
-  state?: SkillState,
-): { output: string; isError: true; mutated: false; summary: string } | null {
-  if (state?.htmlGenerated) return null // Went through the HTML pipeline; subsequent native edits are legitimate
-  let contentEls = 0
-  for (const slide of slides) {
-    for (const n of collectNodeInfos(slide.nodes)) {
-      if (!n.locked && n.text && n.text.trim() !== '') contentEls += 1
-    }
-  }
-  if (contentEls > 2) return null // Deck already has real content; this is a refinement scenario, allow it
-  const label = kind === 'smartart' ? t('aiLabelInsertSmartart') : t('aiFailNewElement')
-  return {
-    output:
-      "For blank/from-scratch scenarios don't hand-assemble pages element by element with addElement/addSmartArt/addTable/addChart ops (crude layout). " +
-      'Use the generation pipeline instead: new whole deck → generate_deck; new pages for an existing deck → generate_deck(pages, insert_mode:"append"). ' +
-      'Write it beautifully in HTML/CSS and the system converts it into editable elements. Use insert ops only when the deck already has polished content and one element needs refining.',
-    isError: true,
-    mutated: false,
-    summary: t('aiSumFromScratchGuard', { label }),
-  }
-}
-
-/**
  * Build the generation progress checklist text — injected to the AI each turn via buildContext
  * so it "sees" which pages are still missing, a mechanical reminder to finish (rather than a
  * one-shot prompt constraint). Returns an empty string when there is no plan.
@@ -1384,9 +1368,6 @@ function applyOpsSummary(ops: unknown[], count: number): string {
   return t('aiSumApplyOps', { count })
 }
 
-/** Insert ops subject to the anti-scratch-build guard when the deck is still blank. */
-const SCRATCH_GUARDED_OPS = new Set(['addElement', 'addSmartArt', 'addTable', 'addChart'])
-
 interface OpPreflight {
   /** ops to send over the IPC (AI-layer fields stripped) */
   ops: unknown[]
@@ -1396,15 +1377,15 @@ interface OpPreflight {
 
 /**
  * apply_ops runs the same policy gates the dedicated tools run before an op
- * reaches the executor: the anti-scratch-build guard for inserts on a blank
- * deck, and figure provenance for chart data. `dataSource` is an AI-layer
+ * reaches the executor: figure provenance for chart data. Blank/sparse slides
+ * accept the same structurally validated native insertions as any other slide;
+ * document sparsity cannot override a user's explicit insertion request. `dataSource` is an AI-layer
  * field the registry does not know; it is checked here and stripped before the
  * ops cross the IPC. Malformed entries pass through untouched so the executor
  * returns its own guided error for them.
  */
 function preflightOps(
   opsIn: unknown[],
-  slides: RenderSlide[],
   state: SkillState | undefined,
 ): OpPreflight | ReturnType<typeof fail> {
   const ops: unknown[] = []
@@ -1420,14 +1401,6 @@ function preflightOps(
     }
     const op = { ...(raw as Record<string, unknown>) }
     const name = op.op as string
-    if (SCRATCH_GUARDED_OPS.has(name)) {
-      const blocked = blockScratchBuild(
-        name === 'addSmartArt' ? 'smartart' : 'element',
-        slides,
-        state,
-      )
-      if (blocked) return { ...blocked, output: `ops[${i}] ${name}: ${blocked.output}` }
-    }
     if (name === 'addChart') {
       const gateErr = dataSourceGateErrorForInput(op, state)
       if (gateErr) return fail(t('aiFailApplyOps'), `ops[${i}] ${name}: ${gateErr}`)
@@ -1465,7 +1438,7 @@ function auditTouchedPages(
   return (
     `\n<layout-audit>⚠️ Found issue(s) on ${failing.length} page(s):\n` +
     failing.map((a) => `page ${a.page}:\n${a.issues.map((s) => `- ${s}`).join('\n')}`).join('\n') +
-    '\n→ Fix issues your edit caused before replying: execute_slide_script on the affected page (it reads live geometry) or another apply_ops with setTransform; at most 2 fix rounds. Issues that already existed and that you did not touch are for your judgment only — do not report them to the user, and never quote element ids in the reply.\n</layout-audit>'
+    '\nThese are advisory geometry observations, not authorization for further edits. Preserve the user\'s exact text, font size, colors, dimensions, positions and slide count. Intentional overlaps and pre-existing findings do not require correction. Only repair a defect introduced by your operation when doing so stays within the original request; otherwise report the conflict without changing the requested design.\n</layout-audit>'
   )
 }
 
@@ -2593,7 +2566,7 @@ async function executeTool(
           t('aiFailApplyOps'),
           `${opsIn.length} ops in one call; the limit is ${APPLY_OPS_MAX}. Split the batch (page by page, or by element group) and send several apply_ops calls.`,
         )
-      const pre = preflightOps(opsIn, slides, state)
+      const pre = preflightOps(opsIn, state)
       if (!('ops' in pre)) return pre
       const r = await window.slidesApi.applyTxn?.({
         ops: pre.ops,

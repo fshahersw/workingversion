@@ -1,3 +1,4 @@
+import type { OfficeChatAppendInput } from "@/lib/office/chat-persistence";
 // ============================================================================
 // Writer document persistence (server-only): the DOCX view of the shared
 // Office document layer in @/lib/office/office.server. Kept as a stable
@@ -115,7 +116,7 @@ export async function loadWriterChat(
 export async function appendWriterChat(
   principal: string,
   draftId: string,
-  message: Omit<WriterChatMessage, "seq" | "ts">,
+  message: OfficeChatAppendInput,
 ): Promise<WriterChatMessage> {
   return appendOfficeChat(principal, draftId, message);
 }
