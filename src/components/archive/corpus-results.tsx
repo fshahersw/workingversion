@@ -435,6 +435,16 @@ export function CfrResults({ value }: { value: JsonValue }) {
           const heading =
             firstText(row, "name", "heading") ?? citation ?? `CFR result ${index + 1}`;
           const sourceUrl = firstText(row, "gpo_xml_source_url", "ecfr_url");
+          // Title rows carry these dates nested under `ecfr`/`temporal`; search rows
+          // carry them at the top level. Prefer top-level, fall back to nested.
+          const ecfr = asObject(row["ecfr"]);
+          const temporal = asObject(row["temporal"]);
+          const latestAmended =
+            firstText(row, "latest_amendment_date") ??
+            (ecfr ? firstText(ecfr, "latest_amended_on") : null);
+          const ecfrReceived =
+            firstText(row, "ecfr_received_on") ??
+            (temporal ? firstText(temporal, "captured_at") : null);
           return (
             <article
               key={firstText(row, "id") ?? `${heading}-${index}`}
@@ -467,21 +477,11 @@ export function CfrResults({ value }: { value: JsonValue }) {
                   label="Sections in slice"
                   value={formatNumber(firstNumber(row, "sections_in_slice"))}
                 />
-                <Field
-                  label="Latest amendment"
-                  value={displayDate(firstText(row, "latest_amendment_date"))}
-                />
-                <Field
-                  label="eCFR received"
-                  value={displayDate(firstText(row, "ecfr_received_on"))}
-                />
+                <Field label="Latest amendment" value={displayDate(latestAmended)} />
+                <Field label="eCFR received" value={displayDate(ecfrReceived)} />
                 <Field label="Source" value={<SourceLink url={sourceUrl} />} />
               </dl>
-              <Provenance
-                record={row}
-                date={firstText(row, "ecfr_received_on")}
-                dateLabel="eCFR received"
-              />
+              <Provenance record={row} date={ecfrReceived} dateLabel="eCFR received" />
             </article>
           );
         })}

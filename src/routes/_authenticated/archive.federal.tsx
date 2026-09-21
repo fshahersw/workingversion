@@ -20,6 +20,7 @@ import {
   regSearch,
   regTitles,
 } from "@/lib/archive/corpus.functions";
+import { useDebouncedValue } from "@/lib/archive/use-debounced-value";
 
 // Federal Law & Agencies: the Code of Federal Regulations (CFR), the US Code
 // outline, and the federal agency hub, all from the Legal Archive. Regulations
@@ -50,6 +51,7 @@ const TABS: { id: Tab; label: string }[] = [
 function FederalPage() {
   const [tab, setTab] = useState<Tab>("regulations");
   const [q, setQ] = useState("");
+  const debouncedQ = useDebouncedValue(q);
   const searchable = tab !== "uscode";
 
   const health = useQuery({
@@ -60,7 +62,7 @@ function FederalPage() {
   const reachable = health.data?.reachable ?? false;
 
   const query = useQuery({
-    queryKey: ["corpus", "federal", tab, searchable ? q : ""],
+    queryKey: ["corpus", "federal", tab, searchable ? debouncedQ : ""],
     enabled: reachable,
     placeholderData: keepPreviousData,
     staleTime: 60_000,
@@ -69,10 +71,10 @@ function FederalPage() {
         case "uscode":
           return lawOutline();
         case "agencies":
-          return q ? agencySearch({ data: { q } }) : agencyHub();
+          return debouncedQ ? agencySearch({ data: { q: debouncedQ } }) : agencyHub();
         case "regulations":
         default:
-          return q ? regSearch({ data: { q } }) : regTitles();
+          return debouncedQ ? regSearch({ data: { q: debouncedQ } }) : regTitles();
       }
     },
   });

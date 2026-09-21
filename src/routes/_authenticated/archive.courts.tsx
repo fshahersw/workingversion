@@ -19,6 +19,7 @@ import {
 } from "@/components/archive/corpus-results";
 import { getArchiveHealth } from "@/lib/archive/archive.functions";
 import { listDocuments, listJudges, listMdls, resolveCourt } from "@/lib/archive/corpus.functions";
+import { useDebouncedValue } from "@/lib/archive/use-debounced-value";
 
 // Courts & Litigation: courts, judges, MDLs and court documents from the Legal
 // Archive. Mirrors the read-only Corpus page pattern (archive.sources.tsx):
@@ -57,6 +58,7 @@ const PLACEHOLDER: Record<Tab, string> = {
 function CourtsPage() {
   const [tab, setTab] = useState<Tab>("mdls");
   const [q, setQ] = useState("");
+  const debouncedQ = useDebouncedValue(q);
 
   const health = useQuery({
     queryKey: ["corpus", "health"],
@@ -66,21 +68,21 @@ function CourtsPage() {
   const reachable = health.data?.reachable ?? false;
 
   const query = useQuery({
-    queryKey: ["corpus", "courts", tab, q],
+    queryKey: ["corpus", "courts", tab, debouncedQ],
     enabled: reachable,
     placeholderData: keepPreviousData,
     staleTime: 60_000,
     queryFn: () => {
       switch (tab) {
         case "courts":
-          return resolveCourt({ data: { q } });
+          return resolveCourt({ data: { q: debouncedQ } });
         case "judges":
-          return listJudges({ data: { q } });
+          return listJudges({ data: { q: debouncedQ } });
         case "documents":
-          return listDocuments({ data: { q } });
+          return listDocuments({ data: { q: debouncedQ } });
         case "mdls":
         default:
-          return listMdls({ data: { q } });
+          return listMdls({ data: { q: debouncedQ } });
       }
     },
   });
