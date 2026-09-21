@@ -47,7 +47,7 @@ import {
   settingsSupportVision,
 } from './slide-qc'
 import { useI18n, t as tGlobal, aiLangDirective, type TFunc } from '../i18n/locale'
-import { Markdown } from '@genoffice/ui'
+import { AssistantMessage } from '@genoffice/ui'
 import { GensparkMark } from '../components/icons'
 import sendEnterOn from '../assets/send-enter-on.png'
 import sendEnterOff from '../assets/send-enter-off.png'
@@ -70,6 +70,7 @@ interface ToolActivity {
   summary: string
   /** still executing: rendered as a spinner chip, replaced in place when the tool finishes */
   isError?: boolean
+  skipped?: boolean
   /** Full tool output (truncated to 2000 chars) */
   output?: string
   /**
@@ -512,6 +513,11 @@ export function AiPanel({
   const stickToBottomRef = useRef(true)
   /** Current chat's projectId/chatId, set after resolve succeeds */
   const chatRefIds = useRef<{ projectId: string; chatId: string } | null>(null)
+  const recoveryMountedRef = useRef(true)
+  useEffect(() => {
+    recoveryMountedRef.current = true
+    return () => { recoveryMountedRef.current = false }
+  }, [])
 
   // The loop instance survives across renders; closures read refs for the latest state
   const slidesRef = useRef(slides)
@@ -581,7 +587,7 @@ export function AiPanel({
   const lastTurnToolsRef = useRef<ToolActivity[]>([])
   /** Tool activity of the whole run (with args/output, accumulated across turns) — for full transcript persistence */
   const runToolsRef = useRef<
-    Array<{ name: string; summary: string; isError?: boolean; input?: string; output?: string }>
+    Array<{ name: string; summary: string; isError?: boolean; skipped?: boolean; input?: string; output?: string }>
   >([])
   /** Last streamed text of the current turn: the only copy left when a run dies before onDone */
   const streamedTextRef = useRef('')
@@ -608,6 +614,7 @@ export function AiPanel({
               name: t.name,
               summary: t.summary,
               isError: t.isError,
+              skipped: !!t.skipped,
               output: t.output ? t.output.slice(0, TOOL_OUTPUT_MAX_CHARS) : undefined,
             })),
             // stored metadata only: no thumbnail read for history, the chips render name/size
@@ -657,6 +664,7 @@ export function AiPanel({
       name: string
       summary: string
       isError?: boolean
+  skipped?: boolean
       input?: string
       output?: string
     }>,
@@ -1440,6 +1448,7 @@ export function AiPanel({
             name: call.name,
             summary: execution.summary,
             isError: execution.isError,
+            skipped: !!execution.skipped,
             output: execution.output ? execution.output.slice(0, TOOL_OUTPUT_MAX_CHARS) : undefined,
             // Side channel: display comes from tools, not into LLM context, UI only
             display: execution.display,
@@ -1450,6 +1459,7 @@ export function AiPanel({
               name: call.name,
               summary: execution.summary,
               isError: execution.isError,
+              skipped: !!execution.skipped,
               input: safeJsonInput(call.input),
               output: execution.output
                 ? execution.output.slice(0, PERSIST_TOOL_FIELD_MAX)
@@ -1475,6 +1485,7 @@ export function AiPanel({
         },
         onDone: ({ text, cancelled, turnLimit, truncated }) => {
           setChat(previous => settleRunMessages(previous))
+          const completed = !cancelled && !turnLimit && !truncated
           const baseText = turnLimit
             ? [text, tGlobal('aiTurnLimit')].filter(Boolean).join('\n\n')
             : text || (cancelled ? tGlobal('aiStoppedNote') : '')
@@ -1505,12 +1516,12 @@ export function AiPanel({
           void finishHistoryBatch().finally(() => {
             setBusy(false)
             // Post-generation layout QC: only after a completed run that landed generated pages
-            if (cancelled) qcPagesRef.current = []
+            if (!completed) qcPagesRef.current = []
             else if (qcPagesRef.current.length > 0) void runQcPassRef.current()
             // After the batch closes, so the next queued page opens a fresh one
             const resolveQueueRun = queueRunResolverRef.current
             queueRunResolverRef.current = null
-            resolveQueueRun?.(!cancelled)
+            resolveQueueRun?.(completed)
           })
           // Persist the assistant message (deckProgress not stored; tools store the whole run's full activity) —
           // side effects outside the updater (StrictMode double-invokes updaters, duplicating history writes)
@@ -1522,6 +1533,16 @@ export function AiPanel({
           if (cancelled && streamedTextRef.current) logRunFailure('stopped')
         },
         onError: (error) => {
+          const failedLoop = loopRef.current
+          const failedVersion = failedLoop?.conversationVersion
+          const failedChat = chatRefIds.current
+          const failedTools = [...runToolsRef.current]
+          const ownsRecovery = () => recoveryMountedRef.current
+            && loopRef.current === failedLoop && failedLoop?.conversationVersion === failedVersion
+            && chatRefIds.current?.projectId === failedChat?.projectId
+            && chatRefIds.current?.chatId === failedChat?.chatId
+          const checkpoint = loopRef.current?.failureCheckpoint ?? error
+          let recovery = runMutatedRef.current ? 'Recovery was incomplete. Inspect the deck before continuing.' : 'No deck changes were made by this run.'
           setChat(previous => settleRunMessages(previous))
           logRunFailure('error', error)
           qcPagesRef.current = []
@@ -1543,7 +1564,7 @@ export function AiPanel({
           void window.slidesApi
             .aiGskStatus()
             .then((status) => {
-              if (status.loggedIn) return
+              if (!ownsRecovery() || status.loggedIn) return
               setChat((prev) => {
                 const next = [...prev]
                 const last = next.at(-1)
@@ -1559,10 +1580,13 @@ export function AiPanel({
           // mutated anything. The message says so; its rollback action retires.
           void finishHistoryBatch()
             .then(async () => {
+              if (!ownsRecovery()) return
               const id = runSnapshotIdRef.current
               if (!runMutatedRef.current || id == null) return
+              recovery = 'Recovery was incomplete. Inspect the deck before continuing.'
               const restored = await window.slidesApi.aiSnapshotRestore(id)
-              if (!restored) return
+              if (!ownsRecovery() || !restored) return
+              recovery = "The run's changes were rolled back."
               applyDeckRef.current(restored, Math.min(currentRef.current, restored.length - 1))
               setChat((prev) =>
                 prev.map((e) =>
@@ -1572,8 +1596,10 @@ export function AiPanel({
                 ),
               )
             })
-            .catch(() => {})
+            .catch(() => { recovery = 'Recovery was incomplete. Inspect the deck before continuing.' })
             .finally(() => {
+              if (!ownsRecovery()) return
+              persistMessage('assistant', `${checkpoint}\n\n${recovery}`, failedTools)
               setBusy(false)
               const resolveQueueRun = queueRunResolverRef.current
               queueRunResolverRef.current = null
@@ -2059,7 +2085,7 @@ export function AiPanel({
                 {entry.tools && entry.tools.length > 0 && <AssistantActivity tools={entry.tools} active={!!entry.streaming}/>}
                 {entry.text && (
                   <div dir="auto">
-                    <Markdown text={entry.text} />
+                    <AssistantMessage role={entry.role} text={entry.text} />
                   </div>
                 )}
               </div>
@@ -2108,7 +2134,7 @@ export function AiPanel({
                 </span>
               ) : entry.role === 'assistant' ? (
                 <div dir="auto">
-                  <Markdown text={entry.text} />
+                  <AssistantMessage role={entry.role} text={entry.text} />
                 </div>
               ) : (
                 <span dir="auto">{entry.text}</span>

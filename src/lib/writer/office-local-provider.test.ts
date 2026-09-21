@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { localProviderMessages, officeLocalModel, officeLocalProvider, streamOfficeLocalTurn } from "./office-local-provider.server.ts";
+import { LocalOfficeProviderError, localProviderMessages, officeLocalModel, officeLocalProvider, streamOfficeLocalTurn } from "./office-local-provider.server.ts";
 import { streamWriterTurn, type AgentToolCall, type RouteDecision, type WriterStreamCallbacks } from "./inference.server.ts";
 
 const route: RouteDecision = { model: "us.anthropic.claude-sonnet-5", tier: "main", taskClass: "draft" };
@@ -36,6 +36,32 @@ function callbacks() {
 }
 const request = () => ({ provider: "anthropic" as const, route, profile: "standard" as const, system: "Synthetic test", messages: [{ role: "user" as const, text: "Format fixture" }], tools: [{ name: "edit", description: "Edit fixture", inputSchema: { type: "object" } }], signal: new AbortController().signal });
 
+test("provider rejection diagnostics are bounded and redact credentials without exposing details in the public error", () => withLocal(async () => {
+  await assert.rejects(streamOfficeLocalTurn({ ...request(), fetchImpl: (async () => new Response(JSON.stringify({ error: {
+    type: "invalid_request_error", message: "messages.4.content is invalid synthetic-placeholder sk-ant-test-secret fw_test-secret",
+  } }), { status: 400, headers: { "request-id": "request-fixture" } })) as typeof fetch }, callbacks().cb), (error: unknown) => {
+    assert.ok(error instanceof LocalOfficeProviderError);
+    assert.equal(error.status, 400);
+    assert.equal(error.message, "Local anthropic request failed (HTTP 400).");
+    assert.deepEqual(error.diagnostic, { type: "invalid_request_error", message: "messages.4.content is invalid [REDACTED] [REDACTED] [REDACTED]", requestId: "request-fixture" });
+    return true;
+  });
+  await assert.rejects(streamOfficeLocalTurn({ ...request(), fetchImpl: (async () => new Response("x".repeat(9000), { status: 400 })) as typeof fetch }, callbacks().cb), (error: unknown) => {
+    assert.ok(error instanceof LocalOfficeProviderError); assert.equal(error.diagnostic, undefined); return true;
+  });
+}));
+
+test("provider SSE failure retains actionable server diagnostics and dispatches no proposed tools", () => withLocal(async () => {
+  const c = callbacks();
+  await assert.rejects(streamOfficeLocalTurn({ ...request(), fetchImpl: (async () => response(beginTool(0, "pending") + evt({
+    type: "error", error: { type: "api_error", message: "Synthetic upstream interruption" },
+  }))) as typeof fetch }, c.cb), (error: unknown) => {
+    assert.ok(error instanceof LocalOfficeProviderError); assert.equal(error.status, 502);
+    assert.equal(error.diagnostic?.message, "Synthetic upstream interruption"); return true;
+  });
+  assert.equal(c.calls.length, 0);
+}));
+
 test("local provider is opt-in and rejected in production or AWS execution", () => {
   assert.equal(officeLocalProvider({}), null);
   assert.equal(officeLocalProvider(local), "anthropic");
@@ -51,6 +77,27 @@ test("synthetic mode without a provider cannot fall through to Bedrock", () => w
   delete process.env.OFFICE_LOCAL_PROVIDER;
   await assert.rejects(streamWriterTurn(request(), callbacks().cb), /AWS fallback is disabled/);
 }));
+
+test("local Fireworks reasoning control is explicit and does not affect Anthropic", () => withLocal(async () => {
+  const prior = process.env.OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT;
+  try {
+    process.env.OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT = "low";
+    await streamOfficeLocalTurn({ ...request(), provider: "fireworks", fetchImpl: (async (_url, init) => {
+      assert.equal(JSON.parse(String(init?.body)).reasoning_effort, "low");
+      return response(evt({ choices: [{ delta: { content: "Ready" }, finish_reason: "stop" }] }) + "data: [DONE]\n\n");
+    }) as typeof fetch }, callbacks().cb);
+    process.env.OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT = "invalid";
+    await assert.rejects(streamOfficeLocalTurn({ ...request(), provider: "fireworks" }, callbacks().cb), /Invalid OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT/);
+    process.env.OFFICE_LOCAL_PROVIDER = "anthropic";
+    await streamOfficeLocalTurn({ ...request(), fetchImpl: (async (_url, init) => {
+      assert.equal(JSON.parse(String(init?.body)).reasoning_effort, undefined);
+      return response(finish("end_turn"));
+    }) as typeof fetch }, callbacks().cb);
+  } finally {
+    if (prior === undefined) delete process.env.OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT;
+    else process.env.OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT = prior;
+  }
+}, "fireworks"));
 
 test("direct models require explicit provider IDs and tier mappings", () => {
   assert.throws(() => officeLocalModel("anthropic", route, "standard", undefined, {}), /explicit/);
@@ -90,10 +137,9 @@ test("Anthropic SSE preserves multiple tools, complete arguments, text and usage
   assert.equal((c.usages[0] as { inputTokens: number }).inputTokens, 17);
 }));
 
-test("truncated, failed and stopped tool streams cannot dispatch any tool", () => withLocal(async () => {
+test("incomplete, failed and invalid tool streams cannot dispatch any tool", () => withLocal(async () => {
   for (const fixture of [
     beginTool(0, "one") + args(0, '{"x":1}') + close(0),
-    beginTool(0, "one") + args(0, '{"x":1}') + close(0) + finish("max_tokens"),
     beginTool(0, "one") + evt({ type: "error", error: { type: "overloaded_error" } }),
     beginTool(0, "one") + args(0, '{"x":1}') + finish(),
     beginTool(0, "one") + close(0) + beginTool(1, "one") + close(1) + finish(),
@@ -103,6 +149,28 @@ test("truncated, failed and stopped tool streams cannot dispatch any tool", () =
     assert.equal(c.calls.length, 0);
   }
 }));
+
+test("a complete length-limited response reports every tool as unexecutable so the loop can split the batch", () => withLocal(async () => {
+  const c = callbacks();
+  const fixture = beginTool(0, "complete-prefix") + args(0, '{"x":1}') + close(0)
+    + beginTool(1, "cut-off") + args(1, '{"operations":[') + close(1) + finish("max_tokens");
+  await streamOfficeLocalTurn({ ...request(), fetchImpl: (async () => response(fixture)) as typeof fetch }, c.cb);
+  assert.deepEqual(c.stops, ["max_tokens"]);
+  assert.equal(c.calls.length, 2);
+  assert.ok(c.calls.every(call => call.truncated && call.inputError));
+  assert.deepEqual(c.calls.map(call => call.input), [{}, {}], "No plausible prefix can execute");
+}));
+
+test("Fireworks output length recovery also prevents completed prefix tools from executing", () => withLocal(async () => {
+  const c = callbacks();
+  const fixture = evt({ choices: [{ delta: { tool_calls: [
+    { index: 0, id: "one", function: { name: "edit", arguments: '{"x":1}' } },
+    { index: 1, id: "two", function: { name: "edit", arguments: '{"x":' } },
+  ] }, finish_reason: "length" }] }) + "data: [DONE]\r\n\r\n";
+  await streamOfficeLocalTurn({ ...request(), provider: "fireworks", fetchImpl: (async () => response(fixture)) as typeof fetch }, c.cb);
+  assert.equal(c.calls.length, 2);
+  assert.ok(c.calls.every(call => call.truncated && call.inputError));
+}, "fireworks"));
 
 test("malformed arguments and disallowed tools are explicit input errors, never silent empty actions", () => withLocal(async () => {
   const c = callbacks();
@@ -132,6 +200,27 @@ test("Fireworks follow-ups preserve interleaved reasoning only for the same mode
   assert.equal(localProviderMessages("fireworks", [message], "accounts/fireworks/models/test-model")[0]!.reasoning_content, "synthetic-private-continuation");
   assert.equal(localProviderMessages("fireworks", [message], "accounts/fireworks/models/other-model")[0]!.reasoning_content, undefined);
   assert.equal(JSON.stringify(localProviderMessages("anthropic", [message], "claude-test-model")).includes("synthetic-private"), false);
+}, "fireworks"));
+
+test("Fireworks final usage reads bounded cached prompt tokens without subtracting them from input totals", () => withLocal(async () => {
+  for (const [details, expected] of [
+    [{ cached_tokens: 80 }, 80], [{ cached_tokens: 0 }, 0], [{ cached_tokens: 120 }, 100],
+    [undefined, 0], [null, 0], [[], 0], [{}, 0],
+    [{ cached_tokens: -1 }, 0], [{ cached_tokens: 1.5 }, 0], [{ cached_tokens: "80" }, 0],
+    [{ cached_tokens: Number.MAX_SAFE_INTEGER + 1 }, 0],
+  ] as const) {
+    const c = callbacks();
+    const fixture = evt({ choices: [{ delta: { content: "Synthetic completion" }, finish_reason: "stop" }] })
+      + evt({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 12, prompt_tokens_details: details } })
+      + "data: [DONE]\r\n\r\n";
+    await streamOfficeLocalTurn({ ...request(), provider: "fireworks", fetchImpl: (async () => response(fixture)) as typeof fetch }, c.cb);
+    assert.equal(c.usages.length, 1);
+    const usage = c.usages[0] as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
+    assert.equal(usage.inputTokens, 100, 'cached tokens remain part of total prompt tokens');
+    assert.equal(usage.outputTokens, 12);
+    assert.equal(usage.cacheReadTokens, expected);
+    assert.equal(usage.cacheWriteTokens, 0, 'cache writes are not reported by Fireworks');
+  }
 }, "fireworks"));
 
 test("pre-abort and abort while reading a stream dispatch no tools", () => withLocal(async () => {

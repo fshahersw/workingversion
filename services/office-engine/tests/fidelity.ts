@@ -4,7 +4,10 @@
 // targeted worksheet part changed: every other ZIP entry survives
 // byte-identical and none disappears. This is the property that makes
 // "what you did not touch stays exactly as Excel wrote it" true.
-import { applyPlanToXlsx } from "../vendor/sheets/src/gateway/xlsx-gateway";
+import { applyPlanToXlsx, applyCellEditsToXlsx } from "../vendor/sheets/src/gateway/xlsx-gateway";
+import { blankXlsxBuffer } from "../vendor/sheets/src/gateway/csv-import";
+import JSZip from "jszip";
+import { XMLParser } from "fast-xml-parser";
 import type { CellState, ChangePlan } from "../vendor/sheets/src/domain/workbook.types";
 import {
   buildCompatibilityFixture,
@@ -15,6 +18,23 @@ import {
 } from "./fixture-builder";
 
 export { PPTX_CORPUS, verifyPptxCase, openPptx, savePptx } from "./fidelity-pptx";
+
+// Exercise the actual retained save writer: a new multi-sheet workbook gets
+// its first stylesheet and new worksheet relationships in the same save.
+export async function verifyStyledSheetCreation() {
+  const result = await applyCellEditsToXlsx(await blankXlsxBuffer(), [
+    { sheetName: "Sheet1", row: 0, column: 0, writeValue: true, cell: { value: "Quarterly" }, style: { bold: true } },
+    { sheetName: "Annual", row: 0, column: 0, writeValue: true, cell: { value: 2025 }, style: { bold: true } },
+  ], [], [], { renames: [], additions: [{ name: "Annual" }, { name: "Assumptions" }], removals: [], order: ["Sheet1", "Annual", "Assumptions"] });
+  const zip = await JSZip.loadAsync(result.buffer);
+  const parser = new XMLParser({ ignoreAttributes: false });
+  const rels = parser.parse(await zip.file("xl/_rels/workbook.xml.rels")!.async("string")).Relationships.Relationship;
+  const sheets = parser.parse(await zip.file("xl/workbook.xml")!.async("string")).workbook.sheets.sheet;
+  return { ids: rels.map((r: any) => r["@_Id"]), sheets: sheets.map((s: any) => {
+    const matches = rels.filter((r: any) => r["@_Id"] === s["@_r:id"]);
+    return { name: s["@_name"], matches: matches.length, type: matches[0]?.["@_Type"], exists: !!zip.file(`xl/${matches[0]?.["@_Target"]}`) };
+  }) };
+}
 
 export type FixtureCase = {
   name: string;

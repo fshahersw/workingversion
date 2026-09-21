@@ -14,6 +14,7 @@ import {
   validateConversation,
   type OfficeApp,
 } from "@/lib/writer/inference.server";
+import { officeStreamFailure } from "./stream-errors";
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,100}$/;
 /**
@@ -143,7 +144,8 @@ export async function handleOfficeStream(
         }
       };
       const heartbeat = setInterval(() => send({ type: "ping" }), 10_000);
-      const deadline = setTimeout(() => controller.abort(), TURN_TIMEOUT_MS);
+      let timedOut = false;
+      const deadline = setTimeout(() => { timedOut = true; controller.abort(); }, TURN_TIMEOUT_MS);
       let stopReason = "end_turn";
       const startedAt = Date.now();
       const metric = {
@@ -202,19 +204,14 @@ export async function handleOfficeStream(
         );
         send({ type: "done", stopReason });
       } catch (err) {
-        const aborted = controller.signal.aborted || (err as Error)?.name === "AbortError";
+        const aborted = !timedOut && (controller.signal.aborted || (err as Error)?.name === "AbortError");
         outcome = aborted ? "cancelled" : "error";
-        const status = Number((err as { status?: number })?.status);
         send(
           aborted
             ? { type: "done", stopReason: "cancelled" }
             : {
                 type: "error",
-                error:
-                  status === 429
-                    ? "The writing service is busy. Wait briefly and try again."
-                    : "The writing service could not complete this request. Earlier applied edits remain in the document.",
-                ...(status === 429 ? { errorCode: "overloaded" } : {}),
+                ...officeStreamFailure(err, timedOut),
               },
         );
         if (!aborted) console.error(`[office:${app}] stream failed:`, err);

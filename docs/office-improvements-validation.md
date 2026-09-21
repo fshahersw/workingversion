@@ -2,7 +2,7 @@
 
 Prepared September 21, 2026. Branch: `codex/office-pdf-quality`, based on `e595931af932953a0f3ef70e9cfb80a837c001bc`. This is a locally implemented and tested release candidate. AWS access was deferred by the user; it has not been deployed or verified against the running firm environment.
 
-The application runs at `http://127.0.0.1:5189/office` with the real Office engine, DynamoDB Local, local S3-compatible storage, synthetic identity, and direct Anthropic inference. JEV is enabled explicitly. See [the local runbook](office-local-development.md).
+The initial validation ran at `http://127.0.0.1:5189/office` with the real Office engine, DynamoDB Local, local S3-compatible storage, synthetic identity, and direct Anthropic inference. JEV was enabled explicitly. The subsequent [complex-workflow validation](office-complex-workflow-validation.md) records the Fireworks fallback, longer live Sheets task, additional export defects and fixes. See [the local runbook](office-local-development.md).
 
 ## What changed
 
@@ -52,7 +52,7 @@ Direct synthetic provider probes used verified available model IDs: Anthropic `c
 
 With JEV active, an explicit pair of independent reads routed to the fast tier and produced two distinct tool calls in one response. Anthropic completed that turn in 1,365 ms and the read-result follow-up in 792 ms. Fireworks completed them in 1,094 ms and 912 ms. Exact-format proposals took 894 ms and 1,648 ms respectively. These were protocol probes; their tool proposals were not executed against a document. After restarting the actual local app with JEV enabled, the HTTP endpoint repeated this successfully: two read calls on Haiku in 1,915 ms, correct follow-up in 762 ms, format proposal in 928 ms, and edit-result follow-up in 819 ms. Mixed legal analysis stayed on Sonnet; ask-mode write tools remained forbidden.
 
-A mixed formatting/legal-analysis request stayed on the main tier. Anthropic completed its small synthetic turn in 2,990 ms. Fireworks' Kimi main-tier sample timed out at 60,017 ms; it is not counted as successful. Anthropic remains the local primary provider. Cancellation probes stopped before returning a tool; an HTTP ask-mode request offering a write tool was rejected with 403 before inference.
+A mixed formatting/legal-analysis request stayed on the main tier. Anthropic completed its small synthetic turn in 2,990 ms. Fireworks' Kimi main-tier sample timed out at 60,017 ms; it is not counted as successful. Anthropic was the local primary provider for this initial validation. Cancellation probes stopped before returning a tool; an HTTP ask-mode request offering a write tool was rejected with 403 before inference.
 
 An initial JEV rubric confused a chat summary with changing the file. A predefined 12-case A/B check evaluated summary, explanation, table analysis, explicit writes, footnotes, legal judgment and mixed requests. Revised wording improved mutation labels from 11/12 to 12/12 and simple-read fast routing from 3/4 to 4/4. Both variants had zero observed unsafe write or main-required downroutes. Thresholds stayed unchanged; the routing cache version changed. All 24 requests finished within the 800 ms budget. Revised median was 146 ms and p90 311 ms; the older p90 was 193 ms. This small sample supports the wording change, not a general accuracy or latency claim.
 

@@ -29,19 +29,19 @@ export function AssistantStarters({app,mode,selected,onChoose}:{app:AppKind;mode
  return <div className="sw-agent-empty"><span className="sw-agent-eyebrow">YOUR WORKSPACE</span><h3>{mode==='ask'?'Understand the details.':mode==='review'?'A second look.':'What would you like to work on?'}</h3><p>{mode==='write'?'Describe the result. Edits happen in the file, not just in chat.':'Get answers and specific findings without changing the file.'}</p><div className="sw-agent-starters">{actions.map(a=><button key={a.label} type="button" onClick={()=>onChoose(a.prompt)}><span><strong>{a.label}</strong><small>{a.detail}</small></span><AssistantIcon name="chevron"/></button>)}</div></div>
 }
 export function AssistantActivity({tools,active=false}:{tools:readonly Activity[];active?:boolean}){
- const [expanded,setExpanded]=useState<boolean|null>(null);const s=summarizeActivities(tools,active);const open=expanded??(s.running>0||s.failed>0||s.stopped>0);const current=[...tools].reverse().find(t=>activityStatus(t)==='running');const state=s.running?'running':s.failed?'failed':s.stopped?'stopped':active?'running':'done'
+ const [expanded,setExpanded]=useState<boolean|null>(null);const s=summarizeActivities(tools,active);const open=expanded??(s.running>0||s.failed>0||s.stopped>0||s.skipped>0);const current=[...tools].reverse().find(t=>activityStatus(t)==='running');const state=s.running?'running':s.failed?'failed':s.stopped?'stopped':active?'running':s.skipped?'skipped':'done'
  if(!tools.length)return null
  return <section className="sw-agent-activity" data-state={state} aria-label="Request activity">
   <button className="sw-agent-activity-toggle" type="button" aria-expanded={open} onClick={()=>setExpanded(!open)}>
-   <span className={`sw-agent-state ${state}`}><AssistantIcon name={state==='done'?'check':state==='running'?'spark':'stop'}/></span>
+   <span className={`sw-agent-state ${state}`}><AssistantIcon name={state==='done'?'check':state==='running'?'spark':state==='skipped'?'chevron':'stop'}/></span>
    <span className="sw-agent-activity-title" role="status" aria-live="polite"><strong>{s.running>1?`${s.running} actions running in parallel`:current?toolLabel(current.name):s.label}</strong><small>{current?s.label:s.updates?`${s.updates} ${s.updates===1?'editing action':'editing actions'} · View activity`:'View activity'}</small></span>
    <span className={open?'sw-agent-chevron open':'sw-agent-chevron'}><AssistantIcon name="chevron"/></span>
   </button>
   {open&&<ol className="sw-agent-steps">{tools.map((t,i)=>{
    const status=activityStatus(t), duration=activityDuration(t.startedAt,t.finishedAt)
    return <li key={t.id??i} data-state={status}>
-    <span className={`sw-agent-state ${status}`}><AssistantIcon name={status==='done'?'check':status==='running'?'spark':'stop'}/></span>
-    <div><div className="sw-agent-step-line"><span>{toolLabel(t.name)}</span><small>{status==='done'?'Done':status==='running'?'Running':status==='failed'?'Failed':'Stopped'}{duration?` · ${duration}`:''}</small></div>
+    <span className={`sw-agent-state ${status}`}><AssistantIcon name={status==='done'?'check':status==='running'?'spark':status==='skipped'?'chevron':'stop'}/></span>
+    <div><div className="sw-agent-step-line"><span>{toolLabel(t.name)}</span><small>{status==='done'?'Done':status==='running'?'Running':status==='failed'?'Failed':status==='skipped'?'Skipped':'Stopped'}{duration?` · ${duration}`:''}</small></div>
      {!t.running&&t.summary&&t.summary!==toolLabel(t.name)&&<p>{t.summary}</p>}
      <ToolResult display={t.display}/>
      {t.output&&<details className="sw-agent-tool-detail"><summary>Technical details</summary><pre>{t.output}</pre></details>}

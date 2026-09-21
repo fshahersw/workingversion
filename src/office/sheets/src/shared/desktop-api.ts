@@ -1307,6 +1307,12 @@ export const workbookHyperlinkEditSchema = z
 export const CHART_TEXT_WIRE_MAX = 255
 export const CHART_CATEGORY_WIRE_MAX = 1_024
 
+const chartValueAxisFormatsSchema = z.object({
+  primary: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
+  secondary: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
+}).strict().refine((formats) => formats.primary !== undefined || formats.secondary !== undefined,
+  { message: 'An axis format edit needs primary or secondary.' })
+
 export const workbookChartEditSchema = z
   .object({
     /// Constrained to the charts directory — the renderer chooses the path.
@@ -1322,6 +1328,7 @@ export const workbookChartEditSchema = z
     /// Placement and number format of the data labels (`c:dLblPos`/`c:numFmt`).
     dataLabelPosition: z.enum(['center', 'inside-end', 'outside-end']).optional(),
     dataLabelFormat: z.string().max(64).optional(),
+    valueAxisFormats: chartValueAxisFormatsSchema.optional(),
     /// null removes that axis title. Axis-based charts only.
     axisTitles: z
       .object({
@@ -1372,12 +1379,15 @@ export const workbookChartEditSchema = z
           .object({
             name: z.string().max(CHART_TEXT_WIRE_MAX),
             values: z.array(z.number().finite()).max(1_000),
+            blanks: z.array(z.number().int().min(0).max(999)).max(1_000).optional(),
             valuesRef: z.string().max(512).optional(),
             categories: z.array(z.string().max(CHART_CATEGORY_WIRE_MAX)).max(1_000).optional(),
             categoriesRef: z.string().max(512).optional(),
             color: hexColorSchema.optional(),
           })
-          .strict(),
+          .strict()
+          .refine((entry) => entry.blanks?.every((index) => index < entry.values.length) ?? true,
+            { message: 'Chart gaps must refer to an index within values.' }),
       )
       .min(1)
       .max(24)
@@ -1392,6 +1402,7 @@ export const workbookChartEditSchema = z
             name: z.string().max(CHART_TEXT_WIRE_MAX).optional(),
             valuesRef: z.string().max(512).optional(),
             values: z.array(z.number().finite()).max(1_000).optional(),
+            blanks: z.array(z.number().int().min(0).max(999)).max(1_000).optional(),
             categoriesRef: z.string().max(512).optional(),
             categories: z.array(z.string().max(CHART_CATEGORY_WIRE_MAX)).max(1_000).optional(),
           })
@@ -1402,7 +1413,10 @@ export const workbookChartEditSchema = z
               entry.values !== undefined ||
               entry.categories !== undefined,
             { message: 'A series edit needs a name or data.' },
-          ),
+          )
+          .refine((entry) => entry.blanks === undefined ||
+            (entry.values !== undefined && entry.blanks.every((index) => index < entry.values!.length)),
+            { message: 'Chart gaps need a values vector containing their indexes.' }),
       )
       .max(24)
       .optional(),
@@ -1422,6 +1436,7 @@ export const workbookChartEditSchema = z
       edit.grouping !== undefined ||
       edit.gridlines !== undefined ||
       edit.valueAxis !== undefined ||
+      edit.valueAxisFormats !== undefined ||
       edit.gapWidthPct !== undefined ||
       edit.holeSizePct !== undefined ||
       edit.explosionPct !== undefined ||
@@ -1593,6 +1608,7 @@ export const workbookVisualAddSchema = z
                 name: z.string().max(CHART_TEXT_WIRE_MAX),
                 categories: z.array(z.string().max(CHART_CATEGORY_WIRE_MAX)).max(1_000),
                 values: z.array(z.number().finite()).max(1_000),
+                blanks: z.array(z.number().int().min(0).max(999)).max(1_000).optional(),
                 valuesRef: z.string().max(512).optional(),
                 categoriesRef: z.string().max(512).optional(),
                 color: hexColorSchema.optional(),
@@ -1603,7 +1619,9 @@ export const workbookVisualAddSchema = z
                   .record(z.string().regex(/^[0-9]{1,3}$/), z.number().int().min(0).max(400))
                   .optional(),
               })
-              .strict(),
+              .strict()
+              .refine((entry) => entry.blanks?.every((index) => index < entry.values.length) ?? true,
+                { message: 'Chart gaps must refer to an index within values.' }),
           )
           .min(1)
           .max(24),
@@ -1611,6 +1629,7 @@ export const workbookVisualAddSchema = z
         dataLabels: z.enum(['none', 'value', 'percent', 'category-percent']).optional(),
         dataLabelPosition: z.enum(['center', 'inside-end', 'outside-end']).optional(),
         dataLabelFormat: z.string().max(64).optional(),
+        valueAxisFormats: chartValueAxisFormatsSchema.optional(),
         axisTitles: z
           .object({
             category: z.string().max(CHART_TEXT_WIRE_MAX).optional(),

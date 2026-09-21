@@ -5,7 +5,7 @@ import { VoiceTaskRouter } from "./voice-task-router";
 import type { OfficeVoiceClient, VoiceLine, VoiceState } from "./voice-client";
 import "./office-task-controls.css";
 
-type TaskLoop = Pick<
+export type OfficeTaskLoop = Pick<
   AgentLoop,
   | "conversationVersion"
   | "steer"
@@ -19,11 +19,13 @@ const empty = () => EMPTY;
 const noopSubscribe = () => () => undefined;
 
 export function OfficeTaskControls(props: {
-  app: "writer" | "sheets" | "slides";
+  app: "writer" | "sheets" | "slides" | "pdf";
   document: string;
   mode: string;
-  loop: TaskLoop | null;
+  loop: OfficeTaskLoop | null;
   busy: boolean;
+  allowVoice?: boolean;
+  stopTitle?: string;
   onSend(instruction: string): void;
   onStop(): void;
 }) {
@@ -40,6 +42,7 @@ export function OfficeTaskControls(props: {
   const [state, setState] = useState<VoiceState>("off");
   const [lines, setLines] = useState<VoiceLine[]>([]);
   const [voiceAvailable, setVoiceAvailable] = useState(false);
+  const voiceAllowed = props.allowVoice !== false && props.app !== "pdf";
   const directions = useSyncExternalStore(
     props.loop?.subscribeDirections ?? noopSubscribe,
     props.loop?.getDirections ?? empty,
@@ -47,6 +50,7 @@ export function OfficeTaskControls(props: {
   );
 
   useEffect(() => {
+    if (!voiceAllowed) { setVoiceAvailable(false); return; }
     let cancelled = false;
     void import("@/lib/office/voice.functions")
       .then((api) => api.officeVoiceStatusFn())
@@ -59,7 +63,7 @@ export function OfficeTaskControls(props: {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [voiceAllowed]);
 
   useEffect(() => {
     // Capture the counter object; cleanup invalidates the newest connection attempt.
@@ -84,7 +88,7 @@ export function OfficeTaskControls(props: {
     } else setNotice(result?.reason || "The task is not ready for a direction yet.");
   };
   const startVoice = async () => {
-    if (!voiceAvailable || connecting.current || state !== "off") return;
+    if (!voiceAllowed || !voiceAvailable || connecting.current || state !== "off") return;
     connecting.current = true;
     const attempt = ++attemptRef.current;
     setState("connecting");
@@ -167,7 +171,7 @@ export function OfficeTaskControls(props: {
             <button
               type="button"
               onClick={props.onStop}
-              title="Stop the task; earlier edits remain"
+              title={props.stopTitle ?? "Stop the task; earlier edits remain"}
             >
               <Square size={12} />
               Stop task
@@ -177,7 +181,7 @@ export function OfficeTaskControls(props: {
             // Persistent-voice entry point is hidden until the voice gateway is
             // provisioned and OFFICE_VOICE_ENABLED is set (voiceAvailable). This
             // keeps a non-functional Voice button off the toolbar for now.
-            voiceAvailable ? (
+            voiceAllowed && voiceAvailable ? (
               <button
                 type="button"
                 onClick={() => void startVoice()}

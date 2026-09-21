@@ -8,13 +8,48 @@ import type { AgentImage, AgentMessage, AgentToolCall, AgentToolDef, RouteDecisi
 export type LocalOfficeProvider = "anthropic" | "fireworks";
 export class LocalOfficeProviderError extends Error {
   status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; this.name = "LocalOfficeProviderError"; }
+  diagnostic?: { type: string; message: string; requestId: string };
+  constructor(status: number, message: string, diagnostic?: LocalOfficeProviderError["diagnostic"]) {
+    super(message); this.status = status; this.name = "LocalOfficeProviderError";
+    this.diagnostic = diagnostic;
+  }
 }
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj => v && typeof v === "object" && !Array.isArray(v) ? v as Obj : {};
 const text = (v: unknown): string => typeof v === "string" ? v : "";
 const count = (v: unknown): number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
 const OPAQUE_REASONING_PREFIX = "sw-opaque-reasoning:";
+
+// Server-only diagnostics for the explicitly opted-in synthetic transport.
+// Keep provider request failures actionable without echoing credentials or the
+// request body into the browser's error message.
+function providerDiagnostic(value: unknown, requestId = ""): NonNullable<LocalOfficeProviderError["diagnostic"]> {
+  const error = obj(obj(value).error ?? value);
+  let message = text(error.message).slice(0, 2000);
+  for (const name of ["ANTHROPIC_API_KEY", "FIREWORKS_API_KEY", "TYPESAFE_API_KEY"]) {
+    const secret = process.env[name];
+    if (secret) message = message.split(secret).join("[REDACTED]");
+  }
+  message = message.replace(/(?:sk-ant-|apikey_|fw_)[A-Za-z0-9_-]+/g, "[REDACTED]");
+  return { type: text(error.type).slice(0, 100), message, requestId: requestId.slice(0, 150) };
+}
+
+async function failedResponseDiagnostic(response: Response): Promise<LocalOfficeProviderError["diagnostic"]> {
+  if (!response.body) return undefined;
+  const reader = response.body.getReader();
+  let raw = "";
+  const decoder = new TextDecoder();
+  try {
+    while (raw.length < 8192) {
+      const { done, value } = await reader.read();
+      raw += decoder.decode(value, { stream: !done });
+      if (done) break;
+    }
+    if (raw.length > 8192) return undefined;
+    return providerDiagnostic(JSON.parse(raw), response.headers.get("request-id") ?? "");
+  } catch { return undefined; }
+  finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
 
 function fireworksReasoning(value: string | undefined, model: string | undefined): string {
   if (!value || !model) return "";
@@ -146,12 +181,17 @@ export async function streamOfficeLocalTurn(req: {
   const max = Number(process.env.OFFICE_LOCAL_MAX_TOKENS || 8192);
   if (!Number.isSafeInteger(max) || max < 1 || max > 65536) throw new Error("Invalid OFFICE_LOCAL_MAX_TOKENS.");
   const anthropic = req.provider === "anthropic";
+  const fireworksReasoningEffort = process.env.OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT;
+  if (!anthropic && fireworksReasoningEffort !== undefined && !["none", "low", "medium", "high"].includes(fireworksReasoningEffort)) {
+    throw new Error("Invalid OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT.");
+  }
   const messages = localProviderMessages(req.provider, req.messages, model);
   const body = anthropic ? {
     model, system: req.system, messages, max_tokens: max, stream: true,
     ...(req.tools.length ? { tools: req.tools.map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema })) } : {}),
   } : {
     model, messages: [{ role: "system", content: req.system }, ...messages], max_tokens: max, stream: true,
+    ...(fireworksReasoningEffort ? { reasoning_effort: fireworksReasoningEffort } : {}),
     stream_options: { include_usage: true },
     ...(req.tools.length ? { tools: req.tools.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })), tool_choice: "auto" } : {}),
   };
@@ -170,8 +210,8 @@ export async function streamOfficeLocalTurn(req: {
     body: JSON.stringify(body),
   });
   if (!response.ok || !response.body) {
-    await response.body?.cancel().catch(() => {});
-    throw new LocalOfficeProviderError(response.status, `Local ${req.provider} request failed (HTTP ${response.status}).`);
+    const diagnostic = await failedResponseDiagnostic(response);
+    throw new LocalOfficeProviderError(response.status, `Local ${req.provider} request failed (HTTP ${response.status}).`, diagnostic);
   }
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const pending = new Map<number, PendingTool>();
@@ -180,7 +220,7 @@ export async function streamOfficeLocalTurn(req: {
     if (data === "[DONE]") { if (!anthropic) complete = true; break; }
     let event: Obj;
     try { event = obj(JSON.parse(data)); } catch { throw new Error("Malformed local provider event."); }
-    if (event.type === "error" || event.error) throw new LocalOfficeProviderError(obj(event.error).type === "overloaded_error" ? 429 : 502, `Local ${req.provider} stream failed.`);
+    if (event.type === "error" || event.error) throw new LocalOfficeProviderError(obj(event.error).type === "overloaded_error" ? 429 : 502, `Local ${req.provider} stream failed.`, providerDiagnostic(event, response.headers.get("request-id") ?? ""));
     if (!ttfbMs) ttfbMs = Math.max(1, Date.now() - started);
     if (anthropic) {
       if (/^content_block_/.test(text(event.type)) && (!Number.isSafeInteger(event.index) || (event.index as number) < 0)) throw new Error("Invalid local content block index.");
@@ -225,16 +265,34 @@ export async function streamOfficeLocalTurn(req: {
       }
       if (event.usage) {
         const u = obj(event.usage); usage.inputTokens = count(u.prompt_tokens); usage.outputTokens = count(u.completion_tokens);
+        // Fireworks reports cache reads as a subset of total prompt tokens.
+        // https://docs.fireworks.ai/api-reference/post-chatcompletions
+        // Missing/invalid details retain the numeric telemetry default (0),
+        // which means unreported here, not evidence of a measured cache miss.
+        // Fireworks does not report a separate cache-write count in this shape.
+        usage.cacheReadTokens = Math.min(usage.inputTokens, count(obj(u.prompt_tokens_details).cached_tokens));
       }
     }
   }
   req.signal.throwIfAborted();
   if (!complete || !stopReason) throw new Error("Local provider stream ended before completion; no tools were dispatched.");
   const normalizedStop = stopReason === "tool_calls" ? "tool_use" : stopReason === "length" ? "max_tokens" : stopReason === "stop" ? "end_turn" : stopReason;
-  const calls = [...pending.values()].map(t => completedCall(t, new Set(req.tools.map(t => t.name))));
+  const allowed = new Set(req.tools.map(t => t.name));
+  // A provider-confirmed length limit is a recoverable planning result. Mark
+  // the WHOLE batch unexecutable, including any plausible completed prefix.
+  // AgentLoop feeds these back as tool errors and asks for smaller batches.
+  // An unconfirmed/disconnected stream still throws above and dispatches none.
+  const truncated = normalizedStop === "max_tokens";
+  const calls = [...pending.values()].map(t => {
+    if (!t.id || !t.name) throw new Error("Incomplete local provider tool identity.");
+    return truncated
+      ? { id: t.id, name: t.name, input: {}, truncated: true,
+          inputError: "Output length limit reached; this tool was not executed. Split the work into smaller batches." }
+      : completedCall(t, allowed);
+  });
   if (new Set(calls.map(c => c.id)).size !== calls.length) throw new Error("Duplicate local provider tool IDs.");
   // Never execute a partial or stopped/refused generation's plausible prefix.
-  if (calls.length && normalizedStop !== "tool_use") throw new Error("Local provider did not complete its tool turn; no tools were dispatched.");
+  if (calls.length && normalizedStop !== "tool_use" && !truncated) throw new Error("Local provider did not complete its tool turn; no tools were dispatched.");
   // Fireworks interleaved-thinking models require this on tool-result follow-ups.
   // Reuse the UI's opaque envelope and bind it to the producing provider/model;
   // never expose raw reasoning as a text delta or replay it to another model.

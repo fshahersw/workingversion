@@ -383,6 +383,7 @@ import { handleExportCsv as handleExportCsvImpl, type CsvExportContext } from '.
 import { effectivePageBreaks, installPageBreakPreview } from './page-break-preview'
 import { mapProtectedRanges } from './protected-ranges'
 import { handleSave as handleSaveImpl, type SaveContext } from './save-actions'
+import { isWorkbookSaveCommitting } from './save-commit-lock'
 import {
   applyChartEdit as applyChartEditImpl,
   applyShapeEdit as applyShapeEditImpl,
@@ -909,6 +910,13 @@ export function App(): React.JSX.Element {
   const workbookOpeningRef = useRef(false)
   /** Current session's projectId/chatId (resolved when the workbook opens) */
   const chatRefIdsRef = useRef<{ projectId: string; chatId: string } | null>(null)
+  const hydratedChatScopeRef = useRef<string | null>(null)
+  const chatResetEpochRef = useRef(0)
+  const recoveryMountedRef = useRef(true)
+  useEffect(() => {
+    recoveryMountedRef.current = true
+    return () => { recoveryMountedRef.current = false }
+  }, [])
 
   // File renamed externally (in the shell Home list) → sync the title-bar file
   // name (the save path is synced by the main process)
@@ -956,7 +964,7 @@ export function App(): React.JSX.Element {
         ): e is {
           role: 'user' | 'assistant'
           text: string
-          tools?: Array<{ summary: string; isError?: boolean }>
+          tools?: Array<{ summary: string; isError?: boolean; skipped?: boolean }>
         } =>
           !!e &&
           typeof e === 'object' &&
@@ -985,6 +993,7 @@ export function App(): React.JSX.Element {
                 name: '',
                 summary: t.summary,
                 isError: !!t.isError,
+                skipped: !!t.skipped,
               }))
             }
             await api.appendChat(appendArgs)
@@ -1003,9 +1012,11 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const api = (window as Window & { projectApi?: typeof window.projectApi }).projectApi
     if (!api) return
-    // Reset (new workbook or new session)
+    // A save replaces the engine session, but retains the conversation. Resolve
+    // its stable identity before hydrating so live entries are not shown twice.
+    let cancelled = false
+    const resetEpoch = chatResetEpochRef.current
     chatRefIdsRef.current = null
-    setHistoricChat([])
     const tempChatId = `unsaved-${Date.now()}`
     const sessionId = workbookFile?.sessionId
     const resolveArgs: Parameters<typeof api.resolveChat>[0] = { filePath: null, tempChatId }
@@ -1013,12 +1024,27 @@ export function App(): React.JSX.Element {
     void api
       .resolveChat(resolveArgs)
       .then(async (ids) => {
+        if (cancelled) return
         chatRefIdsRef.current = ids
+        const scope = JSON.stringify([ids.projectId, ids.chatId])
+        if (hydratedChatScopeRef.current === scope) return
+        if (chatResetEpochRef.current !== resetEpoch) {
+          hydratedChatScopeRef.current = scope
+          return
+        }
+        if (hydratedChatScopeRef.current !== null) {
+          agentLoopRef.current?.reset()
+          setChat([])
+        }
+        setHistoricChat([])
         const msgs = await api.loadChat({
           projectId: ids.projectId,
           chatId: ids.chatId,
           limit: 200,
         })
+        if (cancelled) return
+        hydratedChatScopeRef.current = scope
+        if (chatResetEpochRef.current !== resetEpoch) return
         if (msgs.length === 0) return
         setHistoricChat(
           msgs.map((m) => ({
@@ -1028,6 +1054,7 @@ export function App(): React.JSX.Element {
               m.tools?.map((t) => ({
                 summary: t.summary,
                 isError: !!t.isError,
+                skipped: !!t.skipped,
                 ...(t.name ? { name: t.name } : {}),
                 ...(t.output ? { output: t.output.slice(0, 6000) } : {}),
               })) ?? [],
@@ -1053,6 +1080,7 @@ export function App(): React.JSX.Element {
       .catch(() => {
         /* silent */
       })
+    return () => { cancelled = true }
   }, [workbookFile?.sessionId])
 
   const persistChatMessage = (
@@ -1062,6 +1090,7 @@ export function App(): React.JSX.Element {
       name?: string
       summary: string
       isError?: boolean
+      skipped?: boolean
       input?: string
       output?: string
     }>,
@@ -1116,7 +1145,7 @@ export function App(): React.JSX.Element {
   /** Tool activity for the whole run (args/output included, accumulated across
    * turns) — for full transcript persistence */
   const runToolsRef = useRef<
-    Array<{ name: string; summary: string; isError?: boolean; input?: string; output?: string }>
+    Array<{ name: string; summary: string; isError?: boolean; skipped?: boolean; input?: string; output?: string }>
   >([])
   /** AI plans apply asynchronously after propose_operations returns. Run
    * completion waits for these before doing the run's single auto-save. */
@@ -1232,6 +1261,7 @@ export function App(): React.JSX.Element {
             name: call.name,
             summary: execution.summary,
             isError: !!execution.isError,
+            skipped: !!execution.skipped,
             ...(input !== undefined ? { input } : {}),
             ...(output !== undefined ? { output } : {}),
           })
@@ -1248,6 +1278,7 @@ export function App(): React.JSX.Element {
                 { id: call.id, startedAt, display: execution.display, mutated: !!execution.mutated, running: false, finishedAt: Date.now(),
                   summary: execution.summary,
                   isError: !!execution.isError,
+                  skipped: !!execution.skipped,
                   name: call.name,
                   ...(execution.output ? { output: execution.output.slice(0, 6000) } : {}),
                 },
@@ -1301,7 +1332,7 @@ export function App(): React.JSX.Element {
           const finalText = truncated
             ? [baseText, t('appAiTruncatedNote')].filter(Boolean).join('\n\n')
             : baseText
-          setMessage(cancelled ? t('appAiStopped') : t('appAiDone'))
+          setMessage(cancelled ? t('appAiStopped') : truncated ? t('appAiTruncatedNote') : turnLimit ? t('appAiTurnLimit') : t('appAiDone'))
           patchLastAssistant((entry) => ({
             ...entry,
             text: finalText,
@@ -1321,11 +1352,19 @@ export function App(): React.JSX.Element {
             .finally(() => { aiSaveLockRef.current = false; setAiBusy(false) })
         },
         onError: (error) => {
+          const failedLoop = agentLoopRef.current
+          const failedVersion = failedLoop?.conversationVersion
+          const failedChat = chatRefIdsRef.current
+          const failedTools = [...runToolsRef.current]
+          const ownsRecovery = () => recoveryMountedRef.current
+            && agentLoopRef.current === failedLoop && failedLoop?.conversationVersion === failedVersion
+            && chatRefIdsRef.current?.projectId === failedChat?.projectId
+            && chatRefIdsRef.current?.chatId === failedChat?.chatId
           setChat(previous => settleRunMessages(previous))
           setMessage(error)
           setChat((previous) => {
             const next = [...previous]
-            // the loop rolled this run's user message out of the model context — surface that
+            // Keep a retry affordance, but the interrupted task remains in context.
             for (let i = next.length - 1; i >= 0; i--) {
               const entry = next[i]!
               if (entry.role === 'user') {
@@ -1346,6 +1385,8 @@ export function App(): React.JSX.Element {
             return next
           })
           const failedWorkbook = lazyWorkbookRef.current
+          const checkpoint = agentLoopRef.current?.failureCheckpoint ?? error
+          let recovery = 'No workbook changes were made by this run.'
           void finalizeFailedRun({
             settle: async () => {
               const applies = aiApplyPromisesRef.current
@@ -1354,7 +1395,9 @@ export function App(): React.JSX.Element {
             },
             restore: async () => {
               // Pending applies may have populated the snapshot: read it only now.
+              if (!ownsRecovery()) return false
               if (lazyWorkbookRef.current !== failedWorkbook) {
+                recovery = 'The workbook changed during recovery; inspect its current state before continuing.'
                 failedRunNeedsReviewRef.current = true
                 return false
               }
@@ -1363,11 +1406,15 @@ export function App(): React.JSX.Element {
               const runtime = univerRef.current
               const workbook = runtime?.univerAPI.getActiveWorkbook()
               if (!snap || !failedWorkbook || !runtime || !workbook) {
+                recovery = 'Automatic rollback was unavailable. Changes remain unsaved for review.'
                 failedRunNeedsReviewRef.current = true
                 patchLastAssistant(entry => ({ ...entry, text: `${entry.text}\n\nAutomatic rollback was unavailable. Changes remain unsaved for review.` }))
                 return false
               }
               const result = await restoreRunSnapshot({ runtime, lazyWorkbookRef, workbook, setMessage }, snap)
+              if (!ownsRecovery()) return false
+              recovery = result.ok && !result.caveat ? FAILED_RUN_ROLLED_BACK
+                : 'Recovery was incomplete. Inspect the workbook before continuing; changes remain unsaved for review.'
               patchLastAssistant(entry => ({
                 ...entry,
                 text: `${entry.text}\n\n${result.ok
@@ -1378,14 +1425,20 @@ export function App(): React.JSX.Element {
               if (!restored) failedRunNeedsReviewRef.current = true
               return restored
             },
-            save: results => autoSaveCompletedAiRun(results),
+            save: results => ownsRecovery() ? autoSaveCompletedAiRun(results) : Promise.resolve(),
             onError: cause => {
+              if (!ownsRecovery()) return
               failedRunNeedsReviewRef.current = true
               const detail = cause instanceof Error ? cause.message : 'Rollback failed.'
+              recovery = `${detail} Changes remain unsaved for review.`
               setMessage(`${detail} Changes remain unsaved for review.`)
               patchLastAssistant(entry => ({ ...entry, text: `${entry.text}\n\n${detail} Changes remain unsaved for review.` }))
             },
-            finish: () => { aiSaveLockRef.current = false; setAiRunScope(undefined); setAiBusy(false) },
+            finish: () => {
+              if (!ownsRecovery()) return
+              persistChatMessage('assistant', `${checkpoint}\n\n${recovery}`, failedTools)
+              aiSaveLockRef.current = false; setAiRunScope(undefined); setAiBusy(false)
+            },
           })
         },
       },
@@ -1433,7 +1486,7 @@ export function App(): React.JSX.Element {
 
   function runAgent(instruction: string, sentAttachments: readonly AttachmentMeta[]): void {
     const loop = agentLoopRef.current
-    if (!instruction.trim() || !loop || loop.busy || runStartingRef.current || aiSaveLockRef.current) return
+    if (!instruction.trim() || !loop || loop.busy || runStartingRef.current || aiSaveLockRef.current || isWorkbookSaveCommitting(lazyWorkbookRef.current)) return
     runStartingRef.current = true
     aiSaveLockRef.current = true
     // Freeze the selection scope for the whole run: users go on clicking around
@@ -1507,6 +1560,7 @@ export function App(): React.JSX.Element {
 
   function handleNewChat(): void {
     if (aiSaveLockRef.current) return
+    chatResetEpochRef.current++
     agentLoopRef.current?.reset()
     setAiRunScope(undefined)
     setAiBusy(false)
@@ -1990,11 +2044,18 @@ export function App(): React.JSX.Element {
     const journalDisposable = runtime.univerAPI.addEvent(
       runtime.univerAPI.Event.CommandExecuted,
       (event) => {
-        if (journalSuppression.active) return
         // The formula engine re-applies cached results with these execution
-        // options; they are derived state, never user edits.
+        // options. Do not journal derived cells, but refresh their charts.
         const options = event.options as { fromFormula?: boolean } | undefined
-        if (options?.fromFormula) return
+        if (options?.fromFormula) {
+          if (event.id === SET_RANGE_VALUES_MUTATION) {
+            const params = event.params as { subUnitId?: string; cellValue?: unknown } | undefined
+            const bounds = cellValueBounds(params?.cellValue)
+            if (params?.subUnitId && bounds) queueChartDataSync(params.subUnitId, bounds)
+          }
+          return
+        }
+        if (journalSuppression.active) return
         // The copy finished (or failed); a stale source must not claim a
         // later, unrelated insert-sheet.
         if (event.id === COPY_SHEET_COMMAND) {
@@ -2451,6 +2512,10 @@ export function App(): React.JSX.Element {
       (event) => {
         const state = lazyWorkbookRef.current
         if (journalSuppression.active || !state) return
+        if (isWorkbookSaveCommitting(state) && !(event.options as { fromFormula?: boolean } | undefined)?.fromFormula) {
+          event.cancel = true
+          return
+        }
         if (event.id === SET_RANGE_VALUES_COMMAND || event.id === SET_RANGE_VALUES_MUTATION) {
           // Quadratic array-criteria formulas (distinct-count COUNTIF idioms
           // over 80k+ rows) freeze the main-thread formula engine for
@@ -2934,12 +2999,22 @@ export function App(): React.JSX.Element {
     retryIndex?: number,
   ): Promise<void> {
     const instruction = (overrideInstruction ?? prompt).trim()
-    if (!instruction || aiBusy || runStartingRef.current) return
+    if (!instruction || aiBusy || runStartingRef.current || isWorkbookSaveCommitting(lazyWorkbookRef.current)) return
+    const sourceWorkbook = lazyWorkbookRef.current
+    const sourceLoop = agentLoopRef.current
+    const sourceVersion = sourceLoop?.conversationVersion
+    const resetEpoch = chatResetEpochRef.current
     const swMode=modeName((aiSettingsRef.current as unknown as WriterPreferences|null)?.swMode)
     if (swMode==='research') {
       try { await window.desktopApi.swApproveResearch(instruction) }
       catch { setMessage('Research requires an explicit public question of at most 200 characters.'); return }
     }
+    // Approval may return after a save, new conversation or another run. Keep
+    // the composer's input intact rather than sending it into that newer scope.
+    if (!recoveryMountedRef.current || lazyWorkbookRef.current !== sourceWorkbook
+      || agentLoopRef.current !== sourceLoop || sourceLoop?.conversationVersion !== sourceVersion
+      || chatResetEpochRef.current !== resetEpoch || sourceLoop?.busy || runStartingRef.current
+      || aiSaveLockRef.current || isWorkbookSaveCommitting(sourceWorkbook)) return
     runToolsRef.current = []
     // The message consumes the composer attachments: they ride along (echoed on the
     // bubble, images multimodal, files via the files skill) and the composer clears.

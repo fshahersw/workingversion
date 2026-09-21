@@ -38,7 +38,7 @@ import { useDictation } from './useDictation'
 import { writerSkill } from './sw-skill'
 import { modeName, profileName, publicQuery, type WriterMode, type WriterProfile } from '../../shared/sw-policy'
 import { useI18n, t as tModule, aiLangDirective, type StringKey } from '../i18n/locale'
-import { Markdown } from '@genoffice/ui'
+import { AssistantMessage } from '@genoffice/ui'
 import { AiComposer, AiTypingIndicator } from '@genoffice/ui'
 import { WriterMark } from '../components/WriterHeader'
 import sendEnterOn from '../assets/send-enter-on.png'
@@ -63,6 +63,7 @@ interface ToolActivity {
   summary: string
   /** still executing: rendered as a spinner chip, replaced in place when the tool finishes */
   isError?: boolean
+  skipped?: boolean
   /** Tool output (truncated on the UI side); when set, the row can be expanded for details */
   output?: string
 }
@@ -545,7 +546,7 @@ export function AiPanel({
   /** Tool activity of the whole run (with args/output, accumulated across turns) — for full
       transcript persistence, and so persisting needn't do side effects inside a setState updater */
   const runToolsRef = useRef<
-    Array<{ name: string; summary: string; isError?: boolean; input?: string; output?: string }>
+    Array<{ name: string; summary: string; isError?: boolean; skipped?: boolean; input?: string; output?: string }>
   >([])
 
   // ── Chat-history persistence ────────────────────────────────────────────
@@ -569,6 +570,7 @@ export function AiPanel({
               name: t.name,
               summary: t.summary,
               isError: t.isError,
+              skipped: !!t.skipped,
               output: t.output ? t.output.slice(0, TOOL_OUTPUT_MAX_CHARS) : undefined,
             })),
             // stored metadata only: no thumbnail read for history, the chips render name/size
@@ -613,6 +615,7 @@ export function AiPanel({
       name: string
       summary: string
       isError?: boolean
+  skipped?: boolean
       input?: string
       output?: string
     }>,
@@ -721,6 +724,7 @@ export function AiPanel({
             name: call.name,
             summary: execution.summary,
             isError: execution.isError,
+            skipped: !!execution.skipped,
             input: safeJsonInput(call.input),
             output: execution.output
               ? execution.output.slice(0, PERSIST_TOOL_FIELD_MAX)
@@ -739,6 +743,7 @@ export function AiPanel({
                   name: call.name,
                   summary: execution.summary,
                   isError: execution.isError,
+                  skipped: !!execution.skipped,
                   output: execution.output
                     ? execution.output.slice(0, TOOL_OUTPUT_MAX_CHARS)
                     : undefined,
@@ -796,6 +801,9 @@ export function AiPanel({
               /* keep the partial edits rather than fail twice */
             }
           }
+          persistMessage('assistant', `${loopRef.current?.failureCheckpoint ?? error}\n\n${reverted
+            ? "The run's changes were rolled back."
+            : failedSnapshot ? 'Recovery was incomplete. Inspect the current document before continuing.' : 'No document changes were made by this run.'}`, runToolsRef.current)
           setChat(previous => settleRunMessages(previous))
           setChat((prev) => {
             const next = [...prev]
@@ -1207,7 +1215,7 @@ export function AiPanel({
                 {entry.tools && entry.tools.length > 0 && <AssistantActivity tools={entry.tools} active={!!entry.streaming}/>}
                 {entry.text && (
                   <div dir="auto">
-                    <Markdown text={entry.text} nav={docNav} />
+                    <AssistantMessage role={entry.role} text={entry.text} nav={docNav} />
                   </div>
                 )}
               </div>
@@ -1256,7 +1264,7 @@ export function AiPanel({
                 </span>
               ) : entry.role === 'assistant' ? (
                 <div dir="auto">
-                  <Markdown text={entry.text} nav={docNav} />
+                  <AssistantMessage role={entry.role} text={entry.text} nav={docNav} />
                 </div>
               ) : (
                 <span dir="auto">{entry.text}</span>

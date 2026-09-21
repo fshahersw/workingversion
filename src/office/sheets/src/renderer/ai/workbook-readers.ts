@@ -6,19 +6,42 @@
  */
 import type { IRange } from '@univerjs/core'
 import { columnLabel, parseAddress } from '../../domain/cell-address'
+import { applyChartStateEdit, type ChartVisualState } from '../../domain/chart-visual'
 import { MAX_PATCH_ENTRY_BYTES } from '../../shared/desktop-api'
 import type { InMemoryWorkbookAdapter } from '../../domain/in-memory-workbook'
 import type { CellFormatState, CellScalar } from '../../domain/workbook.types'
 import { toSelectionFormat } from '../selection-format'
 import { lazyCellReader } from '../univer-sync'
 import { lazySheetScreenExtent, type LazyWorkbookState, type UniverRuntime } from '../univer-state'
-import type { ActiveSheetInfo, FrozenSelection } from './tools'
+import type { ActiveSheetInfo, ChartRef, FrozenSelection } from './tools'
 
 /** The App refs the readers need; passed per call so they never go stale. */
 export interface WorkbookReadContext {
   univerRef: { readonly current: UniverRuntime | null }
   lazyWorkbookRef: { readonly current: LazyWorkbookState | null }
   adapterRef: { readonly current: InMemoryWorkbookAdapter }
+}
+
+function chartContext(path: string, sheetId: string, chart: ChartVisualState | undefined): ChartRef {
+  return {
+    path, sheetId, title: chart?.title.slice(0, 255) ?? '', types: chart?.chartTypes.join('+') ?? '',
+    ...(chart ? {
+      seriesCount: chart.series.length,
+      valueAxisFormats: {
+        ...((chart.barDirection === 'bar' ? chart.xAxis : chart.yAxis)?.numFmt === undefined ? {} : {
+          primary: (chart.barDirection === 'bar' ? chart.xAxis : chart.yAxis)!.numFmt!.slice(0, 64),
+        }),
+        ...(chart.secondaryYAxis?.numFmt === undefined ? {} : { secondary: chart.secondaryYAxis.numFmt.slice(0, 64) }),
+      },
+      series: chart.series.slice(0, 8).map((series, index) => ({
+        index, name: series.name.slice(0, 120), valueCount: series.values.length,
+        categoryCount: series.categories.length,
+        categorySample: series.categories.slice(0, 3).map((value) => value.slice(0, 64)),
+        ...(series.valuesRef === undefined ? {} : { valuesRef: series.valuesRef.slice(0, 512) }),
+        ...(series.categoriesRef === undefined ? {} : { categoriesRef: series.categoriesRef.slice(0, 512) }),
+      })),
+    } : {}),
+  }
 }
 
 /// Feature-state report for the AI: what already exists before it edits.
@@ -196,7 +219,8 @@ export function readSheetFeatures(ctx: WorkbookReadContext, sheetIdInput?: strin
 
   if (state) {
     const visuals = [...state.file.visuals, ...state.editJournal.visualAdds].filter(
-      (visual) => visual.sheetId === sheetId && visual.kind !== 'chart',
+      (visual) => visual.sheetId === sheetId && visual.kind !== 'chart' &&
+        !state.editJournal.visualEdits.get(visual.id)?.remove && !state.editJournal.sheets.removed.has(visual.sheetId),
     )
     if (visuals.length > 0) {
       lines.push(`Shapes/images: ${visuals.length} (charts are listed in get_workbook_context):`)
@@ -315,6 +339,10 @@ export function getActiveSheetInfo(
       ? `${columnLabel(loaded.startColumn)}${loaded.startRow + 1}:` +
         `${columnLabel(loaded.endColumn)}${loaded.endRow + 1}`
       : undefined
+    const liveSheetIds = new Set(workbook.getSheets().map((sheet) => sheet.getSheetId()))
+    const charts = [...state.file.visuals, ...state.editJournal.visualAdds].filter((visual) =>
+      visual.kind === 'chart' && (visual.chartPath || visual.chart) && liveSheetIds.has(visual.sheetId) &&
+      !state.editJournal.sheets.removed.has(visual.sheetId) && !state.editJournal.visualEdits.get(visual.id)?.remove)
     return {
       mode: 'lazy',
       streaming: !state.formulaMode,
@@ -338,14 +366,9 @@ export function getActiveSheetInfo(
       merges: worksheet.getMergedRanges().map((range) => range.getA1Notation()),
       // Session-added charts have no chart part yet; their visual id
       // doubles as the edit_chart path.
-      charts: [...state.file.visuals, ...state.editJournal.visualAdds]
-        .filter((visual) => visual.kind === 'chart' && (visual.chartPath || visual.chart))
-        .map((visual) => ({
-          path: visual.chartPath ?? visual.id,
-          title: visual.chart?.title ?? '',
-          types: visual.chart?.chartTypes.join('+') ?? '',
-          sheetId: visual.sheetId,
-        })),
+      chartCount: charts.length,
+      charts: charts.slice(0, 32).map((visual) => chartContext(visual.chartPath ?? visual.id, visual.sheetId,
+        visual.chart ? applyChartStateEdit(visual.chart, state.editJournal.chartEdits.get(visual.chartPath ?? visual.id)) : undefined)),
     }
   }
   const snapshot = ctx.adapterRef.current.getSnapshot()
@@ -354,6 +377,7 @@ export function getActiveSheetInfo(
   const activeId = workbook?.getActiveSheet()?.getSheetId()
   const sheet = snapshot.sheets.find((entry) => entry.id === activeId) ?? snapshot.sheets[0]
   if (!sheet) return { mode: 'none', sheetId: '', sheetName: '', knownAddresses: [], sheets: [] }
+  const charts = snapshot.sheets.flatMap((entry) => entry.visuals ?? [])
   return {
     mode: 'demo',
     sheetId: sheet.id,
@@ -377,14 +401,8 @@ export function getActiveSheetInfo(
     selection,
     ...frozenFields,
     merges: sheet.merges ?? [],
-    charts: snapshot.sheets.flatMap((entry) =>
-      (entry.visuals ?? []).map((visual) => ({
-        path: visual.id,
-        title: visual.chart.title,
-        types: visual.chart.chartTypes.join('+'),
-        sheetId: visual.sheetId,
-      })),
-    ),
+    chartCount: charts.length,
+    charts: charts.slice(0, 32).map((visual) => chartContext(visual.id, visual.sheetId, visual.chart)),
   }
 }
 

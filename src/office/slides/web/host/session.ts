@@ -1,3 +1,4 @@
+import { officeStreamFailure } from "@/lib/office/stream-errors";
 import { OrderedChatAppender } from "@/lib/office/chat-persistence";
 // ============================================================================
 // Platform host for the Slides renderer. The retained preload bridge talks to
@@ -74,6 +75,7 @@ type EngineBinding = { engine: EngineSession; generation: SessionGeneration; ses
 const sessionQueue = new OfficeSessionQueue();
 let activeSession: EngineBinding | null = null;
 let lifecycleSignal: AbortSignal | undefined;
+let pageHideCleanup: (() => void) | undefined;
 let initial: { sessionId: string; sequence: number; result: unknown; events?: unknown[] } | null =
   null;
 let settings: Record<string, unknown> = {
@@ -297,7 +299,7 @@ async function stream(r: {
         }
       }
       if (!complete && !controller.signal.aborted)
-        throw new Error("The response ended before completion.");
+        throw new TypeError("The network response ended before completion.");
     } finally {
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
@@ -311,7 +313,7 @@ async function stream(r: {
         : {
             requestId: r.requestId,
             type: "error",
-            error: error instanceof Error ? error.message : "Request failed.",
+            ...officeStreamFailure(error),
           },
     );
   } finally {
@@ -409,11 +411,16 @@ async function project(channel: string, args: unknown[]) {
   }
   if (channel === "project:appendChat") {
     const r = args[0] as {
+      projectId: string;
+      chatId: string;
       role: "user" | "assistant";
       text: string;
       tools?: unknown;
       attachments?: unknown;
     };
+    if (r.projectId !== docId || r.chatId !== docId) {
+      throw new Error("The document session changed before the chat message was saved.");
+    }
     const message = structuredClone({
       role: r.role, text: r.text,
       ...(Array.isArray(r.tools) ? { tools: r.tools as never } : {}),
@@ -980,6 +987,11 @@ export async function initialize(opts: SlidesHostOptions, signal?: AbortSignal):
     throw error;
   }
   activeSession = { engine: session, generation, sessionId: opened.sessionId, sequence: opened.sequence };
+  // Closing a browser tab does not run React effect cleanup. Release this
+  // document's worker using the existing keepalive close request.
+  const onPageHide = (event: PageTransitionEvent) => { if (!event.persisted) void teardown(signal); };
+  window.addEventListener("pagehide", onPageHide);
+  pageHideCleanup = () => window.removeEventListener("pagehide", onPageHide);
   options = opts;
   state.dirty = false;
   state.busy = false;
@@ -1008,6 +1020,8 @@ export async function initialize(opts: SlidesHostOptions, signal?: AbortSignal):
 /** Stop only the generation owned by this route effect. */
 export async function teardown(signal?: AbortSignal): Promise<void> {
   if (signal && signal !== lifecycleSignal) return;
+  pageHideCleanup?.();
+  pageHideCleanup = undefined;
   sessionQueue.invalidate();
   for (const c of streams.values()) c.abort();
   streams.clear();

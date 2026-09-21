@@ -471,6 +471,7 @@ function cleanTools(v: unknown): OfficeChatMessage["tools"] {
         name: x.name.slice(0, 80),
         summary: s(x.summary).slice(0, 400),
         ...(x.isError === true ? { isError: true } : {}),
+        ...(x.skipped === true ? { skipped: true } : {}),
         ...(typeof x.input === "string" ? { input: x.input.slice(0, MAX_TOOL_FIELD) } : {}),
         ...(typeof x.output === "string" ? { output: x.output.slice(0, MAX_TOOL_FIELD) } : {}),
       },

@@ -102,6 +102,7 @@ export type OfficeChatMessage = {
     name: string;
     summary: string;
     isError?: boolean;
+    skipped?: boolean;
     input?: string;
     output?: string;
   }>;

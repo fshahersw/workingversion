@@ -3,6 +3,8 @@
 /// worksheet/drawing relationships, and the [Content_Types].xml overrides.
 
 import { ensureRelationshipNamespace } from './xlsx-namespace'
+import { numericChartPoints } from '../domain/chart-cache'
+import { setValueAxisFormats } from './xlsx-chart'
 
 export class VisualAddError extends Error {}
 
@@ -21,6 +23,7 @@ export interface ChartAddSeries {
   readonly name: string
   readonly categories: readonly string[]
   readonly values: readonly number[]
+  readonly blanks?: readonly number[] | undefined
   readonly valuesRef?: string | undefined
   readonly categoriesRef?: string | undefined
   readonly color?: string | undefined
@@ -44,6 +47,7 @@ export interface ChartAdd {
   readonly dataLabelPosition?: 'center' | 'inside-end' | 'outside-end' | undefined
   /// c:numFmt formatCode, written with sourceLinked="0".
   readonly dataLabelFormat?: string | undefined
+  readonly valueAxisFormats?: { primary?: string | undefined; secondary?: string | undefined } | undefined
   readonly axisTitles?:
     | {
         readonly category?: string | undefined
@@ -486,7 +490,7 @@ export function buildChartXml(chart: ChartAdd): string {
       : chart.series.length > 1 || isPieLike
         ? '<c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend>'
         : ''
-  return (
+  const xml = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"' +
     ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
@@ -502,6 +506,7 @@ export function buildChartXml(chart: ChartAdd): string {
     '</c:chart>' +
     '</c:chartSpace>'
   )
+  return chart.valueAxisFormats ? setValueAxisFormats(xml, chart.valueAxisFormats) : xml
 }
 
 /// Same flag set xlsx-chart.ts writes, so later edits recognize the element.
@@ -578,8 +583,8 @@ function buildSeriesXml(
     (series.valuesRef
       ? `<c:numRef><c:f>${escapeXmlText(series.valuesRef)}</c:f>` +
         `<c:numCache><c:formatCode>General</c:formatCode>` +
-        `${pointCount(series.values.length)}${numPoints(series.values)}</c:numCache></c:numRef>`
-      : `<c:numLit>${pointCount(series.values.length)}${numPoints(series.values)}</c:numLit>`) +
+        `${pointCount(series.values.length)}${numPoints(series.values, series.blanks)}</c:numCache></c:numRef>`
+      : `<c:numLit>${pointCount(series.values.length)}${numPoints(series.values, series.blanks)}</c:numLit>`) +
     '</c:val>'
   const isPieLike = chartType === 'pie' || chartType === 'doughnut'
   const isLineLike = chartType === 'line' || chartType === 'radar'
@@ -675,8 +680,8 @@ function buildScatterSeriesXml(series: ChartAddSeries, index: number): string {
     (series.valuesRef
       ? `<c:numRef><c:f>${escapeXmlText(series.valuesRef)}</c:f>` +
         `<c:numCache><c:formatCode>General</c:formatCode>` +
-        `${pointCount(series.values.length)}${numPoints(series.values)}</c:numCache></c:numRef>`
-      : `<c:numLit>${pointCount(series.values.length)}${numPoints(series.values)}</c:numLit>`) +
+        `${pointCount(series.values.length)}${numPoints(series.values, series.blanks)}</c:numCache></c:numRef>`
+      : `<c:numLit>${pointCount(series.values.length)}${numPoints(series.values, series.blanks)}</c:numLit>`) +
     '</c:yVal>'
   return (
     '<c:ser>' +
@@ -700,8 +705,8 @@ function strPoints(values: readonly string[]): string {
     .join('')
 }
 
-function numPoints(values: readonly number[]): string {
-  return values.map((value, i) => `<c:pt idx="${i}"><c:v>${String(value)}</c:v></c:pt>`).join('')
+function numPoints(values: readonly number[], blanks?: readonly number[]): string {
+  return numericChartPoints(values, blanks)
 }
 
 // ---- package plumbing ----

@@ -781,6 +781,27 @@ export async function classifyTask(
 
 export type RouteDecision = { model: string; tier: ModelTier; taskClass: TaskClass | null };
 
+/** A steering update is part of its unfinished task, not an isolated cheap edit.
+ * Keep the exact core-loop markers scoped to the current request; an old summary
+ * or interrupted task must not prevent a later, independent simple edit. */
+export function officeNeedsTaskContext(messages: readonly AgentMessage[]): boolean {
+  let latest = messages.length - 1;
+  while (latest >= 0 && messages[latest]?.role !== 'user') latest--;
+  const current = messages[latest];
+  if (!current || current.role !== 'user') return false;
+  const text = current.text.trimStart();
+  if (/^(?:Updated directions from the user\b|\[Summary of earlier conversation \(auto-compacted\)\]|\[Task interrupted\s*[—-]\s*not completed\])/i.test(text)) return true;
+  // Editor context is appended to ordinary requests. A continuation remains
+  // context-dependent even when its full text also contains a workbook outline.
+  if (/^(?:please\s+)?(?:continue|resume|retry|try again|keep going|carry on|pick up where|finish (?:it|that|this|the (?:task|work|rest))|do the rest|go ahead)\b/i.test(text)) return true;
+  let previous = latest - 1;
+  while (previous >= 0 && messages[previous]?.role !== 'user') previous--;
+  const prior = messages[previous];
+  // compactActiveRun pins summary+ack+original request, then complete exchanges.
+  // Its summary can contain authoritative steering removed from the recent tail.
+  return prior?.role === 'user' && prior.text.startsWith('[Summary of earlier conversation (auto-compacted)]\nHistorical receipts only;');
+}
+
 /** Pick the model for this turn from profile, task class and image presence. */
 export async function routeTurn(req: {
   app: OfficeApp;
@@ -796,6 +817,9 @@ export async function routeTurn(req: {
   }
   if (!TIERING_ON) {
     return { model: WRITER_MODEL, tier: "main", taskClass: null };
+  }
+  if (officeNeedsTaskContext(req.messages)) {
+    return { model: WRITER_MODEL, tier: 'main', taskClass: null };
   }
   // One image detection for the whole route: it keeps an image-bearing turn
   // away from the text-only Jev router and, below, away from a fast tier that
@@ -884,7 +908,8 @@ export async function streamWriterTurn(
       contextKey: createHash("sha256").update(req.system).digest("hex") });
   req.signal.throwIfAborted();
   if (localProvider) {
-    await streamOfficeLocalTurn({ ...req, provider: localProvider, route }, cb);
+    const { localOfficeCapabilities } = await import('../office/local-capabilities.server');
+    await streamOfficeLocalTurn({ ...localOfficeCapabilities(req), provider: localProvider, route }, cb);
     return;
   }
   const model = route.model;

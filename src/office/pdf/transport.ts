@@ -1,3 +1,4 @@
+import { officeStreamFailure } from "@/lib/office/stream-errors";
 import type { AgentToolCall, AgentTransport } from "@genoffice/agent-core";
 
 /** Uses the same authenticated, provider-independent Office SSE endpoint as the editors. */
@@ -13,7 +14,7 @@ export function pdfTransport(): AgentTransport {
           headers: { "Content-Type": "application/json" }, signal: controller.signal,
           body: JSON.stringify({ ...request, requestId, app: "pdf", mode: "write", profile: "standard" }),
         });
-        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "The assistant request failed.");
+        if (!response.ok) throw Object.assign(new Error("The assistant request failed."), { status: response.status });
         if (!response.body) throw new Error("The assistant response has no stream.");
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -34,15 +35,26 @@ export function pdfTransport(): AgentTransport {
               else if (event.type === "reasoning") callbacks.onReasoning?.(event.text);
               else if (event.type === "tool-call") callbacks.onToolCall(event.toolCall as AgentToolCall);
               else if (event.type === "status") callbacks.onStatus?.(event);
-              else if (event.type === "error") throw new Error(event.error || "The assistant failed.");
+              else if (event.type === "error") {
+                ended = true;
+                callbacks.onError(event.error || "The assistant failed.", {
+                  code: event.errorCode,
+                  retryable: ["timeout", "network", "overloaded"].includes(event.errorCode),
+                });
+                return;
+              }
               else if (event.type === "done") { callbacks.onStopReason?.(event.stopReason); finish(); return; }
             }
           }
-          if (!ended) throw new Error("The assistant response ended before completion.");
+          if (!ended) throw new TypeError("The network response ended before completion.");
         } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
       })().catch(error => {
         if (controller.signal.aborted) finish();
-        else if (!ended) { ended = true; callbacks.onError(error instanceof Error ? error.message : String(error)); }
+        else if (!ended) {
+          ended = true;
+          const failure = officeStreamFailure(error);
+          callbacks.onError(failure.error, { code: failure.errorCode, retryable: Boolean(failure.errorCode) });
+        }
       });
       return { cancel: () => { controller.abort(); finish(); } };
     },

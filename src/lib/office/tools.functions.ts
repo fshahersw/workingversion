@@ -260,13 +260,15 @@ export const officeVerifyCitationsFn = createServerFn({ method: "POST" })
 
 export const officeFetchPageFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: { url: string; maxChars?: number }) => ({
+  .inputValidator((d: { url: string; maxChars?: number; startChar?: number; revision?: string }) => ({
     url: str(d?.url, 2048, "url"),
-    maxChars: Number.isFinite(d?.maxChars) ? Number(d.maxChars) : 12_000,
+    maxChars: Number.isFinite(d?.maxChars) ? Number(d.maxChars) : 8_000,
+    startChar: d?.startChar === undefined ? 0 : Number(d.startChar),
+    ...(d?.revision ? { revision: str(d.revision, 64, 'revision') } : {}),
   }))
   .handler(async ({ data }) => {
     const { readOfficePage } = await import("./tools.server");
-    return { text: await readOfficePage(data.url, data.maxChars) };
+    return { text: await readOfficePage(data.url, data.maxChars, data.startChar, data.revision) };
   });
 
 export const officeCreateDocumentFn = createServerFn({ method: "POST" })

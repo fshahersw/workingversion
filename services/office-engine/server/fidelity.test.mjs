@@ -13,9 +13,20 @@ test("fidelity bundle is built", () => {
   assert.ok(existsSync(bundle), "run `node build.mjs` first");
 });
 
-const { CORPUS, verifyCase, PPTX_CORPUS, verifyPptxCase } = existsSync(bundle)
+const { CORPUS, verifyCase, PPTX_CORPUS, verifyPptxCase, verifyStyledSheetCreation } = existsSync(bundle)
   ? require(bundle)
   : { CORPUS: [], verifyCase: null, PPTX_CORPUS: [], verifyPptxCase: null };
+
+test("first styled multi-sheet save allocates unique, resolvable relationships", async () => {
+  const result = await verifyStyledSheetCreation();
+  assert.equal(new Set(result.ids).size, result.ids.length, "relationship IDs must be unique");
+  assert.equal(result.sheets.length, 3);
+  for (const sheet of result.sheets) {
+    assert.equal(sheet.matches, 1, sheet.name);
+    assert.match(sheet.type, /\/worksheet$/);
+    assert.equal(sheet.exists, true, sheet.name);
+  }
+});
 
 for (const entry of CORPUS) {
   test(`untouched entries survive byte-identical: ${entry.name}`, async () => {

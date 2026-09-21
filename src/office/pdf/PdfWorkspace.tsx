@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { Link, useBlocker } from "@tanstack/react-router";
-import { ArrowLeft, ArrowUp, Download, Highlighter, Loader2, RotateCw, Save, Square, Undo2, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { ArrowLeft, ArrowUp, Download, Highlighter, Loader2, RotateCw, Save, Undo2, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { AgentLoop } from "@genoffice/agent-core";
-import { Markdown } from "@genoffice/ui";
+import { AssistantMessage } from "@genoffice/ui";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { OfficeDocSummary } from "@/lib/office/types";
 import { appendOfficeChatFn, getOfficeDocFn, loadOfficeChatFn } from "@/lib/office/office.functions";
 import { OrderedChatAppender } from "@/lib/office/chat-persistence";
+import { OfficeTaskControls, type OfficeTaskLoop } from "../shared/OfficeTaskControls";
+import { createPdfTaskDirections } from "./task-directions";
 import { applyPdfOperations, listPdfFields, validatePdf, type PdfOperation } from "./document";
 import { openPdfView, pageText, highlightRects, capturePdfPage } from "./reader";
 import { createPdfSkill } from "./skill";
@@ -23,6 +25,8 @@ const messageOf = (e: unknown) => e instanceof Error ? e.message : String(e);
 export function PdfWorkspace({ docId }: { docId: string }) {
   const model = useRef<Model | null>(null), alive = useRef(true), busyRef = useRef(false);
   const undo = useRef<Uint8Array[]>([]), loop = useRef<AgentLoop | null>(null);
+  const directions = useRef<ReturnType<typeof createPdfTaskDirections> | null>(null);
+  const [taskLoop, setTaskLoop] = useState<OfficeTaskLoop | null>(null);
   const chatAppender = useRef(new OrderedChatAppender());
   const conversation = useRef<HTMLDivElement>(null), followConversation = useRef(true);
   const runStart = useRef<Uint8Array | null>(null);
@@ -64,20 +68,33 @@ export function PdfWorkspace({ docId }: { docId: string }) {
     try { await chatAppender.current.append(docId, operationId => appendOfficeChatFn({ data: { docId, message: { ...message, operationId } } })); }
     catch (e) { if (alive.current) setError("Conversation could not be saved: " + messageOf(e)); }
   };
-  const finishRun = async (text: string, outcome: "complete" | "cancelled" | "failed" = "complete") => {
+  const finishRun = async (text: string, outcome: "complete" | "partial" | "cancelled" | "failed" = "complete") => {
+    const owner = loop.current;
+    const ownsRun = () => alive.current && loop.current === owner;
     const before = runStart.current; runStart.current = null;
     try {
-      if (!alive.current) return;
-      const changed = before && current().bytes !== before;
-      if (outcome !== "complete" && changed) {
-        await install(before, current().revision, "The interrupted run was rolled back. Earlier user changes remain.", undefined, false);
-      } else if (changed) keepUndo(before);
-      setNotice(outcome === "complete"
-        ? changed ? "Task complete. PDF changes are unsaved." : "Task complete. No PDF changes were made."
-        : (outcome === "cancelled" ? "Task stopped." : "Task failed.") + (changed ? " Its PDF changes were rolled back." : " No PDF changes were made."));
-      if (text) await append({ role: "assistant", text });
-    } catch (e) { setNotice("Task ended. Recovery needs attention."); setError("Recovery needs attention: " + messageOf(e)); }
-    finally { if (alive.current) { busyRef.current = false; setBusy(false); setReply(""); } }
+      if (!ownsRun()) return;
+      let transcript = text;
+      try {
+        const changed = before && current().bytes !== before;
+        if ((outcome === "cancelled" || outcome === "failed") && changed) {
+          await install(before, current().revision, "The interrupted run was rolled back. Earlier user changes remain.", undefined, false);
+        } else if (changed) keepUndo(before);
+        if (!ownsRun()) return;
+        setNotice(outcome === "complete"
+          ? changed ? "Task complete. PDF changes are unsaved." : "Task complete. No PDF changes were made."
+          : outcome === "partial" ? "Task paused before completion. Review the PDF and continue the remaining work."
+          : (outcome === "cancelled" ? "Task stopped." : "Task failed.") + (changed ? " Its PDF changes were rolled back." : " No PDF changes were made."));
+      } catch (e) {
+        if (!ownsRun()) return;
+        const recovery = "Recovery was incomplete. Inspect the PDF before continuing; changes may remain. " + messageOf(e);
+        transcript = [text, recovery].filter(Boolean).join("\n\n");
+        setNotice("Task ended. Recovery needs attention."); setError(recovery);
+      }
+      // A failed rollback must not discard the checkpoint needed to resume.
+      if (ownsRun() && transcript) await append({ role: "assistant", text: transcript });
+    } catch (e) { if (ownsRun()) setError("Conversation could not be saved: " + messageOf(e)); }
+    finally { if (ownsRun()) { busyRef.current = false; setBusy(false); setReply(""); } }
   };
 
   useBlocker({ shouldBlockFn: () => (model.current?.dirty || busyRef.current) ? !window.confirm("Leave this PDF with unsaved changes or an active task?") : false, enableBeforeUnload: false });
@@ -103,27 +120,45 @@ export function PdfWorkspace({ docId }: { docId: string }) {
       const actualMeta = { ...metadata, version, hash: response.headers.get("X-Office-Hash") || metadata.hash };
       model.current = { bytes, revision: 0, view: pdf, meta: actualMeta, dirty: false };
       setView(pdf); setMeta(actualMeta); setMessages(chat.map(m => ({ role: m.role, text: m.text })));
-      setFields(await listPdfFields(bytes));
+      const formFields = await listPdfFields(bytes);
+      if (controller.signal.aborted) return;
+      setFields(formFields);
       const skill = createPdfSkill({
         state: () => { const s = current(); return { bytes: s.bytes, revision: s.revision, storageRevision: s.meta.version, pageCount: s.view.numPages, name: s.meta.name }; },
         readPage: n => pageText(current().view, n),
         capturePage: (n, signal) => capturePdfPage(current().view, n, signal),
         commit: install,
       });
-      loop.current = new AgentLoop({
-        skill, transport: pdfTransport(), maxTurns: 20,
+      const isCurrent = (): boolean => alive.current && !controller.signal.aborted && loop.current === agent;
+      const agent = new AgentLoop({
+        skill, transport: pdfTransport(), maxTurns: 100,
         events: {
-          onText: text => { if (alive.current) setReply(text); },
-          onToolStart: call => { if (alive.current) setNotice(call.name.startsWith("pdf_read") || call.name === "pdf_search" ? "Reading source pages…" : "Checking the requested operation…"); },
-          onToolExecuted: event => { if (alive.current) setActivity(previous => [...previous.slice(-19), event.execution.summary + (event.execution.isError ? " — needs attention" : "")]); },
-          onDone: result => { void finishRun(result.cancelled ? "Task stopped. Its PDF changes were rolled back." : result.text || "The PDF task finished.", result.cancelled ? "cancelled" : "complete"); },
-          onError: failure => { if (alive.current) setError(failure); void finishRun("The task failed. Its PDF changes were rolled back.", "failed"); },
+          onText: text => { if (isCurrent()) setReply(text); },
+          onToolStart: call => { if (isCurrent()) setNotice(call.name.startsWith("pdf_read") || call.name === "pdf_search" ? "Reading source pages…" : "Checking the requested operation…"); },
+          onToolExecuted: event => { if (isCurrent()) setActivity(previous => [...previous.slice(-19), event.execution.summary + (event.execution.skipped ? " — skipped" : event.execution.isError ? " — needs attention" : "")]); },
+          onTurnEnd: updates => { if (isCurrent()) controls.applied(updates); },
+          onDone: result => {
+            if (!isCurrent()) return;
+            controls.finish();
+            const partial = result.turnLimit || result.truncated;
+            void finishRun(result.cancelled ? "Task stopped. Inspect the PDF before continuing."
+              : [result.text, partial ? "This task is incomplete. Review the current PDF before continuing." : ""].filter(Boolean).join("\n\n") || "The PDF task finished.",
+            result.cancelled ? "cancelled" : partial ? "partial" : "complete");
+          },
+          onError: failure => {
+            if (!isCurrent()) return;
+            controls.finish(); setError(failure);
+            void finishRun(agent.failureCheckpoint ?? "The task failed. Inspect the PDF before continuing.", "failed");
+          },
         },
       });
-      loop.current.restore(chat.map(m => ({ role: m.role, text: m.text })));
+      loop.current = agent;
+      const controls = createPdfTaskDirections(agent, { isCurrent, append: message => { void append(message); } });
+      directions.current = controls; setTaskLoop(controls.loop);
+      agent.restore(chat.map(m => ({ role: m.role, text: m.text })));
     })().catch(e => { if (!controller.signal.aborted) setError(messageOf(e)); });
     return () => {
-      alive.current = false; controller.abort(); loop.current?.cancel(); loop.current = null;
+      alive.current = false; controller.abort(); loop.current?.cancel(); loop.current = null; directions.current = null;
       window.removeEventListener("beforeunload", beforeUnload);
       void model.current?.view.destroy();
     };
@@ -137,10 +172,18 @@ export function PdfWorkspace({ docId }: { docId: string }) {
     catch (e) { setError(messageOf(e)); }
     finally { if (alive.current) setSaving(false); }
   };
-  const send = async () => {
-    if (locked || !prompt.trim() || !loop.current) return;
+  const send = async (instruction = prompt) => {
+    const text = instruction.trim();
+    if (!alive.current || !text || !loop.current) return;
+    if (busyRef.current) {
+      const result = directions.current?.loop.steer(text);
+      if (result?.accepted) { setPrompt(""); setError(""); setNotice("Direction queued. It will apply after the current operation."); }
+      else setError(result?.reason ?? "The task is finishing. Send a new request when it stops.");
+      return;
+    }
+    if (locked) return;
     followConversation.current = true;
-    const text = prompt.trim(); setPrompt(""); setError(""); setActivity([]);
+    setPrompt(""); setError(""); setActivity([]);
     busyRef.current = true; setBusy(true); runStart.current = current().bytes;
     // Persist in order without delaying the cancellable run on a network write.
     void append({ role: "user", text });
@@ -223,12 +266,18 @@ export function PdfWorkspace({ docId }: { docId: string }) {
           followConversation.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 80;
         }}>
           {messages.length === 0 && <div className="sw-pdf-welcome"><h3>Start with the evidence.</h3><p>Ask about a page, highlight an exact passage, add a review note, or fill a supported form.</p>{["Summarize this PDF with page citations.", "List the form fields and their current values.", "Add a note on page 1: Review before filing."].map(text => <button key={text} onClick={() => setPrompt(text)}>{text}</button>)}</div>}
-          {messages.map((m, i) => <div key={i} className={"sw-pdf-message " + m.role}><span>{m.role === "user" ? "You" : "PDF assistant"}</span><Markdown text={m.text} nav={{ scheme: "#pdf-page-", onNavigate: href => { const n = Number(href.slice(10)); if (n >= 1 && n <= view.numPages) setPage(n); } }} /></div>)}
+          {messages.map((m, i) => <div key={i} className={"sw-pdf-message " + m.role}><span>{m.role === "user" ? "You" : "PDF assistant"}</span><AssistantMessage role={m.role} text={m.text} nav={{ scheme: "#pdf-page-", onNavigate: href => { const n = Number(href.slice(10)); if (n >= 1 && n <= view.numPages) setPage(n); } }} /></div>)}
           {activity.length > 0 && <details className="sw-pdf-activity" open={busy}><summary>{busy ? "Working with your PDF" : "Task activity"} · {activity.length} actions</summary>{activity.map((text, i) => <p key={i}>{text}</p>)}</details>}
-          {reply && <div className="sw-pdf-message assistant"><Markdown text={reply} /></div>}
+          {reply && <div className="sw-pdf-message assistant"><AssistantMessage text={reply} /></div>}
           {fields.length > 0 && <details className="sw-pdf-fields"><summary>{fields.length} form fields</summary>{fields.map(field => <div key={current().revision + ":" + field.name}><label>{field.name}<span>{field.readOnly ? " · Read-only" : ""}</span></label><input aria-label={field.name} disabled={locked || field.readOnly || field.type === "unsupported"} defaultValue={String(field.value ?? "")} placeholder={field.type === "checkbox" ? "true or false" : field.options?.join(" / ")} onKeyDown={e => { if (e.key !== "Enter") return; const value = e.currentTarget.value; if (field.type === "checkbox" && value !== "true" && value !== "false") { setError("Enter true or false for a checkbox."); return; } void apply([{ type: "fill_form", name: field.name, value: field.type === "checkbox" ? value === "true" : value }], "Form value updated."); }} /></div>)}<p>Press Enter to apply a field value.</p></details>}
         </div>
-        <div className="sw-pdf-composer"><textarea aria-label="Ask the PDF assistant" placeholder="Ask about this PDF or describe a change…" value={prompt} disabled={locked && !busy} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }} /><div><span>{busy ? "Working · changes remain unsaved" : "Changes are reversible until you save."}</span>{busy ? <button aria-label="Stop PDF task" onClick={() => loop.current?.cancel()}><Square size={16} /></button> : <button aria-label="Send to PDF assistant" disabled={locked || !prompt.trim()} onClick={() => void send()}><ArrowUp size={18} /></button>}</div></div>
+        <div className="sw-pdf-composer">
+          <OfficeTaskControls app="pdf" document={docId} mode="write" loop={taskLoop} busy={busy} allowVoice={false}
+            stopTitle="Stop the task and restore its PDF changes when possible."
+            onSend={instruction => { void send(instruction); }} onStop={() => loop.current?.cancel()} />
+          <textarea aria-label="Ask the PDF assistant" placeholder={busy ? "Add a direction to the running task…" : "Ask about this PDF or describe a change…"} value={prompt} disabled={locked && !busy} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }} />
+          <div><span>{busy ? "Working · changes remain unsaved" : "Changes are reversible until you save."}</span><button aria-label={busy ? "Queue PDF direction" : "Send to PDF assistant"} disabled={(locked && !busy) || !taskLoop || !prompt.trim()} onClick={() => void send()}><ArrowUp size={18} /></button></div>
+        </div>
         <p className="sw-pdf-limit">Text-layer review only. No OCR, permanent redaction or rewriting existing text.</p>
       </aside>}
     </div>

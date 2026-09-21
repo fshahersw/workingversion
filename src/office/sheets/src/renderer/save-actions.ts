@@ -37,8 +37,11 @@ import {
 import type { LazyWorkbookState, UniverRuntime } from './univer-state'
 import { isManualCalculation } from './calc-options'
 import { collectLiveFormulaValues, saveJournalSnapshot } from './save-formula-values'
+import { synchronizeSavedChartCaches } from './save-chart-values'
 
 /** The App refs/state the save flow needs; built fresh per call. */
+import { beginWorkbookSaveCommit, isWorkbookSaveCommitting } from './save-commit-lock'
+
 export interface SaveContext {
   univerRef: { readonly current: UniverRuntime | null }
   lazyWorkbookRef: { readonly current: LazyWorkbookState | null }
@@ -75,6 +78,10 @@ export async function handleSave(
   quiet = false,
 ): Promise<void> {
   const state = ctx.lazyWorkbookRef.current
+  if (isWorkbookSaveCommitting(state)) {
+    if (!quiet) ctx.setMessage('A workbook save is already in progress.')
+    return
+  }
   // Captured at save start (the Ctrl+S moment): the post-save session swap
   // reinstalls the workbook and would otherwise bounce the view to A1.
   const viewAtSave = (() => {
@@ -117,9 +124,9 @@ export async function handleSave(
   const edits = toSaveEdits(state.editJournal)
   const bulkConstantFills = toSaveBulkConstantFills(state.editJournal)
   const structuralOps = toSaveStructuralOps(state.editJournal)
-  const chartEdits = toSaveChartEdits(state.editJournal)
+  let chartEdits = toSaveChartEdits(state.editJournal)
   const visualEdits = toSaveVisualEdits(state.editJournal)
-  const visualAdditions = toSaveVisualAdds(state.editJournal)
+  let visualAdditions = toSaveVisualAdds(state.editJournal)
   const tableAdditions = toSaveTableAdds(state.editJournal)
   const pivotAdditions = toSavePivotAdds(state.editJournal)
   const sparklineAdditions = toSaveSparklineAdds(state.editJournal)
@@ -252,8 +259,13 @@ export async function handleSave(
     return
   }
   try {
-    formulaValues.push(...await collectLiveFormulaValues(runtime, state, saveStillCurrent, isManualCalculation(runtime)))
+    const manualCalculation = isManualCalculation(runtime)
+    formulaValues.push(...await collectLiveFormulaValues(runtime, state, saveStillCurrent, manualCalculation))
     if (!saveStillCurrent()) throw new Error('The workbook changed while preparing the save. Save again after editing finishes.')
+    const freshCharts = synchronizeSavedChartCaches(runtime, state, chartEdits, visualAdditions, manualCalculation)
+    chartEdits = freshCharts.chartEdits
+    visualAdditions = freshCharts.visualAdditions
+    if (!saveStillCurrent()) throw new Error('The workbook changed while preparing chart caches. Save again after editing finishes.')
   } catch (error: unknown) {
     if (mode !== 'recovery' && ctx.lazyWorkbookRef.current === state) {
       const failed = error instanceof Error ? error.message : t('appSaveFailed')
@@ -330,7 +342,7 @@ export async function handleSave(
     if (!quiet) showToast(failed, 'error')
     return
   }
-  if (!saveStillCurrent()) {
+  if (!saveStillCurrent() || isWorkbookSaveCommitting(state)) {
     await abortStagedEditsTransfer(window.desktopApi, state.file.sessionId, staged.editsTransferId)
     if (mode !== 'recovery' && ctx.lazyWorkbookRef.current === state) {
       ctx.setMessage('The workbook changed while preparing the save. Save again after editing finishes.')
@@ -380,6 +392,7 @@ export async function handleSave(
     })
     return
   }
+  const releaseCommit = beginWorkbookSaveCommit(state)
   try {
     ctx.setMessage(t('appSavingEdits', { count: total }))
     const result = await window.desktopApi.saveWorkbookEdits({
@@ -517,6 +530,8 @@ export async function handleSave(
     const failed = localizeSaveError(message) ?? (message || t('appSaveFailed'))
     ctx.setMessage(failed)
     if (!quiet) showToast(failed, 'error')
+  } finally {
+    releaseCommit()
   }
 }
 

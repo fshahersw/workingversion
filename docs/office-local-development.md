@@ -36,6 +36,12 @@ The preview is `http://127.0.0.1:5189/office`. The launcher sets `LOCAL_SYNTHETI
 
 For Fireworks, set `OFFICE_LOCAL_PROVIDER=fireworks`, `FIREWORKS_API_KEY`, and explicit `OFFICE_LOCAL_FIREWORKS_MODEL`/`FAST_MODEL` IDs. Tested IDs: `accounts/fireworks/models/kimi-k2p6` and `accounts/fireworks/models/glm-5p3-flash`. Image requests require a separately verified image-capable model plus `OFFICE_LOCAL_FIREWORKS_VISION=1`; the adapter refuses silently dropping visual evidence. Provider availability and model IDs should be rechecked before a later run.
 
+`OFFICE_LOCAL_FIREWORKS_REASONING_EFFORT` optionally sends the documented provider setting (`none`, `low`, `medium`, or `high`). Choose a value supported by the actual model. GLM-5.3-Flash's [model card](https://huggingface.co/zai-org/GLM-5.3-Flash#note) documents `low`, `high`, and `max`, with omitted/other values defaulting to its maximum; its thinking cannot simply be disabled. The local acceptance configuration uses `low`. This is an effort selection, not a guaranteed token or latency cap. An earlier run with the omitted setting consumed all 8,192 output tokens without producing an action.
+
+The local capability manifest removes unavailable AWS Python, image-generation and firm-knowledge tools. It also removes visual capture/analysis tools for a Fireworks configuration without verified vision support. Native workbook data, formula, formatting and chart operations remain available. A text-only model must not claim visual inspection. Production tool availability is unchanged.
+
+Local public web search can use the configured Anthropic key with the provider's server search tool; under Fireworks this additionally requires explicit `OFFICE_LOCAL_SEARCH_PROVIDER=anthropic`. Exhausted provider credits are a service failure, not zero search results. Public source reads use bounded, revision-identified excerpts and continuation offsets. Use only synthetic documents: prompts and selected local document context are sent to the configured test provider.
+
 ## Production configuration
 
 Do not deploy `LOCAL_SYNTHETIC_MODE`, `OFFICE_LOCAL_PROVIDER`, local storage endpoints, or the temporary keys. Local mode refuses `NODE_ENV=production`, a nonlocal `APP_ENVIRONMENT`, Lambda and ECS runtime markers. Supplying keys alone never enables synthetic authentication. Requests also require a loopback URL and same-origin browser access. Normal Cognito, SDK credential chains, S3 and DynamoDB behavior remain the production path.
@@ -50,7 +56,7 @@ The controlled Lambda build reads `Architecture` from the selected environment's
 
 ```powershell
 bun test src/lib src/writer/packages/agent-core src/writer/packages/ui/src/assistant-display.test.tsx
-npx tsc --noEmit
+node node_modules/typescript/bin/tsc --noEmit
 npm run build
 # With the local stack running:
 node scripts/office-roundtrip-local.mjs

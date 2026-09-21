@@ -11,6 +11,7 @@ export interface ToolActivity {
   name: string
   summary: string
   isError?: boolean
+  skipped?: boolean
   /** Tool input (JSON-serialized; truncated by the store layer) */
   input?: string
   /** Tool output (truncated by the store layer) */

@@ -49,9 +49,9 @@ export interface AgentLoopEvents<TSnapshot> {
 
 /** Context compaction config (budget tracked in UTF-8 bytes rather than message count) */
 export interface CompactionOptions {
-  /** History size that triggers compaction (UTF-8 bytes, default 256KB) */
+  /** History size that triggers compaction (UTF-8 bytes, default 256 KiB). A byte heuristic, not a token limit. */
   maxBytes?: number;
-  /** Size of recent messages kept after compaction (bytes, default 96KB, cut at a user boundary) */
+  /** Size of recent messages kept after compaction (bytes, default 96 KiB) */
   keepRecentBytes?: number;
   /** Disable LLM summarization and use only the mechanical digest (for tests/offline) */
   disableLlmSummary?: boolean;
@@ -63,8 +63,10 @@ export interface AgentLoopOptions<TSnapshot = unknown> {
   events?: AgentLoopEvents<TSnapshot>;
   /** hard cap on model round-trips per run (default DEFAULT_MAX_TURNS) */
   maxTurns?: number;
-  /** history cap in messages, trimmed at user-turn boundaries (default 40) */
+  /** history cap in messages, trimmed at user-turn boundaries (default 500) */
   maxHistory?: number;
+  /** At most two in-place retries of transient model-stream failures; tools are never replayed. */
+  transientRetryDelaysMs?: readonly number[];
   /** Context compaction; false disables it (enabled by default with default thresholds) */
   compaction?: CompactionOptions | false;
   /** capture rollback state; invoked right before tools run (see snapshotBefore) */
@@ -76,13 +78,15 @@ export interface AgentLoopOptions<TSnapshot = unknown> {
 }
 
 /**
- * Context budgets. Generous by design: the models behind the suite carry
- * 200k+ token windows and the platform caches the conversation prefix, so
- * trimming early costs more in re-reads than it saves in tokens. Compaction
- * kicks in only when a session's history nears the provider payload limit.
+ * Conservative history byte heuristics leave room for system instructions,
+ * schemas and the next response. Bytes do not predict tokens uniformly (in
+ * particular for financial tables and JSON), so these are not provider context
+ * guarantees. The current indivisible exchange and original user request are
+ * preserved even when they exceed this soft budget; providers still enforce
+ * their own limits.
  */
-const COMPACT_MAX_BYTES = 1536 * 1024;
-const COMPACT_KEEP_RECENT_BYTES = 640 * 1024;
+const COMPACT_MAX_BYTES = 256 * 1024;
+const COMPACT_KEEP_RECENT_BYTES = 96 * 1024;
 /** Pre-truncation of each tool output in the summary request (the compaction request itself must not blow up on huge outputs) */
 const SUMMARIZE_TOOL_OUTPUT_MAX = 8_000;
 const SUMMARIZE_TIMEOUT_MS = 45_000;
@@ -192,6 +196,7 @@ function messageSize(m: AgentMessage): number {
       }
     }
   }
+  if (m.role === "assistant" && m.reasoning) n += utf8Size(m.reasoning);
   return n;
 }
 
@@ -200,16 +205,27 @@ function historySize(messages: readonly AgentMessage[]): number {
 }
 
 /** Mechanical digest when LLM summarization is unavailable: bullet list of user instructions + final replies */
-function mechanicalDigest(dropped: readonly AgentMessage[]): string {
+function mechanicalDigest(dropped: readonly AgentMessage[], maxChars = 12_000): string {
   const lines: string[] = [];
   for (const m of dropped) {
-    if (m.role === "user" && !m.text.startsWith(COMPACT_SUMMARY_PREFIX)) {
-      lines.push(`- User: ${m.text.slice(0, 200)}`);
+    if (m.role === "user") {
+      // Retain earlier summaries across successive compactions instead of
+      // silently erasing the first phase of a long research/editing task.
+      lines.push(m.text.startsWith(COMPACT_SUMMARY_PREFIX)
+        ? m.text.slice(m.text.indexOf("\n") + 1)
+        : `- User instruction: ${m.text.slice(0, 4_000)}`);
+    } else if (m.role === "tool") {
+      for (const result of m.results) {
+        lines.push(`- Tool ${result.name} (${result.isError ? "failed" : "returned"}; historical receipt): ${result.output.slice(0, 2_000)}`);
+      }
     } else if (m.role === "assistant" && m.text && !m.toolCalls?.length) {
-      lines.push(`  Reply: ${m.text.slice(0, 200)}`);
+      if (m.text !== COMPACT_SUMMARY_ACK) lines.push(`  Assistant (not independent evidence): ${m.text.slice(0, 1_000)}`);
     }
   }
-  return lines.join("\n").slice(0, 4_000) || "(earlier conversation omitted)";
+  const digest = lines.join("\n") || "(earlier conversation omitted)";
+  if (digest.length <= maxChars) return digest;
+  const half = Math.max(0, Math.floor((maxChars - 100) / 2));
+  return `${digest.slice(0, half)}\n[…middle receipts omitted; read current state or source again before relying on missing details…]\n${digest.slice(-half)}`;
 }
 
 /**
@@ -221,6 +237,7 @@ export class AgentLoop<TSnapshot = unknown> {
   private readonly options: AgentLoopOptions<TSnapshot>;
   private history: AgentMessage[] = [];
   private directions: readonly string[] = [];
+  private appliedDirections: string[] = [];
   private directionListeners = new Set<() => void>();
   readonly subscribeDirections = (listener: () => void): (() => void) => {
     this.directionListeners.add(listener);
@@ -257,6 +274,7 @@ export class AgentLoop<TSnapshot = unknown> {
   private applyDirections(): readonly string[] {
     const directions = this.directions;
     if (!directions.length) return directions;
+    this.appliedDirections.push(...directions);
     this.history.push({
       role: "user",
       text:
@@ -296,6 +314,9 @@ export class AgentLoop<TSnapshot = unknown> {
   private running = false;
   private outcome: "idle" | "running" | "completed" | "partial" | "stopped" | "failed" = "idle";
   private lastFailure = "";
+  private lastCheckpoint: string | null = null;
+  /** Persist with the original user request after an error; never a claim that edits survived rollback. */
+  get failureCheckpoint(): string | null { return this.lastCheckpoint; }
   private cancelled = false;
   private turns = 0;
   /** Finalizing turn after hitting the turn limit: no tools, let the model answer from what it has read */
@@ -317,7 +338,7 @@ export class AgentLoop<TSnapshot = unknown> {
   private executedCalls: ExecutedToolCall[] = [];
   /** verifyResponse may force one extra corrective turn per run — never more */
   private verifyRetryUsed = false;
-  /** user message of the in-flight run; a failed run rolls it (and everything after) back out of history */
+  /** Original request is pinned during compaction and retained for explicit failure recovery. */
   private runUserMsg: AgentMessage | null = null;
   /** invalidates stale transport callbacks after cancel/reset */
   private generation = 0;
@@ -327,6 +348,7 @@ export class AgentLoop<TSnapshot = unknown> {
   }
   /** per-run abort: aborted on cancel(); long tools (e.g. generate_deck) use it to break internal loops */
   private abortController: AbortController | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: AgentLoopOptions<TSnapshot>) {
     this.options = options;
@@ -389,6 +411,7 @@ export class AgentLoop<TSnapshot = unknown> {
     this.running = true;
     this.outcome = "running";
     this.lastFailure = "";
+    this.lastCheckpoint = null;
     this.cancelled = false;
     this.turns = 0;
     this.finalizing = false;
@@ -398,17 +421,31 @@ export class AgentLoop<TSnapshot = unknown> {
     this.identicalTurns = 0;
     this.allErrorTurns = 0;
     this.executedCalls = [];
+    this.appliedDirections = [];
     this.verifyRetryUsed = false;
     this.abortController = new AbortController();
-    const context = this.options.skill.buildContext?.() ?? "";
+    let context: string;
+    try { context = this.options.skill.buildContext?.() ?? ""; }
+    catch (error) {
+      this.history.push({ role: "user", text: sanitizeAgentPayload(instruction) });
+      this.runUserMsg = this.history.at(-1)!;
+      this.failRun(error instanceof Error ? error.message : String(error));
+      return;
+    }
     const format =
       this.options.formatUserMessage ??
       ((instr: string, ctx: string) => (ctx ? `${instr}\n\n${ctx}` : instr));
-    const userMsg: AgentMessage = {
+    let userMsg: AgentMessage;
+    try { userMsg = {
       role: "user",
       text: format(instruction, context),
       ...(images?.length ? { images } : {}),
-    };
+    }; } catch (error) {
+      this.history.push({ role: "user", text: sanitizeAgentPayload(instruction) });
+      this.runUserMsg = this.history.at(-1)!;
+      this.failRun(error instanceof Error ? error.message : String(error));
+      return;
+    }
     void this.beginRun(userMsg);
   }
 
@@ -444,31 +481,73 @@ export class AgentLoop<TSnapshot = unknown> {
     this.startTurn();
   }
 
-  /**
-   * A run failed: remove its user message and every message after it, so the
-   * failed instruction can't be silently re-executed by the next run.
-   */
+  /** Failure is a terminal event; a future user request may explicitly resume it. */
   private reportFailure(error: string): void {
     this.outcome = "failed";
     this.lastFailure = error;
     this.options.events?.onError?.(error);
   }
 
+  private failRun(error: string): void {
+    if (!this.running) return;
+    this.running = false;
+    this.handle = null;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.history = this.history.filter(message => !(message.role === "user" && message.text === TURN_LIMIT_NOTE));
+    // Even a synchronous snapshot/UI callback failure must leave complete
+    // tool-use/result pairs for the next request. Unconfirmed work is never
+    // represented as a successful or safely replayable edit.
+    for (let i = 0; i < this.history.length; i++) {
+      const message = this.history[i]!;
+      if (message.role !== "assistant" || !message.toolCalls?.length) continue;
+      let next = this.history[i + 1];
+      if (next?.role !== "tool") {
+        next = { role: "tool", results: [] };
+        this.history.splice(i + 1, 0, next);
+      }
+      for (const call of message.toolCalls) {
+        if (!next.results.some(result => result.id === call.id)) next.results.push({
+          id: call.id, name: call.name, isError: true,
+          output: "Execution was interrupted before a confirmed result. Inspect current state before deciding whether any operation remains necessary.",
+        });
+      }
+    }
+    this.checkpointFailedRun(error);
+    this.reportFailure(error);
+  }
+
   /**
-   * Conversation-level rollback only: drops the failed run's messages from the
-   * model context. It does NOT touch the document. Reverting partial document
-   * mutations is the host's job in events.onError, from the snapshot handed
-   * out as `snapshotBefore` on the run's first mutating tool (Writer restores
-   * the editor JSON + notes/page setup, Sheets restores its pre-run cell
-   * snapshot, Slides restores the engine-side history batch).
+   * Conversation checkpoint only. Reverting partial document mutations is
+   * still the host's job in events.onError from snapshotBefore. Until the next
+   * explicit user request reads the artifact, rollback success is unknown.
    */
-  private rollbackFailedRun(): void {
+  private checkpointFailedRun(error: string): void {
+    const pending = this.directions;
     this.setDirections([]);
     const msg = this.runUserMsg;
     this.runUserMsg = null;
     if (!msg) return;
     const i = this.history.lastIndexOf(msg);
-    if (i >= 0) this.history.splice(i);
+    if (i < 0) return;
+    // Preserve the goal and completed, paired tool results. A model-stream
+    // error has not executed this turn's pending calls, so they are absent.
+    // Host rollback is asynchronous and domain-specific: never assert that
+    // earlier edits are still applied (or that they were successfully undone).
+    const note = "[Task interrupted — not completed]\n" +
+      `Reason: ${error.slice(0, 1_000)}\n` +
+      "Completed tool exchanges below are historical receipts, not proof of the artifact's current state. " +
+      (this.mutationSeen
+        ? "Some tools reported edits. The host may have rolled those edits back; their current application status is unknown. "
+        : "No tool reported a completed artifact edit. ") +
+      "Do not replay prior writes automatically. If the user asks to continue, recover the original request, inspect current artifact state, reuse supported research, then do only the remaining work.\n" +
+      (pending.length ? `Pending user directions (not yet applied):\n${pending.join("\n")}\n` : "") +
+      mechanicalDigest([
+        ...this.history.slice(0, i).filter(message => message.role === "user" && message.text.startsWith(COMPACT_SUMMARY_PREFIX)),
+        ...this.history.slice(i + 1),
+      ], 12_000);
+    this.lastCheckpoint = note;
+    this.history.push({ role: "assistant", text: note });
   }
 
   // ── Context compaction: fold old conversation into a summary, keep recent messages verbatim ──
@@ -544,21 +623,26 @@ export class AgentLoop<TSnapshot = unknown> {
         };
       }
       if (m.role === "user" && m.images?.length) return { role: "user" as const, text: m.text };
-      return m;
+      return m.role === "assistant" ? { ...m, reasoning: undefined } : m;
     });
     return new Promise((resolve) => {
       let text = "";
       let settled = false;
+      let handle: AgentStreamHandle | null = null;
       const finish = (v: string | null) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (this.handle === handle) this.handle = null;
         resolve(v);
       };
-      const timer = setTimeout(() => finish(null), SUMMARIZE_TIMEOUT_MS);
+      const timer = setTimeout(() => {
+        finish(null);
+        handle?.cancel();
+      }, SUMMARIZE_TIMEOUT_MS);
       try {
         // Attach to this.handle so cancel() can abort the summary request when the user clicks stop
-        this.handle = this.options.transport.stream(
+        handle = this.options.transport.stream(
           {
             system: SUMMARIZE_SYSTEM,
             messages: [
@@ -574,10 +658,11 @@ export class AgentLoop<TSnapshot = unknown> {
             onToolCall: () => {
               /* the summary turn gets no tools */
             },
-            onDone: () => finish(text.trim() || null),
+            onDone: () => finish(this.cancelled ? null : text.trim() || null),
             onError: () => finish(null),
           },
         );
+        if (!settled) this.handle = handle;
       } catch {
         finish(null);
       }
@@ -623,6 +708,12 @@ export class AgentLoop<TSnapshot = unknown> {
     this.setDirections([]);
     // abort lets long tools mid-execution (internal LLM loops etc.) stop promptly
     this.abortController?.abort();
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+      void this.finishTurn().catch((error: unknown) => this.failRun(error instanceof Error ? error.message : String(error)));
+      return;
+    }
     // the transport emits onDone after aborting, which finalizes the run
     this.handle?.cancel();
   }
@@ -631,6 +722,8 @@ export class AgentLoop<TSnapshot = unknown> {
   reset(): void {
     this.setDirections([]);
     this.generation++;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     this.abortController?.abort();
     this.handle?.cancel();
     this.handle = null;
@@ -639,6 +732,7 @@ export class AgentLoop<TSnapshot = unknown> {
     this.history = [];
     this.outcome = "idle";
     this.lastFailure = "";
+    this.lastCheckpoint = null;
     this.turnText = "";
     this.turns = 0;
     this.toolCalls = [];
@@ -659,6 +753,7 @@ export class AgentLoop<TSnapshot = unknown> {
   }
 
   private startTurn(retriesUsed = 0): void {
+    if (!this.running) return;
     const generation = this.generation;
     this.turnText = "";
     this.turnReasoningOpaque = "";
@@ -667,7 +762,40 @@ export class AgentLoop<TSnapshot = unknown> {
     this.turnStopReason = null;
     // Some transports emit an extra onDone after cancel — this turn may finalize only once
     let settled = false;
-    this.handle = this.options.transport.stream(
+    const finish = () => {
+      void this.finishTurn().catch((error: unknown) => {
+        if (generation === this.generation) this.failRun(error instanceof Error ? error.message : String(error));
+      });
+    };
+    const failStream = (error: string, details?: { code?: string; retryable?: boolean }) => {
+      if (generation !== this.generation || settled) return;
+      settled = true;
+      this.handle = null;
+      const delays = this.options.transientRetryDelaysMs ?? EMPTY_STREAM_RETRY_DELAYS_MS;
+      const requestedDelay = retriesUsed < 2 ? delays[retriesUsed] : undefined;
+      const retryable = details?.retryable ?? /\(empty stream\)|ServiceUnavailableException|ThrottlingException|\b(?:HTTP\s*)?(?:429|502|503|504)\b|temporarily unavailable|overloaded/i.test(error);
+      if (requestedDelay !== undefined && Number.isFinite(requestedDelay) && requestedDelay >= 0 && retryable && !this.cancelled) {
+        // A model stream is only a proposal: this turn's tools have not run.
+        // Discard partial arguments/text, retaining all prior executed pairs.
+        this.turnText = "";
+        this.toolCalls = [];
+        this.options.events?.onText?.("");
+        this.options.events?.onStatus?.({ text: `Connection interrupted; retrying model response (${retriesUsed + 1}/2). Completed actions will not be repeated.` });
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          if (generation !== this.generation || !this.running) return;
+          if (this.cancelled) { finish(); return; }
+          const directions = this.applyDirections();
+          if (directions.length) this.options.events?.onTurnEnd?.(directions);
+          if (generation === this.generation && this.running) this.startTurn(retriesUsed + 1);
+        }, Math.min(requestedDelay, 30_000));
+        return;
+      }
+      if (this.cancelled) { finish(); return; }
+      this.failRun(error);
+    };
+    try {
+      const handle = this.options.transport.stream(
       {
         system:
           runtimePreamble() +
@@ -709,39 +837,66 @@ export class AgentLoop<TSnapshot = unknown> {
         onDone: () => {
           if (generation !== this.generation || settled) return;
           settled = true;
-          void this.finishTurn();
+          this.handle = null;
+          finish();
         },
-        onError: (error) => {
-          if (generation !== this.generation || settled) return;
-          settled = true;
-          const delay = EMPTY_STREAM_RETRY_DELAYS_MS[retriesUsed];
-          // The no-partial-output guard keeps the retry idempotent (an empty
-          // stream never emits deltas, but a mislabeled error must not replay
-          // a turn whose text/tool calls the UI already saw)
-          if (
-            delay !== undefined &&
-            error.includes("(empty stream)") &&
-            !this.cancelled &&
-            !this.turnText &&
-            this.toolCalls.length === 0
-          ) {
-            setTimeout(() => {
-              if (generation !== this.generation) return;
-              // Stopped during the backoff window: finalize like a normal cancel
-              if (this.cancelled) {
-                void this.finishTurn();
-                return;
-              }
-              this.startTurn(retriesUsed + 1);
-            }, delay);
-            return;
-          }
-          this.running = false;
-          this.rollbackFailedRun();
-          this.reportFailure(error);
-        },
+        onError: failStream,
       },
     );
+      // Synchronous test/custom transports may already have completed and
+      // started another turn; never replace that newer handle with this one.
+      if (!settled && generation === this.generation && this.running) this.handle = handle;
+    } catch (error) {
+      failStream(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** Compact a long *single* task at completed tool-exchange boundaries.
+   * The initial request is pinned verbatim; source receipts remain attributed
+   * and recent tool-use/result pairs are kept together, including reasoning.
+   * This also sheds old assistant tool arguments/reasoning, which truncating
+   * tool outputs alone never bounded. No extra model request is needed. */
+  private compactActiveRun(): void {
+    if (!this.compactionEnabled() || !this.runUserMsg) return;
+    const { maxBytes, keepRecentBytes } = this.compactBudget();
+    if (historySize(this.history) <= maxBytes) return;
+    const original = this.runUserMsg;
+    const originalIndex = this.history.indexOf(original);
+    if (originalIndex < 0) return;
+    let cut = -1;
+    let kept = 0;
+    for (let i = this.history.length - 1; i > originalIndex; i--) {
+      kept += messageSize(this.history[i]!);
+      const message = this.history[i]!;
+      if (message.role === "assistant" && message.toolCalls?.length && this.history[i + 1]?.role === "tool") {
+        if (cut >= 0 && kept > keepRecentBytes) break;
+        cut = i;
+      }
+    }
+    if (cut <= originalIndex + 1) return;
+    const dropped = this.history.slice(0, cut).filter(message => message !== original);
+    const recent = this.history.slice(cut);
+    // Steering instructions are authoritative, not expendable tool output.
+    const directions = dropped.filter((message): message is Extract<AgentMessage, { role: "user" }> =>
+      message.role === "user" && message.text.startsWith("Updated directions from the user"));
+    const pinnedDirections = this.appliedDirections.join("\n\n");
+    const available = maxBytes - historySize(recent) - messageSize(original) - utf8Size(pinnedDirections) - 700;
+    // A single huge current exchange or user attachment is indivisible. Keep
+    // it rather than silently corrupting tool pairs or dropping user intent.
+    if (available < 600) return;
+    const digest = mechanicalDigest(dropped.filter(message => !directions.includes(message as never)), Math.min(12_000, Math.floor(available / 3)));
+    const summary = `${COMPACT_SUMMARY_HEADER}\nHistorical receipts only; verify live artifact state before editing. Missing details require re-reading their source.\n${digest}` +
+      (pinnedDirections ? `\n\nAuthoritative user updates, in order:\n${pinnedDirections}` : "");
+    const next: AgentMessage[] = [
+      { role: "user", text: summary },
+      { role: "assistant", text: COMPACT_SUMMARY_ACK },
+      original,
+      ...recent,
+    ];
+    if (historySize(next) < historySize(this.history)) {
+      this.history = next;
+      this.options.events?.onStatus?.({ text: "Compacted earlier tool exchanges; retaining the request, source receipts, and recent work." });
+    }
   }
 
   private async finishTurn(): Promise<void> {
@@ -813,7 +968,14 @@ export class AgentLoop<TSnapshot = unknown> {
       // read-only empty turns poison follow-ups just the same. onDone still
       // reports the raw turn text so app UIs keep their localized fallbacks
       // instead of surfacing this English placeholder.
-      this.history.push({ role: "assistant", text: this.turnText || COMPLETED_VIA_TOOLS_TEXT });
+      const emptyReply = this.cancelled
+        ? "(The task was stopped. Inspect the current document before continuing.)"
+        : this.finalizing || this.turnStopReason === "max_tokens"
+          ? "(The task is incomplete because a response or turn limit was reached. Inspect the current document before continuing; do not assume edits were completed.)"
+          : this.executedCalls.some(call => call.ok)
+            ? COMPLETED_VIA_TOOLS_TEXT
+            : "(No tool action completed and no text reply was returned.)";
+      this.history.push({ role: "assistant", text: this.turnText || emptyReply });
       this.setDirections([]);
       this.running = false;
       this.runUserMsg = null;
@@ -848,6 +1010,7 @@ export class AgentLoop<TSnapshot = unknown> {
     });
     const generation = this.generation;
     const results: AgentToolResult[] = [];
+    this.history.push({ role: "tool", results });
     let turnMutated = false;
     // Run one executed tool call: raises the execution error into a result so
     // a failing tool never aborts the turn.
@@ -863,6 +1026,7 @@ export class AgentLoop<TSnapshot = unknown> {
           output:
             "Not executed: the user supplied updated directions. Re-plan with those directions and inspect current state before editing.",
           isError: true,
+          skipped: true,
           summary: "Skipped after updated directions",
         };
       try {
@@ -882,7 +1046,7 @@ export class AgentLoop<TSnapshot = unknown> {
       execution: ToolExecution,
       snapshot: TSnapshot | undefined,
     ): void => {
-      this.executedCalls.push({ name: call.name, ok: !execution.isError });
+      if (!execution.skipped) this.executedCalls.push({ name: call.name, ok: !execution.isError });
       const firstMutation = !!execution.mutated && !this.mutationSeen;
       if (execution.mutated) {
         this.mutationSeen = true;
@@ -919,7 +1083,6 @@ export class AgentLoop<TSnapshot = unknown> {
       // Unusable input (truncated by the token limit, or JSON that failed to parse):
       // don't execute; feed a targeted error back so the model retries correctly
       if (call.truncated || call.inputError) {
-        this.inputParseFails++;
         const output = call.truncated
           ? "Tool arguments were cut off by the output length limit; the tool was not executed. Split this operation into several smaller tool calls (less content per call) and try again."
           : `Tool input JSON failed to parse; the tool was not executed: ${call.inputError}\nFix the arguments (make sure quotes inside strings are escaped) and call again.`;
@@ -940,7 +1103,6 @@ export class AgentLoop<TSnapshot = unknown> {
         i++;
         continue;
       }
-      this.inputParseFails = 0;
 
       // A run of consecutive read-only calls (reads, searches, lookups)
       // executes concurrently: none of them changes the artifact, so their
@@ -976,7 +1138,6 @@ export class AgentLoop<TSnapshot = unknown> {
       record(call, execution, snapshot);
       i++;
     }
-    this.history.push({ role: "tool", results });
 
     // Cancelled while tools were executing: finish immediately, no further model request
     if (this.cancelled) {
@@ -991,13 +1152,15 @@ export class AgentLoop<TSnapshot = unknown> {
     // Pair every tool result before adding a new user message. Pending operations
     // were skipped; any operation already in flight was allowed to settle once.
     const directions = this.applyDirections();
+    // Count failed repair rounds, not parallel calls in a single response.
+    // A three-call truncated batch must get a chance to split its arguments.
+    this.inputParseFails = !directions.length && toolCalls.every(call => call.inputError || call.truncated)
+      ? this.inputParseFails + 1 : 0;
 
     // Bad-input retries hit the cap: abort instead of burning more turns
     if (!directions.length && this.inputParseFails >= MAX_INPUT_PARSE_RETRIES) {
-      this.running = false;
-      this.rollbackFailedRun();
-      this.reportFailure(
-        `Tool input was unusable (unparseable or truncated) ${MAX_INPUT_PARSE_RETRIES} times in a row; retries stopped, please send the request again`,
+      this.failRun(
+        `Tool input remained unusable for ${MAX_INPUT_PARSE_RETRIES} repair rounds. The task was interrupted; you can ask to continue after inspecting the current state.`,
       );
       return;
     }
@@ -1008,10 +1171,8 @@ export class AgentLoop<TSnapshot = unknown> {
     this.allErrorTurns =
       !directions.length && results.every((r) => r.isError) ? this.allErrorTurns + 1 : 0;
     if (this.allErrorTurns >= MAX_ALL_ERROR_TURNS) {
-      this.running = false;
-      this.rollbackFailedRun();
-      this.reportFailure(
-        `Every tool call failed for ${MAX_ALL_ERROR_TURNS} turns in a row; the run was stopped. Please send the request again`,
+      this.failRun(
+        `Every tool call failed for ${MAX_ALL_ERROR_TURNS} turns in a row. The task was interrupted; its request and progress are retained for recovery.`,
       );
       return;
     }
@@ -1028,10 +1189,8 @@ export class AgentLoop<TSnapshot = unknown> {
     ]);
     if (turnSig === this.lastTurnSig && !turnMutated) {
       if (++this.identicalTurns >= MAX_IDENTICAL_TURNS) {
-        this.running = false;
-        this.rollbackFailedRun();
-        this.reportFailure(
-          "The model kept repeating the exact same turn without making progress; the run was stopped. Please send the request again",
+        this.failRun(
+          "The model repeated the same turn without progress. The task was interrupted; its request and progress are retained for recovery.",
         );
         return;
       }
@@ -1048,8 +1207,9 @@ export class AgentLoop<TSnapshot = unknown> {
     }
     // Long runs (e.g. page-by-page generation) over budget mid-way: truncate stale tool outputs so each turn doesn't resend a huge payload
     this.squashStaleToolOutputs();
+    this.compactActiveRun();
     events?.onTurnEnd?.(directions);
-    this.startTurn();
+    if (generation === this.generation && this.running) this.startTurn();
   }
 }
 

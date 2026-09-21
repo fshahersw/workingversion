@@ -26,7 +26,7 @@ Applies to balance sheets, income statements, cash flow statements, P&L statemen
 
 ## Total / subtotal rows
 
-Bold + light gray fill `#F2F2F2`, separated with a thin top border + double bottom border:
+Bold + light gray fill `#F2F2F2`, separated with top and bottom borders. The DSL supports border edges and colors, not double/medium/thick border styles; do not request or claim those styles:
 
 ```json
 [
@@ -38,8 +38,8 @@ Bold + light gray fill `#F2F2F2`, separated with a thin top border + double bott
 
 ## Headers
 
-- Section titles (e.g. "Balance Sheet"): **merged across columns + centered + bold + visually larger (compensate with bold — this app does not change font size for this)**.
-- Period columns ("FY2024 | FY2023 | FY2022"): bold + centered, separated with a medium bottom border.
+- Section titles (e.g. "Balance Sheet"): merged across columns + centered + bold; use format_range `fontSize` (e.g. 16) for a larger title.
+- Period columns ("FY2024 | FY2023 | FY2022"): bold + centered, separated with a bottom border.
 
 ```json
 [
@@ -70,12 +70,12 @@ Bold + light gray fill `#F2F2F2`, separated with a thin top border + double bott
 
 ## Layout
 
-- Widen the first column (line item names) with `set_col_width` to ~200px; value columns uniformly ~100px.
+- Use finish_table after the values are present to fit real labels and values. Inspect with view_range; adjust widths only to correct an observed layout issue.
 - Use border inner lines (`#D9D9D9`) for a light grid; avoid heavy outlines.
 
 ## Data source attribution
 
-Financial data must cite sources (see the `data-attribution` guide): italic small footer text + hyperlink, e.g. "Source: SEC 10-K FY2024".
+Real financial data must cite verified sources (see the `data-attribution` guide): italic small footer text + its actual hyperlink. When the user explicitly requests mock/sample data, label it "Synthetic example — not actual company results" and record assumptions instead; do not research unless requested or invent filing citations. The following is an illustration of syntax, never a source to copy as evidence:
 
 ```json
 [
@@ -96,3 +96,5 @@ Financial data must cite sources (see the `data-attribution` guide): italic smal
 
 - **Styling failures never block**: if a format operation is rejected, prioritize delivering correct data; don't retry styling repeatedly.
 - Every factual data cell needs a source; derive values with formulas, never compute them mentally and hard-code them.
+- Before quoting a financial metric in the final response, read its label, period and computed cell together and cite the sheet/cell. Do not substitute an adjacent segment's CAGR for total-revenue CAGR. If a metric was not read back, omit the number rather than estimating it.
+- A clean formula-error scan is only one check. Reconcile totals and period blocks, verify percentage/currency formats, and inspect effective chart series and category references. Distinguish applied changes, saved native output, and checks that remain unavailable.

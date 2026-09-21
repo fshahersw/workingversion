@@ -8,6 +8,7 @@
 // ============================================================================
 import { asksForRecentSources } from "@/lib/agents/search-window";
 import { SourceBook, executeTool } from "@/lib/agents/tools.server";
+import { localSyntheticEnabled } from "@/lib/local-development";
 
 export type WriterSearchResult = {
   results: Array<{ title: string; url: string; snippet: string }>;
@@ -54,9 +55,13 @@ function categoriesFor(query: string): string[] {
 }
 
 export async function writerWebSearch(query: string, maxResults = 6): Promise<WriterSearchResult> {
-  const q = query.trim().slice(0, 400);
-  if (q.length < 3)
-    return { results: [], method: "error", error: "Query must be at least 3 characters." };
+  const q = query.trim();
+  if (q.length < 3 || q.length > 400)
+    return { results: [], method: "error", error: "Query must contain 3–400 characters." };
+  if (localSyntheticEnabled()) {
+    const { localPublicSearch } = await import("./local-public-search.server");
+    return localPublicSearch(q, maxResults);
+  }
   const book = new SourceBook();
   const limit = Math.min(10, Math.max(1, Math.floor(maxResults) || 6));
   const input: Record<string, unknown> = {
@@ -82,8 +87,8 @@ export async function writerWebSearch(query: string, maxResults = 6): Promise<Wr
         },
       ];
     });
-    if (!results.length && /not configured/i.test(out.text)) {
-      return { results: [], method: "error", error: out.text.slice(0, 300) };
+    if (!results.length && /not configured|\bfailed\b|unavailable|timed out|unauthorized|access denied/i.test(out.text)) {
+      return { results: [], method: "error", error: "Public search could not complete. This is a service failure, not a finding of zero matching sources." };
     }
     return { results: results.slice(0, limit * 2), method: "platform" };
   } catch (err) {

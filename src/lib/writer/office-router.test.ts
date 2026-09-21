@@ -159,3 +159,40 @@ test("failed tools promote later rounds to main and prevent repeating a weak tie
   ] });
   assert.equal(decision.tier, "main"); assert.equal(calls.typesafe, 0);
 }));
+
+test('steering inside an unfinished complex task cannot be routed as an isolated formatting request', () => withStubs(async calls => {
+  const decision = await routeTurn({ app: 'sheets', profile: 'standard', messages: [
+    { role: 'user', text: 'Build and reconcile a five-year quarterly income model with scenario analysis and charts.' },
+    { role: 'assistant', text: '', toolCalls: [{ id: 'read-1', name: 'get_workbook_context', input: {} }] },
+    { role: 'tool', results: [{ id: 'read-1', name: 'get_workbook_context', output: 'Blank workbook.' }] },
+    { role: 'user', text: 'Updated directions from the user (apply these to the current task; inspect current state before editing):\nMake headers bold.' },
+  ] })
+  assert.equal(decision.tier, 'main')
+  assert.equal(calls.typesafe, 0, 'do not ask a text-only classifier to reinterpret just the latest steering update')
+}));
+
+test('resuming an interrupted task stays main even with appended editor context', () => withStubs(async calls => {
+  for (const text of ['continue', 'Please resume the previous task', 'Try again\n\n<workbook outline>Sheet1</workbook outline>']) {
+    const decision = await routeTurn({ app: 'sheets', profile: 'standard', messages: [
+      { role: 'user', text: 'Prepare a quarterly forecast and charts using sourced assumptions.' },
+      { role: 'assistant', text: '[Task interrupted — not completed]\nInspect current state before editing.' },
+      { role: 'user', text },
+    ] })
+    assert.equal(decision.tier, 'main')
+  }
+  assert.equal(calls.typesafe, 0)
+}));
+
+test('active compaction retains main routing, while a later independent simple edit can use fast', () => withStubs(async calls => {
+  const messages: AgentMessage[] = [
+    { role: 'user', text: '[Summary of earlier conversation (auto-compacted)]\nHistorical receipts only; verify live artifact state before editing.\nAuthoritative user updates, in order:\nAdd a complex forecast after formatting.' },
+    { role: 'assistant', text: 'Summary received.' },
+    { role: 'user', text: 'Bold the selection' },
+    { role: 'assistant', text: '', toolCalls: [{ id: 'read', name: 'get_workbook_context', input: {} }] },
+    { role: 'tool', results: [{ id: 'read', name: 'get_workbook_context', output: 'Current cells.' }] },
+  ]
+  assert.equal((await routeTurn({ app: 'sheets', profile: 'standard', messages })).tier, 'main')
+  const fresh: AgentMessage[] = [...messages, { role: 'assistant', text: 'Completed the forecast and formatting.' }, { role: 'user', text: 'Bold the selection' }]
+  assert.equal((await routeTurn({ app: 'sheets', profile: 'standard', messages: fresh })).tier, 'fast')
+  assert.equal(calls.typesafe, 0)
+}));

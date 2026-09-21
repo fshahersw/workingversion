@@ -76,6 +76,8 @@ export interface ToolExecution {
   /** result text fed back to the model */
   output: string
   isError?: boolean
+  /** Deliberately not executed after updated directions; UI-only outcome, not a successful tool result. */
+  skipped?: boolean
   /** true when the tool changed the underlying artifact (document / sheet / deck) */
   mutated?: boolean
   /** short human-readable label for activity UI */
@@ -138,7 +140,8 @@ export interface AgentStreamCallbacks {
   /** normalized stop reason of the turn ('max_tokens' = cut off by the token limit); transports may omit this */
   onStopReason?(reason: string): void
   onDone(): void
-  onError(error: string): void
+  /** Metadata survives localized messages; only transient model requests may be retried. */
+  onError(error: string, details?: { code?: string; retryable?: boolean }): void
 }
 
 export interface AgentStreamHandle {

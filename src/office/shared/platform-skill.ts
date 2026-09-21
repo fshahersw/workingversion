@@ -191,12 +191,14 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
       name: "fetch_page",
       readOnly: true,
       description:
-        "Read a public web page in full (article, opinion, agency rule, court page) from a URL, typically one web_search surfaced. Reading the page beats reasoning from a snippet. Returns title and extracted text.",
+        "Read a public source URL as bounded text excerpts. Prefer primary sources (official filings, company investor relations, agency/court pages). Returns title, source URL, revision and continuation offset; continue only when the needed data is beyond this excerpt. A failed read is not source evidence. Never treat a partial excerpt as a complete table or infer missing values.",
       inputSchema: {
         type: "object",
         properties: {
           url: { type: "string", description: "http(s) URL" },
-          maxChars: { type: "integer", description: "Text limit, default 12000, max 60000" },
+          maxChars: { type: "integer", minimum: 1000, maximum: 24000, description: "Excerpt limit, default 8000; complete lines are preserved." },
+          startChar: { type: "integer", minimum: 0, description: "Continuation offset from the previous result, default 0." },
+          revision: { type: "string", description: "Exact revision from the previous result; required for continuation so changing sources cannot silently mix." },
         },
         required: ["url"],
       },
@@ -587,7 +589,7 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         const { officeFetchPageFn } = await import("@/lib/office/tools.functions");
         try {
           const r = await officeFetchPageFn({
-            data: { url, maxChars: Number(input["maxChars"]) || 12_000 },
+            data: { url, maxChars: Number(input["maxChars"]) || 8_000, startChar: input['startChar'] === undefined ? 0 : Number(input['startChar']), ...(typeof input['revision'] === 'string' ? { revision: input['revision'] } : {}) },
           });
           return { output: r.text, mutated: false, summary: `Read ${new URL(url).hostname}` };
         } catch (error) {

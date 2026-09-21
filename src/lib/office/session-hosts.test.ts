@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { transform } from "esbuild";
 import { OfficeSessionQueue } from "./session-queue.ts";
 import { OrderedChatAppender } from "./chat-persistence.ts";
+import { officeStreamFailure } from "./stream-errors.ts";
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -20,16 +21,25 @@ for (const app of ["sheets", "slides"] as const) {
     const requests: Array<{ url: string; body: Record<string, unknown>; signal?: AbortSignal }> = [];
     const gate = deferred<Response>();
     const started = deferred<void>();
-    globals.window = {};
+    const listeners = new Map<string, (event: { persisted: boolean }) => void>();
+    let invoke!: (channel: string, args: unknown[]) => Promise<unknown>;
+    let streamError: unknown;
+    const appended: unknown[] = [];
+    globals.window = {
+      addEventListener: (name: string, listener: (event: { persisted: boolean }) => void) => listeners.set(name, listener),
+      removeEventListener: (name: string) => listeners.delete(name),
+    };
     const kind = app === "sheets" ? "xlsx" : "pptx";
     globals.__hostRegression = {
-      OfficeSessionQueue, OrderedChatAppender,
+      OfficeSessionQueue, OrderedChatAppender, officeStreamFailure,
+      platformFetch: async () => { throw streamError; },
+      appendOfficeChatFn: async (request: unknown) => { appended.push(request); },
       openEngineSessionFn: async ({ data }: { data: { docId: string } }) => ({
         engineUrl: "http://127.0.0.1:9999", token: "synthetic", tokenExpiresAt: Date.now() + 900_000,
         document: { docId: data.docId, kind, name: `${data.docId}.${kind}`, version: 1, hash: "hash" }, source: "synthetic",
       }),
       emitHost: (...args: unknown[]) => { events.push(args); },
-      installHost: () => undefined,
+      installHost: (handler: typeof invoke) => { invoke = handler; },
     };
     globalThis.fetch = async (input, init) => {
       const url = String(input);
@@ -45,7 +55,7 @@ for (const app of ["sheets", "slides"] as const) {
       const source = await readFile(new URL(`../../office/${app}/web/host/session.ts`, import.meta.url), "utf8");
       const stripped = (await transform(source, { loader: "ts", format: "esm", target: "es2022" })).code
         .replace(/^import[\s\S]*?from\s*["'][^"']+["'];\s*/gm, "");
-      const js = "const { OfficeSessionQueue, OrderedChatAppender, openEngineSessionFn, emitHost, installHost } = globalThis.__hostRegression;\n" + stripped;
+      const js = "const { OfficeSessionQueue, OrderedChatAppender, officeStreamFailure, platformFetch, appendOfficeChatFn, openEngineSessionFn, emitHost, installHost } = globalThis.__hostRegression;\n" + stripped;
       const host = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
       const a = new AbortController();
       await host.initialize({ docId: "A", navigateTo: () => undefined }, a.signal);
@@ -68,7 +78,32 @@ for (const app of ["sheets", "slides"] as const) {
       assert.equal(rpcs.length, 2);
       assert.equal(rpcs[0].signal?.aborted, true);
       assert.deepEqual(rpcs[1].body.args, [{ text: "new" }]);
-      await host.teardown(b.signal);
+      // A failed old run can finish after B opens. Its explicit chat identity must
+      // never be silently retargeted to the currently active document.
+      await assert.rejects(invoke("project:appendChat", [{ projectId: "A", chatId: "A", role: "assistant", text: "old checkpoint" }]), /session changed/);
+      assert.equal(appended.length, 0);
+      await invoke("project:appendChat", [{ projectId: "B", chatId: "B", role: "assistant", text: "current checkpoint" }]);
+      assert.equal(appended.length, 1);
+      assert.equal((appended[0] as { data: { docId: string } }).data.docId, "B");
+      // Exercise the complete host stream catch, not only the classifier helper.
+      for (const [error, expectedCode] of [
+        [Object.assign(new Error("private upstream payload"), { status: 503 }), "network"],
+        [new TypeError("Failed to fetch"), "network"],
+        [Object.assign(new Error("private auth details"), { status: 401 }), undefined],
+      ] as const) {
+        streamError = error;
+        await invoke("ai:stream", [{ requestId: "stream-check", system: "fixture", messages: [] }]);
+        const event = (events.at(-1) as [string, { type: string; error: string; errorCode?: string }])[1];
+        assert.equal(event.type, "error");
+        assert.equal(event.errorCode, expectedCode);
+        assert.doesNotMatch(event.error, /private|payload|auth details/);
+        assert.equal(host.currentState().busy, false);
+      }
+      listeners.get("pagehide")?.({ persisted: true });
+      assert.equal(host.currentState().document.draftId, "B", "bfcache keeps its live document");
+      listeners.get("pagehide")?.({ persisted: false });
+      assert.equal(listeners.has("pagehide"), false);
+      assert.ok(requests.some(request => request.url.endsWith("session-B/close")), "closing a tab releases its engine worker");
       await assert.rejects(host.rpc("write"), /not open/);
     } finally {
       globalThis.fetch = previousFetch;

@@ -5,7 +5,7 @@ export const en = {
   aiEmptyBuildTitle: 'Let AI build this workbook for you',
   aiEmptyBuildBody: 'Describe the table, data, or chart you need — AI creates it in place.',
   aiGskLoginBtn: 'Sign in to Workbook assistant',
-  aiUndelivered: 'Not sent',
+  aiUndelivered: 'Interrupted',
   aiRetry: 'Retry',
   aiOpenAssistant: 'Open AI assistant',
   aiAskBtn: 'Ask AI',

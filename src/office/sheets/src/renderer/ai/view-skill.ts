@@ -1,5 +1,5 @@
 import type { AgentSkill, AgentToolCall, ToolExecution } from '@genoffice/agent-core'
-import { boundCanvas } from '@/office/shared/capture'
+import { captureSheetViewport } from './capture-viewport'
 import type { TemplateHooks, TemplatePayload } from '@/office/shared/platform-skill'
 import { formatAddress, parseRange, type RangeBounds } from '../../domain/cell-address'
 import { t } from '../i18n/locale'
@@ -7,9 +7,8 @@ import type { SheetsSkillDeps } from './tools'
 
 /**
  * Visual verification for Sheets: view_range scrolls a range into view (the
- * same path as select_range) and captures the grid canvas as a PNG the model
- * can look at. Univer paints the sheet on canvas, so the capture is a plain
- * canvas read; no DOM rasterization needed.
+ * same path as select_range) and captures the grid plus its DOM/SVG chart
+ * overlays as a bounded PNG. A canvas-only image omits floating charts.
  */
 export function createViewSkill(deps: Pick<SheetsSkillDeps, 'selectRange' | 'getActiveSheetInfo'>): AgentSkill {
   const fail = (output: string): ToolExecution => ({ output, isError: true, mutated: false, summary: t('aiToolSelectRange') })
@@ -20,9 +19,11 @@ export function createViewSkill(deps: Pick<SheetsSkillDeps, 'selectRange' | 'get
     tools: [
       {
         name: 'view_range',
-        readOnly: true,
+        // Changes the active sheet/viewport. Serialize with other tools so
+        // parallel captures cannot race and photograph the wrong sheet.
+        readOnly: false,
         description:
-          'Scroll a range into view and capture a picture of the grid (PNG) as the user sees it: fonts, fills, borders, column widths, number formats, wrapped text. Use after formatting changes to verify, or when asked how the sheet looks. The image is attached to the result.',
+          'Scroll a range into view and capture the visible grid and chart/shape overlays (PNG): fonts, fills, borders, column widths, number formats, wrapped text. Use after formatting or chart changes to verify. This captures the viewport, not the whole sheet; offscreen charts require another view at their anchor. The image is attached to the result.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -33,7 +34,8 @@ export function createViewSkill(deps: Pick<SheetsSkillDeps, 'selectRange' | 'get
         },
       },
     ],
-    executeTool: async (call: AgentToolCall): Promise<ToolExecution> => {
+    executeTool: async (call: AgentToolCall, signal?: AbortSignal): Promise<ToolExecution> => {
+      if (signal?.aborted) return fail('Visual capture cancelled')
       if (call.name !== 'view_range') return fail(`Unknown tool: ${call.name}`)
       const raw = call.input.range
       if (typeof raw !== 'string' || !raw.trim()) return fail('range must be a non-empty string')
@@ -54,12 +56,12 @@ export function createViewSkill(deps: Pick<SheetsSkillDeps, 'selectRange' | 'get
       const main = canvases
         .filter((c) => c.width > 50 && c.height > 50)
         .sort((a, b) => b.width * b.height - a.width * a.height)[0]
-      if (!main) return fail('The grid canvas is not available for capture.')
+      if (!host || !main) return fail('The grid canvas is not available for capture.')
       try {
-        const shot = boundCanvas(main)
+        const { shot, visibleCharts } = await captureSheetViewport(host, main, signal)
         const label = `${selected.sheetName ?? ''}!${formatAddress(bounds.startRow, bounds.startColumn)}:${formatAddress(bounds.endRow, bounds.endColumn)}`
         return {
-          output: `Captured the grid viewport around ${label} (${shot.width}x${shot.height}px). Inspect the attached image; the selection highlight marks the range.`,
+          output: `Captured the grid viewport around ${label} (${shot.width}x${shot.height}px), including its visible drawing layers. ${visibleCharts ? `${visibleCharts} chart(s) intersect this viewport; inspect their visible portions in the image.` : 'No charts are visible here; chart appearance has not been verified.'} ${shot.truncated ? 'The capture height was limited; review the remaining region separately. ' : ''}Offscreen content is not verified. The selection highlight marks the requested range.`,
           mutated: false,
           summary: t('aiToolSelectRangeOf', { range: label }),
           images: [{ base64: shot.base64, mime: 'image/png' }],

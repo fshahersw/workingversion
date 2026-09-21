@@ -592,6 +592,9 @@ export function recordChartEdit(
     ...(previous?.valueAxis || edit.valueAxis
       ? { valueAxis: { ...previous?.valueAxis, ...edit.valueAxis } }
       : {}),
+    ...(previous?.valueAxisFormats || edit.valueAxisFormats
+      ? { valueAxisFormats: { ...previous?.valueAxisFormats, ...edit.valueAxisFormats } }
+      : {}),
     ...(previous?.series || edit.series
       ? { series: mergeSeriesEdits(previous?.series, edit.series) }
       : {}),
@@ -617,7 +620,8 @@ function mergeSeriesEdits(
 ): NonNullable<WorkbookChartEdit['series']> {
   const byIndex = new Map<number, NonNullable<WorkbookChartEdit['series']>[number]>()
   for (const entry of [...(previous ?? []), ...(next ?? [])]) {
-    byIndex.set(entry.index, { ...byIndex.get(entry.index), ...entry })
+    byIndex.set(entry.index, { ...byIndex.get(entry.index), ...entry,
+      ...(entry.values === undefined ? {} : { blanks: entry.blanks }) })
   }
   return [...byIndex.values()]
 }
@@ -904,6 +908,7 @@ export function toSaveVisualAdds(journal: EditJournal): WorkbookVisualAdd[] {
           name: clampWireText(series.name, CHART_TEXT_WIRE_MAX),
           categories: clampCategories(series.categories),
           values: series.values,
+          ...(series.blanks === undefined ? {} : { blanks: series.blanks }),
           ...(series.valuesRef === undefined ? {} : { valuesRef: series.valuesRef }),
           ...(series.categoriesRef === undefined ? {} : { categoriesRef: series.categoriesRef }),
           ...(series.color === undefined ? {} : { color: series.color }),
@@ -948,6 +953,13 @@ export function toSaveVisualAdds(journal: EditJournal): WorkbookVisualAdd[] {
         ...(visual.chart.grouping === undefined ? {} : { grouping: visual.chart.grouping }),
         ...(visual.chart.gridlines === undefined ? {} : { gridlines: visual.chart.gridlines }),
         ...(visual.chart.valueAxis === undefined ? {} : { valueAxis: visual.chart.valueAxis }),
+        ...((visual.chart.barDirection === 'bar' ? visual.chart.xAxis : visual.chart.yAxis)?.numFmt === undefined && visual.chart.secondaryYAxis?.numFmt === undefined
+          ? {} : { valueAxisFormats: {
+            ...((visual.chart.barDirection === 'bar' ? visual.chart.xAxis : visual.chart.yAxis)?.numFmt === undefined ? {} : {
+              primary: (visual.chart.barDirection === 'bar' ? visual.chart.xAxis : visual.chart.yAxis)!.numFmt,
+            }),
+            ...(visual.chart.secondaryYAxis?.numFmt === undefined ? {} : { secondary: visual.chart.secondaryYAxis.numFmt }),
+          } }),
         ...(visual.chart.gapWidthPct === undefined
           ? {}
           : { gapWidthPct: Math.round(visual.chart.gapWidthPct) }),

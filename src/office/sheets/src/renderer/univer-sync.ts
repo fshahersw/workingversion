@@ -327,9 +327,10 @@ export function applyFormatPatchToRange(
   if (patch.fillColor !== undefined) range.setBackground(patch.fillColor as unknown as string)
   if (patch.numberFormat !== undefined) range.setNumberFormat(patch.numberFormat ?? 'General')
   if (patch.horizontalAlign !== undefined) {
-    range.setHorizontalAlignment(
-      (patch.horizontalAlign ?? 'normal') as 'left' | 'center' | 'normal',
-    )
+    // The installed facade calls RIGHT "normal". Null clears the explicit
+    // style so Excel's General alignment follows the cell's value type.
+    if (patch.horizontalAlign === null) range.setValue({ s: { ht: null } } as unknown as ICellData)
+    else range.setHorizontalAlignment(patch.horizontalAlign === 'right' ? 'normal' : patch.horizontalAlign)
   }
   if (patch.verticalAlign !== undefined) {
     if (patch.verticalAlign === null) range.setValue({ s: { vt: null } } as unknown as ICellData)

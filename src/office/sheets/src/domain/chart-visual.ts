@@ -1,4 +1,5 @@
 import { numfmt } from '@univerjs/core'
+import { numericChartCache } from './chart-cache'
 
 import { columnLabel, parseAddress, parseRange, rangeCellCount } from './cell-address'
 
@@ -78,6 +79,15 @@ export interface ChartAxisInfoState {
   hidden: boolean
   /// c:scaling/c:orientation val="maxMin".
   reversed: boolean
+}
+
+export interface ChartValueAxisFormats { primary?: string | undefined; secondary?: string | undefined }
+
+export function chartValueAxisFormatError(chart: ChartVisualState, formats: ChartValueAxisFormats): string | null {
+  if (!chart.chartTypes.some((type) => !/pie|doughnut/i.test(type))) return 'This chart has no value axis.'
+  const hasSecondary = chart.secondaryYAxis !== undefined
+  if (formats.secondary !== undefined && !hasSecondary) return 'This chart has no supported secondary value axis.'
+  return null
 }
 
 export interface ChartVisualState {
@@ -263,6 +273,7 @@ export interface ChartStateEdit {
   gridlines?: boolean | undefined
   /// null resets that bound to auto.
   valueAxis?: { min?: number | null | undefined; max?: number | null | undefined } | undefined
+  valueAxisFormats?: ChartValueAxisFormats | undefined
   gapWidthPct?: number | undefined
   holeSizePct?: number | undefined
   /// Pie whole-ring explosion (series 0).
@@ -274,6 +285,7 @@ export interface ChartStateEdit {
         index: number
         name?: string | undefined
         values?: number[] | undefined
+        blanks?: number[] | undefined
         categories?: string[] | undefined
         valuesRef?: string | undefined
         categoriesRef?: string | undefined
@@ -285,6 +297,7 @@ export interface ChartStateEdit {
     | {
         name: string
         values: number[]
+        blanks?: number[] | undefined
         categories?: string[] | undefined
         valuesRef?: string | undefined
         categoriesRef?: string | undefined
@@ -306,6 +319,8 @@ export function transposeChartSeries(
   return categories.slice(0, 24).map((category, index) => ({
     name: (category || seriesLabel(index + 1)).slice(0, 255),
     values: series.map((entry) => entry.values[index] ?? 0),
+    blanks: series.flatMap((entry, seriesIndex) =>
+      entry.values[index] === undefined || entry.blanks?.includes(index) ? [seriesIndex] : []),
     categories: seriesNames,
   }))
 }
@@ -404,12 +419,16 @@ export function applyChartStateEdit(
         name: entry.name,
         categories: entry.categories ?? fallbackCategories.slice(0, entry.values.length),
         values: entry.values,
+        ...(entry.blanks === undefined ? {} : { blanks: entry.blanks }),
         ...(entry.valuesRef === undefined ? {} : { valuesRef: entry.valuesRef }),
         ...(entry.categoriesRef === undefined ? {} : { categoriesRef: entry.categoriesRef }),
         ...(entry.color === undefined ? {} : { color: entry.color }),
       }))
     : chart.series
   const valueAxis = mergeValueAxis(chart.valueAxis, edit.valueAxis)
+  const primaryAxisKey = (typeOverride.barDirection ?? chart.barDirection) === 'bar' ? 'xAxis' : 'yAxis'
+  const axisFormats = edit.valueAxisFormats
+  const axisDefaults = { majorGridlines: false, hidden: false, reversed: false }
   return {
     ...chart,
     ...(edit.title === undefined ? {} : { title: edit.title }),
@@ -423,6 +442,12 @@ export function applyChartStateEdit(
     ...(grouping === undefined ? {} : { grouping }),
     ...(edit.gridlines === undefined ? {} : { gridlines: edit.gridlines }),
     ...(edit.valueAxis === undefined ? {} : { valueAxis }),
+    ...(axisFormats?.primary === undefined ? {} : {
+      [primaryAxisKey]: { ...axisDefaults, ...chart[primaryAxisKey], numFmt: axisFormats.primary },
+    }),
+    ...(axisFormats?.secondary === undefined ? {} : {
+      secondaryYAxis: { ...axisDefaults, ...chart.secondaryYAxis, numFmt: axisFormats.secondary },
+    }),
     ...(edit.gapWidthPct === undefined ? {} : { gapWidthPct: edit.gapWidthPct }),
     ...(edit.holeSizePct === undefined ? {} : { holeSizePct: edit.holeSizePct }),
     ...typeOverride,
@@ -445,7 +470,7 @@ export function applyChartStateEdit(
         ...(data?.name === undefined ? {} : { name: data.name }),
         // New values are dense numbers — stale blank markers must not
         // survive them.
-        ...(data?.values === undefined ? {} : { values: data.values, blanks: undefined }),
+        ...(data?.values === undefined ? {} : { values: data.values, blanks: data.blanks }),
         // Replacing the categories orphans the parsed outer-level spans.
         ...(data?.categories === undefined
           ? {}
@@ -467,7 +492,7 @@ export interface ParsedChartData {
   readonly hasCategoryColumn: boolean
   readonly categories: string[]
   /// Offset within the selection along the series axis (for range refs).
-  readonly series: { name: string; values: number[]; column: number }[]
+  readonly series: { name: string; values: number[]; blanks?: number[]; column: number }[]
 }
 
 const MAX_CHART_ROWS = 500
@@ -498,8 +523,6 @@ export function chartDataFromValues(
   const isNumeric = (v: unknown): boolean =>
     typeof v === 'number' ||
     (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)))
-  const toNumber = (v: unknown): number =>
-    typeof v === 'number' ? v : isNumeric(v) ? Number(String(v).trim()) : 0
   const width = firstRow.length
   // A header row is signalled by non-numeric labels, or by the cross-tab
   // fingerprint Excel also uses: blank corner cell with filled cells across
@@ -516,11 +539,19 @@ export function chartDataFromValues(
   const hasHeaderRow = hasLabelHeader || hasCrossTabHeader
   const body = (hasHeaderRow ? grid.slice(1) : grid).slice(0, MAX_CHART_ROWS)
   if (body.length === 0) return null
+  // Financial cross-tabs often use a named corner and numeric year headers.
+  // Require an explicit axis label and a unique plausible year vector so an
+  // arbitrary numeric data column is not silently reclassified as labels.
+  const cornerLabel = String(firstRow[0] ?? '').replace(/\([^)]*\)/g, '').trim()
+  const yearCategory = hasHeaderRow && /^(?:year|fiscal year|period|metric|line items?)$/i.test(cornerLabel) &&
+    body.every((row) => isNumeric(row[0]) && Number.isInteger(Number(row[0])) && Number(row[0]) >= 1900 && Number(row[0]) <= 2199) &&
+    new Set(body.map((row) => Number(row[0]))).size === body.length
   // The blank-corner fingerprint marks the first column as the category axis
   // even when its labels are numeric (years down the side).
   const hasCategoryColumn =
     width > 1 &&
     (hasCrossTabHeader ||
+      yearCategory ||
       body.some((row) => !isBlank(row[0]) && !isNumeric(row[0])) ||
       (options?.numericCategoryColumn === true && body.some((row) => isNumeric(row[0]))))
   const categories = body.map((row, i) =>
@@ -530,9 +561,12 @@ export function chartDataFromValues(
   for (let column = hasCategoryColumn ? 1 : 0; column < width; column++) {
     if (!body.some((row) => isNumeric(row[column]))) continue
     const header = hasHeaderRow ? firstRow[column] : null
+    const cache = numericChartCache(body.map((row) => row[column]))
+    if (!cache) return null
     series.push({
       name: isBlank(header) ? `Series ${series.length + 1}` : String(header),
-      values: body.map((row) => toNumber(row[column])),
+      values: cache.values,
+      ...(cache.blanks.length ? { blanks: cache.blanks } : {}),
       column,
     })
     if (series.length >= MAX_CHART_SERIES) break
@@ -542,6 +576,8 @@ export function chartDataFromValues(
   // though Excel still plots the numbers — chart it as the value series.
   if (series.length === 0 && hasCategoryColumn && body.some((row) => isNumeric(row[0]))) {
     const header = hasHeaderRow ? firstRow[0] : null
+    const cache = numericChartCache(body.map((row) => row[0]))
+    if (!cache) return null
     return {
       byRow,
       hasHeaderRow,
@@ -550,7 +586,8 @@ export function chartDataFromValues(
       series: [
         {
           name: isBlank(header) ? 'Series 1' : String(header),
-          values: body.map((row) => toNumber(row[0])),
+          values: cache.values,
+          ...(cache.blanks.length ? { blanks: cache.blanks } : {}),
           column: 0,
         },
       ],
@@ -689,6 +726,11 @@ export function buildChartVisual(input: BuildChartVisualInput): SheetVisual {
     anchor,
     chart: {
       chartTypes: [...CHART_KIND_TO_TYPES[input.chartType]],
+      // Our native combo writer creates a right value axis for the final
+      // series. Imported bar+line plots may instead share a single axis.
+      ...(input.chartType === 'combo' && parsed.series.length >= 2
+        ? { secondaryYAxis: { majorGridlines: false, hidden: false, reversed: false } }
+        : {}),
       ...(input.chartType === 'column' || input.chartType === 'bar' || input.chartType === 'combo'
         ? {
             barDirection: input.chartType === 'bar' ? 'bar' : 'col',
@@ -704,6 +746,7 @@ export function buildChartVisual(input: BuildChartVisualInput): SheetVisual {
         name: series.name,
         categories: parsed.categories,
         values: series.values,
+        ...(series.blanks === undefined ? {} : { blanks: series.blanks }),
         ...(parsed.byRow
           ? {
               valuesRef: a1RowRangeRef(

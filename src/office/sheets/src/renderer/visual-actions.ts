@@ -230,6 +230,9 @@ export async function handleInsertChart(
       toColumnOffset: 0,
     },
     chart: {
+      ...(chartKind === 'combo' && parsed.series.length >= 2
+        ? { secondaryYAxis: { majorGridlines: false, hidden: false, reversed: false } }
+        : {}),
       chartTypes:
         chartKind === 'line'
           ? ['lineChart']
@@ -482,6 +485,7 @@ export async function buildAiChartEdit(
     ...(op.dataLabels !== undefined ? { dataLabels: op.dataLabels } : {}),
     ...(op.grouping !== undefined ? { grouping: op.grouping } : {}),
     ...(op.axisTitles !== undefined ? { axisTitles: op.axisTitles } : {}),
+    ...(op.valueAxisFormats !== undefined ? { valueAxisFormats: op.valueAxisFormats } : {}),
   }
   if (!op.seriesData || op.seriesData.length === 0) return edit
   const runtime = ctx.univerRef.current
