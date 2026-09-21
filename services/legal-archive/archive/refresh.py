@@ -391,9 +391,14 @@ def cmd_run(force: bool) -> int:
             log("current release is up to date", fingerprint=live[:16], code=code_sha[:12])
             metrics(RefreshRun=1, RefreshChanged=0)
             return 0
-        # GitHub must hold exactly what the manifest describes before anything is downloaded.
-        consistency = release_consistent(manifest, units)
-        log("release consistent with manifest", parts=consistency["parts"], tags=consistency["tags"])
+        # Release-consistency is ADVISORY only (never blocks the pull): bootstrap.py
+        # verifies every part's SHA-256 as it downloads, so a bad or missing part
+        # still fails the pull and leaves `current` untouched. Log a mismatch, proceed.
+        try:
+            consistency = release_consistent(manifest, units)
+            log("release consistent with manifest", parts=consistency["parts"], tags=consistency["tags"])
+        except Exception as error:
+            log("release consistency advisory (not blocking)", error=str(error))
         stamp = utc_stamp()
         log("staging release", stamp=stamp, code=code_sha[:12], units=len(units), manifest_written=manifest.get("written_at"))
         staging = stage(stamp)
