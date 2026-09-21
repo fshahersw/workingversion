@@ -14,8 +14,5 @@ export type QueryInput = { q?: string };
 export type IdInput = { id: string };
 export type RegPartsInput = { title: string };
 export type RegSectionsInput = { title: string; part: string };
-export type JurisdictionInput = { state?: string };
+export type JurisdictionInput = { state: string; stateName?: string };
 export type ForJudgeInput = { judge: string };
-
-/** US states + DC, in the tile-grid layout used by the map (row/col are the statebins grid). */
-export type StateCell = { code: string; name: string; row: number; col: number };

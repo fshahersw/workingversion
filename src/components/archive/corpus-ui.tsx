@@ -7,7 +7,7 @@
 // ============================================================================
 import type { ReactNode } from "react";
 
-import { ARCHIVE_CAVEATS } from "@/lib/archive/policy";
+import { ARCHIVE_CAVEATS, type JsonValue } from "@/lib/archive/policy";
 import type { CorpusResult } from "@/lib/archive/corpus-types";
 
 type Scalar = string | number | boolean | null;
@@ -263,11 +263,13 @@ export function ResultPanel({
   loading,
   error,
   emptyLabel = "No results.",
+  render,
 }: {
   result?: CorpusResult;
   loading?: boolean;
   error?: string | null;
   emptyLabel?: string;
+  render?: (data: JsonValue) => ReactNode;
 }) {
   if (loading)
     return <div className="h-24 animate-pulse rounded-md border border-slate-200 bg-slate-50" />;
@@ -289,7 +291,7 @@ export function ResultPanel({
   if (empty) return <p className="text-[13px] text-slate-500">{emptyLabel}</p>;
   return (
     <div className="rounded-md border border-slate-200 p-4">
-      <Structured value={result.data} />
+      {render ? render(result.data) : <Structured value={result.data} />}
     </div>
   );
 }

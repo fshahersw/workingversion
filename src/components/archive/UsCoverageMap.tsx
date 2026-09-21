@@ -14,6 +14,12 @@ import type { FeatureCollection } from "geojson";
 import statesTopo from "us-atlas/states-10m.json";
 
 import type { JsonValue } from "@/lib/archive/policy";
+import {
+  countBasis,
+  STATE_NAME_BY_CODE,
+  stateCoverageValues,
+  type StateSelection,
+} from "@/lib/archive/corpus-shapes";
 
 const FIPS_TO_USPS: Record<string, string> = {
   "01": "AL",
@@ -73,69 +79,6 @@ const FIPS_TO_USPS: Record<string, string> = {
 const topo = statesTopo as unknown as Topology;
 const STATES = feature(topo, topo.objects.states as GeometryCollection) as FeatureCollection;
 
-// name -> USPS, derived from the topology so we don't hard-code 51 names.
-const NAME_TO_USPS: Record<string, string> = {};
-for (const f of STATES.features) {
-  const code = FIPS_TO_USPS[String(f.id ?? "").padStart(2, "0")];
-  const name = (f.properties as { name?: string } | null)?.name;
-  if (code && name) NAME_TO_USPS[name.toLowerCase()] = code;
-}
-
-const USPS = new Set(Object.values(FIPS_TO_USPS));
-
-function toNum(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) return Number(v);
-  return null;
-}
-
-function normStateKey(key: unknown): string | null {
-  if (typeof key !== "string") return null;
-  const up = key.trim().toUpperCase();
-  if (up.length === 2 && USPS.has(up)) return up;
-  const byName = NAME_TO_USPS[key.trim().toLowerCase()];
-  return byName ?? null;
-}
-
-/** Best-effort extraction of per-state counts from whatever shape /api/coverage/state returns. */
-function toValueMap(coverage: JsonValue | null): Map<string, number> {
-  const m = new Map<string, number>();
-  const put = (key: unknown, val: unknown) => {
-    const code = normStateKey(key);
-    const n = toNum(val);
-    if (code && n !== null) m.set(code, Math.max(n, m.get(code) ?? 0));
-  };
-  if (Array.isArray(coverage)) {
-    for (const row of coverage) {
-      if (row && typeof row === "object" && !Array.isArray(row)) {
-        const o = row as Record<string, unknown>;
-        const key =
-          o["state"] ?? o["code"] ?? o["usps"] ?? o["abbr"] ?? o["name"] ?? o["jurisdiction"];
-        const val =
-          o["count"] ??
-          o["records"] ??
-          o["total"] ??
-          o["saved"] ??
-          o["n"] ??
-          o["value"] ??
-          o["documents"];
-        put(key, val);
-      }
-    }
-  } else if (coverage && typeof coverage === "object") {
-    for (const [k, v] of Object.entries(coverage)) {
-      const val =
-        v && typeof v === "object" && !Array.isArray(v)
-          ? ((v as Record<string, unknown>)["count"] ??
-            (v as Record<string, unknown>)["total"] ??
-            (v as Record<string, unknown>)["records"])
-          : v;
-      put(k, val);
-    }
-  }
-  return m;
-}
-
 const RAMP = ["#e0e7ff", "#c7d2fe", "#a5b4fc", "#818cf8", "#6366f1", "#4f46e5"]; // indigo 100..600
 const NO_DATA = "#f1f5f9"; // slate-100
 
@@ -154,10 +97,12 @@ export function UsCoverageMap({
   coverage: JsonValue | null;
   loading?: boolean;
   selected?: string;
-  onSelect: (code: string) => void;
+  onSelect: (state: StateSelection) => void;
 }) {
-  const values = useMemo(() => toValueMap(coverage), [coverage]);
+  const rows = useMemo(() => stateCoverageValues(coverage), [coverage]);
+  const values = useMemo(() => new Map(rows.map((row) => [row.code, row.total])), [rows]);
   const max = useMemo(() => Math.max(0, ...values.values()), [values]);
+  const basis = useMemo(() => countBasis(coverage), [coverage]);
   const [hover, setHover] = useState<{ code: string; name: string; value?: number } | null>(null);
   const hasData = values.size > 0;
 
@@ -167,9 +112,9 @@ export function UsCoverageMap({
   return (
     <div className="rounded-md border border-slate-200 bg-white p-3">
       <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-2">
-        <p className="text-[12px] text-slate-500">
+        <p className="text-[12px] text-slate-500" title={basis ?? undefined}>
           {hasData
-            ? "Shaded by saved records per state. Click a state to see its counties."
+            ? "Shaded by saved corpus records per jurisdiction, not completeness. Click a state to see its counties."
             : "Coverage counts unavailable; the map is for selection. Click a state to see its counties."}
         </p>
         <div className="min-h-[16px] text-[12px] font-medium text-slate-700">
@@ -191,7 +136,11 @@ export function UsCoverageMap({
             geographies.map((geo) => {
               const fips = String(geo.id ?? "").padStart(2, "0");
               const code = FIPS_TO_USPS[fips];
-              const name = (geo.properties as { name?: string } | null)?.name ?? code ?? fips;
+              const name =
+                (code ? STATE_NAME_BY_CODE[code] : null) ??
+                (geo.properties as { name?: string } | null)?.name ??
+                code ??
+                fips;
               const value = code ? values.get(code) : undefined;
               const isSel = !!code && code === selected;
               const isHover = !!code && hover?.code === code;
@@ -199,7 +148,7 @@ export function UsCoverageMap({
                 <Geography
                   key={geo.rsmKey}
                   geography={geo}
-                  onClick={() => code && onSelect(code)}
+                  onClick={() => code && onSelect({ code, name })}
                   onMouseEnter={() => code && setHover({ code, name, value })}
                   onMouseLeave={() => setHover(null)}
                   fill={isHover ? "#4f46e5" : colorFor(value, max)}

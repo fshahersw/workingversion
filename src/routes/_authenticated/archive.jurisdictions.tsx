@@ -11,8 +11,19 @@ import {
   TabBar,
   UnavailableNotice,
 } from "@/components/archive/corpus-ui";
+import {
+  CountyLitigationResults,
+  CountyResults,
+  StateCoverageResults,
+} from "@/components/archive/corpus-results";
 import { getArchiveHealth } from "@/lib/archive/archive.functions";
-import { countyLitigation, listCounties, stateCoverage } from "@/lib/archive/corpus.functions";
+import {
+  corpusExplore,
+  countyLitigation,
+  listCounties,
+  stateCoverage,
+} from "@/lib/archive/corpus.functions";
+import { stateSelection, type StateSelection } from "@/lib/archive/corpus-shapes";
 
 // States & Counties: state-level coverage (with a US map), the counties saved
 // per state, and county-level litigation records. Selecting a state on the map
@@ -54,24 +65,42 @@ function JurisdictionsPage() {
 
   const coverage = useQuery({
     queryKey: ["corpus", "state-coverage"],
-    queryFn: () => stateCoverage(),
+    queryFn: () => corpusExplore(),
     enabled: reachable,
+    staleTime: 300_000,
+  });
+  const selectedState = stateSelection(state);
+
+  const stateDetail = useQuery({
+    queryKey: ["corpus", "state-coverage-detail", selectedState?.code],
+    queryFn: () =>
+      stateCoverage({
+        data: {
+          state: selectedState!.code,
+          stateName: selectedState!.name,
+        },
+      }),
+    enabled: reachable && tab === "coverage" && selectedState !== null,
     staleTime: 300_000,
   });
 
   const detail = useQuery({
     queryKey: ["corpus", "jurisdiction", tab, state],
-    enabled: reachable && tab !== "coverage",
+    enabled: reachable && tab !== "coverage" && selectedState !== null,
     placeholderData: keepPreviousData,
     staleTime: 60_000,
     queryFn: () =>
       tab === "litigation"
-        ? countyLitigation({ data: { state } })
-        : listCounties({ data: { state } }),
+        ? countyLitigation({
+            data: { state: selectedState!.code, stateName: selectedState!.name },
+          })
+        : listCounties({
+            data: { state: selectedState!.code, stateName: selectedState!.name },
+          }),
   });
 
-  const selectState = (code: string) => {
-    setState(code);
+  const selectState = (selection: StateSelection) => {
+    setState(selection.code);
     if (tab === "coverage") setTab("counties");
   };
 
@@ -119,15 +148,28 @@ function JurisdictionsPage() {
                   <section>
                     <h2 className="text-[13px] font-semibold text-slate-900">State coverage</h2>
                     <p className="mt-0.5 text-[12px] text-slate-500">
-                      The archive's /api/coverage/state, verbatim. Click a state on the map to see
-                      its counties.
+                      Global counts come from the archive&apos;s jurisdiction inventory. Select a
+                      state to load its detailed coverage and counties.
                     </p>
                     <div className="mt-3">
                       <ResultPanel
-                        result={coverage.data}
-                        loading={coverage.isLoading}
-                        error={coverage.error instanceof Error ? coverage.error.message : null}
-                        emptyLabel="No coverage reported."
+                        result={selectedState ? stateDetail.data : coverage.data}
+                        loading={selectedState ? stateDetail.isLoading : coverage.isLoading}
+                        error={
+                          selectedState
+                            ? stateDetail.error instanceof Error
+                              ? stateDetail.error.message
+                              : null
+                            : coverage.error instanceof Error
+                              ? coverage.error.message
+                              : null
+                        }
+                        emptyLabel={
+                          selectedState
+                            ? `No coverage detail reported for ${selectedState.name}.`
+                            : "No coverage reported."
+                        }
+                        render={(data) => <StateCoverageResults value={data} />}
                       />
                     </div>
                   </section>
@@ -159,6 +201,13 @@ function JurisdictionsPage() {
                       state
                         ? `No saved ${tab === "litigation" ? "litigation" : "counties"} for ${state}.`
                         : "Pick a state (type its 2-letter code or use the map)."
+                    }
+                    render={(data) =>
+                      tab === "litigation" ? (
+                        <CountyLitigationResults value={data} />
+                      ) : (
+                        <CountyResults value={data} />
+                      )
                     }
                   />
                 </>

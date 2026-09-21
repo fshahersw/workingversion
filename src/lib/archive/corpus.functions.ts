@@ -52,15 +52,20 @@ export const corpusExplore = createServerFn({ method: "GET" })
   .handler(async (): Promise<CorpusResult> => archive("/api/explore"));
 
 // --- States & counties -----------------------------------------------------------
-export const stateCoverage = createServerFn({ method: "GET" })
+export const stateCoverage = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .handler(async (): Promise<CorpusResult> => archive("/api/coverage/state"));
+  .inputValidator((d: JurisdictionInput) => d)
+  .handler(
+    async ({ data }): Promise<CorpusResult> =>
+      archive("/api/coverage/state", { state: data.state }),
+  );
 
 export const listCounties = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((d: JurisdictionInput) => d)
   .handler(
-    async ({ data }): Promise<CorpusResult> => archive("/api/counties", { state: data.state }),
+    async ({ data }): Promise<CorpusResult> =>
+      archive("/api/counties", { state: data.stateName ?? data.state }),
   );
 
 export const countyFilingCoverage = createServerFn({ method: "GET" })
@@ -105,7 +110,7 @@ export const regSearch = createServerFn({ method: "POST" })
 
 export const lawOutline = createServerFn({ method: "GET" })
   .middleware([requireAuth])
-  .handler(async (): Promise<CorpusResult> => archive("/api/law-outline"));
+  .handler(async (): Promise<CorpusResult> => archive("/api/law-outline", { state: "Federal" }));
 
 export const agencyHub = createServerFn({ method: "GET" })
   .middleware([requireAuth])

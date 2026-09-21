@@ -11,6 +11,12 @@ import {
   TabBar,
   UnavailableNotice,
 } from "@/components/archive/corpus-ui";
+import {
+  CourtResults,
+  JudgeResults,
+  MdlResults,
+  SearchResults,
+} from "@/components/archive/corpus-results";
 import { getArchiveHealth } from "@/lib/archive/archive.functions";
 import { listDocuments, listJudges, listMdls, resolveCourt } from "@/lib/archive/corpus.functions";
 
@@ -123,6 +129,19 @@ function CourtsPage() {
                     ? "No matching records in the archive."
                     : "Type to search, or browse the saved records."
                 }
+                render={(data) => {
+                  switch (tab) {
+                    case "judges":
+                      return <JudgeResults value={data} />;
+                    case "courts":
+                      return <CourtResults value={data} />;
+                    case "documents":
+                      return <SearchResults value={data} />;
+                    case "mdls":
+                    default:
+                      return <MdlResults value={data} />;
+                  }
+                }}
               />
               <Caveats />
             </div>

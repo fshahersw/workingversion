@@ -11,6 +11,7 @@ import {
   TabBar,
   UnavailableNotice,
 } from "@/components/archive/corpus-ui";
+import { AgencyResults, CfrResults, LawOutlineResults } from "@/components/archive/corpus-results";
 import { getArchiveHealth } from "@/lib/archive/archive.functions";
 import {
   agencyHub,
@@ -122,6 +123,17 @@ function FederalPage() {
                       : null
                 }
                 emptyLabel="Nothing saved here yet."
+                render={(data) => {
+                  switch (tab) {
+                    case "uscode":
+                      return <LawOutlineResults value={data} />;
+                    case "agencies":
+                      return <AgencyResults value={data} />;
+                    case "regulations":
+                    default:
+                      return <CfrResults value={data} />;
+                  }
+                }}
               />
               <Caveats />
             </div>

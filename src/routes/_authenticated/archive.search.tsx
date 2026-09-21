@@ -10,6 +10,7 @@ import {
   ResultPanel,
   UnavailableNotice,
 } from "@/components/archive/corpus-ui";
+import { ExploreResults, SearchResults } from "@/components/archive/corpus-results";
 import { getArchiveHealth } from "@/lib/archive/archive.functions";
 import { corpusExplore, corpusSearch } from "@/lib/archive/corpus.functions";
 
@@ -107,6 +108,9 @@ function SearchPage() {
                     : null
               }
               emptyLabel={q ? "No matches in the archive." : "Enter a query to search the corpus."}
+              render={(data) =>
+                q ? <SearchResults value={data} /> : <ExploreResults value={data} />
+              }
             />
             <Caveats />
           </div>
