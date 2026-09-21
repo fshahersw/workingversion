@@ -57,6 +57,10 @@ import { Route as ApiArchiveSplatRouteImport } from './routes/api/archive/$'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
 import { Route as AuthenticatedDraftsDraftIdRouteImport } from './routes/_authenticated/drafts.$draftId'
 import { Route as AuthenticatedArchiveSourcesRouteImport } from './routes/_authenticated/archive.sources'
+import { Route as AuthenticatedArchiveSearchRouteImport } from './routes/_authenticated/archive.search'
+import { Route as AuthenticatedArchiveJurisdictionsRouteImport } from './routes/_authenticated/archive.jurisdictions'
+import { Route as AuthenticatedArchiveFederalRouteImport } from './routes/_authenticated/archive.federal'
+import { Route as AuthenticatedArchiveCourtsRouteImport } from './routes/_authenticated/archive.courts'
 import { Route as AuthenticatedOfficeSlidesIndexRouteImport } from './routes/_authenticated/office.slides.index'
 import { Route as AuthenticatedOfficeSheetsIndexRouteImport } from './routes/_authenticated/office.sheets.index'
 import { Route as AuthenticatedOfficeDraftsIndexRouteImport } from './routes/_authenticated/office.drafts.index'
@@ -326,6 +330,30 @@ const AuthenticatedArchiveSourcesRoute =
     path: '/archive/sources',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedArchiveSearchRoute =
+  AuthenticatedArchiveSearchRouteImport.update({
+    id: '/archive/search',
+    path: '/archive/search',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedArchiveJurisdictionsRoute =
+  AuthenticatedArchiveJurisdictionsRouteImport.update({
+    id: '/archive/jurisdictions',
+    path: '/archive/jurisdictions',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedArchiveFederalRoute =
+  AuthenticatedArchiveFederalRouteImport.update({
+    id: '/archive/federal',
+    path: '/archive/federal',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedArchiveCourtsRoute =
+  AuthenticatedArchiveCourtsRouteImport.update({
+    id: '/archive/courts',
+    path: '/archive/courts',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedOfficeSlidesIndexRoute =
   AuthenticatedOfficeSlidesIndexRouteImport.update({
     id: '/office/slides/',
@@ -477,6 +505,10 @@ export interface FileRoutesByFullPath {
   '/auth/callback': typeof AuthCallbackRoute
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
+  '/archive/courts': typeof AuthenticatedArchiveCourtsRoute
+  '/archive/federal': typeof AuthenticatedArchiveFederalRoute
+  '/archive/jurisdictions': typeof AuthenticatedArchiveJurisdictionsRoute
+  '/archive/search': typeof AuthenticatedArchiveSearchRoute
   '/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
@@ -548,6 +580,10 @@ export interface FileRoutesByTo {
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/': typeof AuthenticatedIndexRoute
+  '/archive/courts': typeof AuthenticatedArchiveCourtsRoute
+  '/archive/federal': typeof AuthenticatedArchiveFederalRoute
+  '/archive/jurisdictions': typeof AuthenticatedArchiveJurisdictionsRoute
+  '/archive/search': typeof AuthenticatedArchiveSearchRoute
   '/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
@@ -621,6 +657,10 @@ export interface FileRoutesById {
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/archive/courts': typeof AuthenticatedArchiveCourtsRoute
+  '/_authenticated/archive/federal': typeof AuthenticatedArchiveFederalRoute
+  '/_authenticated/archive/jurisdictions': typeof AuthenticatedArchiveJurisdictionsRoute
+  '/_authenticated/archive/search': typeof AuthenticatedArchiveSearchRoute
   '/_authenticated/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/_authenticated/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/_authenticated/matters/$slug': typeof AuthenticatedMattersSlugRoute
@@ -694,6 +734,10 @@ export interface FileRouteTypes {
     | '/auth/callback'
     | '/auth/login'
     | '/auth/logout'
+    | '/archive/courts'
+    | '/archive/federal'
+    | '/archive/jurisdictions'
+    | '/archive/search'
     | '/archive/sources'
     | '/drafts/$draftId'
     | '/matters/$slug'
@@ -765,6 +809,10 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/logout'
     | '/'
+    | '/archive/courts'
+    | '/archive/federal'
+    | '/archive/jurisdictions'
+    | '/archive/search'
     | '/archive/sources'
     | '/drafts/$draftId'
     | '/matters/$slug'
@@ -837,6 +885,10 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/logout'
     | '/_authenticated/'
+    | '/_authenticated/archive/courts'
+    | '/_authenticated/archive/federal'
+    | '/_authenticated/archive/jurisdictions'
+    | '/_authenticated/archive/search'
     | '/_authenticated/archive/sources'
     | '/_authenticated/drafts/$draftId'
     | '/_authenticated/matters/$slug'
@@ -1263,6 +1315,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedArchiveSourcesRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/archive/search': {
+      id: '/_authenticated/archive/search'
+      path: '/archive/search'
+      fullPath: '/archive/search'
+      preLoaderRoute: typeof AuthenticatedArchiveSearchRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/archive/jurisdictions': {
+      id: '/_authenticated/archive/jurisdictions'
+      path: '/archive/jurisdictions'
+      fullPath: '/archive/jurisdictions'
+      preLoaderRoute: typeof AuthenticatedArchiveJurisdictionsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/archive/federal': {
+      id: '/_authenticated/archive/federal'
+      path: '/archive/federal'
+      fullPath: '/archive/federal'
+      preLoaderRoute: typeof AuthenticatedArchiveFederalRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/archive/courts': {
+      id: '/_authenticated/archive/courts'
+      path: '/archive/courts'
+      fullPath: '/archive/courts'
+      preLoaderRoute: typeof AuthenticatedArchiveCourtsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/office/slides/': {
       id: '/_authenticated/office/slides/'
       path: '/office/slides'
@@ -1432,6 +1512,10 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedSummarizeRoute: typeof AuthenticatedSummarizeRoute
   AuthenticatedWorkflowsRoute: typeof AuthenticatedWorkflowsRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedArchiveCourtsRoute: typeof AuthenticatedArchiveCourtsRoute
+  AuthenticatedArchiveFederalRoute: typeof AuthenticatedArchiveFederalRoute
+  AuthenticatedArchiveJurisdictionsRoute: typeof AuthenticatedArchiveJurisdictionsRoute
+  AuthenticatedArchiveSearchRoute: typeof AuthenticatedArchiveSearchRoute
   AuthenticatedArchiveSourcesRoute: typeof AuthenticatedArchiveSourcesRoute
   AuthenticatedDraftsDraftIdRoute: typeof AuthenticatedDraftsDraftIdRoute
   AuthenticatedMattersSlugRoute: typeof AuthenticatedMattersSlugRoute
@@ -1458,6 +1542,11 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedSummarizeRoute: AuthenticatedSummarizeRoute,
   AuthenticatedWorkflowsRoute: AuthenticatedWorkflowsRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedArchiveCourtsRoute: AuthenticatedArchiveCourtsRoute,
+  AuthenticatedArchiveFederalRoute: AuthenticatedArchiveFederalRoute,
+  AuthenticatedArchiveJurisdictionsRoute:
+    AuthenticatedArchiveJurisdictionsRoute,
+  AuthenticatedArchiveSearchRoute: AuthenticatedArchiveSearchRoute,
   AuthenticatedArchiveSourcesRoute: AuthenticatedArchiveSourcesRoute,
   AuthenticatedDraftsDraftIdRoute: AuthenticatedDraftsDraftIdRoute,
   AuthenticatedMattersSlugRoute: AuthenticatedMattersSlugRoute,

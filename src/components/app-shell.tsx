@@ -7,9 +7,12 @@ import {
   Database,
   ChevronRight,
   FileSearch,
+  Gavel,
   Home,
+  Landmark,
   Library,
   LogOut,
+  MapPin,
   Menu,
   PenLine,
   Search,
@@ -224,6 +227,30 @@ function SidebarInner({
             Corpus
           </p>
         )}
+        <NavRow
+          item={{ icon: Search, label: "Search the Corpus", to: "/archive/search" }}
+          active={pathname.startsWith("/archive/search")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+        <NavRow
+          item={{ icon: MapPin, label: "States & Counties", to: "/archive/jurisdictions" }}
+          active={pathname.startsWith("/archive/jurisdictions")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+        <NavRow
+          item={{ icon: Landmark, label: "Federal Law & Agencies", to: "/archive/federal" }}
+          active={pathname.startsWith("/archive/federal")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+        <NavRow
+          item={{ icon: Gavel, label: "Courts & Litigation", to: "/archive/courts" }}
+          active={pathname.startsWith("/archive/courts")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
         <NavRow
           item={{ icon: Database, label: "Sources & Coverage", to: "/archive/sources" }}
           active={pathname.startsWith("/archive/sources")}
