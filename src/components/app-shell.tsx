@@ -227,12 +227,6 @@ function SidebarInner({
           </p>
         )}
         <NavRow
-          item={{ icon: Search, label: "Search the Corpus", to: "/archive/search" }}
-          active={pathname.startsWith("/archive/search")}
-          expanded={expanded}
-          onClick={onNavigate}
-        />
-        <NavRow
           item={{ icon: MapPin, label: "States & Counties", to: "/archive/jurisdictions" }}
           active={pathname.startsWith("/archive/jurisdictions")}
           expanded={expanded}
