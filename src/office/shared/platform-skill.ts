@@ -247,7 +247,7 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
       name: "load_firm_guide",
       readOnly: true,
       description:
-        "Load a Seeger Weiss playbook: firm conventions for a kind of deliverable (citation form, table of authorities, deposition summary, damages tables, MDL status deck, case timeline, firm style). Call with no name to list the guides. Load the relevant guide before drafting or reformatting firm work product.",
+        "Load a Seeger Weiss playbook. For complex creation/editing, native-office-workflow covers planning, bounded edits, verification, recovery and faithful export. Other guides cover citation form, table of authorities, deposition summary, damages tables, MDL status decks, case timelines and firm style. Call with no name to list guides; load only those relevant to the task.",
       inputSchema: {
         type: "object",
         properties: {
@@ -484,16 +484,17 @@ const SYSTEM_PROMPT = `## Platform tools
 - search_firm_knowledge: the firm's knowledge base (matter documents, depositions, expert reports). Use it when the user refers to case facts or prior work; cite document and page.
 - search_library: the user's own Office documents on this platform, with open links.
 - fetch_page: read a source web_search surfaced before quoting it.
-- load_firm_guide: firm conventions for the deliverable at hand; load the matching guide before drafting firm work product.
-- list_templates / apply_template / save_template: start from a firm or saved template when the user wants a standard deliverable; apply it first, then fill the [Bracketed] placeholders from the user's facts.
+- load_firm_guide: load native-office-workflow once for complex multi-stage creation/editing, plus the relevant deliverable guide; do not reload unchanged guides after every edit.
+- Template tools, when supplied: start from a firm or saved template for a standard deliverable; apply it first, then fill the [Bracketed] placeholders from the user's facts. Save a reusable template only when save_template is supplied.
 - ask_clarification: one card, only when a real ambiguity would change the work; otherwise proceed and state your assumption.
-- create_document: a separate Library document (Word, Excel, PowerPoint, PDF) from Markdown; the current document is untouched.`;
+- create_document: create a separate document using exactly the formats and content syntax in the supplied tool schema; the current document is untouched. Editor-specific worksheet exports may be values-only. Use the editor Save/Download controls for its complete native file.`;
 
 export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
   const exclude = new Set(options.exclude ?? []);
   // Contrastive "use for / not for" on every platform tool (src/lib/agents/tool-contrast.ts).
   const tools = withToolContrast(
-    toolDefs(options.app, !!options.templates).filter((t) => !exclude.has(t.name)),
+    toolDefs(options.app, !!options.templates).filter((t) =>
+      !exclude.has(t.name) && (t.name !== "save_template" || !!options.templates?.capture)),
     PLATFORM_TOOL_CONTRAST,
   );
   let taskScope = crypto.randomUUID() as string;

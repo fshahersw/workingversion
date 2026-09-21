@@ -1,6 +1,6 @@
 import {
   PDFArray, PDFCheckBox, PDFDict, PDFDocument, PDFDropdown, PDFHexString,
-  PDFName, PDFNumber, PDFRadioGroup, PDFRawStream, PDFString, PDFTextField,
+  PDFName, PDFNumber, PDFRadioGroup, PDFRawStream, PDFRef, PDFString, PDFTextField,
   StandardFonts, degrees, rgb,
 } from "pdf-lib";
 import type { PDFPage } from "pdf-lib";
@@ -84,9 +84,97 @@ export type PdfOperation =
   | { type: "delete_pages"; pages: number[] }
   | { type: "reorder_pages"; order: number[] }
   | { type: "add_text"; page: number; text: string; x: number; y: number; size?: number }
-  | { type: "add_note"; page: number; text: string; x: number; y: number }
-  | { type: "highlight"; page: number; rects: number[][] }
+  | { type: "add_note"; page: number; text: string; x: number; y: number; color?: string }
+  | { type: "highlight"; page: number; rects: number[][]; color?: string }
+  | { type: "update_annotation"; annotationId: string; text?: string; color?: string }
+  | { type: "delete_annotation"; annotationId: string }
   | { type: "fill_form"; name: string; value: string | boolean };
+
+export type PdfAnnotation = {
+  id: string; page: number; kind: string; text: string; author: string;
+  rect: [number, number, number, number] | null; color?: [number, number, number];
+  editable: boolean; removable: boolean; reason?: string; textTruncated?: boolean;
+};
+type AnnotationEntry = { id: string; page: PDFPage; pageNumber: number; raw: unknown; dict: PDFDict };
+const editableAnnotationKinds = new Set(["Text", "Highlight", "Underline", "StrikeOut", "Squiggly"]);
+const pdfText = (dict: PDFDict, key: string) => {
+  const value = dict.lookup(PDFName.of(key));
+  return value instanceof PDFString || value instanceof PDFHexString ? value.decodeText() : "";
+};
+function annotationEntries(doc: PDFDocument): AnnotationEntry[] {
+  const entries: AnnotationEntry[] = [];
+  doc.getPages().forEach((page, index) => {
+    for (const [at, raw] of (page.node.Annots()?.asArray() ?? []).entries()) {
+      requirePdf(entries.length < 20_000, "This PDF exceeds the 20,000-annotation review limit.");
+      const dict = doc.context.lookup(raw);
+      if (!(dict instanceof PDFDict)) continue;
+      entries.push({ id: `p${index + 1}:${raw instanceof PDFRef ? `r${raw.objectNumber}g${raw.generationNumber}` : `a${at}`}`,
+        page, pageNumber: index + 1, raw, dict });
+    }
+  });
+  return entries;
+}
+function annotationKind(entry: AnnotationEntry) {
+  const kind = entry.dict.lookup(PDFName.of("Subtype"));
+  return kind instanceof PDFName ? kind.decodeText() : "Unknown";
+}
+function annotationRestriction(entry: AnnotationEntry, entries: AnnotationEntry[]): string | undefined {
+  if (!editableAnnotationKinds.has(annotationKind(entry))) return "Only notes and text markups can be changed here; links, widgets and other annotation types are preserved.";
+  if (pdfText(entry.dict, "Contents").length > 10_000) return "This annotation exceeds the 10,000-character editing limit; its full contents are preserved.";
+  if (entries.filter(other => other.dict === entry.dict).length !== 1) return "This annotation is shared by multiple page entries and cannot be edited independently.";
+  const flags = entry.dict.lookup(PDFName.of("F"));
+  if (flags instanceof PDFNumber && (flags.asNumber() & (64 | 128 | 512))) return "This annotation is read-only or locked.";
+  if (entry.dict.has(PDFName.of("IRT")) || entries.some(other => other.dict.lookup(PDFName.of("IRT")) === entry.dict))
+    return "This annotation belongs to a reply thread. Thread editing is not supported here.";
+  const popup = entry.dict.lookup(PDFName.of("Popup"));
+  if (popup !== undefined && (!(popup instanceof PDFDict) || !entries.some(other => other.dict === popup && other.page === entry.page &&
+      annotationKind(other) === "Popup" && other.dict.lookup(PDFName.of("Parent")) === entry.dict)))
+    return "This annotation has a popup relationship that requires a specialist editor.";
+  if (popup instanceof PDFDict) {
+    if (entries.some(other => other.dict !== entry.dict && other.dict.lookup(PDFName.of("Popup")) === popup))
+      return "This annotation shares a popup with another comment; the relationship is preserved.";
+    const popupFlags = popup.lookup(PDFName.of("F"));
+    if (popupFlags instanceof PDFNumber && (popupFlags.asNumber() & (64 | 128 | 512))) return "This annotation's popup is read-only or locked.";
+  }
+  if (entries.some(other => other.dict !== popup && (other.dict.lookup(PDFName.of("Popup")) === entry.dict ||
+      other.dict.lookup(PDFName.of("Parent")) === entry.dict))) return "This annotation has unsupported dependent annotations.";
+  return undefined;
+}
+function annotationColor(value: unknown): [number, number, number] {
+  requirePdf(typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value), "Use a color in #RRGGBB format.");
+  return [1, 3, 5].map(at => parseInt(value.slice(at, at + 2), 16) / 255) as [number, number, number];
+}
+/** IDs refer to the current edit revision; reread after every transaction. */
+export async function listPdfAnnotations(bytes: Uint8Array, options: { page?: number; offset?: number; limit?: number } = {}) {
+  const doc = await validatePdf(bytes), entries = annotationEntries(doc);
+  if (options.page !== undefined) pageNumbers([options.page], doc.getPageCount());
+  const offset = options.offset ?? 0, limit = options.limit ?? 100;
+  requirePdf(Number.isInteger(offset) && offset >= 0 && Number.isInteger(limit) && limit >= 1 && limit <= 100, "Use an annotation offset of zero or greater and a limit of 1–100.");
+  // Popup windows are the presentation of their parent, not separate comments.
+  const matching = entries.filter(entry => annotationKind(entry) !== "Popup" && (options.page === undefined || entry.pageNumber === options.page));
+  const candidates: PdfAnnotation[] = matching.slice(offset, offset + limit).map(entry => {
+    const rawRect = entry.dict.lookup(PDFName.of("Rect")), rawColor = entry.dict.lookup(PDFName.of("C"));
+    const numbers = (value: unknown) => value instanceof PDFArray ? value.asArray().map(v => {
+      const n = doc.context.lookup(v); return n instanceof PDFNumber ? n.asNumber() : NaN;
+    }) : [];
+    const rect = numbers(rawRect), color = numbers(rawColor), content = pdfText(entry.dict, "Contents");
+    const reason = annotationRestriction(entry, entries);
+    return { id: entry.id, page: entry.pageNumber, kind: annotationKind(entry), text: content.slice(0, 10_000),
+      author: pdfText(entry.dict, "T").slice(0, 200), rect: rect.length === 4 && rect.every(Number.isFinite) ? rect as [number, number, number, number] : null,
+      ...(color.length === 3 && color.every(n => Number.isFinite(n) && n >= 0 && n <= 1) ? { color: color as [number, number, number] } : {}),
+      editable: reason === undefined, removable: reason === undefined, ...(reason ? { reason } : {}),
+      ...(content.length > 10_000 ? { textTruncated: true } : {}) };
+  });
+  const annotations: PdfAnnotation[] = [];
+  let outputLength = 0;
+  for (const candidate of candidates) {
+    const length = JSON.stringify(candidate).length;
+    if (annotations.length > 0 && outputLength + length > 40_000) break;
+    annotations.push(candidate); outputLength += length;
+  }
+  const nextOffset = offset + annotations.length, hasMore = nextOffset < matching.length;
+  return { annotations, total: matching.length, hasMore, ...(hasMore ? { nextOffset } : {}) };
+}
 
 function pageNumbers(raw: unknown, count: number): number[] {
   requirePdf(Array.isArray(raw) && raw.length > 0 && raw.length <= PDF_MAX_PAGES, "Specify a nonempty list of page numbers.");
@@ -123,14 +211,43 @@ export async function listPdfFields(bytes: Uint8Array) {
 }
 
 /** Always changes a detached copy. A rejected operation cannot partly alter the caller's bytes. */
-export async function applyPdfOperations(bytes: Uint8Array, operations: PdfOperation[]): Promise<Uint8Array> {
+export async function applyPdfOperations(bytes: Uint8Array, operations: PdfOperation[], signal?: AbortSignal): Promise<Uint8Array> {
+  signal?.throwIfAborted();
   requirePdf(Array.isArray(operations) && operations.length > 0 && operations.length <= MAX_OPS, "Use 1–100 PDF operations per transaction.");
   const doc = await validatePdf(bytes);
+  const originalAnnotations = annotationEntries(doc);
   let formChanged = false;
   for (const op of operations) {
+    signal?.throwIfAborted();
     requirePdf(op && typeof op === "object", "Invalid PDF operation.");
-    requirePdf(["rotate_pages", "delete_pages", "reorder_pages", "add_text", "add_note", "highlight", "fill_form"].includes(op.type),
-      "Invalid operation type: " + String(op.type).slice(0, 50) + ". Each operation must set its type property to rotate_pages, delete_pages, reorder_pages, add_text, add_note or fill_form. Use pdf_highlight_text for highlights.");
+    requirePdf(["rotate_pages", "delete_pages", "reorder_pages", "add_text", "add_note", "highlight", "fill_form", "update_annotation", "delete_annotation"].includes(op.type),
+      "Invalid operation type: " + String(op.type).slice(0, 50) + ". Set type to rotate_pages, delete_pages, reorder_pages, add_text, add_note, fill_form, update_annotation or delete_annotation. Use pdf_highlight_text for highlights.");
+    if (op.type === "update_annotation" || op.type === "delete_annotation") {
+      requirePdf(typeof op.annotationId === "string" && op.annotationId.length <= 80, "Use an annotationId returned by pdf_list_annotations.");
+      const entry = originalAnnotations.find(item => item.id === op.annotationId);
+      requirePdf(entry && doc.getPages().includes(entry.page) && entry.page.node.Annots()?.asArray().some(raw => doc.context.lookup(raw) === entry.dict), "This annotation is missing. List the current annotations again.");
+      const restriction = annotationRestriction(entry, annotationEntries(doc));
+      requirePdf(!restriction, restriction ?? "This annotation cannot be changed.");
+      if (op.type === "delete_annotation") {
+        const popup = entry.dict.lookup(PDFName.of("Popup")), annots = entry.page.node.Annots()!;
+        for (let i = annots.size() - 1; i >= 0; i--) {
+          const dict = doc.context.lookup(annots.get(i));
+          if (dict === entry.dict || dict === popup) annots.remove(i);
+        }
+      } else {
+        requirePdf(op.text !== undefined || op.color !== undefined, "An annotation update needs text or color.");
+        if (op.text !== undefined) {
+          requirePdf(typeof op.text === "string" && op.text.length <= 10_000, "Annotation text must be at most 10,000 characters.");
+          entry.dict.set(PDFName.of("Contents"), PDFHexString.fromText(op.text));
+          entry.dict.delete(PDFName.of("RC")); // Plain text is now authoritative, not a stale rich-text body.
+        }
+        if (op.color !== undefined) {
+          entry.dict.set(PDFName.of("C"), doc.context.obj(annotationColor(op.color)));
+          entry.dict.delete(PDFName.of("AP")); // Regenerate standard annotation appearance using its new color.
+        }
+      }
+      continue;
+    }
     if (op.type === "fill_form") {
       requirePdf(typeof op.name === "string" && op.name.length > 0, "A form field name is required.");
       const field = doc.getForm().getFieldMaybe(op.name);
@@ -195,7 +312,7 @@ export async function applyPdfOperations(bytes: Uint8Array, operations: PdfOpera
         const [x, y, w, h] = rect as [number, number, number, number];
         requirePdf(w > 0 && h > 0 && x >= left && y >= bottom && x + w <= right + 1 && y + h <= top + 1, "The highlight falls outside the visible page.");
         const annot = doc.context.obj({ Type: "Annot", Subtype: "Highlight", Rect: [x, y, x + w, y + h],
-          QuadPoints: [x, y + h, x + w, y + h, x, y, x + w, y], C: [1, 0.85, 0], CA: 0.35,
+          QuadPoints: [x, y + h, x + w, y + h, x, y, x + w, y], C: target.color === undefined ? [1, 0.85, 0] : annotationColor(target.color), CA: 0.35,
           T: PDFString.of("AI Assistant"), F: 4 });
         page.node.addAnnot(doc.context.register(annot));
       }
@@ -204,7 +321,7 @@ export async function applyPdfOperations(bytes: Uint8Array, operations: PdfOpera
       requirePdf(Number.isFinite(target.x) && Number.isFinite(target.y) && target.x >= left && target.y >= bottom && target.x < right && target.y < top, "Position must be inside the visible page in PDF points.");
       if (target.type === "add_note") {
         const annotation = doc.context.obj({ Type: "Annot", Subtype: "Text", Rect: [target.x, target.y, Math.min(right, target.x + 20), Math.min(top, target.y + 20)],
-          Contents: PDFHexString.fromText(target.text), T: PDFString.of("AI Assistant"), Name: "Comment", C: [1, 0.85, 0], F: 4 });
+          Contents: PDFHexString.fromText(target.text), T: PDFString.of("AI Assistant"), Name: "Comment", C: target.color === undefined ? [1, 0.85, 0] : annotationColor(target.color), F: 4 });
         page.node.addAnnot(doc.context.register(annotation));
       } else {
         const size = target.size ?? 12;
@@ -223,11 +340,14 @@ export async function applyPdfOperations(bytes: Uint8Array, operations: PdfOpera
     }
   }
   try {
+    signal?.throwIfAborted();
     if (formChanged) doc.getForm().updateFieldAppearances(await doc.embedFont(StandardFonts.Helvetica));
     const output = await doc.save({ updateFieldAppearances: false });
     await validatePdf(output);
+    signal?.throwIfAborted();
     return output;
   } catch (error) {
+    signal?.throwIfAborted();
     if (error instanceof PdfError) throw error;
     throw new PdfError("The requested form text cannot be encoded with the supported font. No changes were applied.");
   }

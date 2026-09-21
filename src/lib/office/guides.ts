@@ -17,6 +17,38 @@ export type FirmGuide = {
 
 const GUIDES: FirmGuide[] = [
   {
+    id: "native-office-workflow",
+    title: "Reliable native Office creation, editing and delivery",
+    apps: ["writer", "sheets", "slides"],
+    summary: "Read → plan → bounded edits → verify → save/export, with source fidelity, dependency ordering and failure recovery.",
+    body: `# Reliable native Office workflow
+
+Use only the current tool definitions. Desktop CLI commands, local paths and cloud-generation features from an external guide do not become available in this browser. The user's exact text, dimensions, formats and scope override design defaults.
+
+## Prepare and execute
+- Read the document outline/workbook context/current slides once. Identify target IDs, source facts, output format and a short completion checklist. Load only relevant operation guides. Ask only when ambiguity would materially change the result.
+- For real figures, read the primary source and retain units, period, source URL/page and as-of date. Label requested mock data as illustrative in the artifact. Missing data is not zero. Reuse verified reads until the source or document changes.
+- Group independent reads in one turn. Batch compatible edits within the tool's limit; await writes before dependent reads, calculations or further writes. Do not send simultaneous writes to the same document. Structural edits invalidate addresses/IDs: re-read before the next batch.
+- Keep progress in small completed stages: source/structure, content/formulas, formatting, verification. Do not paste the entire deliverable into chat or repeatedly fetch the same guide. Stop cosmetic iterations once the requested quality checks pass.
+
+## Writer
+- Use read_document_outline/search_document to locate sections and read_blocks for affected text. Apply formatting with apply_commands; preserve content, citations, comments and unrelated structure. Use insert_content/replace_blocks only for requested content changes, native table/chart tools for editable objects, and set_page_setup for actual page settings.
+- Run audit_document for introduced structural defects; read affected blocks and inspect representative pages with view_page when supplied. A visual check cannot verify quotations or sources. Do not resolve tracked changes or simulate unsupported floating objects by flattening the document.
+
+## Sheets
+- Separate assumptions/input data from formula-driven calculations. Create sheets/structural changes in their own batch, obtain current sheet IDs, then write formulas and formats. Load financial-formatting and charts only when relevant.
+- Read computed values and representative formats after edits. Check errors with find_cells/trace_precedents; reconcile totals, percentages, units and periods. Charts should link to ranges and use appropriate axis number formats; zero and missing values must remain distinct. Use native charts, not pictures of charts.
+- Use create_document only according to its supplied schema. Worksheet XLSX/CSV export is a values-only derivative; it does not preserve the full workbook's formulas, styles, charts or other sheets. The editor's Save then Download preserves the native workbook. Do not describe a values-only derivative as the complete workbook.
+
+## Slides
+- For a new deck, choose an available template or native create_presentation/design_slide_html workflow, a coherent outline and consistent design tokens. For an existing deck, read_slide and load_guide, then use scoped apply_ops/edit tools with existing IDs; do not regenerate the deck for a small edit.
+- Keep text, tables and charts native/editable. audit_layout reports geometry findings; view_slide, when available, checks rendering. Repair only introduced issues within the user's scope, at most two focused polish passes. Preserve an intentional overlap or exact requested size rather than rewriting to satisfy an advisory audit.
+
+## Recover and deliver
+- A failed/partial tool may have changed state. Read its receipt, inspect the current artifact and repair only remaining work; never replay an entire batch blindly. If the run rolled back, historical tool receipts do not prove those edits remain. A checkpoint requires an explicit continuation.
+- Verify the actual requested result, then distinguish edited, saved and downloaded. Claim a save/export only after its success receipt or editor revision confirms it. Name any unsupported feature, incomplete calculation or unavailable visual check. Native-format support is not a guarantee of every Microsoft Office feature or pixel-identical rendering.`,
+  },
+  {
     id: "bluebook-citations",
     title: "Citation form (Bluebook conventions)",
     apps: ["writer", "slides"],

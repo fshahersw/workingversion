@@ -328,8 +328,8 @@ const POLICY: Record<OfficeApp, { read: string[]; write: string[] }> = {
   sheets: { read: SHEETS_READ, write: SHEETS_WRITE },
   slides: { read: SLIDES_READ, write: SLIDES_WRITE },
   pdf: {
-    read: ["pdf_read_pages", "pdf_search", "pdf_list_form_fields", "pdf_capture_page"],
-    write: ["pdf_read_pages", "pdf_search", "pdf_list_form_fields", "pdf_capture_page", "pdf_apply_operations", "pdf_highlight_text"],
+    read: ["pdf_read_pages", "pdf_search", "pdf_list_form_fields", "pdf_capture_page", "pdf_list_annotations", "pdf_get_guide"],
+    write: ["pdf_read_pages", "pdf_search", "pdf_list_form_fields", "pdf_capture_page", "pdf_list_annotations", "pdf_get_guide", "pdf_apply_operations", "pdf_highlight_text"],
   },
 };
 
@@ -570,7 +570,10 @@ If the request mixes classes, pick the heaviest: analyze > draft > short_edit > 
 
 const ROUTE_CACHE_MAX = 2_000;
 const ROUTE_CACHE_TTL_MS = 5 * 60_000;
-const routeCache = new Map<string, { cls: TaskClass; expires: number }>();
+// A brief main-tier abstention avoids paying an unavailable router's deadline
+// again on every tool round. It cannot authorize a cheaper tier.
+const ROUTE_ABSTAIN_TTL_MS = 5_000;
+const routeCache = new Map<string, { cls: TaskClass | null; expires: number }>();
 
 function hashKey(app: OfficeApp, text: string, mode: OfficeRouterMode, opts?: ClassifyTaskOptions): string {
   // Include the full request, safety context and effective policy/provider. No
@@ -583,8 +586,8 @@ function hashKey(app: OfficeApp, text: string, mode: OfficeRouterMode, opts?: Cl
   })).digest("hex");
 }
 
-function cacheRoute(key: string, cls: TaskClass): void {
-  routeCache.set(key, { cls, expires: Date.now() + ROUTE_CACHE_TTL_MS });
+function cacheRoute(key: string, cls: TaskClass | null): void {
+  routeCache.set(key, { cls, expires: Date.now() + (cls === null ? ROUTE_ABSTAIN_TTL_MS : ROUTE_CACHE_TTL_MS) });
   if (routeCache.size > ROUTE_CACHE_MAX) {
     const first = routeCache.keys().next().value;
     if (first !== undefined) routeCache.delete(first);
@@ -743,13 +746,14 @@ export async function classifyTask(
   const bedrockRouter = opts?.bedrockRouter ?? classifyWithBedrock;
   const remember = (cls: TaskClass | null): TaskClass | null => {
     if (signal?.aborted) return null;
-    if (cls && TASK_CLASSES.has(cls)) cacheRoute(key, cls);
-    return cls && TASK_CLASSES.has(cls) ? cls : null;
+    const valid = cls && TASK_CLASSES.has(cls) ? cls : null;
+    cacheRoute(key, valid);
+    return valid;
   };
   if (mode === "bedrock") {
     // A local direct-provider experiment must not accidentally contact AWS.
     if (officeLocalProvider()) return null;
-    try { return remember(await bedrockRouter(app, text, signal)); } catch { return null; }
+    try { return remember(await bedrockRouter(app, text, signal)); } catch { return remember(null); }
   }
   if (!typesafeConfigured()) return null;
   if (mode === "shadow") {
@@ -776,7 +780,7 @@ export async function classifyTask(
     return remember(jev.taskClass);
   }
   agentLog("office_router", { app, via: "main_fallback", cls: "none", jev_reason: jev.reason, jev_ms: jev.ms });
-  return null;
+  return remember(null);
 }
 
 export type RouteDecision = { model: string; tier: ModelTier; taskClass: TaskClass | null };
@@ -895,6 +899,8 @@ export async function streamWriterTurn(
     signal: AbortSignal;
     /** Skip routing and use this model (tests, admin probes). */
     model?: string;
+    /** Test seam only; HTTP routes never accept this field from a request body. */
+    bedrockFetch?: typeof signedBedrockFetch;
   },
   cb: WriterStreamCallbacks,
 ): Promise<void> {
@@ -969,7 +975,8 @@ export async function streamWriterTurn(
     // jittered backoff; once bytes flow the turn is committed.
     let attempt = 0;
     for (;;) {
-      const res = await signedBedrockFetch(converseStreamEndpoint(model), {
+      req.signal.throwIfAborted();
+      const res = await (req.bedrockFetch ?? signedBedrockFetch)(converseStreamEndpoint(model), {
         headers: { accept: "application/vnd.amazon.eventstream" },
         body: JSON.stringify(buildBody(effort, maxTokens)),
         signal: req.signal,
@@ -979,15 +986,17 @@ export async function streamWriterTurn(
       const delay = bedrockRetryDelayMs(attempt, retryAfterMsFrom(res));
       await res.text().catch(() => "");
       await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(resolve, delay);
-        req.signal.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(t);
-            reject(new DOMException("Stopped", "AbortError"));
-          },
-          { once: true },
-        );
+        const onAbort = () => {
+          clearTimeout(t);
+          req.signal.removeEventListener("abort", onAbort);
+          reject(new DOMException("Stopped", "AbortError"));
+        };
+        const t = setTimeout(() => {
+          req.signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, delay);
+        req.signal.addEventListener("abort", onAbort, { once: true });
+        if (req.signal.aborted) onAbort();
       });
       attempt++;
     }
@@ -1030,19 +1039,34 @@ export async function streamWriterTurn(
   const reader = res.body.getReader();
   let pending: Bytes = new Uint8Array(0);
   // Streaming tool-use arguments and reasoning, keyed by content block index.
-  const calls = new Map<number, { id: string; name: string; json: string }>();
+  const calls = new Map<number, { id: string; name: string; json: string; closed: boolean }>();
+  const toolIds = new Set<string>();
   const reasoning = new Map<number, { text: string; signature: string; redacted: string[] }>();
   let complete = false;
+  let stopReason = "";
   let truncated = false;
   const MAX_TOOL_INPUT_CHARS = 4_000_000;
 
+  const onReadAbort = () => { void reader.cancel().catch(() => undefined); };
+  req.signal.addEventListener("abort", onReadAbort, { once: true });
   try {
     for (;;) {
+      req.signal.throwIfAborted();
       const { value, done } = await reader.read();
+      req.signal.throwIfAborted();
       if (done) break;
       if (!value) continue;
       if (req.signal.aborted) throw new DOMException("Stopped", "AbortError");
       pending = concat(pending, value);
+      // The shared decoder tolerates malformed frames for text-only callers.
+      // Office mutations require complete, structurally valid framing instead.
+      for (let offset = 0; pending.length - offset >= 12;) {
+        const frame = new DataView(pending.buffer, pending.byteOffset + offset, pending.length - offset);
+        const total = frame.getUint32(0), headers = frame.getUint32(4);
+        if (total < 16 || total > 8_000_000 || headers > total - 16) throw new BedrockClaudeError(502, "Invalid Office response frame.");
+        if (pending.length - offset < total) break;
+        offset += total;
+      }
       const { events, rest } = decodeFrames(pending);
       pending = rest;
 
@@ -1051,18 +1075,25 @@ export async function streamWriterTurn(
         try {
           evt = JSON.parse(raw) as Record<string, unknown>;
         } catch {
-          continue;
+          throw new BedrockClaudeError(502, "Invalid Office response event.");
         }
-        const index = Number(evt["contentBlockIndex"] ?? -1);
+        if (!evt || typeof evt !== "object" || Array.isArray(evt)) throw new BedrockClaudeError(502, "Invalid Office response event.");
+        const index = evt["contentBlockIndex"] as number;
+        if (index !== undefined && (!Number.isSafeInteger(index) || index < 0)) throw new BedrockClaudeError(502, "Invalid Office content block index.");
+        if (complete && (evt["start"] !== undefined || evt["delta"] !== undefined || index !== undefined)) throw new BedrockClaudeError(502, "Office content arrived after completion.");
 
         // contentBlockStart: a tool-use block opens.
         const start = evt["start"] as Record<string, unknown> | undefined;
         if (start && typeof start === "object" && start["toolUse"]) {
           const t = start["toolUse"] as Record<string, unknown>;
+          const id = t["toolUseId"], name = t["name"];
+          if (index === undefined || typeof id !== "string" || !id || typeof name !== "string" || !name || calls.has(index) || toolIds.has(id)) throw new BedrockClaudeError(502, "Invalid or duplicate Office tool identity.");
+          toolIds.add(id);
           calls.set(index, {
-            id: String(t["toolUseId"] ?? ""),
-            name: String(t["name"] ?? ""),
+            id,
+            name,
             json: "",
+            closed: false,
           });
           continue;
         }
@@ -1073,8 +1104,12 @@ export async function streamWriterTurn(
           const text = delta["text"];
           if (typeof text === "string" && text) cb.onDelta(text);
           const toolUse = delta["toolUse"] as Record<string, unknown> | undefined;
+          if (toolUse !== undefined && (!toolUse || typeof toolUse !== "object" || Array.isArray(toolUse) || typeof toolUse["input"] !== "string")) {
+            throw new BedrockClaudeError(502, "Invalid Office tool argument fragment.");
+          }
           if (toolUse && typeof toolUse["input"] === "string") {
             const t = calls.get(index);
+            if (!t || t.closed) throw new BedrockClaudeError(502, "Office tool arguments arrived outside an open block.");
             if (t) {
               t.json += toolUse["input"];
               if (t.json.length > MAX_TOOL_INPUT_CHARS) {
@@ -1099,9 +1134,21 @@ export async function streamWriterTurn(
 
         // messageStop.
         if (typeof evt["stopReason"] === "string") {
+          if (complete || !evt["stopReason"]) throw new BedrockClaudeError(502, "Invalid Office response completion.");
           complete = true;
+          stopReason = evt["stopReason"];
           truncated = evt["stopReason"] === "max_tokens";
           cb.onStopReason(String(evt["stopReason"] || "end_turn"));
+          continue;
+        }
+
+        // Converse contentBlockStop has only its index as the payload.
+        if (index !== undefined && Object.keys(evt).length === 1) {
+          const tool = calls.get(index);
+          if (tool) {
+            if (tool.closed) throw new BedrockClaudeError(502, "Duplicate Office tool block completion.");
+            tool.closed = true;
+          }
           continue;
         }
 
@@ -1134,10 +1181,17 @@ export async function streamWriterTurn(
       }
     }
   } finally {
+    req.signal.removeEventListener("abort", onReadAbort);
     await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 
-  if (!complete) throw new BedrockClaudeError(502, "The response ended before completion.");
+  req.signal.throwIfAborted();
+  if (!complete || pending.length) throw new BedrockClaudeError(502, "The response ended before completion.");
+  if ((calls.size && stopReason !== "tool_use" && !truncated) || (stopReason === "tool_use" && !calls.size)) {
+    throw new BedrockClaudeError(502, "The response did not complete an executable tool turn.");
+  }
+  if (!truncated && [...calls.values()].some(call => !call.closed)) throw new BedrockClaudeError(502, "An Office tool block ended before completion.");
 
   const blocks = [...reasoning.values()].map((r) =>
     r.redacted.length

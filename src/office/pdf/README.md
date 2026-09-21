@@ -11,6 +11,13 @@ tools against the current document through the shared Office inference endpoint.
   for visual review (at most 1400 pixels along its longest edge).
 - Native notes and highlights anchored to a unique exact quote. Highlights cover
   whole intersecting text runs, not invented per-character glyph bounds.
+- Paginated native annotation readback, exact current-revision ids, author/text/color
+  and explicit editing restrictions. Update text or color and remove notes and text
+  markups, preserving source text and safely cleaning an attached popup. Locked,
+  threaded, shared, oversized or unsupported annotations are preserved.
+- Edit, Ask and Review modes. Ask/Review advertise read tools and independently
+  reject mutations in their executable handlers. Focused review/annotation/form/
+  verification guides and bounded active-page/selected-text context assist the agent.
 - New bounded Helvetica lines; text, checkbox, dropdown and radio form values.
 - Page rotation. Reorder/delete only when links, bookmarks, page labels and tagged
   structure will not be invalidated; deletion also rejects documents with forms.
@@ -45,6 +52,10 @@ The PDF tests in src/lib/office/pdf.test.ts cover page-tree/object-order disagre
 hex/compressed text, native edits, inherited resources, atomic errors, form roundtrips,
 direct/indirect active actions, linked structures, crop coordinates, stale revisions,
 cancellation and missing text coverage.
+src/lib/office/pdf-annotations.test.ts exercises actual native comment/markup updates,
+popup cleanup, author/geometry preservation, pagination/truncated-note protection,
+direct annotation indexes across atomic batches, read-only tools, stale revisions
+and mode changes before commit.
 
 After production build, run: node scripts/verify-pdf-build.mjs
 

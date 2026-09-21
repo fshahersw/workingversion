@@ -1,19 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { Link, useBlocker } from "@tanstack/react-router";
-import { ArrowLeft, ArrowUp, Download, Highlighter, Loader2, RotateCw, Save, Undo2, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { ArrowLeft, ArrowUp, ChevronLeft, ChevronRight, Download, Highlighter, Loader2, MessageSquarePlus, RotateCw, Save, Undo2, PanelRightClose, PanelRightOpen, MousePointer2, Type, Trash2, GripVertical, X, Search, Files, ListChecks, MessageSquare } from "lucide-react";
 import { AgentLoop } from "@genoffice/agent-core";
-import { AssistantMessage } from "@genoffice/ui";
+import { AssistantMessage, AssistantHeader, AssistantContext, AssistantActivity, AssistantWorking, AssistantReplyActions, AssistantStarters, JumpToLatest, mergeActivities, finishActivities, type Activity } from "@genoffice/ui";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { OfficeDocSummary } from "@/lib/office/types";
 import { appendOfficeChatFn, getOfficeDocFn, loadOfficeChatFn } from "@/lib/office/office.functions";
 import { OrderedChatAppender } from "@/lib/office/chat-persistence";
 import { OfficeTaskControls, type OfficeTaskLoop } from "../shared/OfficeTaskControls";
 import { createPdfTaskDirections } from "./task-directions";
-import { applyPdfOperations, listPdfFields, validatePdf, type PdfOperation } from "./document";
+import { applyPdfOperations, listPdfFields, listPdfAnnotations, validatePdf, type PdfOperation, type PdfAnnotation } from "./document";
 import { openPdfView, pageText, highlightRects, capturePdfPage } from "./reader";
 import { createPdfSkill } from "./skill";
 import { pdfTransport } from "./transport";
 import { downloadPdf, pdfRequest } from "./api";
+import { PdfThumbnail, PdfFieldEditor, PdfAnnotationCard } from "./PdfPanels";
 import "./text-layer.css";
 import "./pdf.css";
 
@@ -24,7 +25,7 @@ const messageOf = (e: unknown) => e instanceof Error ? e.message : String(e);
 
 export function PdfWorkspace({ docId }: { docId: string }) {
   const model = useRef<Model | null>(null), alive = useRef(true), busyRef = useRef(false);
-  const undo = useRef<Uint8Array[]>([]), loop = useRef<AgentLoop | null>(null);
+  const undo = useRef<Uint8Array[]>([]), loop = useRef<AgentLoop | null>(null), manualBusy = useRef(false);
   const directions = useRef<ReturnType<typeof createPdfTaskDirections> | null>(null);
   const [taskLoop, setTaskLoop] = useState<OfficeTaskLoop | null>(null);
   const chatAppender = useRef(new OrderedChatAppender());
@@ -35,14 +36,42 @@ export function PdfWorkspace({ docId }: { docId: string }) {
   const [dirty, setDirty] = useState(false), [busy, setBusy] = useState(false), [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState(""), [error, setError] = useState(""), [page, setPage] = useState(1);
   const [prompt, setPrompt] = useState(""), [messages, setMessages] = useState<Message[]>([]), [reply, setReply] = useState("");
-  const [activity, setActivity] = useState<string[]>([]), [panel, setPanel] = useState(true), [selection, setSelection] = useState("");
-  const [zoom, setZoom] = useState(1), [fields, setFields] = useState<Fields>([]), [notes, setNotes] = useState<string[]>([]);
+  const [activity, setActivity] = useState<Activity[]>([]), [panel, setPanel] = useState(true), [selection, setSelection] = useState("");
+  const [zoom, setZoom] = useState<number | "fit">("fit"), [fields, setFields] = useState<Fields>([]);
+  const [mode, setMode] = useState<"write" | "ask" | "review">("write"), modeRef = useRef(mode);
+  const [depth, setDepth] = useState<"standard" | "thorough">("standard"), depthRef = useRef(depth);
+  const pageRef = useRef(page), selectionRef = useRef(selection);
+  modeRef.current = mode; depthRef.current = depth; pageRef.current = page; selectionRef.current = selection;
+  const [ribbon, setRibbon] = useState<"review" | "organize" | "forms">("review");
+  const [sidebar, setSidebar] = useState<"pages" | "search" | "notes" | "fields">("pages");
+  const [placement, setPlacement] = useState<"select" | "note" | "text">("select");
+  const [placementText, setPlacementText] = useState(""), [textSize, setTextSize] = useState(12);
+  const [annotations, setAnnotations] = useState<PdfAnnotation[]>([]), [annotationTotal, setAnnotationTotal] = useState(0);
+  const [connection, setConnection] = useState(false), [panelWidth, setPanelWidth] = useState(370);
+  const resizeStart = useRef<{ x: number; width: number } | null>(null);
+  const canvasScroll = useRef<HTMLDivElement>(null), [canvasWidth, setCanvasWidth] = useState(700);
   const [search, setSearch] = useState(""), [hits, setHits] = useState<number[]>([]), [searching, setSearching] = useState(false);
   useLayoutEffect(() => {
     const element = conversation.current;
     if (element && followConversation.current) element.scrollTop = element.scrollHeight;
   }, [messages, reply, activity, busy, fields, panel, view]);
   const locked = busy || saving || saveAttempt.current !== null;
+  useEffect(() => {
+    const element = canvasScroll.current;
+    if (!element) return;
+    const observer = new ResizeObserver(entries => setCanvasWidth(entries[0]?.contentRect.width ?? 700));
+    observer.observe(element); return () => observer.disconnect();
+  }, [view]);
+  useEffect(() => {
+    const snapshot = model.current;
+    if (!snapshot || sidebar !== "notes") return;
+    let cancelled = false;
+    setAnnotations([]); setAnnotationTotal(0);
+    void listPdfAnnotations(snapshot.bytes, { page, limit: 100 }).then(result => {
+      if (!cancelled && model.current === snapshot) { setAnnotations(result.annotations); setAnnotationTotal(result.total); }
+    }).catch(e => { if (!cancelled) setError(messageOf(e)); });
+    return () => { cancelled = true; };
+  }, [view, page, sidebar]);
   const current = () => { if (!model.current) throw new Error("The PDF is not ready."); return model.current; };
   const keepUndo = (bytes: Uint8Array) => {
     undo.current.push(bytes);
@@ -124,22 +153,26 @@ export function PdfWorkspace({ docId }: { docId: string }) {
       if (controller.signal.aborted) return;
       setFields(formFields);
       const skill = createPdfSkill({
-        state: () => { const s = current(); return { bytes: s.bytes, revision: s.revision, storageRevision: s.meta.version, pageCount: s.view.numPages, name: s.meta.name }; },
+        state: () => { const s = current(); return { bytes: s.bytes, revision: s.revision, storageRevision: s.meta.version, pageCount: s.view.numPages, name: s.meta.name, currentPage: pageRef.current, selection: selectionRef.current }; },
         readPage: n => pageText(current().view, n),
         capturePage: (n, signal) => capturePdfPage(current().view, n, signal),
         commit: install,
-      });
+      }, { mode: () => modeRef.current });
       const isCurrent = (): boolean => alive.current && !controller.signal.aborted && loop.current === agent;
       const agent = new AgentLoop({
-        skill, transport: pdfTransport(), maxTurns: 100,
+        skill, transport: pdfTransport({ mode: () => modeRef.current, profile: () => depthRef.current }), maxTurns: 100,
         events: {
           onText: text => { if (isCurrent()) setReply(text); },
-          onToolStart: call => { if (isCurrent()) setNotice(call.name.startsWith("pdf_read") || call.name === "pdf_search" ? "Reading source pages…" : "Checking the requested operation…"); },
-          onToolExecuted: event => { if (isCurrent()) setActivity(previous => [...previous.slice(-19), event.execution.summary + (event.execution.skipped ? " — skipped" : event.execution.isError ? " — needs attention" : "")]); },
+          onToolStart: call => { if (isCurrent()) {
+            setNotice(call.name.startsWith("pdf_read") || call.name === "pdf_search" ? "Reading source pages…" : "Checking the requested operation…");
+            setActivity(previous => mergeActivities(previous, { id: call.id, name: call.name, summary: "", running: true, startedAt: Date.now() }).slice(-100));
+          } },
+          onToolExecuted: event => { if (isCurrent()) setActivity(previous => mergeActivities(previous, { id: event.call.id, name: event.call.name, ...event.execution, running: false, finishedAt: Date.now(), output: event.execution.output?.slice(0, 6000) }).slice(-100)); },
           onTurnEnd: updates => { if (isCurrent()) controls.applied(updates); },
           onDone: result => {
             if (!isCurrent()) return;
             controls.finish();
+            setActivity(previous => finishActivities(previous));
             const partial = result.turnLimit || result.truncated;
             void finishRun(result.cancelled ? "Task stopped. Inspect the PDF before continuing."
               : [result.text, partial ? "This task is incomplete. Review the current PDF before continuing." : ""].filter(Boolean).join("\n\n") || "The PDF task finished.",
@@ -148,6 +181,7 @@ export function PdfWorkspace({ docId }: { docId: string }) {
           onError: failure => {
             if (!isCurrent()) return;
             controls.finish(); setError(failure);
+            setActivity(previous => finishActivities(previous));
             void finishRun(agent.failureCheckpoint ?? "The task failed. Inspect the PDF before continuing.", "failed");
           },
         },
@@ -165,12 +199,13 @@ export function PdfWorkspace({ docId }: { docId: string }) {
   }, [docId]);
 
   const apply = async (ops: PdfOperation[], description: string) => {
-    if (locked) return;
+    if (locked || manualBusy.current || busyRef.current) return false;
+    manualBusy.current = true;
     setError("");
     const state = current(); setSaving(true);
-    try { await install(await applyPdfOperations(state.bytes, ops), state.revision, description); }
-    catch (e) { setError(messageOf(e)); }
-    finally { if (alive.current) setSaving(false); }
+    try { await install(await applyPdfOperations(state.bytes, ops), state.revision, description); return true; }
+    catch (e) { setError(messageOf(e)); return false; }
+    finally { manualBusy.current = false; if (alive.current) setSaving(false); }
   };
   const send = async (instruction = prompt) => {
     const text = instruction.trim();
@@ -181,7 +216,7 @@ export function PdfWorkspace({ docId }: { docId: string }) {
       else setError(result?.reason ?? "The task is finishing. Send a new request when it stops.");
       return;
     }
-    if (locked) return;
+    if (locked || manualBusy.current) return;
     followConversation.current = true;
     setPrompt(""); setError(""); setActivity([]);
     busyRef.current = true; setBusy(true); runStart.current = current().bytes;
@@ -190,7 +225,8 @@ export function PdfWorkspace({ docId }: { docId: string }) {
     if (alive.current) loop.current.run(text);
   };
   const save = async () => {
-    if (busy || saving || !dirty) return;
+    if (busy || busyRef.current || saving || manualBusy.current || !dirty) return;
+    manualBusy.current = true;
     setSaving(true); setError("");
     const state = current();
     saveAttempt.current ??= { bytes: state.bytes, version: state.meta.version, operationId: crypto.randomUUID() };
@@ -205,7 +241,7 @@ export function PdfWorkspace({ docId }: { docId: string }) {
       model.current = { ...current(), meta: saved, dirty: false };
       saveAttempt.current = null; setMeta(saved); setDirty(false); setNotice("Saved revision " + saved.version + ".");
     } catch (e) { if (alive.current) setError(messageOf(e) + " Retry this same save, or download your copy before reopening."); }
-    finally { if (alive.current) setSaving(false); }
+    finally { manualBusy.current = false; if (alive.current) setSaving(false); }
   };
   const find = async () => {
     if (!search.trim() || !view || busy || searching) return;
@@ -213,105 +249,152 @@ export function PdfWorkspace({ docId }: { docId: string }) {
     const snapshot = current();
     try {
       const found: number[] = [];
+      const query = search.trim().toLocaleLowerCase();
       for (let n = 1; n <= snapshot.view.numPages; n++) {
         if (current() !== snapshot || !alive.current) return;
-        if ((await pageText(snapshot.view, n)).text.toLocaleLowerCase().includes(search.toLocaleLowerCase())) found.push(n);
+        const text = await pageText(snapshot.view, n);
+        if (current() !== snapshot || !alive.current) return;
+        if (text.text.toLocaleLowerCase().includes(query)) found.push(n);
       }
       setHits(found); if (found[0]) setPage(found[0]); setNotice(found.length + " matching pages in the text layer.");
     } catch (e) { setError(messageOf(e)); }
     finally { if (alive.current) setSearching(false); }
   };
 
-  if (!view || !meta) return <div className="p-8">{error ? <p role="alert">{error}</p> : <p role="status"><Loader2 className="mr-2 inline h-4 w-4 animate-spin" />Opening PDF…</p>}<Link className="mt-4 block text-sm underline" to="/office/pdf">Back to PDFs</Link></div>;
-  return <div className="sw-pdf-workspace">
+  const goToPage = (n: number) => { if (view && Number.isInteger(n) && n >= 1 && n <= view.numPages) { setPage(n); setSelection(""); } };
+  const highlightSelection = async () => {
+    if (locked || manualBusy.current || busyRef.current || !selection) return;
+    manualBusy.current = true;
+    const snapshot = current(); setSaving(true); setError("");
+    try {
+      const source = await pageText(snapshot.view, page);
+      const bytes = await applyPdfOperations(snapshot.bytes, [{ type: "highlight", page, rects: highlightRects(source, selection) }]);
+      await install(bytes, snapshot.revision, "Highlighted the selected text runs. Use Undo to revert.");
+    } catch (e) { setError(messageOf(e)); }
+    finally { manualBusy.current = false; if (alive.current) setSaving(false); }
+  };
+  const movePage = (direction: -1 | 1) => {
+    if (!view || page + direction < 1 || page + direction > view.numPages) return;
+    const order = Array.from({ length: view.numPages }, (_, i) => i + 1);
+    [order[page - 1], order[page - 1 + direction]] = [order[page - 1 + direction]!, order[page - 1]!];
+    void apply([{ type: "reorder_pages", order }], "Page moved. Review its new position before saving.").then(ok => { if (ok) goToPage(page + direction); });
+  };
+  const placeAt = (x: number, y: number) => {
+    if (locked || placement === "select" || !placementText.trim()) return;
+    void apply([{ type: placement === "note" ? "add_note" : "add_text", page, text: placementText.trim(), x, y, ...(placement === "text" ? { size: textSize } : {}) }], placement === "note" ? "Review note added. Changes are unsaved." : "New text added. Existing content was preserved.").then(ok => { if (ok) { setPlacement("select"); setSidebar("notes"); } });
+  };
+
+  if (!view || !meta) return <div className="sw-pdf-loading">{error ? <p role="alert">{error}</p> : <p role="status"><Loader2 size={18} className="animate-spin" />Opening PDF workspace…</p>}<Link to="/office/pdf">Back to PDFs</Link></div>;
+  return <div className="sw-pdf-workspace" onKeyDown={event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void save(); }
+    if (event.key === "Escape") { setPlacement("select"); setConnection(false); }
+  }}>
     <header className="sw-pdf-header">
-      <Link to="/office/pdf" aria-label="Back to PDFs"><ArrowLeft size={18} /></Link>
-      <div className="min-w-0 flex-1"><h1>{meta.title}</h1><p>PDF · {view.numPages} pages · Revision {meta.version}{dirty ? " · Unsaved changes" : " · Saved"}</p></div>
+      <Link to="/office/pdf" aria-label="Back to PDFs"><ArrowLeft size={17} /></Link>
+      <span className="sw-pdf-file-mark">PDF</span>
+      <div className="sw-pdf-document-name"><h1>{meta.title}</h1><p>{view.numPages} {view.numPages === 1 ? "page" : "pages"}<span>·</span>{saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</p></div>
       <button disabled={locked || !undo.current.length} title="Undo last change" onClick={() => {
-        const bytes = undo.current[undo.current.length - 1]; if (!bytes) return; setSaving(true);
-        void install(bytes, current().revision, "Change undone.", undefined, false).then(() => undo.current.pop()).catch(e => setError(messageOf(e))).finally(() => setSaving(false));
+        const bytes = undo.current[undo.current.length - 1]; if (!bytes || locked || manualBusy.current || busyRef.current) return; manualBusy.current = true; setSaving(true);
+        void install(bytes, current().revision, "Change undone.", undefined, false).then(() => undo.current.pop()).catch(e => setError(messageOf(e))).finally(() => { manualBusy.current = false; if (alive.current) setSaving(false); });
       }}><Undo2 size={16} /><span>Undo</span></button>
-      <button disabled={busy || saving || !dirty} onClick={() => void save()}><Save size={16} /><span>{saving ? "Saving…" : saveAttempt.current ? "Retry save" : "Save revision"}</span></button>
-      <button disabled={busy || saving} onClick={() => downloadPdf(current().bytes, dirty ? meta.name.replace(/\.pdf$/i, "-review.pdf") : meta.name)}><Download size={16} /><span>Download{dirty ? " copy" : ""}</span></button>
+      <button className="sw-pdf-save" disabled={busy || saving || !dirty} onClick={() => void save()}><Save size={16} /><span>{saving ? "Saving…" : saveAttempt.current ? "Retry save" : "Save"}</span></button>
+      <button disabled={busy || saving} onClick={() => downloadPdf(current().bytes, dirty ? meta.name.replace(/\.pdf$/i, "-review.pdf") : meta.name)}><Download size={16} /><span>Download PDF</span></button>
       <button aria-label={panel ? "Hide assistant" : "Show assistant"} onClick={() => setPanel(p => !p)}>{panel ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
     </header>
-    {error && <div role="alert" className="sw-pdf-error">{error}</div>}
+    <nav className="sw-pdf-ribbon-tabs" aria-label="PDF tools">{([['review', 'Review'], ['organize', 'Organize pages'], ['forms', 'Forms']] as const).map(([id, label]) => <button key={id} aria-pressed={ribbon === id} onClick={() => { setRibbon(id); setPlacement("select"); if (id === "forms") setSidebar("fields"); }}>{label}</button>)}<span>PDF workspace</span></nav>
+    <div className="sw-pdf-ribbon">
+      {ribbon === "review" && <><div className="sw-pdf-tool-group">
+        <button aria-pressed={placement === "select"} onClick={() => setPlacement("select")}><MousePointer2 size={18} />Select text</button>
+        <button disabled={locked || !selection} onClick={() => void highlightSelection()}><Highlighter size={18} />Highlight</button>
+        <button disabled={locked} aria-pressed={placement === "note"} onClick={() => { setPlacement("note"); setPlacementText(""); }}><MessageSquarePlus size={18} />Add note</button>
+        <button disabled={locked} aria-pressed={placement === "text"} onClick={() => { setPlacement("text"); setPlacementText(""); }}><Type size={18} />Add text</button>
+      </div><div className="sw-pdf-tool-group"><button onClick={() => setSidebar("search")}><Search size={18} />Find text</button><button onClick={() => setSidebar("notes")}><MessageSquare size={18} />Annotations</button></div><p>Select a passage to highlight it, or place a review note directly on the page.</p></>}
+      {ribbon === "organize" && <><div className="sw-pdf-tool-group"><button disabled={locked} onClick={() => void apply([{ type: "rotate_pages", pages: [page], degrees: 90 }], "Page rotated.")}><RotateCw size={18} />Rotate right</button><button disabled={locked || page === 1} onClick={() => movePage(-1)}><ChevronLeft size={18} />Move earlier</button><button disabled={locked || page === view.numPages} onClick={() => movePage(1)}><ChevronRight size={18} />Move later</button><button disabled={locked || view.numPages <= 1} onClick={() => void apply([{ type: "delete_pages", pages: [page] }], "Page removed. Undo is available before you leave.")}><Trash2 size={18} />Remove page</button></div><p>Organize page {page}. Linked or structured PDFs may require a specialist editor.</p></>}
+      {ribbon === "forms" && <><div className="sw-pdf-tool-group"><button onClick={() => setSidebar("fields")}><ListChecks size={18} />Form fields</button></div><p>{fields.length ? fields.length + " fields available. Apply a value, review the page, then save." : "This PDF has no supported fillable form fields. Add text creates a separate line."}</p></>}
+    </div>
+    {placement !== "select" && <div className="sw-pdf-placement"><label>{placement === "note" ? "Review note" : "New text"}<input autoFocus value={placementText} maxLength={10000} placeholder={placement === "note" ? "Type a note, then click the page to place it" : "Type one line, then click the page to place it"} onChange={event => setPlacementText(event.target.value)} /></label>{placement === "text" && <label>Size<input aria-label="New text font size" type="number" min={6} max={72} value={textSize} onChange={event => setTextSize(Math.max(6, Math.min(72, Number(event.target.value) || 12)))} /></label>}<span>{placementText.trim() ? "Click a position on the page" : "Enter text to begin"}</span><button aria-label="Cancel placement" onClick={() => setPlacement("select")}><X size={16} /></button></div>}
+    {error && <div role="alert" className="sw-pdf-error"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError("")}><X size={15} /></button></div>}
     <div className="sw-pdf-body">
-      <aside className="sw-pdf-pages">
-        <h2>Pages</h2>
-        <form onSubmit={e => { e.preventDefault(); void find(); }}><input aria-label="Search PDF text" placeholder="Find in document" value={search} onChange={e => setSearch(e.target.value)} /><button disabled={searching || busy}>{searching ? "Searching…" : "Find"}</button></form>
-        {hits.length > 0 && <p className="text-xs">Matches: {hits.slice(0, 50).map(n => <button key={n} onClick={() => setPage(n)}>{n}</button>)}</p>}
-        <div className="sw-pdf-page-list">{Array.from({ length: view.numPages }, (_, i) => <button key={i} aria-current={page === i + 1 ? "page" : undefined} onClick={() => { setPage(i + 1); setSelection(""); }}><span className="sw-pdf-page-icon">{i + 1}</span>Page {i + 1}</button>)}</div>
+      <aside className="sw-pdf-pages" aria-label="PDF navigation">
+        <div className="sw-pdf-sidebar-tabs">{([['pages', Files, 'Pages'], ['search', Search, 'Find'], ['notes', MessageSquare, 'Annotations'], ['fields', ListChecks, 'Form fields']] as const).map(([id, Icon, label]) => <button key={id} aria-label={label} title={label} aria-pressed={sidebar === id} onClick={() => setSidebar(id)}><Icon size={17} /></button>)}</div>
+        <div className="sw-pdf-side-content">
+          {sidebar === "pages" && <><h2>Pages <span>{view.numPages}</span></h2><div className="sw-pdf-page-list">{Array.from({ length: view.numPages }, (_, i) => <PdfThumbnail key={i} doc={view} page={i + 1} active={page === i + 1} onChoose={() => goToPage(i + 1)} />)}</div></>}
+          {sidebar === "search" && <><h2>Find in document</h2><form className="sw-pdf-search" onSubmit={event => { event.preventDefault(); void find(); }}><input aria-label="Search PDF text" placeholder="Search the text layer" value={search} onChange={event => setSearch(event.target.value)} maxLength={500} /><button disabled={searching || busy || !search.trim()}>{searching ? "Searching…" : "Find"}</button></form><div className="sw-pdf-search-results">{hits.map(n => <button key={n} onClick={() => goToPage(n)}>Page {n}<ChevronRight size={14} /></button>)}</div><p className="sw-pdf-hint">Search covers selectable text. Scanned pages need OCR.</p></>}
+          {sidebar === "notes" && <><h2>Annotations <span>{annotationTotal}</span></h2><p className="sw-pdf-hint">On page {page}</p>{annotations.length ? annotations.map(annotation => <PdfAnnotationCard key={current().revision + ":" + annotation.id} annotation={annotation} locked={locked} onApply={operation => { void apply([operation], "Annotation updated. Changes are unsaved."); }} />) : <p className="sw-pdf-empty-side">No annotations on this page. Use Add note or highlight a selected passage.</p>}{annotationTotal > annotations.length && <p className="sw-pdf-hint">Showing the first {annotations.length}. Ask the assistant to inspect further annotations.</p>}</>}
+          {sidebar === "fields" && <><h2>Form fields <span>{fields.length}</span></h2>{fields.length ? fields.map(field => <PdfFieldEditor key={current().revision + ":" + field.name} field={field} locked={locked} onApply={operation => { void apply([operation], "Form value updated. Review before saving."); }} />) : <p className="sw-pdf-empty-side">There are no fillable fields in this PDF.</p>}</>}
+        </div>
       </aside>
       <main className="sw-pdf-document">
-        <div className="sw-pdf-toolbar">
-          <label>Page <input aria-label="Current PDF page" type="number" min={1} max={view.numPages} value={page} onChange={e => { const n = Number(e.target.value); if (n >= 1 && n <= view.numPages) setPage(n); }} /> / {view.numPages}</label>
-          <select aria-label="PDF zoom" value={zoom} onChange={e => setZoom(Number(e.target.value))}><option value={0.75}>75%</option><option value={1}>100%</option><option value={1.25}>125%</option><option value={1.5}>150%</option></select>
-          <button disabled={locked} onClick={() => void apply([{ type: "rotate_pages", pages: [page], degrees: 90 }], "Page rotated.")}><RotateCw size={15} />Rotate</button>
-          <button disabled={locked || !selection} onClick={() => {
-            const state = current(); setSaving(true);
-            void pageText(state.view, page).then(p => applyPdfOperations(state.bytes, [{ type: "highlight", page, rects: highlightRects(p, selection) }])).then(bytes => install(bytes, state.revision, "Highlighted selected text runs.")).catch(e => setError(messageOf(e))).finally(() => setSaving(false));
-          }}><Highlighter size={15} />Highlight selection</button>
-        </div>
-        <div className="sw-pdf-canvas-scroll" onMouseUp={() => setSelection(window.getSelection()?.toString().trim() || "")}>
-          <PdfCanvas doc={view} page={page} zoom={zoom} onNotes={setNotes} onError={setError} />
-        </div>
-        {notes.length > 0 && <div className="sw-pdf-notes"><strong>Page notes</strong>{notes.map((note, i) => <p key={i}>{note}</p>)}</div>}
-        <footer role="status">{notice || "Select text to highlight it, or ask the assistant to review a passage."}</footer>
+        <div className="sw-pdf-toolbar"><div><button aria-label="Previous PDF page" disabled={page === 1} onClick={() => goToPage(page - 1)}><ChevronLeft size={16} /></button><label>Page <input aria-label="Current PDF page" type="number" min={1} max={view.numPages} value={page} onChange={event => goToPage(Number(event.target.value))} /> <span>of {view.numPages}</span></label><button aria-label="Next PDF page" disabled={page === view.numPages} onClick={() => goToPage(page + 1)}><ChevronRight size={16} /></button></div><select aria-label="PDF zoom" value={zoom} onChange={event => setZoom(event.target.value === "fit" ? "fit" : Number(event.target.value))}><option value="fit">Fit width</option><option value={0.5}>50%</option><option value={0.75}>75%</option><option value={1}>100%</option><option value={1.25}>125%</option><option value={1.5}>150%</option><option value={2}>200%</option></select></div>
+        <div ref={canvasScroll} className={"sw-pdf-canvas-scroll" + (placement !== "select" && placementText.trim() ? " placing" : "")} onMouseUp={() => {
+          const selected = window.getSelection();
+          setSelection(selected?.anchorNode && selected.focusNode && canvasScroll.current?.contains(selected.anchorNode) && canvasScroll.current.contains(selected.focusNode) ? selected.toString().trim() : "");
+        }}><PdfCanvas doc={view} page={page} zoom={zoom} availableWidth={canvasWidth} placing={!locked && placement !== "select" && !!placementText.trim()} onPlace={placeAt} onError={setError} /></div>
+        <footer role="status"><span>{notice || (selection ? "Selected passage · " + selection.split(/\s+/).length + " words" : "Select text or ask the assistant to review this PDF.")}</span><span>Revision {meta.version}</span></footer>
       </main>
-      {panel && <aside className="sw-pdf-agent">
-        <div className="sw-pdf-agent-title"><span className="sw-pdf-spark">✦</span><div><h2>PDF assistant</h2><p>Review · annotate · organize</p></div></div>
-        <div ref={conversation} className="sw-pdf-conversation" onScroll={event => {
-          const element = event.currentTarget;
-          followConversation.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 80;
-        }}>
-          {messages.length === 0 && <div className="sw-pdf-welcome"><h3>Start with the evidence.</h3><p>Ask about a page, highlight an exact passage, add a review note, or fill a supported form.</p>{["Summarize this PDF with page citations.", "List the form fields and their current values.", "Add a note on page 1: Review before filing."].map(text => <button key={text} onClick={() => setPrompt(text)}>{text}</button>)}</div>}
-          {messages.map((m, i) => <div key={i} className={"sw-pdf-message " + m.role}><span>{m.role === "user" ? "You" : "PDF assistant"}</span><AssistantMessage role={m.role} text={m.text} nav={{ scheme: "#pdf-page-", onNavigate: href => { const n = Number(href.slice(10)); if (n >= 1 && n <= view.numPages) setPage(n); } }} /></div>)}
-          {activity.length > 0 && <details className="sw-pdf-activity" open={busy}><summary>{busy ? "Working with your PDF" : "Task activity"} · {activity.length} actions</summary>{activity.map((text, i) => <p key={i}>{text}</p>)}</details>}
-          {reply && <div className="sw-pdf-message assistant"><AssistantMessage text={reply} /></div>}
-          {fields.length > 0 && <details className="sw-pdf-fields"><summary>{fields.length} form fields</summary>{fields.map(field => <div key={current().revision + ":" + field.name}><label>{field.name}<span>{field.readOnly ? " · Read-only" : ""}</span></label><input aria-label={field.name} disabled={locked || field.readOnly || field.type === "unsupported"} defaultValue={String(field.value ?? "")} placeholder={field.type === "checkbox" ? "true or false" : field.options?.join(" / ")} onKeyDown={e => { if (e.key !== "Enter") return; const value = e.currentTarget.value; if (field.type === "checkbox" && value !== "true" && value !== "false") { setError("Enter true or false for a checkbox."); return; } void apply([{ type: "fill_form", name: field.name, value: field.type === "checkbox" ? value === "true" : value }], "Form value updated."); }} /></div>)}<p>Press Enter to apply a field value.</p></details>}
+      {panel && <><div className="sw-pdf-resizer" role="separator" aria-label="Resize PDF assistant" aria-orientation="vertical" aria-valuemin={285} aria-valuemax={600} aria-valuenow={panelWidth} tabIndex={0} onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setPanelWidth(width => Math.max(285, Math.min(600, width + (event.key === "ArrowLeft" ? 20 : -20)))); } }} onPointerDown={event => { resizeStart.current = { x: event.clientX, width: panelWidth }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (resizeStart.current) setPanelWidth(Math.max(285, Math.min(600, resizeStart.current.width + resizeStart.current.x - event.clientX))); }} onPointerUp={() => { resizeStart.current = null; }} onPointerCancel={() => { resizeStart.current = null; }}><GripVertical size={12} /></div>
+      <aside className="sw-pdf-agent" style={{ width: panelWidth }}>
+        <AssistantHeader kind="PDF" busy={locked || !taskLoop} onNew={() => { if (locked) return; loop.current?.reset(); setMessages([]); setReply(""); setActivity([]); setNotice("New conversation. Document changes are preserved."); }} onCollapse={() => setPanel(false)} onConnection={() => setConnection(value => !value)} />
+        {connection && <div className="sw-pdf-connection"><strong>Office connection</strong><p>Uses the platform's authenticated model routing and configured model tiers. Credentials are managed by the server.</p><button onClick={() => setConnection(false)}>Close</button></div>}
+        <div role="tablist" aria-label="Assistant mode" className="sw-pdf-mode-tabs">{([['write', 'Edit'], ['ask', 'Ask'], ['review', 'Review']] as const).map(([id, label]) => <button key={id} role="tab" aria-selected={mode === id} disabled={locked} title={id === "write" ? "Edit the PDF on request" : "Read-only; no document changes"} onClick={() => setMode(id)}>{label}</button>)}</div>
+        <div ref={conversation} className="sw-pdf-conversation" onScroll={event => { const element = event.currentTarget; followConversation.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 80; }}>
+          {messages.length === 0 && !busy && <AssistantStarters app="pdf" mode={mode} selected={!!selection} onChoose={setPrompt} />}
+          {messages.map((message, i) => <div key={i} className={"sw-pdf-message " + message.role}><AssistantMessage role={message.role} text={message.text} nav={{ scheme: "#pdf-page-", onNavigate: href => goToPage(Number(href.slice(10))) }} />{message.role === "assistant" && <AssistantReplyActions text={message.text} />}</div>)}
+          <AssistantActivity tools={activity} active={busy} />
+          {busy && !reply && <AssistantWorking />}
+          {reply && <div className="sw-pdf-message assistant"><AssistantMessage text={reply} nav={{ scheme: "#pdf-page-", onNavigate: href => goToPage(Number(href.slice(10))) }} /></div>}
         </div>
-        <div className="sw-pdf-composer">
-          <OfficeTaskControls app="pdf" document={docId} mode="write" loop={taskLoop} busy={busy} allowVoice={false}
-            stopTitle="Stop the task and restore its PDF changes when possible."
-            onSend={instruction => { void send(instruction); }} onStop={() => loop.current?.cancel()} />
-          <textarea aria-label="Ask the PDF assistant" placeholder={busy ? "Add a direction to the running task…" : "Ask about this PDF or describe a change…"} value={prompt} disabled={locked && !busy} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }} />
-          <div><span>{busy ? "Working · changes remain unsaved" : "Changes are reversible until you save."}</span><button aria-label={busy ? "Queue PDF direction" : "Send to PDF assistant"} disabled={(locked && !busy) || !taskLoop || !prompt.trim()} onClick={() => void send()}><ArrowUp size={18} /></button></div>
-        </div>
-        <p className="sw-pdf-limit">Text-layer review only. No OCR, permanent redaction or rewriting existing text.</p>
-      </aside>}
+        <JumpToLatest targetRef={conversation} followRef={followConversation} />
+        <OfficeTaskControls app="pdf" document={docId} mode={mode} loop={taskLoop} busy={busy} allowVoice={false} stopTitle="Stop the task and restore its PDF changes when possible." onSend={instruction => { void send(instruction); }} onStop={() => loop.current?.cancel()} />
+        <AssistantContext label={selection ? "Selected passage · " + selection.split(/\s+/).length + " words" : "PDF · viewing page " + page} busy={busy} />
+        <div className="sw-pdf-composer"><textarea aria-label="Ask the PDF assistant" placeholder={busy ? "Add a direction to the running task…" : mode === "write" ? "Ask about this PDF or describe a change…" : "Ask for a source-based answer without editing…"} value={prompt} disabled={locked && !busy} onChange={event => setPrompt(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} /><div><select aria-label="Response depth" value={depth} disabled={locked} onChange={event => setDepth(event.target.value as "standard" | "thorough")}><option value="standard">Standard</option><option value="thorough">Thorough</option></select><button aria-label={busy ? "Queue PDF direction" : "Send to PDF assistant"} disabled={(locked && !busy) || !taskLoop || !prompt.trim()} onClick={() => void send()}><ArrowUp size={18} /></button></div></div>
+        <details className="sw-pdf-capabilities"><summary>PDF capabilities</summary><p>Review with page citations; add or edit annotations; add new text; fill supported forms; rotate and organize pages. Existing-text rewriting, OCR, permanent redaction and Office conversion are not available.</p></details>
+      </aside></>}
     </div>
   </div>;
 }
 
-function PdfCanvas({ doc, page: number, zoom, onNotes, onError }: { doc: PDFDocumentProxy; page: number; zoom: number; onNotes(notes: string[]): void; onError(error: string): void }) {
+function PdfCanvas({ doc, page: number, zoom, availableWidth, placing, onPlace, onError }: { doc: PDFDocumentProxy; page: number; zoom: number | "fit"; availableWidth: number; placing: boolean; onPlace(x: number, y: number): void; onError(error: string): void }) {
   const canvas = useRef<HTMLCanvasElement>(null), layer = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 612, height: 792 });
+  const [scaleFactor, setScaleFactor] = useState(1), [rendering, setRendering] = useState(true);
+  const placementView = useRef<{ doc: PDFDocumentProxy; page: number; viewport: ReturnType<Awaited<ReturnType<PDFDocumentProxy["getPage"]>>["getViewport"]> } | null>(null);
   useEffect(() => {
     let cancelled = false;
+    placementView.current = null; setRendering(true);
     let render: ReturnType<Awaited<ReturnType<PDFDocumentProxy["getPage"]>>["render"]> | undefined;
     let textLayer: { cancel(): void } | undefined;
     void (async () => {
       const page = await doc.getPage(number);
       if (cancelled || !canvas.current || !layer.current) return;
-      const viewport = page.getViewport({ scale: zoom });
+      const base = page.getViewport({ scale: 1 });
+      const chosenScale = zoom === "fit" ? Math.max(0.1, Math.min(2, (availableWidth - 48) / base.width)) : zoom;
+      const viewport = page.getViewport({ scale: chosenScale });
       const scale = Math.min(window.devicePixelRatio || 1, 2);
       const element = canvas.current, container = layer.current;
       setSize({ width: viewport.width, height: viewport.height });
+      setScaleFactor(chosenScale);
       element.width = Math.ceil(viewport.width * scale); element.height = Math.ceil(viewport.height * scale);
       container.replaceChildren();
       render = page.render({ canvasContext: element.getContext("2d")!, viewport, transform: [scale, 0, 0, scale, 0, 0], canvas: element });
       await render.promise;
       if (cancelled) return;
-      const [{ TextLayer }, content, annotations] = await Promise.all([import("pdfjs-dist"), page.getTextContent(), page.getAnnotations()]);
+      const [{ TextLayer }, content] = await Promise.all([import("pdfjs-dist"), page.getTextContent()]);
       if (cancelled) return;
       const text = new TextLayer({ textContentSource: content, container, viewport }); textLayer = text;
       await text.render();
-      if (!cancelled) onNotes(annotations.filter(a => a.subtype === "Text").map(a => a.contentsObj?.str || a.contents || "").filter(Boolean));
-    })().catch(e => { if (!cancelled) onError(messageOf(e)); });
-    return () => { cancelled = true; render?.cancel(); textLayer?.cancel(); };
-  }, [doc, number, zoom, onNotes, onError]);
-  return <div className="sw-pdf-paper" style={{ width: size.width, height: size.height, "--scale-factor": zoom, "--total-scale-factor": zoom } as CSSProperties}>
+      if (!cancelled) { placementView.current = { doc, page: number, viewport }; setRendering(false); }
+    })().catch(e => { if (!cancelled) { setRendering(false); onError(messageOf(e)); } });
+    return () => { cancelled = true; placementView.current = null; render?.cancel(); textLayer?.cancel(); };
+  }, [doc, number, zoom, availableWidth, onError]);
+  return <div className="sw-pdf-paper" style={{ width: size.width, height: size.height, "--scale-factor": scaleFactor, "--total-scale-factor": scaleFactor } as CSSProperties} onPointerDown={event => {
+    const ready = placementView.current;
+    if (!placing || event.button !== 0 || !ready || ready.doc !== doc || ready.page !== number) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const [x, y] = ready.viewport.convertToPdfPoint((event.clientX - bounds.left) * ready.viewport.width / bounds.width, (event.clientY - bounds.top) * ready.viewport.height / bounds.height);
+    event.preventDefault(); onPlace(x!, y!);
+  }}>
+    {rendering && <div className="sw-pdf-render-status" role="status"><Loader2 size={14} className="animate-spin" />Rendering page…</div>}
     <canvas ref={canvas} style={{ width: size.width, height: size.height }} aria-label={"PDF page " + number} />
     <div ref={layer} className="textLayer" />
   </div>;

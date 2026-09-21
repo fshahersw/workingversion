@@ -2,7 +2,7 @@ import { officeStreamFailure } from "@/lib/office/stream-errors";
 import type { AgentToolCall, AgentTransport } from "@genoffice/agent-core";
 
 /** Uses the same authenticated, provider-independent Office SSE endpoint as the editors. */
-export function pdfTransport(): AgentTransport {
+export function pdfTransport(options: { mode?: () => "write" | "ask" | "review"; profile?: () => "standard" | "thorough" } = {}): AgentTransport {
   return {
     stream(request, callbacks) {
       const controller = new AbortController();
@@ -12,7 +12,7 @@ export function pdfTransport(): AgentTransport {
       void (async () => {
         const response = await fetch("/api/office/stream", { method: "POST", credentials: "same-origin",
           headers: { "Content-Type": "application/json" }, signal: controller.signal,
-          body: JSON.stringify({ ...request, requestId, app: "pdf", mode: "write", profile: "standard" }),
+          body: JSON.stringify({ ...request, requestId, app: "pdf", mode: options.mode?.() ?? "write", profile: options.profile?.() ?? "standard" }),
         });
         if (!response.ok) throw Object.assign(new Error("The assistant request failed."), { status: response.status });
         if (!response.body) throw new Error("The assistant response has no stream.");

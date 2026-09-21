@@ -152,6 +152,31 @@ test("Jev failure goes directly to main without a second model call", () => with
   assert.equal(taskClass, null); assert.equal(fallback, 0);
 }));
 
+test('brief main-only abstention cache suppresses repeated router outages without hiding recovery or context changes', () => withStubs(async () => {
+  const realNow = Date.now; let now = realNow(), requests = 0;
+  Date.now = () => now;
+  globalThis.fetch = (async (_url, init) => {
+    requests++;
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(Object.keys(body.questions).sort(), ['changes_document', 'needs_legal_judgment', 'task_class']);
+    return requests < 3 ? new Response('{}', { status: 503 }) : new Response(jevBody('format'), { status: 200 });
+  }) as typeof fetch;
+  const text = `${INSTRUCTION} outage-cache-regression`;
+  try {
+    assert.equal(await classifyTask('sheets', text, undefined, { contextKey: 'first' }), null);
+    assert.equal(await classifyTask('sheets', text, undefined, { contextKey: 'first' }), null);
+    assert.equal(requests, 1, 'same context reuses main-tier abstention only');
+    assert.equal(await classifyTask('sheets', text, undefined, { contextKey: 'second' }), null);
+    assert.equal(requests, 2, 'changed context is independently classified');
+    now += 5_001;
+    assert.equal(await classifyTask('sheets', text, undefined, { contextKey: 'first' }), 'format');
+    assert.equal(requests, 3, 'provider recovery is reconsidered after five seconds');
+    assert.equal(await classifyTask('sheets', `${text} cancelled`, AbortSignal.abort()), null);
+    assert.equal(await classifyTask('sheets', `${text} cancelled`), 'format');
+    assert.equal(requests, 4, 'cancellation cannot poison the next attempt');
+  } finally { Date.now = realNow; }
+}));
+
 test("failed tools promote later rounds to main and prevent repeating a weak tier", () => withStubs(async calls => {
   const decision = await routeTurn({ app: "writer", profile: "standard", messages: [
     { role: "user", text: "Bold the selection" },

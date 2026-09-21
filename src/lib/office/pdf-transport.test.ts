@@ -2,6 +2,34 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pdfTransport } from "../../office/pdf/transport";
 
+test('PDF transport reads the current mode and profile on each model request', async () => {
+  const previousFetch = globalThis.fetch;
+  let mode: 'write' | 'ask' | 'review' = 'ask';
+  let profile: 'standard' | 'thorough' = 'thorough';
+  const sent: Array<Record<string, unknown>> = [];
+  const transport = pdfTransport({ mode: () => mode, profile: () => profile });
+  try {
+    globalThis.fetch = async (url, init) => {
+      assert.equal(url, '/api/office/stream');
+      assert.equal(init?.credentials, 'same-origin');
+      const body = JSON.parse(String(init?.body)); sent.push(body);
+      return new Response(`data: ${JSON.stringify({ requestId: body.requestId, type: 'done', stopReason: 'end_turn' })}\n\n`);
+    };
+    const request = { system: 'PDF fixture', messages: [{ role: 'user' as const, text: 'Read page 1.' }], tools: [] };
+    const invoke = () => new Promise<void>((resolve, reject) => {
+      transport.stream(request, { onDelta: () => {}, onToolCall: () => {}, onDone: resolve, onError: reject });
+    });
+    await invoke();
+    mode = 'review'; profile = 'standard'; await invoke();
+    mode = 'write'; profile = 'thorough'; await invoke();
+    assert.deepEqual(sent.map(body => [body.app, body.mode, body.profile]), [
+      ['pdf', 'ask', 'thorough'], ['pdf', 'review', 'standard'], ['pdf', 'write', 'thorough'],
+    ]);
+    assert.equal(new Set(sent.map(body => body.requestId)).size, 3);
+    assert.ok(sent.every(body => JSON.stringify(body.messages) === JSON.stringify(request.messages)));
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("PDF transport preserves retry classification and cannot turn an error into successful completion", async () => {
   const previousFetch = globalThis.fetch;
   try {
