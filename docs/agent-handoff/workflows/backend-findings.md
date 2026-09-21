@@ -1,0 +1,84 @@
+# Workflows backend durability and security audit
+
+Audited source: `0afb944b739406e1e3327e589431ac16f4ad4eb1`, 2026-09-21. Read-only source audit; no application edits, deployment, or successful AWS/provider operations. Frontier is excluded. Live deployment, IAM effective permissions, queue health, and production performance were not verified. All source links below are pinned to the audited commit.
+
+## Priority findings
+
+### P1 — A transient checkpoint failure becomes a terminal step failure
+
+The worker supplies `saveRun` as the engine's `onUpdate` callback. After a tool succeeds, the engine assigns its output and marks the step completed, then awaits the persistence callback inside the same `try` that handles tool execution. A temporary S3/DynamoDB checkpoint failure is therefore caught as a tool failure. If the following checkpoint succeeds, the worker saves a terminal failed run and returns successfully to SQS. The infrastructure retry path is bypassed.
+
+Evidence: [worker callback and final save](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/worker.server.ts#L87-L134), [engine completed output and catch](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/engine.ts#L411-L437), [checkpoint write](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L558-L594).
+
+Offline actual-function counterexample: fail only the metadata checkpoint storing the completed start step, then allow subsequent writes. Persisted run and step both become `failed` with the injected checkpoint error. This is not a provider or live AWS test.
+
+Bounded fix: distinguish persistence/ownership failures from task execution failures and let retryable persistence faults escape the engine to the worker. Preserve the completed result when retrying a checkpoint within the same invocation. Add regressions for completed-result checkpoint failure, failed ownership CAS, persistent outage, and recovery after lease expiry. Do not promise exactly-once provider billing: a process crash before durable output may still require recomputation.
+
+### P1 — A failed cancellation poll is recorded as a user-style cancellation
+
+The five-second poll aborts on *any* rejected `runRecord` read. That includes temporary DynamoDB unavailability. The engine interprets the abort as cancellation. If a subsequent read succeeds and ownership still matches, the worker persists `cancelled`, clears the lease, and removes its due-index entry. The special timeout handling only distinguishes the watchdog; it does not distinguish failed polling.
+
+Evidence: [poll rejection](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/worker.server.ts#L69-L81), [terminal result handling](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/worker.server.ts#L107-L131), [terminal states lose due index](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L560-L575).
+
+Offline counterexample: one poll read fails during execution; later reads succeed. Run becomes `cancelled` although `cancelRequested` is false, and no due index remains.
+
+Bounded fix: track abort reason explicitly: user cancel, lease loss, watchdog, or infrastructure uncertainty. On an unverifiable ownership check, stop further tool work conservatively, but propagate retryable infrastructure failure instead of committing a user cancellation. Test cancellation races, one-off and repeated poll faults, and lease takeover independently.
+
+### P1 — The due-run outbox can repeatedly resend its first page and starve later runs
+
+`dueRecords` requests only 100 items and discards pagination. The outbox loop enqueues those records without advancing their due time or recording delivery attempts. When the earliest records cannot be claimed or advanced, each minute can enqueue the same first 100 again while later due runs are never reached. This is reachable during worker outages or failures before lease acquisition, including Cognito refresh failures. Ordinary successful workers advancing records reduce the problem; starvation is conditional on an unchanged leading page.
+
+Evidence: [limited query and enqueue loop](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L634-L663), [identity refresh before lease](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/worker.server.ts#L19-L56), [one-minute scheduler](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/infra/app/workflows.cfn.yaml#L188-L193).
+
+Offline counterexample: 101 due records and two scheduler ticks without worker progress produce 200 enqueues for 100 unique runs; record 101 is never sent. The queue's per-message DLQ receive count does not bound attempts for a run when the scheduler creates fresh messages.
+
+Bounded fix: deadline-bounded pagination plus fair delivery backoff/attempt metadata and a per-run recovery budget. Preserve atomic worker claims. Test >100 due records, persistent leading-page failures, scheduler interruption, duplicates, and a poison run without blocking others. Add oldest-due-run, repeated-recovery, worker-error, and scheduler-error alarms, not only DLQ depth.
+
+### P1 deployment gap — The supplied worker template omits required connected-tool configuration
+
+The standalone worker environment sets storage, Cognito pool, model, and Python interpreter configuration. It does not set AgentCore search endpoint/tool or KB cluster/secret/database variables. The adapter calls the shared KB and web search implementations, whose production configuration requires those values. Deploying this template as written therefore does not establish all advertised connected-tool capabilities, even if the attached policies authorize them. Existing live functions might have manual configuration; that was not inspected.
+
+Evidence: [worker environment](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/infra/app/workflows.cfn.yaml#L148-L158), [KB tool call](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/adapter.server.ts#L318-L329), [production config requirement](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/config.server.ts#L17-L28), [KB config](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/config.server.ts#L99-L104), [AgentCore config](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/config.server.ts#L213-L227).
+
+Bounded fix: explicit stack parameters/references for required runtime values, capability-aware validation, and an offline template-to-config contract test. Keep configured and healthy status separate. After authorized deployment, verify each enabled tool with synthetic inputs and the actual worker role.
+
+### P2 — Idempotency accepts a changed request and is checked after current-definition validation
+
+An existing `requestId` is accepted if principal and workflow match, without comparing inputs, draft/published selection, or source. A changed payload silently returns the old run. Conversely, graph validation occurs before replay lookup, so a legitimate retry can fail after the current definition changes even though the original run was accepted.
+
+Evidence: [start ordering and replay](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L417-L451).
+
+Offline counterexample: same workflow/principal/requestId with changed input text is accepted and returns original text. This does not expose another owner's run; owner/workflow checks remain intact.
+
+Bounded fix: persist a canonical request fingerprint and resolve authorized same-request replay before mutable definition validation. Reject same ID/different logical payload with 409. Define server-derived monitor-baseline handling separately from caller input hashing. Coordinate with the UI to retain the same request ID across ambiguous network retries; fresh IDs create distinct legitimate runs. Test concurrent identical starts and lost-response replay.
+
+### P2 — Daily schedules can execute twice during the DST fall-back hour
+
+The scheduling function scans real instants and matches local clock time. Both occurrences of an ambiguous local time qualify. The scheduler computes the next occurrence from the current instant after the first run, so a daily 01:30 schedule can run again an hour later on the same local date.
+
+Evidence: [real-instant search](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/schedule.ts#L14-L20), [next occurrence update](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L677-L690).
+
+Offline result for America/New_York, 2026-11-01: first `05:30Z`, second `06:30Z`, both local 01:30 on the same date. Define the product's daily/weekly policy explicitly; if once per local calendar occurrence is intended, choose one fold or track the local occurrence key. Cover spring gaps, fall folds, weekly schedules, and late scheduler ticks. Current next-from-now behavior skips missed occurrences; do not silently introduce catch-up execution without a product decision.
+
+## Architecture and existing controls worth preserving
+
+- HTTP routes delegate to `workflowApi`; server-derived Cognito identity, verified email, schema validation, bounded JSON bodies, and same-origin mutation checks precede repository actions. Source collection reads owner-scoped ready KB documents, checks extracted page coverage, and records missing-text warnings. See [API](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/api.server.ts#L75-L174).
+- Draft changes use revision CAS. Published graphs are pinned independently of later drafts. Run creation snapshots graph and inputs, atomically checks the definition revision, reserves a run ID, increments an admission quota, and writes discovery links. Immutable S3 snapshots precede conditional metadata pointers. Failed CAS can leave orphan snapshots; archive is not deletion or retention enforcement. See [definition commit](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L161-L233) and [run creation](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L453-L555).
+- Run reads require both current workflow permission and run-level owner/submitter/reviewer permission. Cancellation and review are authorized and revision checked; review results persist before enqueue. Delay waits are indexed for automatic wake-up; approval waits require an authorized reviewer. See [run access](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L339-L354) and [actions](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L596-L629).
+- Workers re-fetch enabled account status, verified email, and current group membership before each claim. They verify current workflow permissions, recover interrupted running steps to pending, claim with a CAS-protected lease, and reject stale checkpoints. Completed steps remain intact. Identity/permission revocation is rechecked per worker invocation; it is not continuously rechecked during a long step. Explicit run cancellation is polled every five seconds. See [identity](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/identity.server.ts#L22-L85) and [worker](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/worker.server.ts#L14-L105).
+- Schedule runs use a deterministic workflow/occurrence ID, current authorized scheduler identity, and a previously owned run's inputs. Retryable schedule failures retain the occurrence key and back off five minutes; permanent validation/access failures disable the schedule. Concurrent owner edits are protected by revision comparison. Scheduled runs intentionally use the latest published version. See [scheduler](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/src/lib/workflows/repository.server.ts#L664-L721).
+- Queue encryption, retention, visibility timeout, partial batch failures, and worker concurrency limits exist. Scheduler and worker currently share a role carrying broad existing app/KB policies; tighten separately after enumerating actual actions, without claiming an observed privilege exploit. See [infrastructure](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/infra/app/workflows.cfn.yaml#L44-L60), [role](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/infra/app/workflows.cfn.yaml#L110-L137), and [queue handler](https://github.com/fshahersw/workingversion/blob/0afb944b739406e1e3327e589431ac16f4ad4eb1/infra/lambda/workflows/worker.ts#L4-L17).
+
+## Speed and safe JEV opportunities
+
+The durable worker executes one engine step per invocation. Each claim refreshes Cognito, reads a full snapshot, and writes immutable full-run checkpoints containing inputs and accumulated output. This is a source-confirmed amplification path, not measured production latency. Instrument identity, snapshot read/write, queue delay, model, and tool spans before changing batch size. Small bounded batches of dependency-ready local steps could reduce overhead, but need lease/cancellation/checkpoint tests and must preserve review/delay barriers.
+
+JEV should advise bounded semantic decisions through the required AWS AgentCore Gateway adapter only. A useful batch could classify task intent, source requirements, and whether a model-based condition needs deeper evaluation; independent heads may share one bounded request. Deterministic policy must veto contradictions and enforce authorization, exact typed numeric conditions, missing-source/coverage gates, tool availability, and approval requirements. JEV must never approve sharing, permission checks, lease ownership, retries of ambiguous side effects, or success claims. Keep model generation separate; uncertain/invalid/timeout results use a conservative existing route. Cache only sanitized decision input plus model/rubric/policy/context hashes. Do not transmit firm source content merely to optimize scheduling. No JEV integration was added or tested during this audit.
+
+## Validation and limitations
+
+Canonical offline artifacts are backend-probe.mjs (recorded locally; see [validation evidence](validation-evidence.json)) and [backend-results.json](./backend-results.json). The probe extracts actual repository/worker AST declarations, injects in-memory command/storage dependencies, and imports actual engine/schedule behavior. It explicitly blocks HTTP, HTTPS, and fetch. Five counterexample assertions passed with zero network attempts in that replacement run. These are reproductions of defects, not five product acceptance passes. The fake store covers only relevant CAS/query behavior; it does not establish DynamoDB consistency, IAM, SQS redelivery, provider behavior, or deployment state.
+
+An earlier, abandoned Bun test relocation failed to intercept dependency mocks. Four test paths made unintended unsuccessful SDK transport attempts at DynamoDB read/query boundaries and stopped with TLS certificate verification errors (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`). There was no successful AWS operation or response observed. The four count is failed probe paths; exact SDK wire retry count was not captured. Source configuration used the SDK's AWS endpoint path, not an explicit localhost emulator; no endpoint or credential values are reproduced here, and credential files were not read by the auditor. Do not describe the entire audit as having made zero AWS attempts. The obsolete `backend-probe.test.ts.disabled.txt` and `backend-probe-cases.txt` are not valid offline evidence and must not be rerun as-is.
+
+The overview and validation evidence record full-suite/UI results. No live deployment, operational health, real-account authorization, or performance acceptance conclusion follows from this audit.

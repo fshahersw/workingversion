@@ -1,0 +1,273 @@
+{
+  "sourceCommit": "0afb944b739406e1e3327e589431ac16f4ad4eb1",
+  "auditDate": "2026-09-21",
+  "status": "Historical audit evidence, not a fresh implementation or deployment acceptance run",
+  "applicationChangedDuringAudit": false,
+  "unitTests": {
+    "command": "bun test tests/workflows-unit src/lib/workflows",
+    "passed": 71,
+    "failed": 0,
+    "expectations": 184,
+    "files": 4
+  },
+  "typecheck": {
+    "command": "npx tsc --noEmit --project tsconfig.workflows-tests.json",
+    "exitCode": 0
+  },
+  "browserTests": {
+    "command": "CI=1 npx playwright test --config playwright.workflows.config.ts --reporter=line",
+    "initialPassed": 4,
+    "initialFailed": 1,
+    "targetedRerunPassed": 0,
+    "targetedRerunFailed": 1,
+    "classification": "Initial heading timeout unexplained; rerun reaches library and fails stale Litigation stage/Settlement template expectation. Workflow API mocked; not live service validation.",
+    "covered": [
+      "create/edit/save/publish/share/run with API fixtures",
+      "save conflict preserves unsaved work",
+      "mini-app upload, native DOCX, mocked Writer save and mobile layout",
+      "feature gate and real unauthenticated endpoint rejection"
+    ],
+    "limitations": "Not actual DynamoDB/SQS/Bedrock/Office save integration acceptance. Do not add the targeted rerun to the initial pass count."
+  },
+  "counterexamples": {
+    "method": "Actual pure modules and AST-extracted actual functions with injected dependencies; reproduce current defects, not product acceptance passes.",
+    "files": [
+      "engine-results.json",
+      "tools-results.json",
+      "ui-results.json",
+      "backend-results.json"
+    ],
+    "originalScriptsRawLogsAndTracesIncluded": false
+  },
+  "safetyException": {
+    "description": "Abandoned preliminary backend test mocks failed to intercept SDK dependencies. Four failed test paths attempted DynamoDB read/query transport and stopped at TLS verification. Exact wire retry count not captured. No successful operation observed.",
+    "invalidArtifacts": [
+      "backend-probe.test.ts.disabled.txt",
+      "backend-probe-cases.txt"
+    ],
+    "replacement": "backend-probe.mjs explicitly blocks HTTP/HTTPS/fetch; replacement results record zero attempted network calls."
+  },
+  "productionValidation": "Not performed. No successful AWS/provider operation observed. Replacement backend probes blocked HTTP/HTTPS/fetch and recorded zero network attempts; this does not erase the preliminary harness exception.",
+  "pinnedSources": [
+    {
+      "path": "src/lib/workflows/adapter.server.ts",
+      "sha256": "18f9062448285bb72ea7e12b82ce9117042cb9687459bab870d8123da67cdc96"
+    },
+    {
+      "path": "src/lib/workflows/api.server.ts",
+      "sha256": "af0210f36e7d469741fdc0d4474dcff7c445be31abdde0d07d80248cf79aa664"
+    },
+    {
+      "path": "src/lib/workflows/app-templates.ts",
+      "sha256": "14cd45b2e6cdd94e32635e6edde5679fc8d9a0530d10844f9594309695ebffa7"
+    },
+    {
+      "path": "src/lib/workflows/apps.css",
+      "sha256": "5464480fc85135f04d504504e478be063b72864716d8a75c7c04efce023b0c90"
+    },
+    {
+      "path": "src/lib/workflows/AppStudio.tsx",
+      "sha256": "b7a51efce304dd6c5eca379119230740678cb001e67064c36b61ee3c21e75bf3"
+    },
+    {
+      "path": "src/lib/workflows/catalog.ts",
+      "sha256": "ec2c110f79df45c6a289d0a2ec4502518c7001d4ad42a5f66dc5f5c15b625e11"
+    },
+    {
+      "path": "src/lib/workflows/client.ts",
+      "sha256": "9e50e5b7fec33c99279ca2fa53d38ff0381b3c1eda13f39ee1787c2f591f77df"
+    },
+    {
+      "path": "src/lib/workflows/engine.ts",
+      "sha256": "813b303d0b2254be14aa9f6ca92830586668b8aef6377bc8486476a6efa27860"
+    },
+    {
+      "path": "src/lib/workflows/evidence.ts",
+      "sha256": "98c4a4074ca093605606fe0fa46a3196b7ab3697ae4e6dba8930b8d6fd0c4edf"
+    },
+    {
+      "path": "src/lib/workflows/files.ts",
+      "sha256": "235e8a4d0adbb37e2fe70bc06cb5a40d05f02c43178394734e58a363ff383ee6"
+    },
+    {
+      "path": "src/lib/workflows/graph.ts",
+      "sha256": "ab66d2df23e892153c329ed58227f8ac9b9414a699147f924fef2dd69f738cbb"
+    },
+    {
+      "path": "src/lib/workflows/grounded-adapter.ts",
+      "sha256": "93196584900a39b30172e82026abdd9cee76791e8ea3af75829dbf154c697f56"
+    },
+    {
+      "path": "src/lib/workflows/identity.server.ts",
+      "sha256": "5ef0843b6222adf76c2411b8a56dbe7c3ce30c05d9901314b57df813be689204"
+    },
+    {
+      "path": "src/lib/workflows/IntakeTools.tsx",
+      "sha256": "2c2bcc1a7dd2563564eb317aab1805a7e68e322bf46f2feee028e69724e05682"
+    },
+    {
+      "path": "src/lib/workflows/Library.tsx",
+      "sha256": "1deb826247da50fd274a61d5fc293c1534b7420e489747be8948b434986c59e7"
+    },
+    {
+      "path": "src/lib/workflows/OutputView.tsx",
+      "sha256": "e6072168ce22546d9662e3662be93bfd7a89a2a38f9dad192b7f9300a2f81533"
+    },
+    {
+      "path": "src/lib/workflows/pdf-parser.ts",
+      "sha256": "eb1f52f2d4869b46236306de32d02467b491c952333dc18e1c13ac9c1133f813"
+    },
+    {
+      "path": "src/lib/workflows/plan-schema.test.ts",
+      "sha256": "88143da31aaf39420fab141fd6daa8ef7602dbe021bc91f353ef4e1a1ca9ed98"
+    },
+    {
+      "path": "src/lib/workflows/plan-schema.ts",
+      "sha256": "d546dd0070cb5c8abab1fa567a34d86f43eff892a48487bf73fa2dc85eb7212e"
+    },
+    {
+      "path": "src/lib/workflows/policy.ts",
+      "sha256": "e220627261619804a8a1a261f3b6d05232c192440524a3ba7dea1d4c1fe217cf"
+    },
+    {
+      "path": "src/lib/workflows/python.server.ts",
+      "sha256": "71e394c438df0ea83b18735e12a979fab86a169298549991f185dab348784f85"
+    },
+    {
+      "path": "src/lib/workflows/recipes.ts",
+      "sha256": "3d60e204696deaa68bdc453f389bec58b9663c7fe7c99673addfddf4a6137a38"
+    },
+    {
+      "path": "src/lib/workflows/registers.ts",
+      "sha256": "2d5cf70173c692b33579c912abbf1fe305239ec4d80faba5a49a11c9782cdc27"
+    },
+    {
+      "path": "src/lib/workflows/ReportView.tsx",
+      "sha256": "993a6357f8f8dc9a770691051da7109438e4c806bfdc84c074e5b9ab1a9d33a3"
+    },
+    {
+      "path": "src/lib/workflows/repository.server.ts",
+      "sha256": "6c180445356c257ea6bf6f535d69b8efe41e7a54d30665a9358975ba87d253b1"
+    },
+    {
+      "path": "src/lib/workflows/RunPanel.tsx",
+      "sha256": "f838987d3f63a383cc3d9be11d8c952b35e3bf6d17f27d72e7516b8786a7a3b7"
+    },
+    {
+      "path": "src/lib/workflows/schedule.ts",
+      "sha256": "1317bea6613c0c9286ffa95b68c558a7988060c5599e3aa10beaf148df25f312"
+    },
+    {
+      "path": "src/lib/workflows/seeds.ts",
+      "sha256": "5fa9b337f900e367a432ffccec4cc7125a41f5f37c2236e91f693602c057921a"
+    },
+    {
+      "path": "src/lib/workflows/skills-index.ts",
+      "sha256": "fc38ed78ec4eef56cd1a798603d3d038de77192dff35e3ae0025332991424562"
+    },
+    {
+      "path": "src/lib/workflows/skills-instructions.server.ts",
+      "sha256": "3f0c958694661fda1969c281ebddd93e1a62dc4d1e66aff16d574b164f09cb4f"
+    },
+    {
+      "path": "src/lib/workflows/source-policy.ts",
+      "sha256": "087d89e8cc0777941e0b4815f19a139e0fe15c5e9ac2cde0ad18d33e7e6fa617"
+    },
+    {
+      "path": "src/lib/workflows/SourcePicker.tsx",
+      "sha256": "46b8cc51cdcfe437ec7291014bf7e79d64c46c29446eb914afd4835619c493ae"
+    },
+    {
+      "path": "src/lib/workflows/StepInspector.tsx",
+      "sha256": "7db9ea88d2b299f91ed7f6332697ad732cb303b8f9af95d8fb2bc1f62631f11d"
+    },
+    {
+      "path": "src/lib/workflows/styles.css",
+      "sha256": "b104fed8f49978c2cdccf03e42d6eb232967c21858e3b13636de8dc696bb2c8f"
+    },
+    {
+      "path": "src/lib/workflows/TemplateGuide.tsx",
+      "sha256": "a6832fc54190693825aa0fe30bf0e0ccd5cc42616e58c82092340b71ab10fdbb"
+    },
+    {
+      "path": "src/lib/workflows/tool-contracts.test.ts",
+      "sha256": "8825ea3cf8d5d4feba0b5b88b7999cea3ee345ed061976e1b45ce24d92c0ced0"
+    },
+    {
+      "path": "src/lib/workflows/tool-contracts.ts",
+      "sha256": "ac75912d0349cbbb6a3019a799a5f6b3bb7efe0f532f85fcf1ff1c6f09bf8538"
+    },
+    {
+      "path": "src/lib/workflows/types.ts",
+      "sha256": "547cbfc061aab6407f7d7ae5949ec8645053fc2d333029e8dcc784a8258f8772"
+    },
+    {
+      "path": "src/lib/workflows/ui.tsx",
+      "sha256": "b2ca76fc1068508a6abd085971c2c958f40e00dc4536b34372f7d5e032deadac"
+    },
+    {
+      "path": "src/lib/workflows/worker.server.ts",
+      "sha256": "329e728359d0f0539dc847dc1737a1e16d3f0ca0d2e4c0a929d920f0d68db989"
+    },
+    {
+      "path": "src/lib/workflows/WorkflowCanvas.tsx",
+      "sha256": "118dd2f14a8a2265bacfd053ff23c9c61e43981b91a2a41df1b73952e8e0b74a"
+    },
+    {
+      "path": "src/lib/workflows/WorkflowDialogs.tsx",
+      "sha256": "7fbeb4ec73db5bc824944145592a318dbcd88b38b48eb35c1cec4619353ae699"
+    },
+    {
+      "path": "src/lib/workflows/WorkflowsPage.tsx",
+      "sha256": "028b8ea4e0cfbf1afa9477bce769cfa70073712fe3e0049a0c6f26d382c01e6e"
+    },
+    {
+      "path": "tests/workflows-unit/core.test.ts",
+      "sha256": "6e5e591a4040aa34858f4c976c49d638eecc902a96b0f752ecd21f7f7acfbc68"
+    },
+    {
+      "path": "tests/workflows-unit/repository.test.ts",
+      "sha256": "8265d99c92e9e7a4c5ffab4c9ed188c74300e94ec0807f507b2f07572a6eaa31"
+    },
+    {
+      "path": "tests/workflows/page.spec.ts",
+      "sha256": "712f8bee8cf79463bb63b093ca34fef446b9a7cb3313179dac6043bcdb092886"
+    },
+    {
+      "path": "infra/lambda/workflows/scheduler.ts",
+      "sha256": "2d488128f0bb31184bc02f8e0694e118c1d72872699c8c56ed305a94d97fc2c9"
+    },
+    {
+      "path": "infra/lambda/workflows/worker.ts",
+      "sha256": "b1bad3e75c5fff3443c3df9ab37d0563bc1c6e1f545898d3efcf81dc6d3439a6"
+    },
+    {
+      "path": "infra/app/workflows.cfn.yaml",
+      "sha256": "49df14dccf2f0bbc41dbdac8bceb4ddf95569b1157200fe5993e672afc8a48d6"
+    },
+    {
+      "path": "docs/workflows/README.md",
+      "sha256": "8e4be62a92f1698fcd57572753ba7d56143b3c5687a878adcd6654b3f9ae28ca"
+    },
+    {
+      "path": "src/lib/config.server.ts",
+      "sha256": "4ee5d1ef813ecc9b31542bd2fef5c426652ebf393ec8c587ac83f7f902c91a34"
+    },
+    {
+      "path": "src/lib/agents/tools.server.ts",
+      "sha256": "b5d9a7795a2e94a766cec520f2e0b94cd149737d887a50a5a6ae53e09aa847de"
+    },
+    {
+      "path": "src/routes/_authenticated/workflows.tsx",
+      "sha256": "be6c4c11e2e2a3d0bb6d01dc5630a07cd069c690752921d557c26e3c98b38532"
+    },
+    {
+      "path": "playwright.workflows.config.ts",
+      "sha256": "0acc410463898b13dd022e71b55293d7c7eb586d52e39bf4bdcfb0504c9f7cab"
+    },
+    {
+      "path": "tsconfig.workflows-tests.json",
+      "sha256": "2434e4a281cf8555c1f5a4ffd0283822da69a18a602fa257d2af96ee0f1bb91e"
+    }
+  ]
+}

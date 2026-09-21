@@ -1,0 +1,84 @@
+{
+  "method": "Actual pure-module imports and isolated actual-function ASTs with synthetic sources; no AWS/provider/network calls; not end-to-end",
+  "results": {
+    "docketContracts": {
+      "db_get_case": {
+        "ok": true,
+        "args": {
+          "query": "synthetic",
+          "term": "synthetic",
+          "limit": 10
+        }
+      },
+      "db_docket_sheet": {
+        "ok": true,
+        "args": {
+          "query": "synthetic",
+          "term": "synthetic",
+          "limit": 10
+        }
+      },
+      "db_calendar": {
+        "ok": true,
+        "args": {
+          "query": "synthetic",
+          "term": "synthetic",
+          "limit": 10
+        }
+      },
+      "db_read_filing": {
+        "ok": true,
+        "args": {
+          "query": "synthetic",
+          "term": "synthetic",
+          "limit": 10
+        }
+      }
+    },
+    "reportCap": {
+      "total": 1201,
+      "retained": 1200,
+      "lateFindingPresent": false,
+      "warning": [
+        "Showing 1200 of 1201 findings. Narrow the source set to review the remainder."
+      ]
+    },
+    "csvReferences": {
+      "textIncludesSecondSide": true,
+      "csvIncludesSecondSide": false
+    },
+    "failureDrain": {
+      "chunks": 12,
+      "atReject": {
+        "calls": 6,
+        "completed": 0
+      },
+      "afterReturn": {
+        "calls": 12,
+        "completed": 11
+      }
+    },
+    "skillCorpus": {
+      "count": 146,
+      "trailingEllipsis": 14,
+      "example": "sw-adverse-event-analyst"
+    },
+    "wordComparison": {
+      "reportHasNarrative": true,
+      "nativeDocxHasNarrative": false,
+      "nativeDocxHasEvidence": true
+    },
+    "pdfLongToken": {
+      "pageWidth": 612,
+      "textWidth": 1510.4,
+      "x": 55,
+      "successfullyReturnedBytes": 854
+    },
+    "requestBudget": {
+      "previousRequests": 199,
+      "additionalCompleted": 6,
+      "total": 205,
+      "error": "This work exceeds the model-request budget (100 per step, 200 per run). Split the source set into identified batches."
+    }
+  }
+}
