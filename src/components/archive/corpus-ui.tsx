@@ -16,10 +16,51 @@ function isScalar(v: unknown): v is Scalar {
   return v === null || ["string", "number", "boolean"].includes(typeof v);
 }
 
+const ISO_DATE =
+  /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/** One scalar, formatted for reading: external links, thousands separators, human dates, yes/no. Values are the archive's; only the presentation changes. */
+function ScalarValue({ value }: { value: Scalar }) {
+  if (value === null || value === "") return <span className="text-slate-400">—</span>;
+  if (typeof value === "boolean")
+    return <Badge tone={value ? "green" : "slate"}>{value ? "yes" : "no"}</Badge>;
+  if (typeof value === "number")
+    return (
+      <span className="tabular-nums">
+        {Number.isInteger(value) ? value.toLocaleString("en-US") : String(value)}
+      </span>
+    );
+  const s = String(value);
+  if (/^https?:\/\//i.test(s)) {
+    const shown = s.replace(/^https?:\/\//, "");
+    return (
+      <a
+        href={s}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="break-all text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
+      >
+        {shown.slice(0, 64)}
+        {shown.length > 64 ? "…" : ""}
+      </a>
+    );
+  }
+  if (ISO_DATE.test(s)) {
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime()))
+      return (
+        <span className="tabular-nums" title={s}>
+          {d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}
+        </span>
+      );
+  }
+  return <span>{s}</span>;
+}
+
 /** Arrays of flat objects render as tables, objects as key/value lists, anything else as JSON. Shapes are the archive's; nothing is reinterpreted. */
 export function Structured({ value, depth = 0 }: { value: unknown; depth?: number }) {
   if (value === null || value === undefined) return <span className="text-slate-400">—</span>;
-  if (isScalar(value)) return <span className="tabular-nums">{String(value)}</span>;
+  if (isScalar(value)) return <ScalarValue value={value} />;
   if (Array.isArray(value)) {
     if (value.length === 0) return <span className="text-slate-400">none</span>;
     if (
@@ -49,9 +90,11 @@ export function Structured({ value, depth = 0 }: { value: unknown; depth?: numbe
                 <tr key={i} className="odd:bg-white even:bg-slate-50/40">
                   {columns.map((c) => (
                     <td key={c} className="px-3 py-1.5 align-top text-slate-700">
-                      {isScalar((row as Record<string, unknown>)[c])
-                        ? String((row as Record<string, unknown>)[c] ?? "")
-                        : ""}
+                      {isScalar((row as Record<string, unknown>)[c]) ? (
+                        <ScalarValue value={(row as Record<string, unknown>)[c] as Scalar} />
+                      ) : (
+                        ""
+                      )}
                     </td>
                   ))}
                 </tr>
