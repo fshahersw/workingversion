@@ -2,6 +2,7 @@
 // deck creation through the platform (PPTX uploads become revision 1; a new
 // blank deck is built in the browser with the vendored pptx-engine).
 import type { OfficeDocSummary } from "@/lib/office/types";
+import { deliverOfficeFile } from '@/office/shared/file-delivery';
 
 const PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 const MAX_UPLOAD = 30 * 1024 * 1024;
@@ -27,6 +28,7 @@ export async function createDeck(
   name: string,
   bytes: ArrayBuffer | Uint8Array,
 ): Promise<OfficeDocSummary> {
+  if(bytes.byteLength>3*1024*1024) return (await import('@/office/shared/create-transfer')).createLargeOfficeDocument('pptx',name,bytes);
   const body = bytes instanceof Uint8Array ? new Blob([bytes as BlobPart]) : new Blob([bytes]);
   const res = await platformFetch("/api/office/docs", {
     method: "POST",
@@ -56,12 +58,7 @@ export async function uploadDeck(file: File): Promise<OfficeDocSummary> {
 }
 
 export function downloadBlob(blob: Blob, name: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  deliverOfficeFile(blob, name);
 }
 
 export function pickFiles(accept: string, multiple = false): Promise<File[]> {

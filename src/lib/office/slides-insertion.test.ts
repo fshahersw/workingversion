@@ -14,7 +14,7 @@ const modulePromise = (async () => {
   const root = fileURLToPath(new URL("../../../", import.meta.url));
   const bundled = await build({
     absWorkingDir: root,
-    entryPoints: ["src/office/slides/src/renderer/ai/slides-skill.ts"],
+    stdin: { contents: 'export { createSlidesSkill } from "./src/office/slides/src/renderer/ai/slides-skill.ts"; export { createCompanionSkill } from "./src/office/slides/src/renderer/ai/sw-skill.ts";', resolveDir: root, loader: 'ts' },
     bundle: true,
     write: false,
     platform: "node",
@@ -46,6 +46,7 @@ const modulePromise = (async () => {
   assert.ok(code, "the actual Slides skill must bundle");
   return await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`) as {
     createSlidesSkill(access: DeckAccess): AgentSkill;
+    createCompanionSkill(base: AgentSkill, getMode: () => "ask" | "review" | "write"): AgentSkill;
   };
 })();
 
@@ -108,6 +109,55 @@ test("actual Slides apply_ops preserves an exact textbox insert on an existing b
   assert.equal(result.mutated, true);
   assert.match(result.output, /e_inserted/);
   assert.deepEqual(fixture.replacements, [{ slides: nativeSlides, goTo: 0 }]);
+});
+
+test("new native operation schemas dispatch unchanged and mode changes revoke write access", async () => {
+  const { createSlidesSkill, createCompanionSkill } = await modulePromise;
+  let mode: "ask" | "review" | "write" = "write";
+  const skill = createCompanionSkill(createSlidesSkill(deckAccess().access), () => mode);
+  const tool = skill.tools.find(value => value.name === "apply_ops")!;
+  const schema = tool.inputSchema as any;
+  assert.equal(schema.properties.ops.maxItems, 50, "browser limit must match the native transaction boundary");
+  const operations = ['addAnimation','addConnector','addSlideWithLayout','alignElements','distributeElements','insertEquation','removeAnimation','reorderAnimation','setShapeCustomGeometry','setSlideLayout','setTableStyle'];
+  for (const op of operations) assert.ok(schema.properties.ops.items.properties.op.enum.includes(op), op);
+  const requests: unknown[] = [];
+  const call = { id: "layout-ops", name: "apply_ops", input: {ops:[{op:"alignElements",target:{slide:0},els:["e_one","e_two"],mode:"left"}]}};
+  await withNativeTransaction(async request => { requests.push(request); return {applied:true,slides:[blankSlide()],records:[{op:"alignElements",target:"0"}]}; }, async () => {
+    assert.equal((await skill.executeTool(call)).mutated,true);
+    for (mode of ["ask", "review"] as const) {
+      assert.ok(!skill.tools.some(value => value.name === "apply_ops"));
+      assert.equal((await skill.executeTool(call)).isError,true);
+      assert.ok(skill.tools.some(value => value.name === "read_slide"));
+    }
+  });
+  assert.deepEqual(requests,[call.input]);
+});
+
+test("read_slide returns actual native identities read-only and never invents an unavailable inventory", async () => {
+  const { createSlidesSkill } = await modulePromise;
+  const skill=createSlidesSkill(deckAccess().access);
+  const global=globalThis as unknown as Record<string,unknown>;
+  const previous=Object.getOwnPropertyDescriptor(global,"window");
+  const native={animations:[{seq:0,el:null},{seq:1,el:"e_shape"}],layoutCount:1,layouts:[{index:0,path:"ppt/slideLayouts/slideLayout1.xml",name:"Blank"}]};
+  let reads=0;
+  Object.defineProperty(global,"window",{value:{slidesApi:{readNativeDetails:async(index:number)=>{assert.equal(index,0);reads++;return native;}}},configurable:true,writable:true});
+  try {
+    const result=await skill.executeTool({id:"native-read",name:"read_slide",input:{slideIndex:0,include_native:true}});
+    assert.equal(result.mutated,false); assert.match(result.output,/"seq":0,"el":null/); assert.match(result.output,/untrusted-native-slide-data/); assert.equal(reads,1);
+    (global.window as any).slidesApi.readNativeDetails=undefined;
+    assert.equal((await skill.executeTool({id:"missing-read",name:"read_slide",input:{slideIndex:0,include_native:true}})).isError,true);
+  } finally { if(previous)Object.defineProperty(global,"window",previous);else delete global.window; }
+});
+
+test("new style operation rejects raw model XML and oversized batches before native dispatch", async () => {
+  const { createSlidesSkill }=await modulePromise;
+  const skill=createSlidesSkill(deckAccess().access);
+  await withNativeTransaction(async()=>assert.fail("invalid inputs must not reach the engine"),async()=>{
+    for(const input of [{ops:[{op:"setTableStyle",target:{slide:0,el:"e_table"},edit:{tblPrXml:"<untrusted/>"}}]},{ops:Array.from({length:51},()=>({op:"addAnimation",target:{slide:0,el:"e_a"},effect:"fade"}))}]) {
+      const result=await skill.executeTool({id:"invalid-style",name:"apply_ops",input});
+      assert.equal(result.isError,true); assert.equal(result.mutated,false);
+    }
+  });
 });
 
 test("Slides advertises the canonical operation envelope and editable textbox signature", async () => {

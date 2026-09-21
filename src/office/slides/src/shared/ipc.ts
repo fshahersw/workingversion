@@ -1494,6 +1494,8 @@ export interface SlidesApi {
   ) => Promise<{ slide: RenderSlide } | { error: string } | null>
   /** AI batch surface: apply raw ops as one transaction (atomic/per_op, dry-run supported) */
   applyTxn: (op: ApplyTxnOp) => Promise<ApplyTxnResult | null>
+  /** Package timeline/layout identities, including orphan animation targets. */
+  readNativeDetails: (slideIndex: number) => Promise<Record<string, unknown>>
   /** Roll the deck back to an AI rollback point; returns the restored full RenderSlide array, null when the id is unknown */
   aiSnapshotRestore: (id: number) => Promise<RenderSlide[] | null>
   /** Undo/redo (main-process snapshot history): returns the restored full RenderSlide array, null when nothing to undo */

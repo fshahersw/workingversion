@@ -5,6 +5,7 @@ import { transform } from 'esbuild'
 import { localOfficeCapabilities } from './local-capabilities.server.ts'
 import type { AgentToolDef } from '../writer/inference.server.ts'
 import { streamWriterTurn, type AgentToolCall } from '../writer/inference.server.ts'
+import { BROWSER_WRITER_TOOLS } from '../../writer/renderer/ai/browser-tools'
 
 const tool = (name: string): AgentToolDef => ({ name, description: name, inputSchema: { type: 'object', properties: { kind: { type: 'string' }, engine: { type: 'string' }, style: { type: 'string' }, source: { type: 'string' } } } })
 const request = { system: 'Use exact calculations.\n## Platform tools\n- run_python: always use this for figures.\n- generate_image / edit_image: create pictures.\n- create_document: Word, Excel, PowerPoint and PDF.\n- search_library: find local documents.\nPreserve the user request.', tools: ['run_python', 'load_attachment_for_python', 'generate_image', 'edit_image', 'search_firm_knowledge', 'web_search', 'image_search', 'verify_citations', 'fetch_page', 'search_library', 'render_diagram', 'create_document', 'propose_operations', 'read_range', 'aggregate_range'].map(tool) }
@@ -44,7 +45,7 @@ test('actual Writer create_document retains its type discriminator and HTML cont
   const end = source.indexOf('\n];', start)
   assert.ok(start >= 0 && end > start)
   // Evaluate the real definition array without loading the browser editor.
-  const { code } = await transform(source.slice(start, end + 3), { loader: 'ts', format: 'esm' })
+  const { code } = await transform(`const BROWSER_WRITER_TOOLS = ${JSON.stringify(BROWSER_WRITER_TOOLS)};\n${source.slice(start, end + 3)}`, { loader: 'ts', format: 'esm' })
   const actual = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`)
   const writerTool = actual.AGENT_TOOLS.find((entry: AgentToolDef) => entry.name === 'create_document') as AgentToolDef
   assert.ok(writerTool)

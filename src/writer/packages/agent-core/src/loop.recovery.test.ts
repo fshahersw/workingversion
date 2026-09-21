@@ -43,6 +43,15 @@ function harness(steps: Step[], options: Partial<AgentLoopOptions<string>> = {})
 }
 const tools = (...calls: AgentToolCall[]): Step => cb => { calls.forEach(tool => cb.onToolCall(tool)); cb.onDone(); };
 const answer = (text = 'Finished.'): Step => cb => { cb.onDelta(text); cb.onDone(); };
+
+test('an unsupported completion claim after one corrective turn is replaced and marked unverified', async () => {
+  const h=harness([answer('Invented download one'),answer('Invented download two')],{skill:{id:'receipt-check',systemPrompt:'Use real receipts.',tools:[],executeTool:()=>{throw new Error('unused');},verifyResponse:()=> 'No file receipt exists. Perform the operation or state the limitation.'}});
+  const result=await h.run('Export the PDF');
+  assert.equal(h.requests.length,2);assert.equal((result.done as {unverified?:boolean}).unverified,true);
+  assert.match((result.done as {text:string}).text,/could not be verified/);
+  assert.ok(!(result.done as {text:string}).text.includes('Invented download'));
+  assert.equal(h.loop.taskStatus().state,'partial');
+});
 function assertPairs(messages: readonly AgentMessage[]) {
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index]!;

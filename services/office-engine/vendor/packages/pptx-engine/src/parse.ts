@@ -269,6 +269,39 @@ function isHiddenElement(node: any, tagName: string): boolean {
   return hidden === '1' || hidden === 'true'
 }
 
+/** A paragraph-level <mc:AlternateContent> whose Choice is an a14:m equation. */
+const MATH_AC_RE =
+  /<mc:AlternateContent\b[^>]*>\s*<mc:Choice\b[^>]*>\s*<a14:m\b[\s\S]*?<\/mc:AlternateContent>/g
+
+/**
+ * Equations are paragraph children fast-xml-parser would file outside the run
+ * list (losing their position and, on rebuild, the block itself). They become a
+ * run carrying the block verbatim (base64 in an attribute, TextRun.rawXml after
+ * parseRun) with the Fallback's text — or the m:t tokens — as its display text.
+ */
+function mathBlockAsRun(block: string): string {
+  const fallback = /<mc:Fallback\b[^>]*>([\s\S]*?)<\/mc:Fallback>/.exec(block)?.[1] ?? ''
+  const texts = (m: string) =>
+    [...m.matchAll(/<(?:a|m):t(?:\s[^>]*)?>([\s\S]*?)<\/(?:a|m):t>/g)].map((x) => x[1]!).join('')
+  const text = texts(fallback) || texts(block)
+  return `<a:r gxRaw="${utf8ToBase64(block)}"><a:rPr/><a:t>${text}</a:t></a:r>`
+}
+
+function utf8ToBase64(s: string): string {
+  const bytes = new TextEncoder().encode(s)
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 0x8000)
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(bin)
+}
+
+function base64ToUtf8(b64: string): string {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return new TextDecoder().decode(bytes)
+}
+
 function parseShapeFragment(
   sp: SpElement,
   fragXml: string,
@@ -283,6 +316,9 @@ function parseShapeFragment(
   // and rewriting the tag (attributes kept, so @_type survives for run.field) keeps
   // fields in document order instead of being appended after all plain runs.
   const semanticXml = fragXml
+    // gxRaw is an internal semantic marker, never a trusted source-file attribute.
+    .replace(/<a:r\b[^>]*>/g, (tag) => tag.replace(/\sgxRaw\s*=\s*(?:"[^"]*"|'[^']*')/g, ''))
+    .replace(MATH_AC_RE, mathBlockAsRun)
     .replace(/<a:br\b[^>]*\/>|<a:br\b[\s\S]*?<\/a:br>/g, '<a:r><a:t>\n</a:t></a:r>')
     .replace(/<a:fld\b/g, '<a:r')
     .replace(/<\/a:fld>/g, '</a:r>')
@@ -3219,6 +3255,7 @@ function parseParagraph(
   const runs: TextRun[] = runsRaw.map((r: any) => {
     const run = parseRun(r, ctx, runDflt)
     // a:fld rewritten to a:r by parseShapeFragment (a genuine a:r never carries @_type)
+    if (r?.['@_gxRaw']) run.rawXml = base64ToUtf8(String(r['@_gxRaw']))
     if (r?.['@_type']) run.field = String(r['@_type'])
     return run
   })
@@ -3238,7 +3275,7 @@ function parseParagraph(
   // A field with no cached text (<a:fld type="slidenum"> straight from the layout,
   // never opened in PowerPoint) is not empty: its value is substituted at render time.
   const endPr = p['a:endParaRPr']
-  if (endPr && typeof endPr === 'object' && runs.every((r) => !r.text && !r.field)) {
+  if (endPr && typeof endPr === 'object' && runs.every((r) => !r.text && !r.field && !r.rawXml)) {
     const mark = parseRun({ 'a:rPr': endPr, 'a:t': '' }, ctx, runDflt)
     mark.paraMark = true
     runs.splice(0, runs.length, mark)

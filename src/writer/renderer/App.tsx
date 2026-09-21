@@ -1,3 +1,9 @@
+import { addCommentAtRange, nextCommentId } from './editor/comments'
+import { removeNoteRefs, protectedNoteMarkBlock } from './ai/note-ops'
+import type { AiStyleInfo } from './ai/style-ops'
+import { previewStyleDefinitions } from './ai/style-preview'
+import { writerPageContext } from './ai/page-context'
+import { docStyleCss } from './doc-style-css'
 /* Modified for the Seeger Weiss Writer desktop preview from GenOffice commit 69b4ce0. See the retained LICENSE, NOTICE, and source-change list. */
 import { DOC_CSS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
 import {
@@ -23,6 +29,7 @@ import {
   DEFAULT_SECTION,
   applySectionSettings,
   nextNoteId,
+  pendingHeadingLevel,
   verifyProtectionPassword,
   type Block,
   type CommentInfo,
@@ -551,6 +558,7 @@ export function App() {
     setHfViewTouched(true)
   }
   const [pageInfo, setPageInfo] = useState({ current: 1, total: 1 })
+  const aiPageMapRef = useRef<{ doc: unknown; pages: number; blocks: Array<{ blockIndex: number; firstPage: number; lastPage: number }> } | null>(null)
   // last page's number for the document-end footer: text for the page marker, num for
   // even/odd parity (section restarts / pageNumberFmt make both differ from the physical count)
   const [lastPageNo, setLastPageNo] = useState<{ text: string; num: number } | null>(null)
@@ -797,6 +805,23 @@ export function App() {
     setEditQueue([])
   }, [aiPanelKey])
   const [docCss, setDocCss] = useState('')
+  useEffect(() => {
+    if (!doc) return
+    let current = true
+    if (!Object.keys(styleUpserts).length) {
+      setDocCss(docStyleCss(doc.parsed))
+      return
+    }
+    void previewStyleDefinitions(doc.parsed, styleUpserts).then(preview => {
+      if (current) setDocCss(docStyleCss({ ...doc.parsed, ...preview }))
+    }).catch(error => {
+      // Native save still validates the same patch; never replace the current
+      // stylesheet with an incomplete preview after a failed parse.
+      if (current) console.error('Writer style preview failed', error)
+    })
+    return () => { current = false }
+  }, [doc, styleUpserts])
+
   // Live CJK-ness of the body while editing; overrides docCss's --doc-line-factor
   const [liveDocCjk, setLiveDocCjk] = useState<boolean | null>(null)
   // header/footer push-down re-measures after the doc-scoped <style> elements
@@ -2555,6 +2580,28 @@ export function App() {
       })
       const { blocks, secList, hfHs, floats, rowFills, floatVShifts, oversizeClips } = measured
       slices = measured.s
+      if (editor && slices.length) {
+        const owners = new Map<HTMLElement, number>()
+        editor.state.doc.forEach((_node, pos, blockIndex) => {
+          const dom = editor.view.nodeDOM(pos)
+          if (dom instanceof HTMLElement) owners.set(dom, blockIndex)
+        })
+        const extents = new Map<number, { top: number; bottom: number }>()
+        for (const box of blocks) {
+          let element: HTMLElement | null | undefined = box.el
+          while (element && !owners.has(element)) element = element.parentElement
+          const owner = element ? owners.get(element) : undefined
+          if (owner === undefined) continue
+          const old = extents.get(owner)
+          extents.set(owner, { top: Math.min(old?.top ?? box.top, box.top), bottom: Math.max(old?.bottom ?? 0, box.top + box.height) })
+        }
+        const map = [...extents].map(([blockIndex, extent]) => ({
+          blockIndex,
+          firstPage: visiblePageCount(slices, pageAt(slices, extent.top + 0.5)),
+          lastPage: visiblePageCount(slices, pageAt(slices, Math.max(extent.top + 0.5, extent.bottom - 0.5))),
+        })).sort((a, b) => a.blockIndex - b.blockIndex)
+        aiPageMapRef.current = { doc: editor.state.doc, pages: visiblePageCount(slices), blocks: map }
+      }
       // document-end footer shows the last page's displayed number, not the physical count
       if (slices.length > 0) {
         const lastIdx = slices.length - 1
@@ -3513,14 +3560,15 @@ export function App() {
 
   // close guard: the main process queries dirty state before closing a tab/window; choosing "Save" runs a full save and reports back
   useEffect(() => {
-    const offCheck = window.desktop.onCloseCheck?.(() => {
-      window.desktop.reportCloseCheck({
+    const saveOwner = window.desktop
+    const offCheck = saveOwner.onCloseCheck?.(() => {
+      saveOwner.reportCloseCheck({
         dirty: !!doc && (anyDirtyRef.current || dirtyRef.current),
         autoSave: autoSave && !!doc?.filePath,
         filePath: doc?.filePath ?? null,
       })
     })
-    const offSave = window.desktop.onCloseSaveRequest?.(() => {
+    const offSave = saveOwner.onCloseSaveRequest?.(() => {
       // Closing must not report success while edits are still unpersisted, so a
       // save that raced with typing is retried until the file catches up.
       // save(false) never prompts — a pathless first save lands silently in the
@@ -3531,8 +3579,8 @@ export function App() {
         wasIncomplete: () => saveIncompleteRef.current,
         hasPath: () => true,
       }).then(
-        (ok) => window.desktop.reportCloseSaveResult(ok === true),
-        () => window.desktop.reportCloseSaveResult(false),
+        (ok) => saveOwner.reportCloseSaveResult(ok === true),
+        () => saveOwner.reportCloseSaveResult(false),
       )
     })
     return () => {
@@ -4125,6 +4173,25 @@ export function App() {
   const aiCommentsAccess = useMemo<AiCommentsAccess>(
     () => ({
       list: () => reviewCtxRef.current.comments,
+      add: (from, to, text) => {
+        const ctx = reviewCtxRef.current
+        if (aiDocCtxRef.current.locked || !ctx.editor) return 'The document is read-only or unavailable.'
+        const ed = ctx.editor
+        const id = nextCommentId(ctx.comments)
+        const added = addCommentAtRange(ed, id, from, to)
+        if (!added) return 'The comment anchor is unavailable.'
+        ctx.setComments(prev => [...prev, { id, author: AI_REVISION_AUTHOR, date: new Date().toISOString(), text }])
+        ctx.setCommentsDirty(true)
+        ctx.dirtyRef.current = true
+        return { id }
+      },
+      remove: (id) => {
+        const ctx = reviewCtxRef.current
+        if (aiDocCtxRef.current.locked || !ctx.editor) return 'The document is read-only or unavailable.'
+        if (!ctx.comments.some(c => c.id === id)) return 'The comment no longer exists.'
+        deleteCommentImpl(ctx, id)
+        return null
+      },
       reply: (parentId, text) =>
         replyToCommentImpl(reviewCtxRef.current, parentId, text, AI_REVISION_AUTHOR),
       resolve: (id) => {
@@ -4209,6 +4276,11 @@ export function App() {
   // tool executor holds one stable object, the bundle is refreshed every render,
   // and writes run the Layout-ribbon / Insert-Footnote code paths.
   const aiDocCtx = {
+    pageInfo,
+    doc,
+    styleUpserts,
+    watermark,
+    trailingStartType,
     editor,
     section,
     sections,
@@ -4221,7 +4293,46 @@ export function App() {
   aiDocCtxRef.current = aiDocCtx
   const aiDocAccess = useMemo<AiDocumentAccess>(
     () => ({
+      layout: (page) => {
+        const measured = aiPageMapRef.current
+        return measured && measured.doc === aiDocCtxRef.current.editor?.state.doc ? writerPageContext(measured.pages, aiDocCtxRef.current.pageInfo.current, measured.blocks, page) : null
+      },
       pageSetup: {
+        insertBreak: (type, afterBlockIndex) => {
+          const ctx = aiDocCtxRef.current
+          const ed = ctx.editor
+          if (ctx.locked || !ed || !ctx.doc) return 'The document is read-only or unavailable.'
+          const body = ed.state.doc
+          if (!Number.isInteger(afterBlockIndex) || afterBlockIndex < -1 || afterBlockIndex >= body.childCount) return 'Invalid current block index.'
+          let pending = false
+          body.forEach(node => { if (typeof node.attrs.genXml === 'string' && /<w:sectPr\b/.test(node.attrs.genXml)) pending = true })
+          if (pending) return 'Save the existing new section break before inserting another; this keeps section/header ownership exact.'
+          let nativeIndex: number | null = null
+          for (let i = Math.max(afterBlockIndex, 0); i >= 0; i--) {
+            const index = body.child(i).attrs.docxIndex
+            if (typeof index === 'number') { nativeIndex = index; break }
+          }
+          if (nativeIndex === null && ctx.sections.length > 1) return 'This new block has no unambiguous original section. Save and re-read the document before inserting a section break.'
+          const owner = nativeIndex === null ? 0 : ctx.sections.findIndex(sec => nativeIndex! >= sec.firstBlockIndex && nativeIndex! <= sec.lastBlockIndex)
+          if (owner < 0) return 'The original section could not be resolved. Save and re-read before continuing.'
+          const current = ctx.sections[owner]
+          const settings = current?.settings ?? ctx.section ?? DEFAULT_SECTION
+          const xml = applySectionSettings(current?.sectPrXml ?? '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>', settings)
+          let pos = 0
+          body.forEach((node, offset, i) => { if (i === afterBlockIndex) pos = offset + node.nodeSize })
+          if (!ed.chain().insertContentAt(pos, { type: 'docProtected', attrs: { docxIndex: null, blockType: 'passthrough', label: 'Section break paragraph', previewText: '', genXml: `<w:p><w:pPr>${xml}</w:pPr></w:p>` } }).run()) return 'Section insertion was rejected.'
+          if (ctx.sections.length <= 1 || owner === ctx.sections.length - 1) {
+            setTrailingStartType(type)
+            aiDocCtxRef.current = { ...ctx, trailingStartType: type }
+          } else {
+            const next = ctx.sections.map((sec, i) => i === owner ? { ...sec, startType: type } : sec)
+            setSections(next)
+            setSectionsDirty(prev => prev.includes(owner) ? prev : [...prev, owner])
+            aiDocCtxRef.current = { ...ctx, sections: next }
+          }
+          dirtyRef.current = true
+          return null
+        },
         read: () => {
           const ctx = aiDocCtxRef.current
           return {
@@ -4283,10 +4394,35 @@ export function App() {
         },
       },
       notes: {
-        list: (kind) =>
-          (kind === 'footnote' ? aiDocCtxRef.current.footnotes : aiDocCtxRef.current.endnotes).map(
-            (n) => ({ id: n.id, text: n.text }),
-          ),
+        list: (kind) => kind === 'footnote' ? aiDocCtxRef.current.footnotes : aiDocCtxRef.current.endnotes,
+        protectedMarkBlock: (kind, id) => {
+          const ctx = aiDocCtxRef.current
+          if (!ctx.editor) return null
+          return protectedNoteMarkBlock(ctx.editor.state.doc, block => String(block.attrs.genXml ?? ctx.doc?.parsed.blocks.find(source => source.docxIndex === block.attrs.docxIndex)?.originalXml ?? ''), kind, id)
+        },
+        replace: (kind, id, next) => {
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked) return 'The document is read-only.'
+          const list = kind === 'footnote' ? ctx.footnotes : ctx.endnotes
+          if (next.id !== id || !list.some(n => n.id === id)) return 'The note no longer exists.'
+          const updated = list.map(n => n.id === id ? next : n)
+          ;(kind === 'footnote' ? setFootnotes : setEndnotes)(updated)
+          aiDocCtxRef.current = kind === 'footnote' ? { ...ctx, footnotes: updated } : { ...ctx, endnotes: updated }
+          setNotesDirty(true)
+          return null
+        },
+        remove: (kind, id) => {
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked || !ctx.editor) return 'The document is read-only or unavailable.'
+          const list = kind === 'footnote' ? ctx.footnotes : ctx.endnotes
+          if (!list.some(n => n.id === id)) return 'The note no longer exists.'
+          removeNoteRefs(ctx.editor, kind, id)
+          const updated = list.filter(n => n.id !== id)
+          ;(kind === 'footnote' ? setFootnotes : setEndnotes)(updated)
+          aiDocCtxRef.current = kind === 'footnote' ? { ...ctx, footnotes: updated } : { ...ctx, endnotes: updated }
+          setNotesDirty(true)
+          return null
+        },
         insert: (kind, text, pos) => {
           const ctx = aiDocCtxRef.current
           if (ctx.locked) return 'the document is read-only; notes cannot be inserted'
@@ -4315,6 +4451,40 @@ export function App() {
           return { num }
         },
       },
+      styles: {
+        list: () => {
+          const ctx = aiDocCtxRef.current
+          const catalog = new Map<string, AiStyleInfo>()
+          for (const style of ctx.doc?.parsed.styles.values() ?? []) {
+            catalog.set(style.styleId, { styleId: style.styleId, name: style.name, type: style.type, basedOn: style.basedOn, headingLevel: style.headingLevel })
+          }
+          for (const up of Object.values(ctx.styleUpserts)) {
+            const current = catalog.get(up.styleId)
+            catalog.set(up.styleId, { styleId: up.styleId, name: up.name ?? current?.name ?? up.styleId, type: current?.type ?? up.type ?? 'paragraph', basedOn: up.basedOn === undefined ? current?.basedOn : up.basedOn ?? undefined, headingLevel: pendingHeadingLevel(up.styleId, id => ctx.styleUpserts[id], id => ctx.doc?.parsed.styles.get(id)), pending: true })
+          }
+          return [...catalog.values()]
+        },
+        upsert: (up) => {
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked || !ctx.doc) return 'The document is read-only or unavailable.'
+          const prev = ctx.styleUpserts[up.styleId]
+          const next = { ...ctx.styleUpserts, [up.styleId]: prev ? { ...prev, ...up, pPr: { ...prev.pPr, ...up.pPr }, rPr: { ...prev.rPr, ...up.rPr } } : up }
+          aiDocCtxRef.current = { ...ctx, styleUpserts: next }
+          setStyleUpserts(next)
+          dirtyRef.current = true
+          return null
+        },
+      },
+      watermark: {
+        set: (text) => {
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked || !ctx.doc) return 'The document is read-only or unavailable.'
+          setWatermark(text)
+          setWatermarkDirty(true)
+          aiDocCtxRef.current = { ...ctx, watermark: text }
+          return null
+        },
+      },
       // Rollback point for everything that is NOT in editor.getJSON(): note
       // text, section list / active page setup, header & footer variants.
       // Captured before a run's first mutation, restored with the document.
@@ -4337,10 +4507,18 @@ export function App() {
           hfRaw,
           titlePg: hf.titlePg,
           evenOddHf: hf.evenOddHf,
+          comments: structuredClone(commentsLiveRef.current),
+          styleUpserts: structuredClone(ctx.styleUpserts),
+          watermark: ctx.watermark,
+          trailingStartType: ctx.trailingStartType,
         }
       },
       restoreExtras: (extras) => {
         const notesNow = aiDocCtxRef.current
+        if (extras.comments) { setComments(structuredClone(extras.comments)); setCommentsDirty(true) }
+        if (extras.styleUpserts) setStyleUpserts(structuredClone(extras.styleUpserts))
+        if (extras.watermark !== undefined) { setWatermark(extras.watermark); setWatermarkDirty(true) }
+        if (extras.trailingStartType !== undefined) setTrailingStartType(extras.trailingStartType as typeof trailingStartType)
         const footnotes = structuredClone(extras.footnotes) as NoteInfo[]
         const endnotes = structuredClone(extras.endnotes) as NoteInfo[]
         setFootnotes(footnotes)
@@ -4355,6 +4533,9 @@ export function App() {
         }
         aiDocCtxRef.current = {
           ...notesNow,
+          styleUpserts: extras.styleUpserts ? structuredClone(extras.styleUpserts) : notesNow.styleUpserts,
+          watermark: extras.watermark !== undefined ? extras.watermark : notesNow.watermark,
+          trailingStartType: extras.trailingStartType !== undefined ? extras.trailingStartType as typeof trailingStartType : notesNow.trailingStartType,
           footnotes,
           endnotes,
           sections,

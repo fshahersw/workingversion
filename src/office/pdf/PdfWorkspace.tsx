@@ -13,8 +13,13 @@ import { applyPdfOperations, listPdfFields, listPdfAnnotations, validatePdf, typ
 import { openPdfView, pageText, highlightRects, capturePdfPage } from "./reader";
 import { createPdfSkill } from "./skill";
 import { pdfTransport } from "./transport";
-import { downloadPdf, pdfRequest } from "./api";
+import { downloadPdf, downloadSavedPdf } from "./api";
+import { createPdfExportDelivery } from "./export-delivery";
+import { createLargeOfficeDocument } from "../shared/create-transfer";
+import { loadOfficeRevision, transferOfficeRevision } from "../shared/revision-transfer";
 import { PdfThumbnail, PdfFieldEditor, PdfAnnotationCard } from "./PdfPanels";
+import { PdfSourcesPanel } from "./PdfSourcesPanel";
+import type { PdfLocalSource } from "./local-sources";
 import "./text-layer.css";
 import "./pdf.css";
 
@@ -43,7 +48,9 @@ export function PdfWorkspace({ docId }: { docId: string }) {
   const pageRef = useRef(page), selectionRef = useRef(selection);
   modeRef.current = mode; depthRef.current = depth; pageRef.current = page; selectionRef.current = selection;
   const [ribbon, setRibbon] = useState<"review" | "organize" | "forms">("review");
-  const [sidebar, setSidebar] = useState<"pages" | "search" | "notes" | "fields">("pages");
+  const [sidebar, setSidebar] = useState<"pages" | "search" | "notes" | "fields" | "sources">("pages");
+  const [sources, setSources] = useState<PdfLocalSource[]>([]), sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
   const [placement, setPlacement] = useState<"select" | "note" | "text">("select");
   const [placementText, setPlacementText] = useState(""), [textSize, setTextSize] = useState(12);
   const [annotations, setAnnotations] = useState<PdfAnnotation[]>([]), [annotationTotal, setAnnotationTotal] = useState(0);
@@ -135,18 +142,18 @@ export function PdfWorkspace({ docId }: { docId: string }) {
     void (async () => {
       const [metadata, response, chat] = await Promise.all([
         getOfficeDocFn({ data: { docId } }),
-        pdfRequest("/api/office/docs/" + docId + "/content", { signal: controller.signal }),
+        loadOfficeRevision(docId, controller.signal),
         loadOfficeChatFn({ data: { docId } }),
       ]);
-      if (metadata.kind !== "pdf" || response.headers.get("X-Office-Kind") !== "pdf") throw new Error("This document is not a PDF.");
-      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (metadata.kind !== "pdf") throw new Error("This document is not a PDF.");
+      const bytes = response.bytes;
       await validatePdf(bytes);
       const pdf = await openPdfView(bytes);
       if (controller.signal.aborted) { await pdf.destroy(); return; }
       // The bytes endpoint is authoritative if a concurrent save occurred during load.
-      const version = Number(response.headers.get("X-Office-Version"));
+      const version = response.version;
       if (!Number.isInteger(version) || version < 1) throw new Error("Missing PDF revision metadata.");
-      const actualMeta = { ...metadata, version, hash: response.headers.get("X-Office-Hash") || metadata.hash };
+      const actualMeta = { ...metadata, version, hash: response.hash };
       model.current = { bytes, revision: 0, view: pdf, meta: actualMeta, dirty: false };
       setView(pdf); setMeta(actualMeta); setMessages(chat.map(m => ({ role: m.role, text: m.text })));
       const formFields = await listPdfFields(bytes);
@@ -156,6 +163,10 @@ export function PdfWorkspace({ docId }: { docId: string }) {
         state: () => { const s = current(); return { bytes: s.bytes, revision: s.revision, storageRevision: s.meta.version, pageCount: s.view.numPages, name: s.meta.name, currentPage: pageRef.current, selection: selectionRef.current }; },
         readPage: n => pageText(current().view, n),
         capturePage: (n, signal) => capturePdfPage(current().view, n, signal),
+        navigate: n => { if (Number.isInteger(n) && n >= 1 && n <= current().view.numPages) { setPage(n); setSelection(""); } },
+        sources: () => sourcesRef.current.map(({ bytes: _, ...source }) => source),
+        sourceBytes: async id => { const source = sourcesRef.current.find(item => item.id === id); if (!source) throw new Error("This attached source is no longer available."); return source.bytes.slice(); },
+        exportFile: createPdfExportDelivery((name, bytes) => createLargeOfficeDocument("pdf", name, bytes), downloadSavedPdf, () => alive.current && !controller.signal.aborted),
         commit: install,
       }, { mode: () => modeRef.current });
       const isCurrent = (): boolean => alive.current && !controller.signal.aborted && loop.current === agent;
@@ -173,7 +184,7 @@ export function PdfWorkspace({ docId }: { docId: string }) {
             if (!isCurrent()) return;
             controls.finish();
             setActivity(previous => finishActivities(previous));
-            const partial = result.turnLimit || result.truncated;
+            const partial = result.turnLimit || result.truncated || result.unverified;
             void finishRun(result.cancelled ? "Task stopped. Inspect the PDF before continuing."
               : [result.text, partial ? "This task is incomplete. Review the current PDF before continuing." : ""].filter(Boolean).join("\n\n") || "The PDF task finished.",
             result.cancelled ? "cancelled" : partial ? "partial" : "complete");
@@ -232,16 +243,26 @@ export function PdfWorkspace({ docId }: { docId: string }) {
     saveAttempt.current ??= { bytes: state.bytes, version: state.meta.version, operationId: crypto.randomUUID() };
     const attempt = saveAttempt.current;
     try {
-      const response = await pdfRequest("/api/office/docs/" + docId + "/content", { method: "PUT",
-        headers: { "Content-Type": "application/pdf", "If-Match": String(attempt.version), "Idempotency-Key": attempt.operationId },
-        body: new Blob([attempt.bytes as BlobPart]),
-      });
-      const saved = await response.json() as OfficeDocSummary;
+      const saved = await transferOfficeRevision(docId, attempt.version, attempt.operationId, attempt.bytes);
       if (!alive.current) return;
       model.current = { ...current(), meta: saved, dirty: false };
       saveAttempt.current = null; setMeta(saved); setDirty(false); setNotice("Saved revision " + saved.version + ".");
     } catch (e) { if (alive.current) setError(messageOf(e) + " Retry this same save, or download your copy before reopening."); }
     finally { manualBusy.current = false; if (alive.current) setSaving(false); }
+  };
+  const download = async () => {
+    if (!alive.current || busy || busyRef.current || saving || manualBusy.current) return;
+    const snapshot = current();
+    if (snapshot.dirty) await save();
+    if (!alive.current || current().bytes !== snapshot.bytes) return;
+    const state = current();
+    if (state.dirty) {
+      // A failed save must never download an older server revision as the edit.
+      downloadPdf(state.bytes, state.meta.name.replace(/\.pdf$/i, "-recovery.pdf"));
+      setNotice("Save did not complete. An unsaved recovery copy is prepared; keep this document open and retry Save.");
+      return;
+    }
+    downloadSavedPdf(docId, state.meta.version, state.meta.name);
   };
   const find = async () => {
     if (!search.trim() || !view || busy || searching) return;
@@ -281,7 +302,7 @@ export function PdfWorkspace({ docId }: { docId: string }) {
   };
   const placeAt = (x: number, y: number) => {
     if (locked || placement === "select" || !placementText.trim()) return;
-    void apply([{ type: placement === "note" ? "add_note" : "add_text", page, text: placementText.trim(), x, y, ...(placement === "text" ? { size: textSize } : {}) }], placement === "note" ? "Review note added. Changes are unsaved." : "New text added. Existing content was preserved.").then(ok => { if (ok) { setPlacement("select"); setSidebar("notes"); } });
+    void apply([{ type: placement === "note" ? "add_note" : "insert_text", page, text: placementText.trim(), x, y, ...(placement === "text" ? { size: textSize } : {}) }], placement === "note" ? "Review note added. Changes are unsaved." : "New text added. Existing content was preserved.").then(ok => { if (ok) { setPlacement("select"); setSidebar("notes"); } });
   };
 
   if (!view || !meta) return <div className="sw-pdf-loading">{error ? <p role="alert">{error}</p> : <p role="status"><Loader2 size={18} className="animate-spin" />Opening PDF workspace…</p>}<Link to="/office/pdf">Back to PDFs</Link></div>;
@@ -298,10 +319,10 @@ export function PdfWorkspace({ docId }: { docId: string }) {
         void install(bytes, current().revision, "Change undone.", undefined, false).then(() => undo.current.pop()).catch(e => setError(messageOf(e))).finally(() => { manualBusy.current = false; if (alive.current) setSaving(false); });
       }}><Undo2 size={16} /><span>Undo</span></button>
       <button className="sw-pdf-save" disabled={busy || saving || !dirty} onClick={() => void save()}><Save size={16} /><span>{saving ? "Saving…" : saveAttempt.current ? "Retry save" : "Save"}</span></button>
-      <button disabled={busy || saving} onClick={() => downloadPdf(current().bytes, dirty ? meta.name.replace(/\.pdf$/i, "-review.pdf") : meta.name)}><Download size={16} /><span>Download PDF</span></button>
+      <button disabled={busy || saving} onClick={() => void download()} title="Save changes and download the current PDF revision"><Download size={16} /><span>Download PDF</span></button>
       <button aria-label={panel ? "Hide assistant" : "Show assistant"} onClick={() => setPanel(p => !p)}>{panel ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
     </header>
-    <nav className="sw-pdf-ribbon-tabs" aria-label="PDF tools">{([['review', 'Review'], ['organize', 'Organize pages'], ['forms', 'Forms']] as const).map(([id, label]) => <button key={id} aria-pressed={ribbon === id} onClick={() => { setRibbon(id); setPlacement("select"); if (id === "forms") setSidebar("fields"); }}>{label}</button>)}<span>PDF workspace</span></nav>
+    <nav className="sw-pdf-ribbon-tabs" aria-label="PDF tools">{([['review', 'Review'], ['organize', 'Organize pages'], ['forms', 'Forms']] as const).map(([id, label]) => <button key={id} aria-pressed={ribbon === id} onClick={() => { setRibbon(id); setPlacement("select"); if (id === "forms") setSidebar("fields"); }}>{label}</button>)}<button aria-pressed={sidebar === "sources"} onClick={() => setSidebar("sources")}>Attached sources{sources.length ? " (" + sources.length + ")" : ""}</button><span>PDF workspace</span></nav>
     <div className="sw-pdf-ribbon">
       {ribbon === "review" && <><div className="sw-pdf-tool-group">
         <button aria-pressed={placement === "select"} onClick={() => setPlacement("select")}><MousePointer2 size={18} />Select text</button>
@@ -318,6 +339,7 @@ export function PdfWorkspace({ docId }: { docId: string }) {
       <aside className="sw-pdf-pages" aria-label="PDF navigation">
         <div className="sw-pdf-sidebar-tabs">{([['pages', Files, 'Pages'], ['search', Search, 'Find'], ['notes', MessageSquare, 'Annotations'], ['fields', ListChecks, 'Form fields']] as const).map(([id, Icon, label]) => <button key={id} aria-label={label} title={label} aria-pressed={sidebar === id} onClick={() => setSidebar(id)}><Icon size={17} /></button>)}</div>
         <div className="sw-pdf-side-content">
+          {sidebar === "sources" && <PdfSourcesPanel sources={sources} locked={locked} onChange={value => { if (alive.current && !busyRef.current) setSources(value); }} onError={value => { if (alive.current) setError(value); }} />}
           {sidebar === "pages" && <><h2>Pages <span>{view.numPages}</span></h2><div className="sw-pdf-page-list">{Array.from({ length: view.numPages }, (_, i) => <PdfThumbnail key={i} doc={view} page={i + 1} active={page === i + 1} onChoose={() => goToPage(i + 1)} />)}</div></>}
           {sidebar === "search" && <><h2>Find in document</h2><form className="sw-pdf-search" onSubmit={event => { event.preventDefault(); void find(); }}><input aria-label="Search PDF text" placeholder="Search the text layer" value={search} onChange={event => setSearch(event.target.value)} maxLength={500} /><button disabled={searching || busy || !search.trim()}>{searching ? "Searching…" : "Find"}</button></form><div className="sw-pdf-search-results">{hits.map(n => <button key={n} onClick={() => goToPage(n)}>Page {n}<ChevronRight size={14} /></button>)}</div><p className="sw-pdf-hint">Search covers selectable text. Scanned pages need OCR.</p></>}
           {sidebar === "notes" && <><h2>Annotations <span>{annotationTotal}</span></h2><p className="sw-pdf-hint">On page {page}</p>{annotations.length ? annotations.map(annotation => <PdfAnnotationCard key={current().revision + ":" + annotation.id} annotation={annotation} locked={locked} onApply={operation => { void apply([operation], "Annotation updated. Changes are unsaved."); }} />) : <p className="sw-pdf-empty-side">No annotations on this page. Use Add note or highlight a selected passage.</p>}{annotationTotal > annotations.length && <p className="sw-pdf-hint">Showing the first {annotations.length}. Ask the assistant to inspect further annotations.</p>}</>}
@@ -348,7 +370,7 @@ export function PdfWorkspace({ docId }: { docId: string }) {
         <OfficeTaskControls app="pdf" document={docId} mode={mode} loop={taskLoop} busy={busy} allowVoice={false} stopTitle="Stop the task and restore its PDF changes when possible." onSend={instruction => { void send(instruction); }} onStop={() => loop.current?.cancel()} />
         <AssistantContext label={selection ? "Selected passage · " + selection.split(/\s+/).length + " words" : "PDF · viewing page " + page} busy={busy} />
         <div className="sw-pdf-composer"><textarea aria-label="Ask the PDF assistant" placeholder={busy ? "Add a direction to the running task…" : mode === "write" ? "Ask about this PDF or describe a change…" : "Ask for a source-based answer without editing…"} value={prompt} disabled={locked && !busy} onChange={event => setPrompt(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} /><div><select aria-label="Response depth" value={depth} disabled={locked} onChange={event => setDepth(event.target.value as "standard" | "thorough")}><option value="standard">Standard</option><option value="thorough">Thorough</option></select><button aria-label={busy ? "Queue PDF direction" : "Send to PDF assistant"} disabled={(locked && !busy) || !taskLoop || !prompt.trim()} onClick={() => void send()}><ArrowUp size={18} /></button></div></div>
-        <details className="sw-pdf-capabilities"><summary>PDF capabilities</summary><p>Review with page citations; add or edit annotations; add new text; fill supported forms; rotate and organize pages. Existing-text rewriting, OCR, permanent redaction and Office conversion are not available.</p></details>
+        <details className="sw-pdf-capabilities"><summary>PDF capabilities</summary><p>Review and edit annotations; edit inspected native text/image objects within source-font limits; create editable text blocks; fill forms; organize, merge and extract pages. Attach local PDFs or images for the assistant. OCR, permanent redaction, signing and Office conversion are unavailable.</p></details>
       </aside></>}
     </div>
   </div>;

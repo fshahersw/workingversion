@@ -151,7 +151,10 @@ export function validateOfficeArchive(
     ensure(
       expanded <= MAX_ENTRY &&
         (compressed > 0 || expanded === 0) &&
-        expanded <= Math.max(4096, compressed * 200),
+        // Repeated table cells, diagram XML and formatting legitimately exceed
+        // a 200:1 ratio. XML is still bounded by MAX_ENTRY, the shared expansion
+        // budget, exact inflate length/CRC and structural validation below.
+        (/\.(xml|rels)$/i.test(name) || expanded <= Math.max(4096, compressed * 200)),
       "A package part exceeds decompression limits.",
     );
     total += expanded;

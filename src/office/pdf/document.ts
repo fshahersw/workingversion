@@ -4,6 +4,8 @@ import {
   StandardFonts, degrees, rgb,
 } from "pdf-lib";
 import type { PDFPage } from "pdf-lib";
+import { applyPageOperation, isPageOperation, type PdfPageOperation } from "./page-operations";
+import { applyInsertedTextOperation, isInsertedTextOperation, type InsertedTextOperation, applyDecorationOperation, isDecorationOperation, type PdfDecorationOperation } from "./inserted-text";
 
 export const PDF_MAX_BYTES = 30 * 1024 * 1024;
 export const PDF_MAX_PAGES = 500;
@@ -14,7 +16,7 @@ export class PdfError extends Error {
 function requirePdf(ok: unknown, message: string): asserts ok {
   if (!ok) throw new PdfError(message);
 }
-function visiblePageBox(page: PDFPage) {
+export function visiblePageBox(page: PDFPage) {
   const media = page.getMediaBox(), crop = page.getCropBox();
   requirePdf([crop.x, crop.y, crop.width, crop.height].every(Number.isFinite) && crop.width > 0 && crop.height > 0,
     "The PDF contains invalid visible page geometry.");
@@ -80,6 +82,9 @@ export async function validatePdf(bytes: Uint8Array): Promise<PDFDocument> {
 }
 
 export type PdfOperation =
+  | PdfDecorationOperation
+  | PdfPageOperation
+  | InsertedTextOperation
   | { type: "rotate_pages"; pages: number[]; degrees: 90 | 180 | 270 }
   | { type: "delete_pages"; pages: number[] }
   | { type: "reorder_pages"; order: number[] }
@@ -176,14 +181,14 @@ export async function listPdfAnnotations(bytes: Uint8Array, options: { page?: nu
   return { annotations, total: matching.length, hasMore, ...(hasMore ? { nextOffset } : {}) };
 }
 
-function pageNumbers(raw: unknown, count: number): number[] {
+export function pageNumbers(raw: unknown, count: number): number[] {
   requirePdf(Array.isArray(raw) && raw.length > 0 && raw.length <= PDF_MAX_PAGES, "Specify a nonempty list of page numbers.");
   requirePdf(raw.every(n => Number.isInteger(n) && n >= 1 && n <= count), `Page numbers must be between 1 and ${count}.`);
   requirePdf(new Set(raw).size === raw.length, "A page may appear only once in an operation.");
   return raw as number[];
 }
 
-function assertPageOrganizationSupported(doc: PDFDocument) {
+export function assertPageOrganizationSupported(doc: PDFDocument) {
   const linkedStructure = ["Outlines", "Dests", "PageLabels", "StructTreeRoot"].some(name => doc.catalog.has(PDFName.of(name)));
   const names = doc.catalog.lookupMaybe(PDFName.of("Names"), PDFDict);
   const hasLinks = doc.getPages().some(page => {
@@ -220,6 +225,9 @@ export async function applyPdfOperations(bytes: Uint8Array, operations: PdfOpera
   for (const op of operations) {
     signal?.throwIfAborted();
     requirePdf(op && typeof op === "object", "Invalid PDF operation.");
+    if (isPageOperation(op)) { applyPageOperation(doc, op); continue; }
+    if (isInsertedTextOperation(op)) { await applyInsertedTextOperation(doc, op); continue; }
+    if (isDecorationOperation(op)) { await applyDecorationOperation(doc, op); continue; }
     requirePdf(["rotate_pages", "delete_pages", "reorder_pages", "add_text", "add_note", "highlight", "fill_form", "update_annotation", "delete_annotation"].includes(op.type),
       "Invalid operation type: " + String(op.type).slice(0, 50) + ". Set type to rotate_pages, delete_pages, reorder_pages, add_text, add_note, fill_form, update_annotation or delete_annotation. Use pdf_highlight_text for highlights.");
     if (op.type === "update_annotation" || op.type === "delete_annotation") {
@@ -299,7 +307,7 @@ export async function applyPdfOperations(bytes: Uint8Array, operations: PdfOpera
       for (const n of order) doc.addPage(pages[n - 1]!);
       continue;
     }
-    requirePdf(["add_text", "add_note", "highlight"].includes(op.type), "This PDF operation is unsupported. Redaction and rewriting existing text are not available.");
+    requirePdf(["add_text", "add_note", "highlight"].includes(op.type), "This PDF operation type is unsupported. Use the documented operation types; source text/image edits use pdf_edit_page_objects.");
     const target = op as Extract<PdfOperation, { page: number }>;
     const n = pageNumbers([target.page], doc.getPageCount())[0]!;
     const page = doc.getPage(n - 1);

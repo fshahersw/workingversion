@@ -507,6 +507,10 @@ Resources:
             MaxAge: 3600
       LifecycleConfiguration:
         Rules:
+          - Id: ExpireUncommittedOfficeUploads
+            Status: Enabled
+            Prefix: office-uploads/
+            ExpirationInDays: 1
           - Id: AbortIncompleteMultipartUploads
             Status: Enabled
             AbortIncompleteMultipartUpload:

@@ -38,6 +38,7 @@ const PLATFORM_READ = [
   "image_search",
 ];
 const READ = [
+  "read_notes", "list_styles",
   "get_document_context",
   "read_blocks",
   "read_document_outline",
@@ -54,6 +55,7 @@ const READ = [
 ];
 // The Writer's generate_image places the picture in the document, so it is an edit here.
 const WRITE = [
+  "replace_selection", "write_document", "insert_endnote", "edit_note", "delete_note", "add_comment", "delete_comment", "define_style", "accept_changes", "reject_changes", "insert_section_break", "insert_picture", "insert_text_box", "set_watermark", "apply_ops",
   ...READ,
   "generate_image",
   "insert_content",

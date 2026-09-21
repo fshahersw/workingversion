@@ -21,6 +21,7 @@ import type {
 import { PLATFORM_TOOL_CONTRAST, withToolContrast } from "@/lib/agents/tool-contrast";
 
 import { askClarification, type ClarifyQuestion } from "./clarify-card";
+import { deliverOfficeFile } from './file-delivery';
 import {
   dataUrlOf,
   describeImage,
@@ -814,14 +815,9 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
           });
           if (r.kind === "pdf") {
             const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
-            const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = r.name;
-            a.click();
-            setTimeout(() => URL.revokeObjectURL(url), 30_000);
+            deliverOfficeFile(new Blob([bytes], { type: 'application/pdf' }), r.name);
             return {
-              output: `Created ${r.name} (${r.size} bytes); the browser downloaded it.`,
+              output: `Created ${r.name} (${r.size} bytes); the file is ready in Prepared downloads.`,
               mutated: false,
               summary: `Created ${r.name}`,
             };

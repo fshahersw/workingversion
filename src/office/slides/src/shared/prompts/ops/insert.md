@@ -220,3 +220,40 @@ Embeds a 3D model; bytes payload from the UI file picker.
 `{items,dx,dy} — clipboard payload`
 
 Pastes copied elements; the payload comes from the internal clipboard.
+
+
+### addConnector
+
+`{from,to,kind?:"straight"|"elbow"|"curved",fromSide?,toSide?,arrow?:"none"|"end"|"both",line?:{color?,widthPt?,dash?}}`
+
+Draws a connector glued to two shapes (`a:stCxn`/`a:endCxn`), so PowerPoint
+and later `setTransform` moves keep it attached. When `fromSide`/`toSide`
+(`top`/`left`/`bottom`/`right`) are omitted, the pair of edge midpoints that
+are closest to each other is chosen. The frame is derived from the two
+connection points; the new element id is in `created`.
+
+| Field            | Type                                    | Notes                                                                        |
+| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------- |
+| from, to         | element ids                             | Two different top-level elements on `target.slide`                           |
+| kind             | `straight` (default), `elbow`, `curved` |                                                                              |
+| fromSide, toSide | side name                               | Pin one or both ends; omitted sides are chosen automatically                 |
+| arrow            | `none`, `end` (default), `both`         | Arrowhead at the `to` end, both ends, or none                                |
+| line             | `{color?, widthPt?, dash?}`             | Defaults 1 pt black solid; `dash` is an OOXML preset (`dash`, `sysDot`, ...) |
+
+```json
+{
+  "op": "addConnector",
+  "target": { "slide": 0 },
+  "from": "e_SHAPE",
+  "to": "e_PICTURE",
+  "kind": "elbow",
+  "line": { "color": "#1A73E8", "widthPt": 1.5 }
+}
+```
+
+Common mistakes
+
+- Drawing a free line with `addElement` and hoping it follows the shapes: only `addConnector` (or `setConnectorEndpoints` with `start`/`end`) attaches.
+- Using it between a group child and a shape: connect to the group (top-level ids only).
+
+`addConnector` currently supports unrotated, unflipped rectangle/rounded-rectangle/ellipse/text-box/picture/group endpoints. Other custom or preset connection geometries are rejected instead of guessing OOXML connection indices. Width is bounded to 1584pt.

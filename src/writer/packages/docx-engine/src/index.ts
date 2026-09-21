@@ -1,3 +1,4 @@
+export { pendingHeadingLevel, mergeStyleXml, mergeStylesXml, type StyleParaProps, type StyleRunProps } from './style-upsert'
 export * from './types'
 export { deobfuscateOdttf, isSfnt, parseFontTable, readEmbeddedFonts } from './font-table'
 export { decodeEntities } from './parse-xml-text'

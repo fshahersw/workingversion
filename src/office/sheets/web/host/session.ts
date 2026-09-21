@@ -30,6 +30,7 @@ import {
 } from "@/office/shared/extract-attachment";
 
 import { createWorkbook, downloadBlob, pickFiles, platformFetch, uploadWorkbook } from "../api";
+import { deliverOfficeFile } from '@/office/shared/file-delivery';
 import { emitHost, installHost, takeDropped } from "./electron";
 
 /**
@@ -253,8 +254,7 @@ async function openNew(upload: boolean): Promise<null> {
 export async function downloadSaved(): Promise<void> {
   const d = state.document!;
   if (state.dirty) throw new Error("Save the workbook before downloading its committed revision.");
-  const r = await platformFetch(`/api/office/docs/${d.draftId}/content?version=${d.version}`);
-  downloadBlob(await r.blob(), d.name);
+  deliverOfficeFile(`/api/office/docs/${d.draftId}/content?version=${d.version}&download=1`, d.name);
 }
 
 // --- Assistant stream (platform model, Sheets tool policy) --------------------------------------------------

@@ -1,3 +1,4 @@
+import { BROWSER_WRITER_GUIDE } from "./browser-tools";
 import type { Editor } from "@tiptap/core";
 import type { AgentSkill } from "@genoffice/agent-core";
 import {
@@ -46,7 +47,7 @@ export function createDocsSkill(
     // Platform build: the shared platform tools (Python, diagrams, citation
     // checks, guides, clarification card) ride along with the docx tools; their
     // definitions are appended to AGENT_TOOLS in tools.ts.
-    systemPrompt: AGENT_SYSTEM_PROMPT + "\n\n" + PLATFORM_SYSTEM_PROMPT,
+    systemPrompt: AGENT_SYSTEM_PROMPT + "\n\n" + PLATFORM_SYSTEM_PROMPT + "\n\n" + BROWSER_WRITER_GUIDE,
     tools: AGENT_TOOLS,
     buildContext: () => {
       const editor = getEditor();
@@ -56,7 +57,7 @@ export function createDocsSkill(
       requestedScope = getInstruction?.() ?? "";
       try { auditBaseline = structuredClone(extractAuditModel(editor, getApp?.())); }
       catch { auditBaseline = null; }
-      return buildDocContext(editor, frozen.scope, getComments?.()?.list(), getHf?.()?.read());
+      return buildDocContext(editor, frozen.scope, getComments?.()?.list(), getHf?.()?.read()) + `\nRendered page mapping: ${JSON.stringify(getApp?.()?.layout?.() ?? null)}. This is current browser pagination; multi-page blocks require exact selection for page-specific deletion.`;
     },
     executeTool: (call, signal) =>
       executeTool(

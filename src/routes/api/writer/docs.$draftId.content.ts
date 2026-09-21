@@ -21,6 +21,14 @@ export const Route = createFileRoute("/api/writer/docs/$draftId/content")({
           if (version !== undefined && (!Number.isInteger(version) || version < 1)) {
             return Response.json({ error: "Invalid revision." }, { status: 400 });
           }
+          if (url.searchParams.get('download') === '1' || url.searchParams.get('direct') === '1') {
+            const { grantOfficeRevision } = await import('@/lib/office/office.server');
+            const grant = await grantOfficeRevision(user.sub, params.draftId, version);
+            if (grant.kind !== 'docx') return Response.json({ error: 'Not a Word document.' }, { status: 422 });
+            return url.searchParams.get('direct') === '1'
+              ? Response.json(grant, { headers: { 'Cache-Control': 'no-store' } })
+              : new Response(null, { status: 302, headers: { Location: grant.url, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
+          }
           const rev = await readWriterRevision(user.sub, params.draftId, version);
           return docxResponse(rev.bytes, rev.name, {
             "X-Writer-Version": String(rev.version),
@@ -30,12 +38,29 @@ export const Route = createFileRoute("/api/writer/docs/$draftId/content")({
           return writerErrorResponse(err);
         }
       },
+      POST: async ({ request, params }) => {
+        const { writerUser, writerErrorResponse } = await import('@/lib/writer/api.server');
+        const user = await writerUser(request);
+        if (user instanceof Response) return user;
+        try {
+          const { getWriterDoc } = await import('@/lib/writer/writer.server');
+          await getWriterDoc(user.sub, params.draftId);
+          const { prepareRevisionUpload, readRevisionUpload } = await import('@/lib/office/revision-upload.server');
+          return Response.json(await prepareRevisionUpload(user.sub, await readRevisionUpload(request, params.draftId)), { headers: { 'Cache-Control': 'no-store' } });
+        } catch (error) { return writerErrorResponse(error); }
+      },
       PUT: async ({ request, params }) => {
         const { writerUser, writerErrorResponse, readDocxBody } =
           await import("@/lib/writer/api.server");
         const user = await writerUser(request);
         if (user instanceof Response) return user;
         try {
+          if (request.headers.get('content-type')?.startsWith('application/json')) {
+            const { getWriterDoc } = await import('@/lib/writer/writer.server');
+            await getWriterDoc(user.sub, params.draftId);
+            const { commitRevisionUpload, readRevisionUpload } = await import('@/lib/office/revision-upload.server');
+            return Response.json(await commitRevisionUpload(user.sub, await readRevisionUpload(request, params.draftId)));
+          }
           const { saveWriterRevision } = await import("@/lib/writer/writer.server");
           const expectedVersion = Number(request.headers.get("if-match") ?? "");
           const operationId = request.headers.get("idempotency-key") ?? "";

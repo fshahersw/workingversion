@@ -44,6 +44,7 @@ import { Route as ApiPileStructureRouteImport } from './routes/api/pile/structur
 import { Route as ApiPileRerankRouteImport } from './routes/api/pile/rerank'
 import { Route as ApiPileOcrRouteImport } from './routes/api/pile/ocr'
 import { Route as ApiPileAskRouteImport } from './routes/api/pile/ask'
+import { Route as ApiOfficeUploadsRouteImport } from './routes/api/office/uploads'
 import { Route as ApiOfficeStreamRouteImport } from './routes/api/office/stream'
 import { Route as ApiOfficeJwksRouteImport } from './routes/api/office/jwks'
 import { Route as ApiOfficeDocsRouteImport } from './routes/api/office/docs'
@@ -260,6 +261,11 @@ const ApiPileOcrRoute = ApiPileOcrRouteImport.update({
 const ApiPileAskRoute = ApiPileAskRouteImport.update({
   id: '/api/pile/ask',
   path: '/api/pile/ask',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiOfficeUploadsRoute = ApiOfficeUploadsRouteImport.update({
+  id: '/api/office/uploads',
+  path: '/api/office/uploads',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiOfficeStreamRoute = ApiOfficeStreamRouteImport.update({
@@ -520,6 +526,7 @@ export interface FileRoutesByFullPath {
   '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
   '/api/office/jwks': typeof ApiOfficeJwksRoute
   '/api/office/stream': typeof ApiOfficeStreamRoute
+  '/api/office/uploads': typeof ApiOfficeUploadsRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -595,6 +602,7 @@ export interface FileRoutesByTo {
   '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
   '/api/office/jwks': typeof ApiOfficeJwksRoute
   '/api/office/stream': typeof ApiOfficeStreamRoute
+  '/api/office/uploads': typeof ApiOfficeUploadsRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -672,6 +680,7 @@ export interface FileRoutesById {
   '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
   '/api/office/jwks': typeof ApiOfficeJwksRoute
   '/api/office/stream': typeof ApiOfficeStreamRoute
+  '/api/office/uploads': typeof ApiOfficeUploadsRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -749,6 +758,7 @@ export interface FileRouteTypes {
     | '/api/office/docs'
     | '/api/office/jwks'
     | '/api/office/stream'
+    | '/api/office/uploads'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -824,6 +834,7 @@ export interface FileRouteTypes {
     | '/api/office/docs'
     | '/api/office/jwks'
     | '/api/office/stream'
+    | '/api/office/uploads'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -900,6 +911,7 @@ export interface FileRouteTypes {
     | '/api/office/docs'
     | '/api/office/jwks'
     | '/api/office/stream'
+    | '/api/office/uploads'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -958,6 +970,7 @@ export interface RootRouteChildren {
   ApiOfficeDocsRoute: typeof ApiOfficeDocsRouteWithChildren
   ApiOfficeJwksRoute: typeof ApiOfficeJwksRoute
   ApiOfficeStreamRoute: typeof ApiOfficeStreamRoute
+  ApiOfficeUploadsRoute: typeof ApiOfficeUploadsRoute
   ApiPileAskRoute: typeof ApiPileAskRoute
   ApiPileOcrRoute: typeof ApiPileOcrRoute
   ApiPileRerankRoute: typeof ApiPileRerankRoute
@@ -1222,6 +1235,13 @@ declare module '@tanstack/react-router' {
       path: '/api/pile/ask'
       fullPath: '/api/pile/ask'
       preLoaderRoute: typeof ApiPileAskRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/office/uploads': {
+      id: '/api/office/uploads'
+      path: '/api/office/uploads'
+      fullPath: '/api/office/uploads'
+      preLoaderRoute: typeof ApiOfficeUploadsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/office/stream': {
@@ -1658,6 +1678,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiOfficeDocsRoute: ApiOfficeDocsRouteWithChildren,
   ApiOfficeJwksRoute: ApiOfficeJwksRoute,
   ApiOfficeStreamRoute: ApiOfficeStreamRoute,
+  ApiOfficeUploadsRoute: ApiOfficeUploadsRoute,
   ApiPileAskRoute: ApiPileAskRoute,
   ApiPileOcrRoute: ApiPileOcrRoute,
   ApiPileRerankRoute: ApiPileRerankRoute,

@@ -53,7 +53,7 @@ export function patchTextElementXml(el: TextElement, originalXml: string): strin
       const span = runSpans[i]!
       out += originalXml.slice(cursor, span.start)
       const slice = originalXml.slice(span.start, span.end)
-      out += span.kind === 'br' || span.newlineOnly ? slice : patchRun(slice, modelRuns[i]!)
+      out += span.raw ? (modelRuns[i]!.rawXml ?? generateRunXml(modelRuns[i]!)) : span.kind === 'br' || span.newlineOnly ? slice : patchRun(slice, modelRuns[i]!)
       cursor = span.end
     }
     out += originalXml.slice(cursor)
@@ -229,15 +229,28 @@ interface Span {
   end: number
   kind: 'r' | 'br'
   newlineOnly?: boolean
+  /** an <mc:AlternateContent> math block standing in the run sequence */
+  raw?: boolean
 }
 
 /** Locate all top-level <a:r>…</a:r> and <a:br/> (incl. paired form) spans in document order. */
 function findRunSpans(xml: string): Span[] {
   const spans: Span[] = []
-  const re = /<a:r>|<a:r\s[^>]*>|<a:br\b[^>]*\/>|<a:br\b[^>]*>/g
+  const re = /<a:r>|<a:r\s[^>]*>|<a:br\b[^>]*\/>|<a:br\b[^>]*>|<mc:AlternateContent\b[^>]*>/g
   let m: RegExpExecArray | null
   while ((m = re.exec(xml)) !== null) {
     const start = m.index
+    if (m[0].startsWith('<mc:AlternateContent')) {
+      // Only a paragraph-level math block is a run; a shape-level AC anchor is scanned through
+      const head = xml.slice(re.lastIndex, re.lastIndex + 400)
+      if (!/^\s*<mc:Choice\b[^>]*>\s*<a14:m\b/.test(head)) continue
+      const close = xml.indexOf('</mc:AlternateContent>', re.lastIndex)
+      if (close < 0) break
+      const end = close + '</mc:AlternateContent>'.length
+      spans.push({ start, end, kind: 'r', raw: true })
+      re.lastIndex = end
+      continue
+    }
     if (m[0].startsWith('<a:br')) {
       if (m[0].endsWith('/>')) {
         spans.push({ start, end: re.lastIndex, kind: 'br' })
@@ -262,7 +275,7 @@ function findRunSpans(xml: string): Span[] {
   return spans
 }
 
-/** Patch a single <a:r>: replace the <a:t> text + adjust <a:rPr> formatting as needed. */
+/** Patch a single text run while retaining unedited OOXML attributes. */
 function patchRun(runXml: string, run: TextRun): string {
   let out = runXml
 
@@ -782,6 +795,7 @@ function defRPrXml(d: ParagraphDefaultRunProps): string {
 }
 
 function generateRunXml(r: TextRun): string {
+  if (r.rawXml) return r.rawXml
   // Soft-break sentinel → <a:br/>; embedded "\n" in text (new editor Shift+Enter input) splits into alternating run+br
   if (isSoftBreakRun(r)) return '<a:br/>'
   if (r.text.includes('\n') && !r.field) {

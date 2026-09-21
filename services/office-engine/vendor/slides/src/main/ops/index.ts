@@ -4,6 +4,9 @@ import './element-ops'
 import './insert-ops'
 import './table-ops'
 import './slide-ops'
+import './arrange-ops'
+import './animation-ops'
+import './equation-ops'
 export { runTxn, type TxnRequest, type TxnResult, type OpFailure } from './executor'
 export {
   elementDurableId,

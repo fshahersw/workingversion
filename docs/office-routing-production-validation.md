@@ -8,7 +8,7 @@ Reviewed September 21, 2026. This bounded pass targets the original AWS Bedrock 
 2. **Cancellation covers EOF and retry backoff.** The stream reader is cancelled on abort, checks cancellation before/after reads and before dispatch, and releases its lock. Aborting while an HTTP error body is consumed cannot enter an unnecessary backoff or start another request. Backoff listeners are removed after settlement.
 3. **Short main-only abstention cache.** An unavailable or uncertain classifier result is cached for five seconds under the existing full-request/context/model/rubric/configuration key. Repeated unchanged tool rounds can stay on main without paying another classifier deadline. A changed context or expired entry is classified again; cancellation is not cached. Positive decisions retain their five-minute bounded cache. This is a deterministic avoidance of repeated calls, not a measured production latency claim.
 
-The PDF agent's coordinated read-only `pdf_list_annotations` and `pdf_load_guide` names were also added to the existing app/mode policy. PDF implementation and UI are covered separately.
+The PDF agent's coordinated read-only `pdf_list_annotations` and `pdf_get_guide` names were also added to the existing app/mode policy. PDF implementation and UI are covered separately.
 
 ## JEV usage and production policy
 

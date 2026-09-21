@@ -15,6 +15,19 @@ export function nextCommentId(comments: CommentInfo[]): string {
   return String(max + 1)
 }
 
+/** Add an agent's exact anchor without moving the user's live selection. */
+export function addCommentAtRange(editor: Editor, id: string, from: number, to: number): boolean {
+  const bookmark = editor.state.selection.getBookmark()
+  if (!editor.commands.setTextSelection({ from, to })) return false
+  try {
+    return addCommentToSelection(editor, id)
+  } finally {
+    // Adding marks creates a new document. A Selection tied to the old document
+    // cannot be installed on it, even though the positions did not move.
+    editor.view.dispatch(editor.state.tr.setSelection(bookmark.resolve(editor.state.doc)))
+  }
+}
+
 /** attach `id` to every text node in the current selection; false when selection is empty */
 export function addCommentToSelection(editor: Editor, id: string): boolean {
   const { state } = editor

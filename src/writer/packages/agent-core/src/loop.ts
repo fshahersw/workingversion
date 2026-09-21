@@ -29,6 +29,8 @@ export interface AgentRunResult {
   turnLimit: boolean;
   /** the final turn hit the token limit (stop_reason max_tokens): text is incomplete; set only when true */
   truncated?: boolean;
+  /** Claimed work still lacked tool evidence after the bounded repair turn. */
+  unverified?: boolean;
 }
 
 export interface AgentLoopEvents<TSnapshot> {
@@ -902,6 +904,7 @@ export class AgentLoop<TSnapshot = unknown> {
   private async finishTurn(): Promise<void> {
     const { events, skill, captureSnapshot } = this.options;
     const toolCalls = this.toolCalls;
+    let verificationFailed = false;
 
     // Claimed-action guard: before accepting a final text turn, let the skill
     // check the claims in it against the tools that actually ran this run.
@@ -926,10 +929,10 @@ export class AgentLoop<TSnapshot = unknown> {
       // snapshot copy: the live array keeps growing if the corrective turn
       // runs more tools, and the hook must see the state at check time
       const correction =
-        !this.verifyRetryUsed && this.turnText && skill.verifyResponse
+        this.turnText && skill.verifyResponse
           ? skill.verifyResponse(this.turnText, [...this.executedCalls])
           : null;
-      if (correction) {
+      if (correction && !this.verifyRetryUsed) {
         this.verifyRetryUsed = true;
         this.history.push({ role: "assistant", text: this.turnText });
         this.history.push({ role: "user", text: correction });
@@ -938,6 +941,11 @@ export class AgentLoop<TSnapshot = unknown> {
         // corrective turn's cumulative onText overwrites the bubble in place.
         this.startTurn();
         return;
+      }
+      if (correction) {
+        verificationFailed = true;
+        this.turnText = "The task could not be verified against completed tool actions. Any claimed file, download, or document change remains unconfirmed. Inspect the current document and retry the unfinished operation.";
+        events?.onText?.(this.turnText);
       }
     }
 
@@ -981,7 +989,7 @@ export class AgentLoop<TSnapshot = unknown> {
       this.runUserMsg = null;
       this.outcome = this.cancelled
         ? "stopped"
-        : this.finalizing || this.turnStopReason === "max_tokens"
+        : this.finalizing || this.turnStopReason === "max_tokens" || verificationFailed
           ? "partial"
           : "completed";
       events?.onDone?.({
@@ -990,6 +998,7 @@ export class AgentLoop<TSnapshot = unknown> {
         turnLimit: this.finalizing,
         // set only when true so exact-shape consumers/tests stay unaffected
         ...(this.turnStopReason === "max_tokens" && !this.cancelled ? { truncated: true } : {}),
+        ...(verificationFailed ? { unverified: true } : {}),
       });
       return;
     }

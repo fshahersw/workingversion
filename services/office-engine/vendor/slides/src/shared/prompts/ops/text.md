@@ -123,3 +123,33 @@ Common mistakes
 
 - Negative spacing values: all `...Pct` / `...Pt` / `...Emu` fields must be >= 0.
 - Using `setParagraphFormat` to change font size: that is a run property, use `setFont`.
+
+
+### insertEquation
+
+`{latex,position?} — target:{slide, el}; or {latex,box:{x,y,cx,cy}} to create a text box for it`
+
+Adds a typeset equation (PowerPoint's own math format) as a centered paragraph
+at the `position` (`"end"`, default, or `"start"`) of a text or shape element,
+or in a new text box at `box` (numeric EMU). Older readers and
+the GenOffice preview show the linearized text (`E=mc²`); PowerPoint 2010+
+renders the formula. LaTeX subset: `\frac`, `\sqrt[n]`, `^`, `_`,
+`\sum`/`\int`/`\prod` with limits, `\left(` `\right)`, matrices, Greek
+letters, accents, `\text{}`.
+
+```json
+{
+  "op": "insertEquation",
+  "target": { "slide": 0, "el": "e_TEXT" },
+  "latex": "E = mc^2"
+}
+```
+
+```json
+{
+  "op": "insertEquation",
+  "target": { "slide": 0 },
+  "box": { "x": 914400, "y": 2743200, "cx": 4572000, "cy": 914400 },
+  "latex": "\\frac{a}{b} + \\sqrt{x^2 + y^2}"
+}
+```

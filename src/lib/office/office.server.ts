@@ -23,6 +23,7 @@ import {
   doc as dynamo,
   getItem,
   putItem,
+  putItemIfAbsent,
   queryPrefix,
   tableName,
   updateItem,
@@ -234,17 +235,28 @@ export async function renameOfficeDoc(
 export async function createOfficeDoc(
   principal: string,
   input: { kind: OfficeKind; name?: string; bytes: Uint8Array; folderId?: string },
+  creation?: { docId: string; operationId: string },
 ): Promise<OfficeDocSummary> {
   assertPrincipal(principal);
   await assertValidPackage(input.kind, input.bytes);
+  const docId = creation?.docId ?? ulid();
+  assertDocId(docId);
+  if (creation && !IDEMPOTENCY_KEY.test(creation.operationId)) throw new OfficeError(422, 'A unique operation identifier is required.');
+  const hash = sha256(input.bytes);
+  const folderId = input.folderId && input.folderId !== ROOT_FOLDER ? input.folderId : ROOT_FOLDER;
+  const fingerprint = sha256(Buffer.from(JSON.stringify([input.kind,cleanOfficeName(input.kind,input.name),folderId,hash,creation?.operationId])));
+  const replayCreation = async () => {
+    const existing = await getItem(userPK(principal),itemSK(docId),{consistent:true});
+    if (!existing) return null;
+    if (existing.creationFingerprint !== fingerprint) throw new OfficeError(409, 'This upload identifier already belongs to a different document creation.');
+    return mapSummary(existing);
+  };
+  if (creation) { const replay = await replayCreation(); if (replay) return replay; }
   const existing = await queryPrefix(userPK(principal), "ITEM#");
   if (existing.filter((r) => s(r.type) === "draft").length >= MAX_DOCS_PER_USER) {
     throw new OfficeError(413, `This account has reached ${MAX_DOCS_PER_USER} documents.`);
   }
-  const docId = ulid();
   const now = new Date().toISOString();
-  const hash = sha256(input.bytes);
-  const folderId = input.folderId && input.folderId !== ROOT_FOLDER ? input.folderId : ROOT_FOLDER;
   await putBytes(revisionKey(principal, docId, input.kind, 1, hash), input.bytes, input.kind);
   const row: Item = {
     PK: userPK(principal),
@@ -267,8 +279,15 @@ export async function createOfficeDoc(
     updatedAt: now,
     GSI1PK: `FLD#${principal}#${folderId}`,
     GSI1SK: `ITEM#${now}#${docId}`,
+    ...(creation ? {creationFingerprint:fingerprint} : {}),
   };
-  await putItem(row);
+  if (creation) {
+    if (!await putItemIfAbsent(row)) {
+      const replay = await replayCreation();
+      if (replay) return replay;
+      throw new OfficeError(409,'Document creation changed. Retry the upload.');
+    }
+  } else await putItem(row);
   return mapSummary(row);
 }
 
@@ -313,6 +332,35 @@ export async function grantOfficeRevision(
 
 // --- Save -----------------------------------------------------------------------
 
+type SavedOfficeOperation = { docId: string; operationId: string; sha256: string; expectedVersion: number };
+
+function savedOfficeOperation(row: Item, input: SavedOfficeOperation): (OfficeDocSummary & { replayed: true }) | null {
+  const operations = row.operations as Record<string, { hash: string; version: number }> | undefined;
+  if (!operations || !Object.hasOwn(operations, input.operationId)) return null;
+  const prior = operations[input.operationId];
+  if (!prior || prior.hash !== input.sha256 || prior.version !== input.expectedVersion + 1)
+    throw new OfficeError(409, 'Operation identifier was reused with different content or revision.');
+  const revision = parseRevisions(row.revisions).find(r => r.version === prior.version && r.hash === prior.hash);
+  if (!revision || !Number.isSafeInteger(revision.size) || revision.size < 1)
+    throw new OfficeError(409, 'The saved operation could not be reconciled with its revision. Reopen the document.');
+  // The row may have advanced since this operation. Never return another
+  // revision's size, timestamp, or recovery state with the replayed bytes.
+  return { ...mapSummary(row), version: revision.version, hash: revision.hash,
+    size: revision.size, updatedAt: revision.createdAt, recovery: null, replayed: true };
+}
+
+/** Reconcile a lost commit response without requiring its deleted staging object. */
+export async function getSavedOfficeOperation(
+  principal: string, input: SavedOfficeOperation,
+): Promise<(OfficeDocSummary & { replayed: true }) | null> {
+  assertPrincipal(principal);
+  if (typeof input.operationId !== 'string' || !IDEMPOTENCY_KEY.test(input.operationId) ||
+      typeof input.sha256 !== 'string' || !SHA256_HEX.test(input.sha256) ||
+      !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1)
+    throw new OfficeError(422, 'Invalid saved operation.');
+  return savedOfficeOperation(await loadRow(principal, input.docId), input);
+}
+
 export async function saveOfficeRevision(
   principal: string,
   input: { docId: string; expectedVersion: number; bytes: Uint8Array; operationId: string },
@@ -328,12 +376,8 @@ export async function saveOfficeRevision(
 
   const operations = (row.operations as Record<string, { hash: string; version: number }>) ?? {};
   const hash = sha256(input.bytes);
-  const prior = operations[input.operationId];
-  if (prior) {
-    if (prior.hash !== hash)
-      throw new OfficeError(409, "Operation identifier was reused with different content.");
-    return { ...mapSummary(row), version: prior.version, hash: prior.hash, replayed: true };
-  }
+  const replay = savedOfficeOperation(row, { ...input, sha256: hash });
+  if (replay) return replay;
   const current = n(row.version);
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== current) {
     throw new OfficeError(

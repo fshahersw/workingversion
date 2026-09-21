@@ -110,6 +110,7 @@ export function applyEditParagraphs(oldParas: Paragraph[], edited: EditParagraph
           else merged.baseline = r.baseline
         }
         if (merged.strike === false) delete merged.strikeStyle
+        if (merged.rawXml && r.text !== oldRun?.text) delete merged.rawXml
         // The editor always returns the resolved display color; treat it as an explicit color
         // only if the user actually changed it (clear colorFollowsTheme, persist as srgbClr),
         // otherwise keep the theme linkage

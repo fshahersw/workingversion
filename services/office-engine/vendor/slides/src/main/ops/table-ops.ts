@@ -5,6 +5,10 @@
  * the selection.
  */
 import {
+  TABLE_STYLE_PRESETS,
+  EMU_PER_PT,
+  BUILTIN_TABLE_STYLES,
+  resolveBuiltinTableStyleId,
   applyParagraphFormat,
   editChartElement,
   editTableCellText,
@@ -23,7 +27,7 @@ import {
 import { editTableStyle } from '@genoffice/pptx-engine'
 import type { EditParagraph } from '../../shared/ipc'
 import { applyEditParagraphs, collectParagraphFormatPatches } from '../edit-text'
-import { GuidedError, register, resolveElement, type OpRecord } from './registry'
+import { GuidedError, register, resolveElement, type Op, type OpRecord } from './registry'
 
 register({
   name: 'setTableCell',
@@ -177,26 +181,152 @@ register({
   },
 })
 
+const MAX_BORDER_WIDTH_PT = 1584
 // ── setTableStyle ───────────────────────────────────────────────────────
-// Preset-name resolution stays in the shim (the preset table is app data);
-// the op takes the resolved TableStyleEdit plus an optional style part to
-// inject (fixed-color presets pin their definition into tableStyles.xml).
+// Model-facing fields resolve here so the ribbon and the AI send the same op:
+// a preset name pins its fixed-color style definition into tableStyles.xml
+// (built-in GUIDs track theme colors, so colors would drift), and applying a
+// preset clears direct cell formatting like PowerPoint's style gallery does.
+const HEX_RE = /^#[0-9A-Fa-f]{6}$/
+const STYLE_FIELDS = [
+  'styleId',
+  'firstRow',
+  'lastRow',
+  'firstCol',
+  'lastCol',
+  'bandRow',
+  'bandCol',
+  'rtl',
+  'shadingColor',
+  'borderColor',
+  'borderWidthPt',
+  'borderPreset',
+  'cells',
+] as const
+
+interface ResolvedTableStyle {
+  edit: TableStyleEdit
+  stylePart?: { styleId: string; styleDefXml: string }
+}
+
+function resolveTableStyle(op: Op): ResolvedTableStyle {
+  if (op.edit && typeof op.edit === "object") return { edit: op.edit as TableStyleEdit, ...(op.stylePart ? {stylePart: op.stylePart as ResolvedTableStyle["stylePart"]} : {}) }
+  if (op.styleName != null) {
+    if (STYLE_FIELDS.some((field) => op[field] != null) || op.keepFormatting != null) {
+      throw new GuidedError('op "setTableStyle": use styleName alone; send explicit style overrides as a separate operation.')
+    }
+    const preset = TABLE_STYLE_PRESETS[String(op.styleName)]
+    if (!preset) {
+      throw new GuidedError(
+        `op "setTableStyle": unknown styleName "${String(op.styleName)}". Presets: ${Object.keys(TABLE_STYLE_PRESETS).join(', ')}.`,
+      )
+    }
+    return {
+      edit: {
+        tblPrXml: preset.tblPrXml,
+        clearDirectFormatting: true,
+        // Grid presets draw the outer frame with direct borders (styles only have inner lines)
+        ...(preset.border
+          ? {
+              borderPreset: 'all' as const,
+              borderColor: preset.border.color,
+              borderWidthEmu: preset.border.widthEmu,
+            }
+          : {}),
+      },
+      ...(preset.styleId
+        ? { stylePart: { styleId: preset.styleId, styleDefXml: preset.styleDefXml! } }
+        : {}),
+    }
+  }
+  if (!STYLE_FIELDS.some((f) => op[f] != null)) {
+    throw new GuidedError(
+      'op "setTableStyle" needs "styleName", "styleId" (a built-in style name or GUID) or at least one of firstRow, lastRow, firstCol, lastCol, bandRow, bandCol, shadingColor, borderColor, borderWidthPt, borderPreset.',
+    )
+  }
+  let styleId: string | undefined
+  for (const field of ['firstRow', 'lastRow', 'firstCol', 'lastCol', 'bandRow', 'bandCol', 'rtl', 'keepFormatting']) {
+    if (op[field] !== undefined && typeof op[field] !== 'boolean') throw new GuidedError(`op "setTableStyle": ${field} must be boolean.`)
+  }
+  if ((op.borderColor != null || op.borderWidthPt != null) && op.borderPreset !== 'all') {
+    throw new GuidedError('op "setTableStyle": borderColor/borderWidthPt require borderPreset:"all"; this tool does not infer which existing borders to change.')
+  }
+  if (op.cells !== undefined && op.shadingColor === undefined && op.borderPreset === undefined) {
+    throw new GuidedError('op "setTableStyle": a cells selection needs shadingColor or borderPreset.')
+  }
+  if (op.cells !== undefined && (!Array.isArray(op.cells) || op.cells.length === 0 || op.cells.some((cell: any) => !cell || !Number.isSafeInteger(cell.row) || cell.row < 0 || !Number.isSafeInteger(cell.col) || cell.col < 0))) {
+    throw new GuidedError('op "setTableStyle": cells must be a non-empty array of non-negative integer row/col addresses.')
+  }
+  if (op.styleId != null) {
+    if (typeof op.styleId !== 'string' || !op.styleId.trim()) {
+      throw new GuidedError('op "setTableStyle": "styleId" must be a built-in style name or GUID.')
+    }
+    styleId = resolveBuiltinTableStyleId(op.styleId)
+    if (!styleId) {
+      throw new GuidedError(
+        `op "setTableStyle": unknown styleId "${op.styleId}". Built-in styles: ${BUILTIN_TABLE_STYLES.map((s) => s.name).join(', ')}.`,
+      )
+    }
+  }
+  if (
+    op.shadingColor != null &&
+    op.shadingColor !== 'none' &&
+    !HEX_RE.test(String(op.shadingColor))
+  ) {
+    throw new GuidedError('op "setTableStyle": shadingColor must be #RRGGBB or "none".')
+  }
+  if (op.borderColor != null && !HEX_RE.test(String(op.borderColor))) {
+    throw new GuidedError('op "setTableStyle": borderColor must be #RRGGBB.')
+  }
+  if (op.borderWidthPt != null) {
+    const w = typeof op.borderWidthPt === 'number' ? op.borderWidthPt : NaN
+    if (!Number.isFinite(w) || w <= 0 || w > MAX_BORDER_WIDTH_PT) {
+      throw new GuidedError(
+        'op "setTableStyle": borderWidthPt must be a finite number > 0 and <= 1584.',
+      )
+    }
+  }
+  if (op.borderPreset != null && op.borderPreset !== 'all' && op.borderPreset !== 'none') {
+    throw new GuidedError('op "setTableStyle": borderPreset must be "all" or "none".')
+  }
+  return {
+    edit: {
+      ...(styleId ? { styleId } : {}),
+      // a gallery pick clears direct cell fills so the style shows, like the preset path
+      ...(styleId && op.keepFormatting !== true ? { clearDirectFormatting: true } : {}),
+      ...(op.firstRow != null ? { firstRow: Boolean(op.firstRow) } : {}),
+      ...(op.lastRow != null ? { lastRow: Boolean(op.lastRow) } : {}),
+      ...(op.firstCol != null ? { firstCol: Boolean(op.firstCol) } : {}),
+      ...(op.lastCol != null ? { lastCol: Boolean(op.lastCol) } : {}),
+      ...(op.bandCol != null ? { bandCol: Boolean(op.bandCol) } : {}),
+      ...(op.bandRow != null ? { bandRow: Boolean(op.bandRow) } : {}),
+      ...(op.rtl != null ? { rtl: Boolean(op.rtl) } : {}),
+      ...(op.shadingColor != null ? { shadingColor: String(op.shadingColor) } : {}),
+      ...(op.borderColor != null ? { borderColor: String(op.borderColor) } : {}),
+      ...(op.borderWidthPt != null
+        ? { borderWidthEmu: Math.round(Number(op.borderWidthPt) * EMU_PER_PT) }
+        : {}),
+      ...(op.borderPreset != null ? { borderPreset: op.borderPreset as 'all' | 'none' } : {}),
+      ...(op.cells != null ? { cells: op.cells as TableStyleEdit['cells'] } : {}),
+    },
+  }
+}
+
 register({
   name: 'setTableStyle',
   validate(op, ctx) {
-    resolveElement(ctx, op, { types: ['table'] })
-    if (typeof op.edit !== 'object' || op.edit === null) {
-      throw new GuidedError('op "setTableStyle" needs "edit": a TableStyleEdit object.')
-    }
+    const { el } = resolveElement(ctx, op, { types: ['table'] })
+    const { edit } = resolveTableStyle(op)
+    if (edit.cells?.some((cell) => !(el as TableElement).rows[cell.row]?.[cell.col])) throw new GuidedError('op "setTableStyle": a selected cell does not exist in this table.')
   },
   apply(op, ctx): OpRecord {
     const { slide, el } = resolveElement(ctx, op, { types: ['table'] })
-    const part = op.stylePart as { styleId: string; styleDefXml: string } | undefined
-    if (part) ensureTableStylePart(ctx.opened, part.styleId, part.styleDefXml)
-    if (!editTableStyle(slide, el.id, op.edit as TableStyleEdit)) {
+    const { edit, stylePart } = resolveTableStyle(op)
+    if (stylePart) ensureTableStylePart(ctx.opened, stylePart.styleId, stylePart.styleDefXml)
+    if (!editTableStyle(slide, el.id, edit)) {
       throw new GuidedError(`op "setTableStyle": table "${el.id}" rejected the style edit.`)
     }
-    return { op, after: op.edit }
+    return { op, after: edit }
   },
 })
 
