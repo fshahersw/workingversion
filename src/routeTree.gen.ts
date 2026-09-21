@@ -56,7 +56,6 @@ import { Route as ApiAuthMeRouteImport } from './routes/api/auth/me'
 import { Route as ApiArchiveSplatRouteImport } from './routes/api/archive/$'
 import { Route as AuthenticatedMattersSlugRouteImport } from './routes/_authenticated/matters.$slug'
 import { Route as AuthenticatedDraftsDraftIdRouteImport } from './routes/_authenticated/drafts.$draftId'
-import { Route as AuthenticatedArchiveSourcesRouteImport } from './routes/_authenticated/archive.sources'
 import { Route as AuthenticatedArchiveSearchRouteImport } from './routes/_authenticated/archive.search'
 import { Route as AuthenticatedArchiveJurisdictionsRouteImport } from './routes/_authenticated/archive.jurisdictions'
 import { Route as AuthenticatedArchiveFederalRouteImport } from './routes/_authenticated/archive.federal'
@@ -324,12 +323,6 @@ const AuthenticatedDraftsDraftIdRoute =
     path: '/drafts/$draftId',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
-const AuthenticatedArchiveSourcesRoute =
-  AuthenticatedArchiveSourcesRouteImport.update({
-    id: '/archive/sources',
-    path: '/archive/sources',
-    getParentRoute: () => AuthenticatedRouteRoute,
-  } as any)
 const AuthenticatedArchiveSearchRoute =
   AuthenticatedArchiveSearchRouteImport.update({
     id: '/archive/search',
@@ -509,7 +502,6 @@ export interface FileRoutesByFullPath {
   '/archive/federal': typeof AuthenticatedArchiveFederalRoute
   '/archive/jurisdictions': typeof AuthenticatedArchiveJurisdictionsRoute
   '/archive/search': typeof AuthenticatedArchiveSearchRoute
-  '/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/archive/$': typeof ApiArchiveSplatRoute
@@ -584,7 +576,6 @@ export interface FileRoutesByTo {
   '/archive/federal': typeof AuthenticatedArchiveFederalRoute
   '/archive/jurisdictions': typeof AuthenticatedArchiveJurisdictionsRoute
   '/archive/search': typeof AuthenticatedArchiveSearchRoute
-  '/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/archive/$': typeof ApiArchiveSplatRoute
@@ -661,7 +652,6 @@ export interface FileRoutesById {
   '/_authenticated/archive/federal': typeof AuthenticatedArchiveFederalRoute
   '/_authenticated/archive/jurisdictions': typeof AuthenticatedArchiveJurisdictionsRoute
   '/_authenticated/archive/search': typeof AuthenticatedArchiveSearchRoute
-  '/_authenticated/archive/sources': typeof AuthenticatedArchiveSourcesRoute
   '/_authenticated/drafts/$draftId': typeof AuthenticatedDraftsDraftIdRoute
   '/_authenticated/matters/$slug': typeof AuthenticatedMattersSlugRoute
   '/api/archive/$': typeof ApiArchiveSplatRoute
@@ -738,7 +728,6 @@ export interface FileRouteTypes {
     | '/archive/federal'
     | '/archive/jurisdictions'
     | '/archive/search'
-    | '/archive/sources'
     | '/drafts/$draftId'
     | '/matters/$slug'
     | '/api/archive/$'
@@ -813,7 +802,6 @@ export interface FileRouteTypes {
     | '/archive/federal'
     | '/archive/jurisdictions'
     | '/archive/search'
-    | '/archive/sources'
     | '/drafts/$draftId'
     | '/matters/$slug'
     | '/api/archive/$'
@@ -889,7 +877,6 @@ export interface FileRouteTypes {
     | '/_authenticated/archive/federal'
     | '/_authenticated/archive/jurisdictions'
     | '/_authenticated/archive/search'
-    | '/_authenticated/archive/sources'
     | '/_authenticated/drafts/$draftId'
     | '/_authenticated/matters/$slug'
     | '/api/archive/$'
@@ -1308,13 +1295,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDraftsDraftIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/archive/sources': {
-      id: '/_authenticated/archive/sources'
-      path: '/archive/sources'
-      fullPath: '/archive/sources'
-      preLoaderRoute: typeof AuthenticatedArchiveSourcesRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
     '/_authenticated/archive/search': {
       id: '/_authenticated/archive/search'
       path: '/archive/search'
@@ -1516,7 +1496,6 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedArchiveFederalRoute: typeof AuthenticatedArchiveFederalRoute
   AuthenticatedArchiveJurisdictionsRoute: typeof AuthenticatedArchiveJurisdictionsRoute
   AuthenticatedArchiveSearchRoute: typeof AuthenticatedArchiveSearchRoute
-  AuthenticatedArchiveSourcesRoute: typeof AuthenticatedArchiveSourcesRoute
   AuthenticatedDraftsDraftIdRoute: typeof AuthenticatedDraftsDraftIdRoute
   AuthenticatedMattersSlugRoute: typeof AuthenticatedMattersSlugRoute
   AuthenticatedDraftsIndexRoute: typeof AuthenticatedDraftsIndexRoute
@@ -1547,7 +1526,6 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedArchiveJurisdictionsRoute:
     AuthenticatedArchiveJurisdictionsRoute,
   AuthenticatedArchiveSearchRoute: AuthenticatedArchiveSearchRoute,
-  AuthenticatedArchiveSourcesRoute: AuthenticatedArchiveSourcesRoute,
   AuthenticatedDraftsDraftIdRoute: AuthenticatedDraftsDraftIdRoute,
   AuthenticatedMattersSlugRoute: AuthenticatedMattersSlugRoute,
   AuthenticatedDraftsIndexRoute: AuthenticatedDraftsIndexRoute,

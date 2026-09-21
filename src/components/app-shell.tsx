@@ -4,7 +4,6 @@ import {
   Briefcase,
   CalendarDays,
   ChevronLeft,
-  Database,
   ChevronRight,
   FileSearch,
   Gavel,
@@ -221,7 +220,7 @@ function SidebarInner({
           onClick={onNavigate}
         />
 
-        {/* Corpus: the Legal Archive pages (Sources & Coverage first; Legal Archive and Courts & Judges follow) */}
+        {/* Corpus: the Legal Archive pages */}
         {expanded && (
           <p className="mb-1 mt-3 px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
             Corpus
@@ -248,12 +247,6 @@ function SidebarInner({
         <NavRow
           item={{ icon: Gavel, label: "Courts & Litigation", to: "/archive/courts" }}
           active={pathname.startsWith("/archive/courts")}
-          expanded={expanded}
-          onClick={onNavigate}
-        />
-        <NavRow
-          item={{ icon: Database, label: "Sources & Coverage", to: "/archive/sources" }}
-          active={pathname.startsWith("/archive/sources")}
           expanded={expanded}
           onClick={onNavigate}
         />
