@@ -97,7 +97,7 @@ function DraftsPage() {
       <div className="mx-auto flex h-full w-full max-w-[900px] flex-col px-4 py-6 sm:px-6">
         <OfficeTabs
           active="drafts"
-          description="Word documents written in the Writer, workbooks in Sheets, decks in Slides. Every save is a numbered revision in your Library."
+          description="Write documents, edit workbooks, build presentations, and review PDFs. Every save is a numbered revision in your Library."
         />
         <div className="mt-4 flex items-center justify-end gap-2">
           <input

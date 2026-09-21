@@ -96,30 +96,46 @@ function looksLikeBoldHeading(b: AuditBlock): boolean {
   return true;
 }
 
-export function auditDocumentModel(model: AuditModel): string[] {
+export type AuditOptions = { structuralOnly?: boolean; baseline?: AuditModel };
+
+function invalidGeometry(section: AuditSection | null): boolean {
+  if (!section) return false;
+  const { pageWidth: w, pageHeight: h, marginTop: top, marginRight: right, marginBottom: bottom, marginLeft: left } = section;
+  return ![w, h, top, right, bottom, left].every(Number.isFinite) || w <= 0 || h <= 0
+    || [top, right, bottom, left].some(m => m < 0) || w - left - right <= 0 || h - top - bottom <= 0;
+}
+
+/** Style heuristics are advisory; only broken references/geometry force correction. */
+export function auditDocumentModel(model: AuditModel, options: AuditOptions = {}): string[] {
   const issues: string[] = [];
+  const structural: string[] = [];
+  const structuralIssue = (message: string) => { issues.push(message); structural.push(message); };
   const blocks = model.blocks.filter((b) => !b.deleted);
 
   // --- 1. Footnote / endnote parity --------------------------------------------
   for (const kind of ["footnote", "endnote"] as const) {
     const defs = kind === "footnote" ? model.footnotes : model.endnotes;
+    const priorDefs = options.baseline ? kind === "footnote" ? options.baseline.footnotes : options.baseline.endnotes : [];
+    const priorRefs = options.baseline?.blocks.filter(b => !b.deleted).flatMap(b => b.noteRefs.filter(r => r.kind === kind)) ?? [];
+    const priorOrphans = new Set(priorDefs.filter(d => !priorRefs.some(r => r.id === d.id)).map(d => d.id));
+    const priorMissing = new Set(priorRefs.filter(r => !priorDefs.some(d => d.id === r.id)).map(r => r.id));
     if (!defs.length && !blocks.some((b) => b.noteRefs.some((r) => r.kind === kind))) continue;
     const refs = blocks.flatMap((b) => b.noteRefs.filter((r) => r.kind === kind).map((r) => ({ ...r, block: b.index })));
     const refIds = new Map<string, number[]>();
     for (const r of refs) refIds.set(r.id, [...(refIds.get(r.id) ?? []), r.block]);
     const defIds = new Set(defs.map((d) => d.id));
-    const orphans = defs.filter((d) => !refIds.has(d.id));
+    const orphans = defs.filter((d) => !refIds.has(d.id) && !priorOrphans.has(d.id));
     if (orphans.length) {
-      issues.push(
+      structuralIssue(
         `Orphan ${kind}${orphans.length === 1 ? "" : "s"}: ${orphans.length} definition${orphans.length === 1 ? "" : "s"} (${orphans
           .map((d) => `"${d.text.trim().slice(0, 40)}${d.text.trim().length > 40 ? "…" : ""}"`)
           .slice(0, 3)
-          .join("; ")}) ${orphans.length === 1 ? "has" : "have"} no reference mark in the body. This is what re-inserting the same authority produces; remove the extra definition or keep exactly one reference per note.`,
+          .join("; ")}) ${orphans.length === 1 ? "has" : "have"} no reference mark in the body. Preserve the note's text; restore its intended reference from known context or report the detached note. Do not delete source content merely to silence the audit.`,
       );
     }
-    const missing = refs.filter((r) => !defIds.has(r.id));
+    const missing = refs.filter((r) => !defIds.has(r.id) && !priorMissing.has(r.id));
     if (missing.length) {
-      issues.push(`Dangling ${kind} reference${missing.length === 1 ? "" : "s"} in block${missing.length === 1 ? "" : "s"} ${list([...new Set(missing.map((m) => m.block))])}: the mark points to no ${kind} text.`);
+      structuralIssue(`Dangling ${kind} reference${missing.length === 1 ? "" : "s"} in block${missing.length === 1 ? "" : "s"} ${list([...new Set(missing.map((m) => m.block))])}: the mark points to no ${kind} text. Restore known source text or report the missing definition; never invent a note.`);
     }
     const dupRefs = [...refIds.entries()].filter(([, bs]) => bs.length > 1);
     if (dupRefs.length) {
@@ -142,7 +158,7 @@ export function auditDocumentModel(model: AuditModel): string[] {
   const fakeHeadings = blocks.filter((b, i) => looksLikeBoldHeading(b) && blocks[i + 1] && (blocks[i + 1]!.type === "paragraph" || blocks[i + 1]!.type === "listItem") && blocks[i + 1]!.text.trim());
   if (fakeHeadings.length) {
     issues.push(
-      `Bold paragraph${fakeHeadings.length === 1 ? "" : "s"} used as heading${fakeHeadings.length === 1 ? "" : "s"} in block${fakeHeadings.length === 1 ? "" : "s"} ${list(fakeHeadings.map((b) => b.index))} ("${fakeHeadings[0]!.text.trim().slice(0, 40)}"): apply a named Heading style (apply_commands setHeadingLevel) so the outline, numbering and TOC see them.`,
+      `Bold paragraph${fakeHeadings.length === 1 ? "" : "s"} used as heading${fakeHeadings.length === 1 ? "" : "s"} in block${fakeHeadings.length === 1 ? "" : "s"} ${list(fakeHeadings.map((b) => b.index))} ("${fakeHeadings[0]!.text.trim().slice(0, 40)}"): advisory heuristic only. Apply a named Heading style only if the user's request identifies this as a heading; preserve intentional bold body text.`,
     );
   }
 
@@ -159,7 +175,7 @@ export function auditDocumentModel(model: AuditModel): string[] {
   }
   if (colored.size) {
     const parts = [...colored.entries()].slice(0, 3).map(([c, bs]) => `#${c} in block${bs.length === 1 ? "" : "s"} ${list([...new Set(bs)], 5)}`);
-    issues.push(`Colored body text: ${parts.join("; ")}. Body and citation text should be black (apply_commands updateTextStyle with style {color: null}, fields ["color"]); keep color for headings or deliberate callouts only.`);
+    issues.push(`Colored body text: ${parts.join("; ")}. Advisory style observation only: preserve requested colors and the existing theme. Change color only when the user's request calls for it; color alone is not a structural defect.`);
   }
 
   // --- 4. Page geometry ------------------------------------------------------------
@@ -173,12 +189,15 @@ export function auditDocumentModel(model: AuditModel): string[] {
     const bad = margins.filter(([, m]) => m < MARGIN_MIN || m > MARGIN_MAX);
     if (bad.length) issues.push(`Margins out of range: ${bad.map(([n, m]) => `${n} ${inches(m)}`).join(", ")} (courts expect 0.5"–2"; set_page_setup margins).`);
     const contentW = w - s.marginLeft - s.marginRight;
+    if (invalidGeometry(s) && !invalidGeometry(options.baseline?.section ?? null)) {
+      structuralIssue("Invalid page geometry: dimensions and margins must be finite, dimensions positive, margins nonnegative, and the text area positive. Restore valid geometry without changing the user's chosen paper size unnecessarily.");
+    }
     if (contentW < CONTENT_MIN) issues.push(`Text area is only ${inches(contentW)} wide: margins leave too little room for body text.`);
     const contentPx = (contentW / TWIPS_PER_INCH) * PX_PER_INCH;
     const wide = blocks.filter((b) => b.type === "table" && typeof b.tableWidthPx === "number" && b.tableWidthPx > contentPx + 8);
     if (wide.length) {
       issues.push(
-        `Table${wide.length === 1 ? "" : "s"} wider than the text area in block${wide.length === 1 ? "" : "s"} ${list(wide.map((b) => b.index))} (${Math.round(wide[0]!.tableWidthPx! / PX_PER_INCH * 100) / 100}" vs ${inches(contentW)}): set_table_properties widthPercent 100 or autoFit window, or widen the margins/orientation.`,
+        `Table${wide.length === 1 ? "" : "s"} wider than the text area in block${wide.length === 1 ? "" : "s"} ${list(wide.map((b) => b.index))} (${Math.round(wide[0]!.tableWidthPx! / PX_PER_INCH * 100) / 100}" vs ${inches(contentW)}): advisory layout observation. Verify the rendered page for actual overflow. Preserve existing or requested widths unless the user's scope authorizes a layout change.`,
       );
     }
     const overIndent = blocks.filter((b) => (b.type === "paragraph" || b.type === "listItem") && (b.indentLeft ?? 0) > contentW * 0.6);
@@ -199,12 +218,12 @@ export function auditDocumentModel(model: AuditModel): string[] {
   const doubles = runs.filter((r) => r.length >= 2);
   if (doubles.length) {
     issues.push(
-      `${doubles.length} run${doubles.length === 1 ? "" : "s"} of consecutive empty paragraphs (blocks ${doubles.map((r) => `${r[0]}–${r[r.length - 1]}`).slice(0, 4).join(", ")}): delete them and use paragraph spacing (spaceBefore/spaceAfter) or insert_page_break instead of blank lines.`,
+      `${doubles.length} run${doubles.length === 1 ? "" : "s"} of consecutive empty paragraphs (blocks ${doubles.map((r) => `${r[0]}–${r[r.length - 1]}`).slice(0, 4).join(", ")}): advisory spacing observation. Preserve intentional spacing unless cleanup is requested.`,
     );
   }
-  if (blocks.length && isBlank(blocks[0]!) && blocks.length > 1) issues.push("The document starts with an empty paragraph (block 0): delete it.");
+  if (blocks.length && isBlank(blocks[0]!) && blocks.length > 1) issues.push("The document starts with an empty paragraph (block 0): advisory observation; preserve it unless spacing cleanup is requested.");
   const last = runs[runs.length - 1];
-  if (last && last[last.length - 1] === blocks[blocks.length - 1]?.index && !doubles.includes(last)) issues.push(`Trailing empty paragraph at block ${last[0]}: delete it.`);
+  if (last && last[last.length - 1] === blocks[blocks.length - 1]?.index && !doubles.includes(last)) issues.push(`Trailing empty paragraph at block ${last[0]}: advisory observation; preserve it unless spacing cleanup is requested.`);
 
   const orphanHeadings: number[] = [];
   blocks.forEach((b, i) => {
@@ -213,7 +232,7 @@ export function auditDocumentModel(model: AuditModel): string[] {
     if (!next) orphanHeadings.push(b.index);
     else if (next.type === "heading" && (next.level ?? 1) <= (b.level ?? 1)) orphanHeadings.push(b.index);
   });
-  if (orphanHeadings.length) issues.push(`Heading${orphanHeadings.length === 1 ? "" : "s"} with no body text beneath in block${orphanHeadings.length === 1 ? "" : "s"} ${list(orphanHeadings)}: add the section's content or remove the heading.`);
+  if (orphanHeadings.length) issues.push(`Heading${orphanHeadings.length === 1 ? "" : "s"} with no body text beneath in block${orphanHeadings.length === 1 ? "" : "s"} ${list(orphanHeadings)}: advisory observation. Bare titles and outline headings can be intentional; do not add descriptors, create body text or remove headings unless requested.`);
 
   // --- 6. Alignment consistency ------------------------------------------------------
   const body = blocks.filter((b) => b.type === "paragraph" && b.text.trim().length > 120);
@@ -247,16 +266,18 @@ export function auditDocumentModel(model: AuditModel): string[] {
     }
   }
 
-  return issues.slice(0, DOC_AUDIT_MAX_ISSUES);
+  return (options.structuralOnly ? structural : issues).slice(0, DOC_AUDIT_MAX_ISSUES);
 }
 
 /** Trailing text for a tool result or the verify step; empty issues = pass. */
-export function formatDocAudit(issues: string[], opts?: { fixInstruction?: boolean }): string {
-  if (!issues.length) return "\n<document-audit>✅ Passed: footnotes paired, headings styled, body text black, page geometry sane, no stray empty paragraphs.</document-audit>";
+export function formatDocAudit(issues: string[], opts?: { fixInstruction?: boolean; structuralOnly?: boolean }): string {
+  if (!issues.length) return `\n<document-audit>✅ Passed: no ${opts?.structuralOnly ? "structural " : ""}findings in the checked document model. This does not verify factual accuracy or all user requirements.</document-audit>`;
   const body = issues.map((s) => `- ${s}`).join("\n");
   const tail =
     opts?.fixInstruction === false
       ? ""
-      : "\n→ Fix these with the document tools now (do not ask the user, do not declare completion first). If a finding is intentional, say so explicitly in the final receipt.";
+      : opts?.structuralOnly
+        ? "\n→ Correct these structural defects within the user's scope. Preserve content, requested colors, theme, heading levels and layout choices. If safe repair requires missing facts, report the limitation instead of inventing content."
+        : "\n→ Review these observations against the user's request. Style findings are advisory: do not override requested colors, themes, headings, margins, spacing or intentional formatting to satisfy a default. Repair actual structural defects only within the authorized scope.";
   return `\n<document-audit>⚠️ ${issues.length} finding${issues.length === 1 ? "" : "s"}:\n${body}${tail}\n</document-audit>`;
 }

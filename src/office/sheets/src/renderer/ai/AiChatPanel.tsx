@@ -1,3 +1,4 @@
+import type { ToolDisplay } from '@genoffice/agent-core'
 import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel as assistantScopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
 import React, { useEffect, useRef, useState } from 'react'
@@ -7,7 +8,7 @@ import type { ChangePlan } from '../../domain/workbook.types'
 import type { RunSnapshot } from '@/lib/sheets/run-snapshot'
 import { ATTACHMENT_IMAGE_EXTS, type AttachmentMeta } from '../../shared/desktop-api'
 import { useI18n, type TFunc } from '../i18n/locale'
-import { Markdown } from '@genoffice/ui'
+import { AssistantMessage } from '@genoffice/ui'
 import { SHEET_NAV_SCHEME } from './sheet-nav'
 import sendEnterOn from '../assets/send-enter-on.png'
 import sendEnterOff from '../assets/send-enter-off.png'
@@ -182,9 +183,11 @@ function loadPanelWidth(): number | null {
 }
 
 export interface AiToolChip {
+  readonly display?: ToolDisplay
   readonly id?: string; readonly startedAt?: number; readonly finishedAt?: number; readonly interrupted?: boolean; readonly mutated?: boolean
   readonly summary: string
   readonly isError: boolean
+  readonly skipped?: boolean
   /** still executing: rendered as a spinner chip, replaced in place when the tool finishes */
   readonly running?: boolean
   /** Tool name (title tooltip) */
@@ -203,7 +206,7 @@ export interface AiChatMessage {
   /** model tier status line for this segment (UI only) */
   readonly status?: string | undefined
   readonly isError?: boolean | undefined
-  /** the run failed and this user message was rolled back out of the model context */
+  /** the run was interrupted; offer editing/retry while preserving its context */
   readonly undelivered?: boolean | undefined
   /** this user message was written to the project-store chat log (Retry re-persists when it wasn't) */
   readonly persisted?: boolean | undefined
@@ -546,7 +549,7 @@ export function AiChatPanel({
                 {entry.tools.length > 0 && <AssistantActivity tools={entry.tools} active={!!entry.streaming}/>}
                 {entry.text && (
                   <div dir="auto">
-                    <Markdown text={entry.text} nav={citationNav} />
+                    <AssistantMessage role={entry.role} text={entry.text} nav={citationNav} />
                   </div>
                 )}
               </div>
@@ -590,7 +593,7 @@ export function AiChatPanel({
                 {entry.tools.length > 0 && <AssistantActivity tools={entry.tools} active={!!entry.streaming}/>}
                 {entry.text ? (
                   <div dir="auto">
-                    <Markdown text={entry.text} nav={citationNav} />
+                    <AssistantMessage role={entry.role} text={entry.text} nav={citationNav} />
                   </div>
                 ) : (
                   entry.streaming && (

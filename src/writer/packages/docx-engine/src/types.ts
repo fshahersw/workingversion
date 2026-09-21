@@ -1663,10 +1663,14 @@ export interface TableStyleDisplay {
 }
 
 export interface StyleInfo {
+  /** Explicit inheritance parent in styles.xml. */
+  basedOn?: string
   styleId: string
   name: string
   type: 'paragraph' | 'character' | 'table'
   headingLevel?: number
+  headingLevelInherited?: boolean
+  headingOutlineOff?: boolean
   /** w:semiHidden — Word itself hides it from the style gallery (e.g. DefaultParagraphFont) */
   semiHidden?: boolean
   /** w:qFormat — candidate for Word's quick style gallery */

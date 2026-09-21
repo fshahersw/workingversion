@@ -7,6 +7,12 @@ in document-space EMU. They report the new element id in `created`; later ops
 in the same transaction cannot reference it yet, so insert first and style in
 the next call, or pass the style inline where the op supports it.
 
+Use a bounded insert for the element the user requested, including on an existing
+blank or sparse slide. Preserve the exact requested text, formatting, and geometry;
+do not redesign the slide, add decorative content, or create a new deck to insert
+one element. Cloud `generate_deck` is unavailable in this build. For a whole new
+presentation, use the available template tools or `create_presentation`.
+
 ### addElement
 
 `{kind:"textbox"|<preset geometry>,offset:{x,y,cx,cy},paragraphs?,fill?,stroke?,adjustments?:{<gd name>:val},bodyPr?:{autoFit?:"shrink"|"resize"}}`
@@ -62,7 +68,7 @@ Adds a text box, a preset-geometry shape, or a line/connector.
 
 Common mistakes
 
-- Building whole pages element by element on an empty deck: use `generate_deck`; `addElement` is for adding to an already designed page.
+- Replacing or redesigning a slide when the user requested only an inserted element: use the bounded insert on the existing slide, even when it is blank.
 - Pixel frames: convert with the px-to-EMU factor from `read_slide`.
 - `autoFit` values other than `"shrink"`/`"resize"`.
 
@@ -214,3 +220,40 @@ Embeds a 3D model; bytes payload from the UI file picker.
 `{items,dx,dy} — clipboard payload`
 
 Pastes copied elements; the payload comes from the internal clipboard.
+
+
+### addConnector
+
+`{from,to,kind?:"straight"|"elbow"|"curved",fromSide?,toSide?,arrow?:"none"|"end"|"both",line?:{color?,widthPt?,dash?}}`
+
+Draws a connector glued to two shapes (`a:stCxn`/`a:endCxn`), so PowerPoint
+and later `setTransform` moves keep it attached. When `fromSide`/`toSide`
+(`top`/`left`/`bottom`/`right`) are omitted, the pair of edge midpoints that
+are closest to each other is chosen. The frame is derived from the two
+connection points; the new element id is in `created`.
+
+| Field            | Type                                    | Notes                                                                        |
+| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------- |
+| from, to         | element ids                             | Two different top-level elements on `target.slide`                           |
+| kind             | `straight` (default), `elbow`, `curved` |                                                                              |
+| fromSide, toSide | side name                               | Pin one or both ends; omitted sides are chosen automatically                 |
+| arrow            | `none`, `end` (default), `both`         | Arrowhead at the `to` end, both ends, or none                                |
+| line             | `{color?, widthPt?, dash?}`             | Defaults 1 pt black solid; `dash` is an OOXML preset (`dash`, `sysDot`, ...) |
+
+```json
+{
+  "op": "addConnector",
+  "target": { "slide": 0 },
+  "from": "e_SHAPE",
+  "to": "e_PICTURE",
+  "kind": "elbow",
+  "line": { "color": "#1A73E8", "widthPt": 1.5 }
+}
+```
+
+Common mistakes
+
+- Drawing a free line with `addElement` and hoping it follows the shapes: only `addConnector` (or `setConnectorEndpoints` with `start`/`end`) attaches.
+- Using it between a group child and a shape: connect to the group (top-level ids only).
+
+`addConnector` currently supports unrotated, unflipped rectangle/rounded-rectangle/ellipse/text-box/picture/group endpoints. Other custom or preset connection geometries are rejected instead of guessing OOXML connection indices. Width is bounded to 1584pt.

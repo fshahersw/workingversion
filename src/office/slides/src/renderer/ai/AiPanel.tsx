@@ -41,14 +41,13 @@ import { createElectronTransport } from './transport'
 import { renderSlidesToPngBase64 } from '../export-render'
 import {
   isQcEnabled,
-  isUnsupportedImageInputError,
   mergeQcPages,
   qcSlidePage,
   QC_MAX_PAGES,
   settingsSupportVision,
 } from './slide-qc'
 import { useI18n, t as tGlobal, aiLangDirective, type TFunc } from '../i18n/locale'
-import { Markdown } from '@genoffice/ui'
+import { AssistantMessage } from '@genoffice/ui'
 import { GensparkMark } from '../components/icons'
 import sendEnterOn from '../assets/send-enter-on.png'
 import sendEnterOff from '../assets/send-enter-off.png'
@@ -71,6 +70,7 @@ interface ToolActivity {
   summary: string
   /** still executing: rendered as a spinner chip, replaced in place when the tool finishes */
   isError?: boolean
+  skipped?: boolean
   /** Full tool output (truncated to 2000 chars) */
   output?: string
   /**
@@ -513,6 +513,11 @@ export function AiPanel({
   const stickToBottomRef = useRef(true)
   /** Current chat's projectId/chatId, set after resolve succeeds */
   const chatRefIds = useRef<{ projectId: string; chatId: string } | null>(null)
+  const recoveryMountedRef = useRef(true)
+  useEffect(() => {
+    recoveryMountedRef.current = true
+    return () => { recoveryMountedRef.current = false }
+  }, [])
 
   // The loop instance survives across renders; closures read refs for the latest state
   const slidesRef = useRef(slides)
@@ -582,7 +587,7 @@ export function AiPanel({
   const lastTurnToolsRef = useRef<ToolActivity[]>([])
   /** Tool activity of the whole run (with args/output, accumulated across turns) — for full transcript persistence */
   const runToolsRef = useRef<
-    Array<{ name: string; summary: string; isError?: boolean; input?: string; output?: string }>
+    Array<{ name: string; summary: string; isError?: boolean; skipped?: boolean; input?: string; output?: string }>
   >([])
   /** Last streamed text of the current turn: the only copy left when a run dies before onDone */
   const streamedTextRef = useRef('')
@@ -609,6 +614,7 @@ export function AiPanel({
               name: t.name,
               summary: t.summary,
               isError: t.isError,
+              skipped: !!t.skipped,
               output: t.output ? t.output.slice(0, TOOL_OUTPUT_MAX_CHARS) : undefined,
             })),
             // stored metadata only: no thumbnail read for history, the chips render name/size
@@ -658,6 +664,7 @@ export function AiPanel({
       name: string
       summary: string
       isError?: boolean
+  skipped?: boolean
       input?: string
       output?: string
     }>,
@@ -1441,6 +1448,7 @@ export function AiPanel({
             name: call.name,
             summary: execution.summary,
             isError: execution.isError,
+            skipped: !!execution.skipped,
             output: execution.output ? execution.output.slice(0, TOOL_OUTPUT_MAX_CHARS) : undefined,
             // Side channel: display comes from tools, not into LLM context, UI only
             display: execution.display,
@@ -1451,6 +1459,7 @@ export function AiPanel({
               name: call.name,
               summary: execution.summary,
               isError: execution.isError,
+              skipped: !!execution.skipped,
               input: safeJsonInput(call.input),
               output: execution.output
                 ? execution.output.slice(0, PERSIST_TOOL_FIELD_MAX)
@@ -1460,7 +1469,8 @@ export function AiPanel({
           patchLastAssistant((last) => {
             // Swap out the running placeholder pushed by onToolStart (parse-fail calls have none)
             const tools = [...(last.tools ?? [])]
-            const pending = tools.findIndex(t => t.id === call.id); if (pending >= 0) tools.splice(pending, 1)
+            const pending = tools.findIndex(t => t.id === call.id)
+            if (pending >= 0) { activity.startedAt = tools[pending]?.startedAt; tools.splice(pending, 1) }
             return { tools: [...tools, activity] }
           })
         },
@@ -1475,6 +1485,7 @@ export function AiPanel({
         },
         onDone: ({ text, cancelled, turnLimit, truncated }) => {
           setChat(previous => settleRunMessages(previous))
+          const completed = !cancelled && !turnLimit && !truncated
           const baseText = turnLimit
             ? [text, tGlobal('aiTurnLimit')].filter(Boolean).join('\n\n')
             : text || (cancelled ? tGlobal('aiStoppedNote') : '')
@@ -1505,12 +1516,12 @@ export function AiPanel({
           void finishHistoryBatch().finally(() => {
             setBusy(false)
             // Post-generation layout QC: only after a completed run that landed generated pages
-            if (cancelled) qcPagesRef.current = []
+            if (!completed) qcPagesRef.current = []
             else if (qcPagesRef.current.length > 0) void runQcPassRef.current()
             // After the batch closes, so the next queued page opens a fresh one
             const resolveQueueRun = queueRunResolverRef.current
             queueRunResolverRef.current = null
-            resolveQueueRun?.(!cancelled)
+            resolveQueueRun?.(completed)
           })
           // Persist the assistant message (deckProgress not stored; tools store the whole run's full activity) —
           // side effects outside the updater (StrictMode double-invokes updaters, duplicating history writes)
@@ -1522,6 +1533,16 @@ export function AiPanel({
           if (cancelled && streamedTextRef.current) logRunFailure('stopped')
         },
         onError: (error) => {
+          const failedLoop = loopRef.current
+          const failedVersion = failedLoop?.conversationVersion
+          const failedChat = chatRefIds.current
+          const failedTools = [...runToolsRef.current]
+          const ownsRecovery = () => recoveryMountedRef.current
+            && loopRef.current === failedLoop && failedLoop?.conversationVersion === failedVersion
+            && chatRefIds.current?.projectId === failedChat?.projectId
+            && chatRefIds.current?.chatId === failedChat?.chatId
+          const checkpoint = loopRef.current?.failureCheckpoint ?? error
+          let recovery = runMutatedRef.current ? 'Recovery was incomplete. Inspect the deck before continuing.' : 'No deck changes were made by this run.'
           setChat(previous => settleRunMessages(previous))
           logRunFailure('error', error)
           qcPagesRef.current = []
@@ -1543,7 +1564,7 @@ export function AiPanel({
           void window.slidesApi
             .aiGskStatus()
             .then((status) => {
-              if (status.loggedIn) return
+              if (!ownsRecovery() || status.loggedIn) return
               setChat((prev) => {
                 const next = [...prev]
                 const last = next.at(-1)
@@ -1559,10 +1580,13 @@ export function AiPanel({
           // mutated anything. The message says so; its rollback action retires.
           void finishHistoryBatch()
             .then(async () => {
+              if (!ownsRecovery()) return
               const id = runSnapshotIdRef.current
               if (!runMutatedRef.current || id == null) return
+              recovery = 'Recovery was incomplete. Inspect the deck before continuing.'
               const restored = await window.slidesApi.aiSnapshotRestore(id)
-              if (!restored) return
+              if (!ownsRecovery() || !restored) return
+              recovery = "The run's changes were rolled back."
               applyDeckRef.current(restored, Math.min(currentRef.current, restored.length - 1))
               setChat((prev) =>
                 prev.map((e) =>
@@ -1572,8 +1596,10 @@ export function AiPanel({
                 ),
               )
             })
-            .catch(() => {})
+            .catch(() => { recovery = 'Recovery was incomplete. Inspect the deck before continuing.' })
             .finally(() => {
+              if (!ownsRecovery()) return
+              persistMessage('assistant', `${checkpoint}\n\n${recovery}`, failedTools)
               setBusy(false)
               const resolveQueueRun = queueRunResolverRef.current
               queueRunResolverRef.current = null
@@ -1687,7 +1713,7 @@ export function AiPanel({
     // runStartingRef: loop.run is called only after attachments are read asynchronously, during which loop.busy is still false,
     // so duplicate triggers must be blocked synchronously (e.g. StrictMode double-running the preset autoRun effect),
     // otherwise two sets of bubbles get pushed and the earlier assistant placeholder stays at "thinking" forever.
-    // qcRunningRef: the post-generation QC pass edits the deck outside the main loop — no concurrent runs
+    // qcRunningRef: wait for the bounded read-only post-generation check to settle.
     if (!instruction || !loop || loop.busy || runStartingRef.current || qcRunningRef.current) return
     runStartingRef.current = true
     setInput('')
@@ -1851,11 +1877,9 @@ export function AiPanel({
   }
 
   /**
-   * Post-generation layout QC: each page landed by this run gets one focused pass in a fresh
-   * AgentLoop. Vision models receive screenshot + inventory; text-only models receive only
-   * deterministic geometry evidence. Each page's edits sit in their own history batch; if the
-   * deterministic audit says the page got worse, that batch is rolled back. Progress streams
-   * into one assistant chat entry.
+   * A post-generation check has no independent editing authority. Keep the user's
+   * completion receipt and exact design intact; explicit audit_layout/view_slide
+   * tools expose findings during the user-scoped workflow.
    */
   const runQcPass = async () => {
     const pages = qcPagesRef.current
@@ -1865,99 +1889,17 @@ export function AiPanel({
     qcRunningRef.current = true
     const controller = new AbortController()
     qcAbortRef.current = controller
-    const capped = pages.slice(0, QC_MAX_PAGES)
-    const transport = createElectronTransport(() => settingsRef.current)
-    const header = tGlobal('aiQcStart', { count: capped.length })
-    const lines: string[] = []
-    const renderEntry = () => [header, ...lines].join('\n')
-    setBusy(true)
-    stickToBottomRef.current = true
-    // The QC entry demotes the run's reply to a mid-turn segment, whose action
-    // toolbar never shows — carry its rollback point onto this entry instead
-    // (settled in the finally below; runSnapshotIdRef keeps the id meanwhile)
-    setChat((prev) => [
-      ...prev.map((e, i) =>
-        i === prev.length - 1 && e.snapshotId != null ? { ...e, snapshotId: undefined } : e,
-      ),
-      { role: 'assistant', text: header, streaming: true },
-    ])
-    // First kept QC batch — the run's own batch takes precedence (it is earlier,
-    // so restoring it rewinds past the QC edits too)
-    let qcSnapshotId: number | null = null
-    // A custom endpoint may claim generic OpenAI-compatible vision support but reject the
-    // first image. Fall back for that page and keep the rest of this pass geometry-only.
-    let forceGeometryOnly = false
     try {
-      for (const page of capped) {
+      for (const page of pages.slice(0, QC_MAX_PAGES)) {
         if (controller.signal.aborted) break
-        const useScreenshot = !forceGeometryOnly && settingsSupportVision(settingsRef.current)
-        const shot = useScreenshot ? await captureSlideShot(page) : null
-        if (useScreenshot && !shot) {
-          if (slidesRef.current[page]) lines.push(tGlobal('aiQcPageSkipped', { n: page + 1 }))
-          continue
-        }
-        const batchOpened = await window.slidesApi.beginHistoryBatch()
-        let result = await qcSlidePage({
-          access,
-          transport,
-          pageIndex: page,
-          screenshot: shot,
-          systemSuffix: aiLangDirective,
-          signal: controller.signal,
-        })
-        if (shot && result.error && isUnsupportedImageInputError(result.error)) {
-          forceGeometryOnly = true
-          result = await qcSlidePage({
-            access,
-            transport,
-            pageIndex: page,
-            screenshot: null,
-            systemSuffix: aiLangDirective,
-            signal: controller.signal,
-          })
-        }
-        const batchId = batchOpened ? await window.slidesApi.endHistoryBatch() : null
-        if (controller.signal.aborted) break
-        if (result.error) {
-          // QC is optional polish. Keep provider/network details in diagnostics instead of
-          // exposing a noisy raw API error in the completed generation transcript.
-          console.warn(`[slides-qc] page ${page + 1} skipped:`, result.error)
-          lines.push(tGlobal('aiQcPageSkipped', { n: page + 1 }))
-        } else if (result.edited && result.postIssues > result.preIssues) {
-          // The fix made the deterministic audit worse — undo this page's batch
-          if (typeof batchId === 'number') {
-            const restored = await window.slidesApi.aiSnapshotRestore(batchId)
-            if (restored)
-              applyDeckRef.current(restored, Math.min(currentRef.current, restored.length - 1))
-          }
-          lines.push(tGlobal('aiQcPageReverted', { n: page + 1 }))
-        } else if (result.edited) {
-          const summary =
-            result.reply && result.reply.toUpperCase() !== 'OK'
-              ? result.reply
-              : tGlobal('aiQcPageFixedDefault')
-          lines.push(tGlobal('aiQcPageFixed', { n: page + 1, summary }))
-          if (typeof batchId === 'number' && qcSnapshotId == null) qcSnapshotId = batchId
-        } else {
-          lines.push(tGlobal('aiQcPageOk', { n: page + 1 }))
-        }
-        patchLastAssistant({ text: renderEntry() })
+        const result = await qcSlidePage({ access, pageIndex: page, signal: controller.signal })
+        // Geometry flags can describe requested overlap/cropping or old defects.
+        // Do not promote them to a new task, model call, history edit or receipt.
+        if (result.findings.length) console.info('[slides-qc] advisory geometry findings', { page: page + 1, count: result.findings.length })
       }
-      if (pages.length > capped.length) {
-        lines.push(tGlobal('aiQcCapped', { count: pages.length - capped.length }))
-      }
-      if (controller.signal.aborted) lines.push(tGlobal('aiQcStopped'))
     } finally {
       qcRunningRef.current = false
       qcAbortRef.current = null
-      const finalText = renderEntry()
-      patchLastAssistant({
-        streaming: false,
-        text: finalText,
-        snapshotId: runSnapshotIdRef.current ?? qcSnapshotId ?? undefined,
-      })
-      persistMessage('assistant', finalText)
-      setBusy(false)
     }
   }
   runQcPassRef.current = runQcPass
@@ -2143,7 +2085,7 @@ export function AiPanel({
                 {entry.tools && entry.tools.length > 0 && <AssistantActivity tools={entry.tools} active={!!entry.streaming}/>}
                 {entry.text && (
                   <div dir="auto">
-                    <Markdown text={entry.text} />
+                    <AssistantMessage role={entry.role} text={entry.text} />
                   </div>
                 )}
               </div>
@@ -2192,7 +2134,7 @@ export function AiPanel({
                 </span>
               ) : entry.role === 'assistant' ? (
                 <div dir="auto">
-                  <Markdown text={entry.text} />
+                  <AssistantMessage role={entry.role} text={entry.text} />
                 </div>
               ) : (
                 <span dir="auto">{entry.text}</span>

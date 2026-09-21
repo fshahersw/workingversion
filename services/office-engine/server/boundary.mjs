@@ -1,7 +1,7 @@
 import {reject} from './auth.mjs';
 const words = s => new Set(s.trim().split(/\s+/));
 const read = {
- slides: words('read-slide get-render-slides get-slide-size get-layouts private-font-faces private-font-data font-catalog font-missing get-chart-data chart-color-schemes get-link get-slide-links get-run-links get-header-footer get-transition get-animations get-shape-keys get-sections get-notes get-comments has-slide-clipboard clipboard-probe is-dirty master-enter master-open master-close'),
+ slides: words('read-slide read-native-details get-render-slides get-slide-size get-layouts private-font-faces private-font-data font-catalog font-missing get-chart-data chart-color-schemes get-link get-slide-links get-run-links get-header-footer get-transition get-animations get-shape-keys get-sections get-notes get-comments has-slide-clipboard clipboard-probe is-dirty master-enter master-open master-close'),
  sheets: words('read-range read-formulas read-media read-pivot-definition recalc'),
  pdf: words('read-file validate-text-edits list-edit-fonts can-draw-text list-page-images list-static-form-fills page-image-png page-preview-png is-untitled get-username')
 };

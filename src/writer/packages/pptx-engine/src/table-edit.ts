@@ -17,6 +17,12 @@ export interface TableStyleEdit {
   firstRow?: boolean
   /** Change only the bandRow flag */
   bandRow?: boolean
+  lastRow?: boolean
+  firstCol?: boolean
+  lastCol?: boolean
+  bandCol?: boolean
+  /** Replace a:tableStyleId (a built-in GUID or a custom style id already in tableStyles.xml), keeping the rest of tblPr */
+  styleId?: string
   /** Right-to-left table (tblPr rtl: mirrored grid); false removes the attribute */
   rtl?: boolean
   /** Shading color #RRGGBB or 'none' (<a:solidFill> / <a:noFill> per tc) */
@@ -85,12 +91,6 @@ const ID_ZEBRA_GRAY = '{A10FF1CE-0000-4000-9000-000000000002}'
 const ID_HEADER_DARKBLUE = '{A10FF1CE-0000-4000-9000-000000000003}'
 const ID_HEADER_ORANGE = '{A10FF1CE-0000-4000-9000-000000000004}'
 const ID_NO_BORDER = '{A10FF1CE-0000-4000-9000-000000000005}'
-// Seeger Weiss firm palette (mirrors src/writer/shared/design.ts): navy 172E4C,
-// blue 1D6294, bronze A77D4B; tints E2ECF9 / EAF5FF / FCF2E4; rules DDE0E4.
-const ID_FIRM_NAVY = '{A10FF1CE-0000-4000-9000-000000000006}'
-const ID_FIRM_BLUE = '{A10FF1CE-0000-4000-9000-000000000007}'
-const ID_FIRM_ACCENT = '{A10FF1CE-0000-4000-9000-000000000008}'
-const ID_FIRM_MINIMAL = '{A10FF1CE-0000-4000-9000-000000000009}'
 
 export interface TableStylePreset {
   tblPrXml: string
@@ -107,52 +107,8 @@ const tblPr = (styleId: string, flags = '') =>
 // Official "No Style, No Grid" GUID (we previously misused a made-up ...307D; the read side stays compatible with it)
 const NO_STYLE = '{2D5ABB26-0587-4C30-8999-92F81FD0307C}'
 
-/** Preset styles (keys map to the ribbon style gallery); the firm* presets share
- *  names with the Writer's insert_table presets so the assistants speak one vocabulary. */
+/** The 8 preset styles (keys map to the ribbon style gallery). */
 export const TABLE_STYLE_PRESETS: Record<string, TableStylePreset> = {
-  firmNavy: {
-    tblPrXml: tblPr(ID_FIRM_NAVY, ' firstRow="1" bandRow="1"'),
-    description: 'Firm navy',
-    styleId: ID_FIRM_NAVY,
-    styleDefXml: customStyle(ID_FIRM_NAVY, 'Firm navy', {
-      whole: 'FFFFFF',
-      insideH: 'DDE0E4',
-      band: 'E2ECF9',
-      header: { fill: '172E4C', text: 'FFFFFF' },
-    }),
-  },
-  firmBlue: {
-    tblPrXml: tblPr(ID_FIRM_BLUE, ' firstRow="1" bandRow="1"'),
-    description: 'Firm blue',
-    styleId: ID_FIRM_BLUE,
-    styleDefXml: customStyle(ID_FIRM_BLUE, 'Firm blue', {
-      whole: 'FFFFFF',
-      insideH: 'DDE0E4',
-      band: 'EAF5FF',
-      header: { fill: '1D6294', text: 'FFFFFF' },
-    }),
-  },
-  firmAccent: {
-    tblPrXml: tblPr(ID_FIRM_ACCENT, ' firstRow="1" bandRow="1"'),
-    description: 'Firm accent',
-    styleId: ID_FIRM_ACCENT,
-    styleDefXml: customStyle(ID_FIRM_ACCENT, 'Firm accent', {
-      whole: 'FFFFFF',
-      insideH: 'DDE0E4',
-      band: 'FCF2E4',
-      header: { fill: 'A77D4B', text: 'FFFFFF' },
-    }),
-  },
-  firmMinimal: {
-    tblPrXml: tblPr(ID_FIRM_MINIMAL, ' firstRow="1"'),
-    description: 'Firm minimal',
-    styleId: ID_FIRM_MINIMAL,
-    styleDefXml: customStyle(ID_FIRM_MINIMAL, 'Firm minimal', {
-      whole: 'FFFFFF',
-      insideH: 'DDE0E4',
-      header: { fill: 'FFFFFF', text: '172E4C' },
-    }),
-  },
   none: { tblPrXml: tblPr(NO_STYLE), description: 'No style' },
   lightGrid: {
     tblPrXml: tblPr(NO_STYLE),
@@ -228,7 +184,7 @@ export function ensureTableStyleXml(
   if (xml.includes(styleId)) return xml
   const sc = /<a:tblStyleLst([^>]*)\/>/.exec(xml)
   if (sc) return xml.replace(sc[0], `<a:tblStyleLst${sc[1]}>${styleDefXml}</a:tblStyleLst>`)
-  return xml.replace('</a:tblStyleLst>', `${styleDefXml}</a:tblStyleLst>`)
+  return xml.replace('</a:tblStyleLst>', () => `${styleDefXml}</a:tblStyleLst>`)
 }
 
 /**
@@ -249,18 +205,22 @@ export function patchTableStyleXml(originalXml: string, edit: TableStyleEdit): s
       next = next.replace(/^<a:tblPr/, '<a:tblPr rtl="1"')
     }
     xml = replaceTblPr(xml, next)
-  } else if (edit.firstRow !== undefined || edit.bandRow !== undefined || edit.rtl !== undefined) {
+  } else if (
+    FLAG_ATTRS.some((k) => edit[k] !== undefined) ||
+    edit.rtl !== undefined ||
+    edit.styleId !== undefined
+  ) {
     // Change only the flags, keeping the rest (styleId etc.)
+    if (!/<a:tblPr[\s>/]/.test(xml)) xml = replaceTblPr(xml, '<a:tblPr/>')
     const tblPrMatch = /<a:tblPr(\s[^>]*)?(\/?>)/s.exec(xml)
     if (tblPrMatch) {
       // With attributes present the greedy [^>]* swallows a trailing "/" into group 1,
       // so self-closing must be detected on the whole tag and the slash stripped
       const selfClosing = tblPrMatch[0].endsWith('/>')
       let attrs = (tblPrMatch[1] ?? '').replace(/\/\s*$/, '')
-      if (edit.firstRow !== undefined)
-        attrs = setAttr(attrs, 'firstRow', edit.firstRow ? '1' : undefined)
-      if (edit.bandRow !== undefined)
-        attrs = setAttr(attrs, 'bandRow', edit.bandRow ? '1' : undefined)
+      for (const k of FLAG_ATTRS) {
+        if (edit[k] !== undefined) attrs = setAttr(attrs, k, edit[k] ? '1' : undefined)
+      }
       if (edit.rtl !== undefined) attrs = setAttr(attrs, 'rtl', edit.rtl ? '1' : undefined)
       // Self-closing expands into <a:tblPr...></a:tblPr>
       xml =
@@ -269,6 +229,7 @@ export function patchTableStyleXml(originalXml: string, edit: TableStyleEdit): s
         (selfClosing ? '</a:tblPr>' : '') +
         xml.slice(tblPrMatch.index + tblPrMatch[0].length)
     }
+    if (edit.styleId !== undefined) xml = setTableStyleId(xml, edit.styleId)
   }
 
   // ── 2. Shading / borders: patch the targeted <a:tcPr> nodes ────────
@@ -281,6 +242,23 @@ export function patchTableStyleXml(originalXml: string, edit: TableStyleEdit): s
   }
 
   return xml
+}
+
+const FLAG_ATTRS = ['firstRow', 'lastRow', 'firstCol', 'lastCol', 'bandRow', 'bandCol'] as const
+
+/** Set a:tableStyleId inside an open/close tblPr (CT_TableProperties: the style id is the last child before extLst). */
+function setTableStyleId(xml: string, styleId: string): string {
+  const m = /<a:tblPr(\s[^>]*)?>([\s\S]*?)<\/a:tblPr>/.exec(xml)
+  if (!m) return xml
+  const tag = `<a:tableStyleId>${escapeXmlAttr(styleId)}</a:tableStyleId>`
+  let inner = m[2]!.replace(/<a:tableStyleId>[^<]*<\/a:tableStyleId>/, '')
+  const ext = inner.indexOf('<a:extLst')
+  inner = ext >= 0 ? inner.slice(0, ext) + tag + inner.slice(ext) : inner + tag
+  return (
+    xml.slice(0, m.index) +
+    `<a:tblPr${m[1] ?? ''}>${inner}</a:tblPr>` +
+    xml.slice(m.index + m[0].length)
+  )
 }
 
 /** Replace <a:tblPr>…</a:tblPr> (or its self-closing form) in the XML with a new value. */
@@ -384,13 +362,15 @@ function applyTcPrEdit(inner: string, edit: TableStyleEdit): string {
 function patchAllTcPr(xml: string, edit: TableStyleEdit): string {
   const out: string[] = []
   let cursor = 0
-  const re = /<a:tcPr([^>]*)>(.*?)<\/a:tcPr>|<a:tcPr([^>]*)\/>/gs
+  // self-closing first: [^>]* in the paired form would also accept the '/' of <a:tcPr/> and run
+  // on to some later cell's </a:tcPr>, swallowing the cells in between
+  const re = /<a:tcPr([^>]*)\/>|<a:tcPr([^>]*)>(.*?)<\/a:tcPr>/gs
   let m: RegExpExecArray | null
   while ((m = re.exec(xml)) !== null) {
     out.push(xml.slice(cursor, m.index))
     // Existing children (non-self-closing form)
-    const inner = applyTcPrEdit(m[2] ?? '', edit)
-    const attrs = m[1] ?? m[3] ?? ''
+    const inner = applyTcPrEdit(m[3] ?? '', edit)
+    const attrs = m[1] ?? m[2] ?? ''
     out.push(`<a:tcPr${attrs}>${inner}</a:tcPr>`)
     cursor = m.index + m[0].length
   }

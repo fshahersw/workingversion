@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from 'react'
+import { safeAssistantLink } from './safe-links'
 
 /**
  * Minimal dependency-free markdown for chat bubbles: paragraphs, ul/ol,
@@ -8,7 +9,7 @@ import { Fragment, type ReactNode } from 'react'
  *
  * Markdown links stay literal text unless the host passes `nav` and the href
  * carries its scheme — then they become in-app navigation links. External
- * URLs never turn into clickable links here.
+ * HTTPS citations and known Office document links are clickable; other schemes stay literal.
  */
 
 export interface MarkdownNav {
@@ -54,7 +55,8 @@ function renderInline(text: string, nav?: MarkdownNav): ReactNode[] {
           </a>,
         )
       } else {
-        out.push(tok) // non-nav links keep today's literal rendering
+        const target = link && safeAssistantLink(href)
+        out.push(target ? <a key={key++} href={target.href} target={target.external ? '_blank' : undefined} rel={target.external ? 'noopener noreferrer' : undefined}>{link![1]}</a> : tok)
       }
     } else out.push(<em key={key++}>{tok.slice(1, -1)}</em>)
     last = i + tok.length

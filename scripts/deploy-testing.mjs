@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { lambdaNativeTarget, assertLambdaZipNativeTarget } from "./lambda-native-target.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const paramsPath = resolve(repoRoot, "infra/app/parameters/testing-runtime.parameters.json");
@@ -330,6 +331,7 @@ async function main() {
 
   if (!args.skipBuild) buildArtifact(params);
   const sha256 = zipDigest();
+  await assertLambdaZipNativeTarget(readFileSync(zipPath), lambdaNativeTarget(params, process.env.LITAI_LAMBDA_ARCHITECTURE), "testing");
   const nextKey = artifactObjectKey(sha256);
   const sameArtifact = parameterValue(params, "ArtifactObjectKey") === nextKey;
 

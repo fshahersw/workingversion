@@ -21,6 +21,7 @@ import type {
 import { t } from '../i18n/locale'
 import { formatRangeAggregate, type RangeAggregate } from './aggregate'
 import { guideCatalogSummary, loadGuides } from './guides'
+import { workbookOperationToolSchema, verifyStructuralFormulaErrors } from '@/lib/sheets/agent-contract'
 
 /**
  * The workbook DSL as an AgentSkill tool set: read-only context/reader tools
@@ -51,6 +52,17 @@ export interface ChartRef {
   readonly title: string
   readonly types: string
   readonly sheetId: string
+  readonly seriesCount?: number
+  readonly valueAxisFormats?: { readonly primary?: string; readonly secondary?: string }
+  readonly series?: readonly {
+    readonly index: number
+    readonly name: string
+    readonly valueCount: number
+    readonly categoryCount: number
+    readonly categorySample: readonly string[]
+    readonly valuesRef?: string
+    readonly categoriesRef?: string
+  }[]
 }
 
 /**
@@ -93,8 +105,9 @@ export interface ActiveSheetInfo {
   readonly selectionColumns?: readonly string[] | undefined
   /** merged ranges on the active sheet (A1 notation) */
   readonly merges?: readonly string[] | undefined
-  /** charts in the workbook (imported files only) */
+  /** Effective charts after pending edits/removals; details may be bounded. */
   readonly charts?: readonly ChartRef[] | undefined
+  readonly chartCount?: number
 }
 
 export interface FindCellsOptions {
@@ -499,12 +512,13 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
     name: 'propose_operations',
     description:
       'Submit a batch of change operations, applied to the workbook immediately (the user can roll back with the [Undo] button or ⌘Z). Basic operations: ' +
+      'Arguments are one JSON object {"summary":"Describe this batch","operations":[...]}: operations must be a JSON array, never a quoted JSON string or code. ' +
       '{op:"set_cell",sheetId,address,value} | {op:"set_formula",sheetId,address,formula(starts with =)} | ' +
       '{op:"clear_cell",sheetId,address} | {op:"rename_sheet",sheetId,name}. ' +
       'Field definitions for the remaining operations live in the guides — load_guide before using them: ' +
       'writing(set_range/fill_range/copy_range/convert_to_values/clear_range/find_replace) | ' +
       'query(query_range: filter/sort/select/distinct/groupBy+aggregates over a block, computed by the engine and written as values — THE op for "show me the rows where…", "top N by…", "totals by custodian", "unique values of…" on large data; import_file: land a CSV/TSV the Python sandbox wrote, by its platform-file handle) | ' +
-      'finishing(finish_table: LAST op after building or extending any table — fits every column to its real content, wraps prose columns, top-aligns; {sheetId, range incl. header, headerRows?}) | ' +
+      'finishing(finish_table: separate finishing batch AFTER writing and reading back table content — fits every column to its current real content, wraps prose columns, top-aligns; {sheetId, range incl. header, headerRows?}) | ' +
       'formatting(format_range) | ' +
       'layout(sort_range/merge_cells/unmerge_cells/set_row_height/set_col_width/set_rows_hidden/set_cols_hidden/set_freeze/set_page_setup) | ' +
       'structure(insert_rows/delete_rows/insert_cols/delete_cols/add_sheet/delete_sheet/' +
@@ -524,10 +538,12 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
       properties: {
         operations: {
           type: 'array',
-          items: { type: 'object' },
-          description: 'Array of operations in the workbook DSL discriminated-union format',
+          items: workbookOperationToolSchema(workbookOperationSchema.options),
+          minItems: 1,
+          maxItems: 1000,
+          description: 'Use the exact op discriminator and fields shown. Prefer bounded batches of at most 500 written cells (hard limit 2000 expanded cell edits); split dependent stages and await each result. Load guides for the other operation names.',
         },
-        summary: { type: 'string', description: 'One-sentence summary of this batch of changes' },
+        summary: { type: 'string', minLength: 1, maxLength: 500, description: 'One-sentence summary of this batch of changes' },
       },
       required: ['operations', 'summary'],
     },
@@ -720,15 +736,27 @@ export function buildWorkbookContext(deps: SheetsSkillDeps): string {
   if (info.merges && info.merges.length > 0) {
     lines.push(`Merged ranges on the active sheet: ${info.merges.slice(0, 50).join(', ')}`)
   }
-  if (info.charts && info.charts.length > 0) {
+  if (info.charts) {
     lines.push(
-      'Charts in the workbook (use the path below with edit_chart to edit an existing chart; use add_chart to create one):',
+      `Current charts in the workbook: ${info.chartCount ?? info.charts.length} (pending edits/removals included; use these current paths with edit_chart):`,
     )
+    let detailCharacters = 0
+    let omittedDetails = false
     for (const chart of info.charts) {
       lines.push(
-        `- ${chart.path} | title: ${chart.title || '(none)'} | type: ${chart.types} | sheetId: ${chart.sheetId}`,
+        `- ${chart.path} | title: ${chart.title || '(none)'} | type: ${chart.types} | sheetId: ${chart.sheetId} | series: ${chart.seriesCount ?? 'metadata unavailable'}`,
       )
+      if (chart.valueAxisFormats) lines.push(`  Value-axis number formats: ${JSON.stringify(chart.valueAxisFormats)}`)
+      for (const series of chart.series ?? []) {
+        const detail = `  series[${series.index}] ${JSON.stringify(series.name)}: values=${series.valuesRef ?? '(literal/cache)'} (${series.valueCount} cached points); categories=${series.categoriesRef ?? '(literal/cache)'} (${series.categoryCount} cached labels), sample=${JSON.stringify(series.categorySample)}`
+        if (detailCharacters + detail.length > 12_000) { omittedDetails = true; break }
+        lines.push(detail); detailCharacters += detail.length
+      }
+      if ((chart.seriesCount ?? 0) > (chart.series?.length ?? 0)) lines.push('  Additional series details omitted; count above is the full count.')
     }
+    if (omittedDetails) lines.push('Additional chart series details omitted by the context size limit.')
+    if ((info.chartCount ?? info.charts.length) > info.charts.length) lines.push(`Chart inventory truncated: showing ${info.charts.length} of ${info.chartCount}. Do not assume an omitted chart is absent.`)
+    lines.push('Category samples and cached point counts describe current chart state; they do not certify source formulas or visual correctness.')
   }
   if (info.knownAddresses.length > 0) {
     lines.push(
@@ -1284,14 +1312,21 @@ export function executeWorkbookTool(
       const rawOps = call.input.operations
       const summaryInput = call.input.summary
       if (!Array.isArray(rawOps) || rawOps.length === 0) {
-        return fail(t('aiToolPropose'), 'operations must be a non-empty array')
+        const received = rawOps === undefined ? 'missing' : rawOps === null ? 'null' : Array.isArray(rawOps) ? 'empty array' : typeof rawOps
+        const keys = Object.keys(call.input)
+        const fields = keys.slice(0, 8).map((key) => JSON.stringify(key.slice(0, 48))).join(', ') || '(none)'
+        return fail(t('aiToolPropose'),
+          `operations must be a non-empty array (received ${received}; top-level fields: ${fields}${keys.length > 8 ? ', …' : ''}). No changes were applied. ` +
+          'Send operations as a JSON array, not quoted JSON or code; check matching brackets and keep the batch small. ' +
+          'Correct argument shape: {"summary":"Describe this batch","operations":[{"op":"set_cell","sheetId":"ID_FROM_CONTEXT","address":"A1","value":"example"}]}. Use actual sheet ids and the intended edits; this is a syntax example only.',
+        )
       }
       if (typeof summaryInput !== 'string' || !summaryInput.trim()) {
         return fail(t('aiToolPropose'), 'summary must not be empty')
       }
       let operations: WorkbookOperation[]
       try {
-        operations = z.array(workbookOperationSchema).parse(rawOps)
+        operations = z.array(workbookOperationSchema).min(1).max(1000).parse(rawOps)
       } catch (e) {
         return fail(t('aiToolPropose'), e instanceof Error ? e.message : 'Invalid operation format')
       }
@@ -1331,43 +1366,27 @@ export function executeWorkbookTool(
         }
         // Structural edits (row/column inserts and deletes, sorts, moves) shift
         // references that other formulas depend on: after the recalc, scan the
-        // touched sheets for error values so a broken reference is reported in
+        // touched sheets (all sheets for reference-shifting edits) so errors are reported in
         // the same result instead of surfacing later in the attorney's totals.
-        const structuralSheets = [
+        const affectsReferences = operations.some((op) =>
+          ['insert_rows', 'delete_rows', 'insert_cols', 'delete_cols', 'delete_sheet', 'rename_sheet'].includes(op.op),
+        )
+        const structuralSheets = affectsReferences ? deps.getActiveSheetInfo().sheets.map((sheet) => sheet.id) : [
           ...new Set(
             outcome.plan.structuralChanges
               .map((change) => (change.op as { sheetId?: string }).sheetId)
               .filter((id): id is string => typeof id === 'string' && id.length > 0),
           ),
         ]
-        const errorScan = async (): Promise<string> => {
-          if (structuralSheets.length === 0) return ''
-          const found: string[] = []
-          let truncated = false
-          for (const sheetId of structuralSheets) {
-            try {
-              const result = await deps.findCells({
-                query: '',
-                regex: false,
-                lookIn: 'values',
-                errorsOnly: true,
-                sheetId,
-                maxResults: 20,
-              })
-              if (result.error) continue
-              found.push(...result.matches.map((m) => `${m.sheetName}!${m.address} = ${String(m.value)}`))
-              truncated ||= result.truncated
-            } catch {
-              /* scan is best effort */
-            }
-          }
-          if (found.length === 0)
-            return '\nStructural change check: no formula error values on the affected sheet(s).'
-          return (
-            `\n⚠️ Structural change check: ${found.length}${truncated ? '+' : ''} cell(s) now show formula errors: ${found.slice(0, 20).join('; ')}. ` +
-            'Inspect them with trace_precedents and repair the references (or undo) before continuing.'
-          )
-        }
+        const errorScan = (): Promise<string> =>
+          verifyStructuralFormulaErrors(structuralSheets, (sheetId) => deps.findCells({
+            query: '',
+            regex: false,
+            lookIn: 'values',
+            errorsOnly: true,
+            sheetId,
+            maxResults: 20,
+          }))
         if (formulaCells.length === 0) {
           if (structuralSheets.length === 0) return { output: base, mutated: true, summary }
           return (async (): Promise<ToolExecution> => {
@@ -1388,11 +1407,20 @@ export function executeWorkbookTool(
             deps.getActiveSheetInfo().sheets.map((sheet) => [sheet.id, sheet.name]),
           )
           const lines: string[] = []
+          let incompleteReadback = false
           for (const [cellSheetId, addresses] of bySheet) {
-            const cells = deps.readCells(addresses, cellSheetId)
             const prefix = bySheet.size > 1 ? `${sheetNames.get(cellSheetId) ?? cellSheetId}!` : ''
+            let cells: ReturnType<SheetsSkillDeps['readCells']>
+            try {
+              cells = deps.readCells(addresses, cellSheetId)
+            } catch (error) {
+              incompleteReadback = true
+              lines.push(`${prefix}${addresses.join(', ')}: readback unavailable (${error instanceof Error ? error.message : 'read failed'})`)
+              continue
+            }
             for (const addr of addresses) {
               const v = cells[addr]?.value
+              if (v === null || v === undefined) incompleteReadback = true
               lines.push(
                 `${prefix}${addr} = ${v === null || v === undefined ? '(still computing; verify with read_cells)' : String(v)}`,
               )
@@ -1404,9 +1432,12 @@ export function executeWorkbookTool(
           )
           return {
             output:
-              `${base}\nFormula results: ${lines.join('; ')}${rest > 0 ? `; …${rest} more formula cells` : ''}` +
+              `${base}\nSampled formula results: ${lines.join('; ')}${rest > 0 ? `; …${rest} additional cells were NOT checked; use read_cells/read_range and find_cells errors_only before claiming completion` : ''}` +
               (hasError
                 ? '\n⚠️ Formula error values present — check references/divisors and fix them.'
+                : '') +
+              (incompleteReadback
+                ? '\n⚠️ Formula verification INCOMPLETE. The edits applied, but some results are unavailable; retry read_cells after recalculation before claiming completion.'
                 : '') +
               (await errorScan()),
             mutated: true,
@@ -1418,7 +1449,7 @@ export function executeWorkbookTool(
       return outcome.applied.then((applied) => {
         if (applied.ok) return finish(applied.notices)
         const reason = applied.reason ?? 'unknown reason'
-        return fail(
+        return { ...fail(
           t('aiToolPropose'),
           applied.partiallyApplied
             ? `Apply failed MID-BATCH — operations before the failing one were already committed: ${reason}. ` +
@@ -1428,7 +1459,7 @@ export function executeWorkbookTool(
                   : 'the whole partial batch is one undo step (⌘Z / [Undo]).')
             : `Apply failed — the workbook is UNCHANGED: ${reason}. ` +
                 'Do not tell the user the changes were made; adjust the operations and retry, or explain the failure.',
-        )
+        ), mutated: applied.partiallyApplied === true }
       })
     }
 

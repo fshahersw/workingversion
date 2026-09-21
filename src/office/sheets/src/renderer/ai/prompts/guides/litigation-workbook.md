@@ -26,7 +26,7 @@ Applies to the workbooks a litigation team actually builds: damages models, priv
 
 ## Column widths and alignment
 
-- Finish every table with `finish_table` on its full range (header included) as the LAST op of the batch that writes it: the engine measures the actual cells and sets each column's width (id/Bates and dates snug and unwrapped, descriptions and participant lists 180–420 px with wrap), keeps the total inside a page width, and top-aligns the block. Do not hand-pick widths with `set_col_width` for a table you just wrote; use `set_col_width` only to adjust one column afterwards (a rough guide if you must: id/Bates 110 px, dates 96 px, names 180 px, currency 110 px).
+- Finish every table with `finish_table` on its full range (header included) in a separate batch AFTER the values are written and read back: it measures current cells at planning time, so placing it last in the write batch would measure old content. It fits id/Bates and dates snug and unwrapped, descriptions and participant lists 180–420 px with wrap, keeps the total inside a page width, and top-aligns the block. Do not hand-pick widths for a table you just wrote; use `set_col_width` only to correct an observed issue after the finishing pass.
 - Text left, numbers and currency right, dates and short codes center. Wrapped columns read from the top (`finish_table` sets `verticalAlign: "top"`); never let one long "Additional Participants" cell decide the row while its neighbours are crushed — that is exactly what the finishing pass prevents.
 - Body text 10 pt (`fontSize: 10`); one font family for the whole workbook (leave the default unless the firm style says otherwise).
 

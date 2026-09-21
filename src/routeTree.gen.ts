@@ -44,6 +44,7 @@ import { Route as ApiPileStructureRouteImport } from './routes/api/pile/structur
 import { Route as ApiPileRerankRouteImport } from './routes/api/pile/rerank'
 import { Route as ApiPileOcrRouteImport } from './routes/api/pile/ocr'
 import { Route as ApiPileAskRouteImport } from './routes/api/pile/ask'
+import { Route as ApiOfficeUploadsRouteImport } from './routes/api/office/uploads'
 import { Route as ApiOfficeStreamRouteImport } from './routes/api/office/stream'
 import { Route as ApiOfficeJwksRouteImport } from './routes/api/office/jwks'
 import { Route as ApiOfficeDocsRouteImport } from './routes/api/office/docs'
@@ -61,6 +62,7 @@ import { Route as AuthenticatedArchiveFederalRouteImport } from './routes/_authe
 import { Route as AuthenticatedArchiveCourtsRouteImport } from './routes/_authenticated/archive.courts'
 import { Route as AuthenticatedOfficeSlidesIndexRouteImport } from './routes/_authenticated/office.slides.index'
 import { Route as AuthenticatedOfficeSheetsIndexRouteImport } from './routes/_authenticated/office.sheets.index'
+import { Route as AuthenticatedOfficePdfIndexRouteImport } from './routes/_authenticated/office.pdf.index'
 import { Route as AuthenticatedOfficeDraftsIndexRouteImport } from './routes/_authenticated/office.drafts.index'
 import { Route as ApiPublicWebhooksDocketbirdRouteImport } from './routes/api/public/webhooks/docketbird'
 import { Route as ApiPublicWebhooksCourtlistenerRouteImport } from './routes/api/public/webhooks/courtlistener'
@@ -72,6 +74,7 @@ import { Route as ApiPublicIngestBatchesRouteImport } from './routes/api/public/
 import { Route as ApiPublicCalendarSyncRouteImport } from './routes/api/public/calendar/sync'
 import { Route as AuthenticatedOfficeSlidesDocIdRouteImport } from './routes/_authenticated/office.slides.$docId'
 import { Route as AuthenticatedOfficeSheetsDocIdRouteImport } from './routes/_authenticated/office.sheets.$docId'
+import { Route as AuthenticatedOfficePdfDocIdRouteImport } from './routes/_authenticated/office.pdf.$docId'
 import { Route as AuthenticatedOfficeDraftsDraftIdRouteImport } from './routes/_authenticated/office.drafts.$draftId'
 import { Route as ApiWriterDocsDraftIdRecoveryRouteImport } from './routes/api/writer/docs.$draftId.recovery'
 import { Route as ApiWriterDocsDraftIdContentRouteImport } from './routes/api/writer/docs.$draftId.content'
@@ -260,6 +263,11 @@ const ApiPileAskRoute = ApiPileAskRouteImport.update({
   path: '/api/pile/ask',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiOfficeUploadsRoute = ApiOfficeUploadsRouteImport.update({
+  id: '/api/office/uploads',
+  path: '/api/office/uploads',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiOfficeStreamRoute = ApiOfficeStreamRouteImport.update({
   id: '/api/office/stream',
   path: '/api/office/stream',
@@ -352,6 +360,12 @@ const AuthenticatedOfficeSheetsIndexRoute =
     path: '/office/sheets/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedOfficePdfIndexRoute =
+  AuthenticatedOfficePdfIndexRouteImport.update({
+    id: '/office/pdf/',
+    path: '/office/pdf/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedOfficeDraftsIndexRoute =
   AuthenticatedOfficeDraftsIndexRouteImport.update({
     id: '/office/drafts/',
@@ -410,6 +424,12 @@ const AuthenticatedOfficeSheetsDocIdRoute =
   AuthenticatedOfficeSheetsDocIdRouteImport.update({
     id: '/office/sheets/$docId',
     path: '/office/sheets/$docId',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedOfficePdfDocIdRoute =
+  AuthenticatedOfficePdfDocIdRouteImport.update({
+    id: '/office/pdf/$docId',
+    path: '/office/pdf/$docId',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedOfficeDraftsDraftIdRoute =
@@ -506,6 +526,7 @@ export interface FileRoutesByFullPath {
   '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
   '/api/office/jwks': typeof ApiOfficeJwksRoute
   '/api/office/stream': typeof ApiOfficeStreamRoute
+  '/api/office/uploads': typeof ApiOfficeUploadsRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -518,6 +539,7 @@ export interface FileRoutesByFullPath {
   '/matters/': typeof AuthenticatedMattersIndexRoute
   '/office/': typeof AuthenticatedOfficeIndexRoute
   '/office/drafts/$draftId': typeof AuthenticatedOfficeDraftsDraftIdRoute
+  '/office/pdf/$docId': typeof AuthenticatedOfficePdfDocIdRoute
   '/office/sheets/$docId': typeof AuthenticatedOfficeSheetsDocIdRoute
   '/office/slides/$docId': typeof AuthenticatedOfficeSlidesDocIdRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
@@ -529,6 +551,7 @@ export interface FileRoutesByFullPath {
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
   '/office/drafts/': typeof AuthenticatedOfficeDraftsIndexRoute
+  '/office/pdf/': typeof AuthenticatedOfficePdfIndexRoute
   '/office/sheets/': typeof AuthenticatedOfficeSheetsIndexRoute
   '/office/slides/': typeof AuthenticatedOfficeSlidesIndexRoute
   '/api/office/docs/$docId/content': typeof ApiOfficeDocsDocIdContentRoute
@@ -579,6 +602,7 @@ export interface FileRoutesByTo {
   '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
   '/api/office/jwks': typeof ApiOfficeJwksRoute
   '/api/office/stream': typeof ApiOfficeStreamRoute
+  '/api/office/uploads': typeof ApiOfficeUploadsRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -591,6 +615,7 @@ export interface FileRoutesByTo {
   '/matters': typeof AuthenticatedMattersIndexRoute
   '/office': typeof AuthenticatedOfficeIndexRoute
   '/office/drafts/$draftId': typeof AuthenticatedOfficeDraftsDraftIdRoute
+  '/office/pdf/$docId': typeof AuthenticatedOfficePdfDocIdRoute
   '/office/sheets/$docId': typeof AuthenticatedOfficeSheetsDocIdRoute
   '/office/slides/$docId': typeof AuthenticatedOfficeSlidesDocIdRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
@@ -602,6 +627,7 @@ export interface FileRoutesByTo {
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
   '/office/drafts': typeof AuthenticatedOfficeDraftsIndexRoute
+  '/office/pdf': typeof AuthenticatedOfficePdfIndexRoute
   '/office/sheets': typeof AuthenticatedOfficeSheetsIndexRoute
   '/office/slides': typeof AuthenticatedOfficeSlidesIndexRoute
   '/api/office/docs/$docId/content': typeof ApiOfficeDocsDocIdContentRoute
@@ -654,6 +680,7 @@ export interface FileRoutesById {
   '/api/office/docs': typeof ApiOfficeDocsRouteWithChildren
   '/api/office/jwks': typeof ApiOfficeJwksRoute
   '/api/office/stream': typeof ApiOfficeStreamRoute
+  '/api/office/uploads': typeof ApiOfficeUploadsRoute
   '/api/pile/ask': typeof ApiPileAskRoute
   '/api/pile/ocr': typeof ApiPileOcrRoute
   '/api/pile/rerank': typeof ApiPileRerankRoute
@@ -666,6 +693,7 @@ export interface FileRoutesById {
   '/_authenticated/matters/': typeof AuthenticatedMattersIndexRoute
   '/_authenticated/office/': typeof AuthenticatedOfficeIndexRoute
   '/_authenticated/office/drafts/$draftId': typeof AuthenticatedOfficeDraftsDraftIdRoute
+  '/_authenticated/office/pdf/$docId': typeof AuthenticatedOfficePdfDocIdRoute
   '/_authenticated/office/sheets/$docId': typeof AuthenticatedOfficeSheetsDocIdRoute
   '/_authenticated/office/slides/$docId': typeof AuthenticatedOfficeSlidesDocIdRoute
   '/api/public/calendar/sync': typeof ApiPublicCalendarSyncRoute
@@ -677,6 +705,7 @@ export interface FileRoutesById {
   '/api/public/webhooks/courtlistener': typeof ApiPublicWebhooksCourtlistenerRoute
   '/api/public/webhooks/docketbird': typeof ApiPublicWebhooksDocketbirdRoute
   '/_authenticated/office/drafts/': typeof AuthenticatedOfficeDraftsIndexRoute
+  '/_authenticated/office/pdf/': typeof AuthenticatedOfficePdfIndexRoute
   '/_authenticated/office/sheets/': typeof AuthenticatedOfficeSheetsIndexRoute
   '/_authenticated/office/slides/': typeof AuthenticatedOfficeSlidesIndexRoute
   '/api/office/docs/$docId/content': typeof ApiOfficeDocsDocIdContentRoute
@@ -729,6 +758,7 @@ export interface FileRouteTypes {
     | '/api/office/docs'
     | '/api/office/jwks'
     | '/api/office/stream'
+    | '/api/office/uploads'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -741,6 +771,7 @@ export interface FileRouteTypes {
     | '/matters/'
     | '/office/'
     | '/office/drafts/$draftId'
+    | '/office/pdf/$docId'
     | '/office/sheets/$docId'
     | '/office/slides/$docId'
     | '/api/public/calendar/sync'
@@ -752,6 +783,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
     | '/office/drafts/'
+    | '/office/pdf/'
     | '/office/sheets/'
     | '/office/slides/'
     | '/api/office/docs/$docId/content'
@@ -802,6 +834,7 @@ export interface FileRouteTypes {
     | '/api/office/docs'
     | '/api/office/jwks'
     | '/api/office/stream'
+    | '/api/office/uploads'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -814,6 +847,7 @@ export interface FileRouteTypes {
     | '/matters'
     | '/office'
     | '/office/drafts/$draftId'
+    | '/office/pdf/$docId'
     | '/office/sheets/$docId'
     | '/office/slides/$docId'
     | '/api/public/calendar/sync'
@@ -825,6 +859,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
     | '/office/drafts'
+    | '/office/pdf'
     | '/office/sheets'
     | '/office/slides'
     | '/api/office/docs/$docId/content'
@@ -876,6 +911,7 @@ export interface FileRouteTypes {
     | '/api/office/docs'
     | '/api/office/jwks'
     | '/api/office/stream'
+    | '/api/office/uploads'
     | '/api/pile/ask'
     | '/api/pile/ocr'
     | '/api/pile/rerank'
@@ -888,6 +924,7 @@ export interface FileRouteTypes {
     | '/_authenticated/matters/'
     | '/_authenticated/office/'
     | '/_authenticated/office/drafts/$draftId'
+    | '/_authenticated/office/pdf/$docId'
     | '/_authenticated/office/sheets/$docId'
     | '/_authenticated/office/slides/$docId'
     | '/api/public/calendar/sync'
@@ -899,6 +936,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/courtlistener'
     | '/api/public/webhooks/docketbird'
     | '/_authenticated/office/drafts/'
+    | '/_authenticated/office/pdf/'
     | '/_authenticated/office/sheets/'
     | '/_authenticated/office/slides/'
     | '/api/office/docs/$docId/content'
@@ -932,6 +970,7 @@ export interface RootRouteChildren {
   ApiOfficeDocsRoute: typeof ApiOfficeDocsRouteWithChildren
   ApiOfficeJwksRoute: typeof ApiOfficeJwksRoute
   ApiOfficeStreamRoute: typeof ApiOfficeStreamRoute
+  ApiOfficeUploadsRoute: typeof ApiOfficeUploadsRoute
   ApiPileAskRoute: typeof ApiPileAskRoute
   ApiPileOcrRoute: typeof ApiPileOcrRoute
   ApiPileRerankRoute: typeof ApiPileRerankRoute
@@ -1198,6 +1237,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPileAskRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/office/uploads': {
+      id: '/api/office/uploads'
+      path: '/api/office/uploads'
+      fullPath: '/api/office/uploads'
+      preLoaderRoute: typeof ApiOfficeUploadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/office/stream': {
       id: '/api/office/stream'
       path: '/api/office/stream'
@@ -1317,6 +1363,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedOfficeSheetsIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/office/pdf/': {
+      id: '/_authenticated/office/pdf/'
+      path: '/office/pdf'
+      fullPath: '/office/pdf/'
+      preLoaderRoute: typeof AuthenticatedOfficePdfIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/office/drafts/': {
       id: '/_authenticated/office/drafts/'
       path: '/office/drafts'
@@ -1392,6 +1445,13 @@ declare module '@tanstack/react-router' {
       path: '/office/sheets/$docId'
       fullPath: '/office/sheets/$docId'
       preLoaderRoute: typeof AuthenticatedOfficeSheetsDocIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/office/pdf/$docId': {
+      id: '/_authenticated/office/pdf/$docId'
+      path: '/office/pdf/$docId'
+      fullPath: '/office/pdf/$docId'
+      preLoaderRoute: typeof AuthenticatedOfficePdfDocIdRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/office/drafts/$draftId': {
@@ -1481,9 +1541,11 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedMattersIndexRoute: typeof AuthenticatedMattersIndexRoute
   AuthenticatedOfficeIndexRoute: typeof AuthenticatedOfficeIndexRoute
   AuthenticatedOfficeDraftsDraftIdRoute: typeof AuthenticatedOfficeDraftsDraftIdRoute
+  AuthenticatedOfficePdfDocIdRoute: typeof AuthenticatedOfficePdfDocIdRoute
   AuthenticatedOfficeSheetsDocIdRoute: typeof AuthenticatedOfficeSheetsDocIdRoute
   AuthenticatedOfficeSlidesDocIdRoute: typeof AuthenticatedOfficeSlidesDocIdRoute
   AuthenticatedOfficeDraftsIndexRoute: typeof AuthenticatedOfficeDraftsIndexRoute
+  AuthenticatedOfficePdfIndexRoute: typeof AuthenticatedOfficePdfIndexRoute
   AuthenticatedOfficeSheetsIndexRoute: typeof AuthenticatedOfficeSheetsIndexRoute
   AuthenticatedOfficeSlidesIndexRoute: typeof AuthenticatedOfficeSlidesIndexRoute
 }
@@ -1510,9 +1572,11 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedMattersIndexRoute: AuthenticatedMattersIndexRoute,
   AuthenticatedOfficeIndexRoute: AuthenticatedOfficeIndexRoute,
   AuthenticatedOfficeDraftsDraftIdRoute: AuthenticatedOfficeDraftsDraftIdRoute,
+  AuthenticatedOfficePdfDocIdRoute: AuthenticatedOfficePdfDocIdRoute,
   AuthenticatedOfficeSheetsDocIdRoute: AuthenticatedOfficeSheetsDocIdRoute,
   AuthenticatedOfficeSlidesDocIdRoute: AuthenticatedOfficeSlidesDocIdRoute,
   AuthenticatedOfficeDraftsIndexRoute: AuthenticatedOfficeDraftsIndexRoute,
+  AuthenticatedOfficePdfIndexRoute: AuthenticatedOfficePdfIndexRoute,
   AuthenticatedOfficeSheetsIndexRoute: AuthenticatedOfficeSheetsIndexRoute,
   AuthenticatedOfficeSlidesIndexRoute: AuthenticatedOfficeSlidesIndexRoute,
 }
@@ -1614,6 +1678,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiOfficeDocsRoute: ApiOfficeDocsRouteWithChildren,
   ApiOfficeJwksRoute: ApiOfficeJwksRoute,
   ApiOfficeStreamRoute: ApiOfficeStreamRoute,
+  ApiOfficeUploadsRoute: ApiOfficeUploadsRoute,
   ApiPileAskRoute: ApiPileAskRoute,
   ApiPileOcrRoute: ApiPileOcrRoute,
   ApiPileRerankRoute: ApiPileRerankRoute,

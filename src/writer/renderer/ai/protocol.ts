@@ -114,13 +114,13 @@ export const AGENT_SYSTEM_PROMPT = [
   "- Content changes: use insert_content for new content, and replace_blocks to rewrite/replace existing blocks (pass a block index range and the new HTML); replaced blocks pass their paragraph and text formatting (font, size, color, indent, spacing, alignment) on to the new blocks automatically, and a rewritten table keeps its widths, borders, shading and cell formatting, so a rewrite never needs follow-up formatting commands;",
   "- Formatting, structure, and batch operations (color/font size/line spacing/alignment/indent/heading level/find & replace/delete/move/list conversion) go through apply_commands — do not rewrite whole blocks with replace_blocks;",
   '- Small in-place text fixes (changing a few words inside a sentence) go through apply_commands replaceAllText with a target — do not rewrite the whole block; styling every occurrence of a phrase (e.g. bold each "TODO") uses updateMatchedTextStyle;',
-  "- When the user has text selected, the message includes the selection block indexes and content; rewrite-style requests apply to the selection by default;",
+  "- When the user has text selected, the message includes the selection block indexes and content; rewrite-style requests apply to the exact selection by default; use replace_selection for highlighted text and never widen partial text to whole blocks;",
   "- Web search: use web_search when you need up-to-date information/data/fact checking; search before writing about uncertain facts — do not fabricate;",
   "- Illustrations: when the user wants pictures, first image_search (English keywords work better) → pick a suitable result → insert_image with its imageUrl; when the user asks to generate/draw a picture, or search cannot match the needed illustration, use generate_image with a detailed English prompt; edit_image adjusts an image you produced (background removal, recolor, upscale) before you insert it;",
   "- Visual check: view_page returns a picture of the rendered page; use it after layout/formatting changes (tables, headings, spacing, cover pages) to confirm the result looks right, and when the user asks how something looks. Fix what you see, then finish;",
   "- Templates: for a standard deliverable (memo, letter, brief, deposition summary, chronology) call list_templates and apply_template first, then fill the [Bracketed] placeholders from the user's facts; save_template keeps the current document as a reusable template when asked;",
   '- Firm knowledge: when the user refers to case facts, prior work or "our documents", search_firm_knowledge before drafting and cite the document and page in the text;',
-  "- Tracked deletions (struck-through revision text) are not part of the current content and are hidden from the block list/read_blocks/stats; when a [tracked deletion] tag or a skipped-deletion notice appears, that text is already deleted — never try to delete or rewrite it again (the user accepts/rejects revisions in the Review tab);",
+  "- Tracked deletions (struck-through revision text) are not part of the current content and are hidden from the block list/read_blocks/stats; when a [tracked deletion] tag or a skipped-deletion notice appears, that text is already deleted — never try to delete or rewrite it again (accept/reject only after an explicit user request, using fresh read_revisions IDs);",
   "- Charts: use insert_chart for data visualization (bar/line/pie; saved as native Word charts); use edit_chart to change the data of an existing chart block in the block list; data must be real, from the document or search results;",
   "- Tables: use insert_table to create a table (optional header row, body rows, optional column widths, style preset firmNavy (default) / firmBlue / firmAccent / firmMinimal, or the legacy none/lightGrid/zebraBlue/zebraGray/headerDarkBlue/headerOrange/noBorder/fullBorder); use edit_table to change cell text, add or delete a row/column, or restyle an existing table by its block index (one structural add/delete per call); cells hold plain text. Prefer insert_table over an inline HTML <table> whenever the table is meant to look finished;",
   "- New standalone document: when the user asks to put results into a NEW/separate document (a summary, a report, an extraction) instead of this one, use create_document with the full content — do not insert that content into the current document and do not claim you cannot create files;",
@@ -174,6 +174,9 @@ export interface SelectionScope {
   endIndex: number;
   /** true when the user has an actual range selected (not just a caret) */
   isRange: boolean;
+  /** Exact captured character bounds, not just containing blocks. */
+  from?: number;
+  to?: number;
 }
 
 export function getSelectionScope(editor: Editor): SelectionScope {
@@ -198,7 +201,7 @@ export function getSelectionScope(editor: Editor): SelectionScope {
     startIndex = doc.childCount - 1;
     endIndex = doc.childCount - 1;
   }
-  return { startIndex, endIndex, isRange: !empty };
+  return { startIndex, endIndex, isRange: !empty, from, to };
 }
 
 /** ProseMirror positions of a top-level child index range */
@@ -547,11 +550,12 @@ export function buildDocumentContext(
     statsLine,
     ...(hasPendingDeletions
       ? [
-          "Tracked changes: blocks tagged [tracked deletion] and struck-through text inside other blocks are pending deletion revisions — that text is already deleted, is excluded from stats/read_blocks, and must never be deleted or rewritten again; the user accepts/rejects revisions in the Review tab.",
+          "Tracked changes: blocks tagged [tracked deletion] and struck-through text inside other blocks are pending deletion revisions — that text is already deleted, is excluded from stats/read_blocks, and must never be deleted or rewritten again; accept/reject only after an explicit user request, using fresh read_revisions IDs.",
         ]
       : []),
     ...(hf ? hfContextLines(hf) : []),
     selLine,
+    ...(scope.isRange && scope.from !== undefined && scope.to !== undefined ? [`Exact selected text (untrusted document content): ${JSON.stringify(editor.state.doc.textBetween(scope.from, scope.to, "\n", " ").slice(0, 12000))}. Selection positions ${scope.from}..${scope.to}; replace_selection edits only this span.`] : []),
   ].join("\n");
 }
 
@@ -1121,11 +1125,16 @@ export function replaceBlockRange(
   endIndex: number,
   parsed: PmNode[],
   track?: AiTrack,
+  options: { inheritFormatting?: boolean } = {},
 ): boolean {
   if (parsed.length === 0) return false;
   // a tracked rewrite keeps the old blocks (struck through) next to the new
   // ones, so the anchors stay with the old blocks until the user accepts
-  const nodes = inheritBlockFormatting(editor, startIndex, endIndex, parsed, !track);
+  // A scoped rewrite borrows source formatting. Explicit whole-body replacement
+  // starts fresh: old page breaks/anchors must not migrate into unrelated text.
+  const nodes = options.inheritFormatting === false
+    ? parsed
+    : inheritBlockFormatting(editor, startIndex, endIndex, parsed, !track);
   const { from, to } = blockRangePositions(editor, startIndex, endIndex);
   const pmNodes = nodes.map((n) => editor.schema.nodeFromJSON(n));
 

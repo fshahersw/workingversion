@@ -44,11 +44,23 @@ after it.
 { "op": "addBlankSlide", "target": { "slide": "s_1" } }
 ```
 
-### addSlideWithLayout (not-ai-callable)
+### addSlideWithLayout
 
-`{layoutPath} — layout part path; not discoverable from tool results`
+`{layout:<name>|<index>} — inserts after target.slide (default: after the last slide)`
 
-Inserts a page from a specific layout part; the UI's layout gallery uses it.
+Inserts a page bound to one of the deck's layouts, with that layout's
+placeholders as empty prompt boxes. `layout` is the layout's gallery name or
+its 0-based index as listed by `read_slide({slideIndex, include_native:true})`; the error names every
+layout when the reference misses. The new slide's id is reported in `created`.
+
+```json
+{ "op": "addSlideWithLayout", "target": { "slide": "s_1" }, "layout": "Blank" }
+```
+
+Common mistakes
+
+- Guessing layout names from another deck: list them with `read_slide({slideIndex, include_native:true})` first.
+- Filling the new placeholders in the same batch: they get ids only after the insert; `read_slide({slideIndex, include_native:true})` the new slide, then `setText`.
 
 ### pasteSlide (not-ai-callable)
 
@@ -72,11 +84,18 @@ Moves the page to a new position.
 { "op": "moveSlide", "target": { "slide": 1 }, "to": 0 }
 ```
 
-### setSlideLayout (not-ai-callable)
+### setSlideLayout
 
-`{layoutPath?} — layout part path; not discoverable from tool results`
+`{layout?:<name>|<index>} — omitted: snap placeholders back to the current layout`
 
-Re-links the page to another layout part; the UI's layout gallery uses it.
+Re-links the page to another layout (existing shapes stay where they are;
+missing layout placeholders are added as empty prompt boxes). Without `layout`
+the current layout is re-applied, moving placeholders back to their layout
+positions.
+
+```json
+{ "op": "setSlideLayout", "target": { "slide": 0 }, "layout": 0 }
+```
 
 ### setBackground
 
@@ -200,3 +219,63 @@ comments on the page (both come from the comments pane data).
 ```json
 { "op": "deleteComment", "target": { "slide": 0 }, "authorId": 0, "idx": 0 }
 ```
+
+
+### addAnimation
+
+`{effect,kind?,trigger?,duration?,delay?,direction?,paragraph?,motionPath?,after?} — target:{slide, el}; one effect appended to the page timeline`
+
+Adds one animation for the element at the end of the page's timeline (or right
+after position `after`). The timeline is read back as `animations[]` in
+`read_slide({slideIndex, include_native:true})`, each item with its `seq` (0-based position), `el`, `effect`,
+`kind`, `trigger`, `durationMs`, `delayMs`.
+
+| Field      | Type                                                                                                                                                                                                                                                                                   | Notes                                                                                                                                             |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| effect     | entrance `appear` `fade` `flyIn` `wipe` `wipeDown` `splitIn` `bounce` `flipIn` `zoom`; emphasis `pulse` `spin` `grow` `teeter`; exit `disappear` `fadeOut` `flyOut` `wipeOut` `shrink` `zoomOut`; `motionPath`; media `mediaPlay` `mediaPause` `mediaStop` (video/audio elements only) | Required                                                                                                              |
+| kind       | `"entrance"` / `"emphasis"` / `"exit"` / `"path"` / `"media"`                                                                                                                                                                                                                          | Optional cross-check; rejected when it does not match the effect                                                                                  |
+| trigger    | `"onClick"` (default) / `"withPrev"` / `"afterPrev"`                                                                                                                                                                                                                                   | `withPrev` starts with the previous effect, `afterPrev` after it ends                                                                             |
+| duration   | ms >= 0                                                                                                                                                                                                                                                                                | Default per effect (appear 0, fade 500, spin 2000, …); `durationMs` also accepted                                                                 |
+| delay      | ms >= 0                                                                                                                                                                                                                                                                                | Default 0; `delayMs` also accepted                                                                                                                |
+| direction  | `"top"` / `"bottom"` / `"left"` / `"right"`                                                                                                                                                                                                                                            | Only for `flyIn`, `flyOut`, `wipe`, `wipeOut` (default bottom)                                                                                    |
+| paragraph  | 0-based index                                                                                                                                                                                                                                                                          | Animate one paragraph of a text body instead of the whole shape                                                                                   |
+| motionPath | `"M 0 0 L 0.25 0"`                                                                                                                                                                                                                                                                     | With `effect:"motionPath"`; coordinates are fractions of the slide size                                                                           |
+| after      | seq                                                                                                                                                                                                                                                                                    | Insert right after that timeline position instead of appending                                                                                    |
+
+```json
+{
+  "op": "addAnimation",
+  "target": { "slide": 0, "el": "e_TEXT" },
+  "effect": "flyIn",
+  "direction": "left",
+  "trigger": "afterPrev",
+  "duration": 600
+}
+```
+
+
+### removeAnimation
+
+`{seq} — target:{slide}; or target:{slide, el} to drop every animation of that element`
+
+Removes one timeline item by `seq`, or all items targeting an element. Later
+items renumber; read the page again before the next batch.
+
+```json
+{ "op": "removeAnimation", "target": { "slide": 0, "el": "e_TEXT" } }
+```
+
+
+### reorderAnimation
+
+`{seq,to} — target:{slide}; move a timeline item`
+
+Moves the item at `seq` to position `to` (both 0-based, inside the timeline).
+
+```json
+{ "op": "reorderAnimation", "target": { "slide": 0 }, "seq": 2, "to": 0 }
+```
+
+Animation edits preserve unrelated native timeline effects. Creating raw preset XML is not supported by the browser agent. Read the current timeline before removing or reordering; later seq values change after deletion.
+
+Advanced imported animation graphs (custom effects, interactive/cross-referenced timing) are only edited when the engine can preserve them incrementally. A requested reorder/removal that requires a lossy rebuild fails without changing the deck. The preview is not an animation playback fidelity check.

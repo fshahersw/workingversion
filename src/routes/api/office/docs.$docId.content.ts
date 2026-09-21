@@ -22,6 +22,13 @@ export const Route = createFileRoute("/api/office/docs/$docId/content")({
           if (version !== undefined && (!Number.isInteger(version) || version < 1)) {
             return Response.json({ error: "Invalid revision." }, { status: 400 });
           }
+          if (url.searchParams.get('download') === '1' || url.searchParams.get('direct') === '1') {
+            const { grantOfficeRevision } = await import('@/lib/office/office.server');
+            const grant = await grantOfficeRevision(user.sub, params.docId, version);
+            return url.searchParams.get('direct') === '1'
+              ? Response.json(grant, { headers: { 'Cache-Control': 'no-store' } })
+              : new Response(null, { status: 302, headers: { Location: grant.url, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
+          }
           const rev = await readOfficeRevision(user.sub, params.docId, version);
           return packageResponse(rev.bytes, rev.name, rev.kind, {
             "X-Office-Version": String(rev.version),
@@ -32,12 +39,25 @@ export const Route = createFileRoute("/api/office/docs/$docId/content")({
           return officeErrorResponse(err);
         }
       },
+      POST: async ({ request, params }) => {
+        const { officeUser, officeErrorResponse } = await import('@/lib/office/api.server');
+        const user = await officeUser(request, { docId: params.docId });
+        if (user instanceof Response) return user;
+        try {
+          const { prepareRevisionUpload, readRevisionUpload } = await import('@/lib/office/revision-upload.server');
+          return Response.json(await prepareRevisionUpload(user.sub, await readRevisionUpload(request, params.docId)), { headers: { 'Cache-Control': 'no-store' } });
+        } catch (error) { return officeErrorResponse(error); }
+      },
       PUT: async ({ request, params }) => {
         const { officeUser, officeErrorResponse, readPackageBody } =
           await import("@/lib/office/api.server");
         const user = await officeUser(request, { docId: params.docId });
         if (user instanceof Response) return user;
         try {
+          if (request.headers.get('content-type')?.startsWith('application/json')) {
+            const { commitRevisionUpload, readRevisionUpload } = await import('@/lib/office/revision-upload.server');
+            return Response.json(await commitRevisionUpload(user.sub, await readRevisionUpload(request, params.docId)));
+          }
           const { saveOfficeRevision } = await import("@/lib/office/office.server");
           const expectedVersion = Number(request.headers.get("if-match") ?? "");
           const operationId = request.headers.get("idempotency-key") ?? "";

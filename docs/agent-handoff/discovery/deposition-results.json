@@ -1,0 +1,74 @@
+{
+  "method": "Direct imports of actual pure modules with synthetic fixtures; not end-to-end UI or provider validation",
+  "results": {
+    "numberedContinuation": {
+      "inputPages": 2,
+      "retainedPages": [
+        1
+      ],
+      "retainsCriticalPassage": false
+    },
+    "unnumberedCitation": {
+      "citeReady": true,
+      "matched": {
+        "quote": "Yes, I received the warning.",
+        "cite": "1:2",
+        "fileName": "unnumbered.txt",
+        "evidenceStatus": "source_matched"
+      }
+    },
+    "sameNameEntities": {
+      "people": [
+        {
+          "id": "person:john smith",
+          "label": "John Smith",
+          "kind": "person"
+        }
+      ],
+      "edges": [
+        {
+          "from": "person:john smith",
+          "to": "org:alpha",
+          "label": "employed by",
+          "fileName": "alpha.txt",
+          "cite": "1:2",
+          "quote": "John Smith worked for Alpha."
+        },
+        {
+          "from": "person:john smith",
+          "to": "org:beta",
+          "label": "employed by",
+          "fileName": "beta.txt",
+          "cite": "1:2",
+          "quote": "John Smith worked for Beta."
+        }
+      ]
+    },
+    "lastPairSummary": "Only the final evidence-batch pair discussed an isolated valve.",
+    "strictEmptyObject": {
+      "role": "",
+      "summary": "",
+      "profile": [],
+      "admissions": [],
+      "impeachment": [],
+      "themes": [],
+      "objections": [],
+      "chronology": [],
+      "exhibits": [],
+      "witnesses": [],
+      "contradictions": [],
+      "graph": {
+        "nodes": [],
+        "edges": []
+      },
+      "dropped": 0
+    },
+    "scaling": {
+      "findings": 3200,
+      "batches": 100,
+      "crossCalls": 5050,
+      "concurrency": 2,
+      "scheduledCharacterVolume": 81796000
+    }
+  }
+}

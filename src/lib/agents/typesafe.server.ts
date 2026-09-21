@@ -2,7 +2,7 @@
 // TypeSafe System One client (server-only) — the router model.
 //
 // Jev answers TYPED questions (choice / score / noul) about a `state` and
-// returns calibrated probabilities plus a confidence, in ~100-300 ms, for
+// returns probabilities plus a confidence statistic (not a correctness guarantee), for
 // $0.042 per million input tokens (output is free). That is the shape of every
 // routing decision this app makes today with a generative model round trip
 // (Office task class on Haiku, frontier RoutePlan on Nemotron, topic-shift on
@@ -12,7 +12,7 @@
 //   - HARD wall-clock cap per call (TYPESAFE_TIMEOUT_MS, default 800 ms) and NO
 //     retries by default. A router that is late is a router that lost; every
 //     caller treats `null` as "no opinion" and falls back to its current path.
-//   - Fail-open everywhere: network/HTTP/parse failures return null and log a
+//   - No opinion on failure: network/HTTP/parse failures return null and log a
 //     stage line with counts and latency only. Question text and state are
 //     never logged.
 //   - Pinned model by default (jev-1.13.0). `jev-latest` moves on release and
@@ -133,15 +133,45 @@ function baseUrl(): string {
   return (env("TYPESAFE_BASE_URL") || "https://api.typesafe.ai").replace(/\/+$/, "");
 }
 
-function isAnswer(v: unknown): v is Answer {
-  if (!v || typeof v !== "object") return false;
-  const a = v as Record<string, unknown>;
-  if (a["type"] === "noul") return typeof a["noul"] === "number";
-  if (a["type"] === "choice")
-    return typeof a["choice"] === "string" && typeof a["confidence"] === "number" && !!a["probabilities"];
-  if (a["type"] === "score")
-    return typeof a["score"] === "number" && typeof a["confidence"] === "number" && !!a["probabilities"];
-  return false;
+const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const probability = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
+const tokenCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+/** Validate against the question, not just an untrusted response's type tag. */
+export function validAnswer(v: unknown, q: Question): v is Answer {
+  if (!record(v) || v.type !== q.type) return false;
+  if (q.type === "noul") return probability(v.noul);
+  if (!probability(v.confidence) || !record(v.probabilities)) return false;
+  const keys = q.type === "choice" ? Object.keys(q.criteria) : q.criteria.map((_, i) => String(i));
+  const p = v.probabilities;
+  if (!keys.length || Object.keys(p).length !== keys.length || !keys.every(k => Object.hasOwn(p, k) && probability(p[k]))) return false;
+  // The service rounds probabilities to two decimals. Accommodate only that
+  // rounding error; malformed distributions must never justify a down-route.
+  const sum = keys.reduce((s, k) => s + (p[k] as number), 0);
+  if (Math.abs(sum - 1) > Math.max(0.015, Math.min(0.05, keys.length * 0.005 + 1e-8))) return false;
+  if (q.type === "choice") return typeof v.choice === "string" && keys.includes(v.choice)
+    && (p[v.choice] as number) + 0.011 >= Math.max(...keys.map(k => p[k] as number));
+  return typeof v.score === "number" && Number.isFinite(v.score) && v.score >= 0 && v.score <= keys.length - 1
+    && record(v.legend) && Object.keys(v.legend).length === keys.length
+    && keys.every(k => Object.hasOwn(v.legend as object, k) && typeof (v.legend as Record<string, unknown>)[k] === "string");
+}
+
+/** Race even an uncooperative transport/body reader against cancellation. */
+async function withinSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+  let stop!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    stop = () => reject(signal.reason ?? new Error("Aborted"));
+    signal.addEventListener("abort", stop, { once: true });
+  });
+  try { return await Promise.race([work, aborted]); }
+  finally { signal.removeEventListener("abort", stop); }
+}
+
+async function retryPause(ms: number, signal: AbortSignal): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { await withinSignal(new Promise<void>(resolve => { timer = setTimeout(resolve, ms); }), signal); }
+  finally { clearTimeout(timer); }
 }
 
 /**
@@ -151,19 +181,23 @@ function isAnswer(v: unknown): v is Answer {
  */
 export async function systemOne(req: SystemOneRequest): Promise<SystemOneResult | null> {
   const apiKey = env("TYPESAFE_API_KEY");
-  if (!apiKey) return null;
+  if (!apiKey || req.signal?.aborted) return null;
   const questionIds = Object.keys(req.questions);
   if (!questionIds.length) return null;
   const budget = req.timeoutMs ?? typesafeTimeoutMs();
-  const retries = Math.max(0, req.retries ?? 0);
+  if (!Number.isFinite(budget) || budget <= 0) return null;
+  const retries = Number.isFinite(req.retries) ? Math.min(3, Math.max(0, Math.floor(req.retries!))) : 0;
   const model = req.model ?? typesafeModel();
   const doFetch = req.fetchImpl ?? fetch;
   const started = Date.now();
-  const body = JSON.stringify({ state: req.state, model, questions: req.questions });
+  let body: string;
+  try { body = JSON.stringify({ state: req.state, model, questions: req.questions }); }
+  catch { return null; }
 
   let attempt = 0;
   for (;;) {
     const remaining = budget - (Date.now() - started);
+    if (req.signal?.aborted) return null;
     if (remaining <= 0) {
       agentError("typesafe_failed", { purpose: req.purpose, kind: "budget", ms: Date.now() - started });
       return null;
@@ -173,31 +207,36 @@ export async function systemOne(req: SystemOneRequest): Promise<SystemOneResult 
     const onParent = () => controller.abort(req.signal?.reason);
     req.signal?.addEventListener("abort", onParent, { once: true });
     try {
-      const res = await doFetch(`${baseUrl()}${ENDPOINT_PATH}`, {
+      const res = await withinSignal(doFetch(`${baseUrl()}${ENDPOINT_PATH}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", Accept: "application/json" },
         body,
         signal: controller.signal,
-      });
+        redirect: "error",
+      }), controller.signal);
       if (!res.ok) {
         const retryable = res.status === 408 || res.status === 429 || res.status === 529 || res.status >= 500;
         if (retryable && attempt < retries) {
           attempt++;
-          await new Promise((r) => setTimeout(r, Math.min(250 * 2 ** (attempt - 1), remaining / 2)));
+          await retryPause(Math.min(250 * 2 ** (attempt - 1), Math.max(0, budget - (Date.now() - started)) / 2), controller.signal);
           continue;
         }
         agentError("typesafe_failed", { purpose: req.purpose, kind: "http", status: res.status, ms: Date.now() - started });
         return null;
       }
-      const json = (await res.json()) as {
+      const json = (await withinSignal(res.json(), controller.signal)) as {
         model?: string;
         answers?: Record<string, unknown>;
         usage?: { input_tokens?: number; output_tokens?: number };
       };
+      if (!record(json) || typeof json.model !== "string" || !json.model
+        || (!/^(jev-latest|jev-preview)$/.test(model) && json.model !== model)
+        || !record(json.answers) || !record(json.usage)
+        || !tokenCount(json.usage.input_tokens) || !tokenCount(json.usage.output_tokens)) return null;
       const answers: Record<string, Answer> = {};
       for (const id of questionIds) {
         const a = json.answers?.[id];
-        if (!isAnswer(a)) {
+        if (!validAnswer(a, req.questions[id]!)) {
           agentError("typesafe_failed", { purpose: req.purpose, kind: "shape", missing: id, ms: Date.now() - started });
           return null;
         }
@@ -219,7 +258,7 @@ export async function systemOne(req: SystemOneRequest): Promise<SystemOneResult 
       };
     } catch (err) {
       if (req.signal?.aborted) return null; // the caller gave up; nothing to log
-      const network = !(err instanceof Error && /timed out/.test(err.message));
+      const network = !controller.signal.aborted;
       if (network && attempt < retries) {
         attempt++;
         continue;

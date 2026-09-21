@@ -675,6 +675,28 @@ export async function planCellEditsToXlsx(
   const pkg = new PackageEditor(source)
   const touchedEntries = new Set<string>()
 
+  // Reserve the styles relationship before allocating added-sheet IDs. Blank
+  // workbooks may not contain styles.xml; allocating both from the old rels
+  // would otherwise give the stylesheet and first added sheet the same rId.
+  // Cell-edit styles and CF need the editor, and
+  // 'set-col-style' structural ops (select-all/full-column formatting, alpha
+  // ledger r124) intern their column xf during the structural pass below.
+  let stylesheet: StylesheetEditor | null = null
+  const stylesPath = 'xl/styles.xml'
+  if (
+    edits.some((edit) => edit.style !== undefined) ||
+    cfStates.length > 0 ||
+    structuralOps.some(({ ops }) => ops.some((op) => op.kind === 'set-col-style'))
+  ) {
+    if (!(await pkg.has(stylesPath))) await addDefaultStylesheet(pkg, touchedEntries)
+    stylesheet = new StylesheetEditor(await pkg.readText(stylesPath))
+  }
+  const resolveColStyle =
+    stylesheet === null
+      ? undefined
+      : (baseXfIndex: number, delta: WorkbookStyleEdit) =>
+          stylesheet!.resolveStyle(baseXfIndex, delta)
+
   // Added sheets get their parts up front so cell edits, structural ops, and
   // the cross-sheet scan below all see them. Duplicates are seeded from the
   // source sheet's part; their journaled edits replay on top like any other.
@@ -757,25 +779,6 @@ export async function planCellEditsToXlsx(
     }
     await applyPivotLayoutExpansions(pkg, resolvedUpdates, touchedEntries)
   }
-
-  // Stylesheet editor created up front: cell-edit styles and CF need it, and
-  // 'set-col-style' structural ops (select-all/full-column formatting, alpha
-  // ledger r124) intern their column xf during the structural pass below.
-  let stylesheet: StylesheetEditor | null = null
-  const stylesPath = 'xl/styles.xml'
-  if (
-    edits.some((edit) => edit.style !== undefined) ||
-    cfStates.length > 0 ||
-    structuralOps.some(({ ops }) => ops.some((op) => op.kind === 'set-col-style'))
-  ) {
-    if (!(await pkg.has(stylesPath))) await addDefaultStylesheet(pkg, touchedEntries)
-    stylesheet = new StylesheetEditor(await pkg.readText(stylesPath))
-  }
-  const resolveColStyle =
-    stylesheet === null
-      ? undefined
-      : (baseXfIndex: number, delta: WorkbookStyleEdit) =>
-          stylesheet!.resolveStyle(baseXfIndex, delta)
 
   // Structural operations replay first: journaled cell edits are already in
   // the post-operation coordinate space. Qualified references from other

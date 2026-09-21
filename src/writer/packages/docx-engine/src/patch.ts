@@ -1,3 +1,5 @@
+import { mergeStylesXml, type StyleUpsert } from './style-upsert'
+export type { StyleUpsert } from './style-upsert'
 import JSZip from 'jszip'
 import {
   applyImageWrap,
@@ -208,74 +210,6 @@ const HF_REL_TYPE = {
   header: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header',
   footer: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer',
 } as const
-/** Model for creating/modifying a style (used by styleUpserts) */
-export interface StyleUpsert {
-  styleId: string
-  type: 'paragraph' | 'character'
-  name: string
-  basedOn?: string
-  rPr?: {
-    bold?: boolean
-    italic?: boolean
-    underline?: boolean
-    strike?: boolean
-    /** hex without '#' */
-    color?: string
-    sizeHalfPoints?: number
-    font?: string
-  }
-  pPr?: {
-    align?: 'left' | 'center' | 'right' | 'justify'
-    spaceBeforeTwips?: number
-    spaceAfterTwips?: number
-    /** line spacing as a multiple (auto) */
-    lineSpacing?: number
-  }
-}
-
-function buildStyleXml(up: StyleUpsert): string {
-  const rPr: string[] = []
-  if (up.rPr?.font) {
-    const f = escapeXmlAttr(up.rPr.font)
-    rPr.push(`<w:rFonts w:ascii="${f}" w:hAnsi="${f}" w:eastAsia="${f}"/>`)
-  }
-  if (up.rPr?.bold) rPr.push('<w:b/>')
-  if (up.rPr?.italic) rPr.push('<w:i/>')
-  if (up.rPr?.strike) rPr.push('<w:strike/>')
-  if (up.rPr?.color) rPr.push(`<w:color w:val="${escapeXmlAttr(up.rPr.color)}"/>`)
-  if (up.rPr?.sizeHalfPoints) {
-    rPr.push(`<w:sz w:val="${up.rPr.sizeHalfPoints}"/><w:szCs w:val="${up.rPr.sizeHalfPoints}"/>`)
-  }
-  if (up.rPr?.underline) rPr.push('<w:u w:val="single"/>')
-  const pPr: string[] = []
-  const sp = up.pPr
-  if (
-    sp &&
-    (sp.spaceBeforeTwips !== undefined ||
-      sp.spaceAfterTwips !== undefined ||
-      sp.lineSpacing !== undefined)
-  ) {
-    const attrs = [
-      sp.spaceBeforeTwips !== undefined ? ` w:before="${sp.spaceBeforeTwips}"` : '',
-      sp.spaceAfterTwips !== undefined ? ` w:after="${sp.spaceAfterTwips}"` : '',
-      sp.lineSpacing !== undefined
-        ? ` w:line="${Math.round(sp.lineSpacing * 240)}" w:lineRule="auto"`
-        : '',
-    ].join('')
-    pPr.push(`<w:spacing${attrs}/>`)
-  }
-  if (sp?.align) pPr.push(`<w:jc w:val="${sp.align === 'justify' ? 'both' : sp.align}"/>`)
-  return (
-    `<w:style w:type="${up.type}" w:styleId="${escapeXmlAttr(up.styleId)}" w:customStyle="1">` +
-    `<w:name w:val="${escapeXmlAttr(up.name)}"/>` +
-    (up.basedOn ? `<w:basedOn w:val="${escapeXmlAttr(up.basedOn)}"/>` : '') +
-    '<w:qFormat/>' +
-    (pPr.length > 0 ? `<w:pPr>${pPr.join('')}</w:pPr>` : '') +
-    (rPr.length > 0 ? `<w:rPr>${rPr.join('')}</w:rPr>` : '') +
-    '</w:style>'
-  )
-}
-
 const NUMBERING_REL_TYPE =
   'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering'
 const COMMENTS_EXT_REL_TYPE =
@@ -793,15 +727,7 @@ export async function saveDocx(
       ? await file.async('string')
       : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' +
         '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>'
-    for (const up of options.styleUpserts ?? []) {
-      const styleXml = buildStyleXml(up)
-      const existing = new RegExp(
-        `<w:style [^>]*w:styleId="${up.styleId.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}"[\\s\\S]*?</w:style>`,
-      )
-      xml = existing.test(xml)
-        ? xml.replace(existing, styleXml)
-        : xml.replace('</w:styles>', `${styleXml}</w:styles>`)
-    }
+    xml = mergeStylesXml(xml, options.styleUpserts ?? [])
     stylesXmlOut = xml
   }
 

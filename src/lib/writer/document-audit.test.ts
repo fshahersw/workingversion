@@ -132,3 +132,42 @@ test("findings are capped", () => {
   const issues = auditDocumentModel(model(blocks));
   assert.ok(issues.length <= 12);
 });
+
+test("requested colors, bare headings, table widths and spacing remain advisory during automatic verification", () => {
+  const m = model([
+    heading(0, "Title"), heading(1, "Test facts", 1),
+    para(2, body, { runs: [run(body, { color: "ff0000" })] }),
+    { ...para(3, "Requested table"), type: "table", tableWidthPx: 900 },
+    para(4, ""), para(5, ""), heading(6, "Requested outline heading"),
+  ], { section: { ...LETTER, pageWidth: 9000, pageHeight: 13000 } });
+  const before = structuredClone(m);
+  const findings = auditDocumentModel(m);
+  assert.ok(findings.some(i => i.startsWith("Colored body text")));
+  assert.ok(findings.some(i => /no body text beneath/.test(i)));
+  assert.ok(findings.some(i => /wider than the text area/.test(i)));
+  assert.deepEqual(auditDocumentModel(m, { structuralOnly: true }), []);
+  assert.deepEqual(m, before, "audit never mutates requested formatting or structure");
+  assert.match(formatDocAudit(findings), /Style findings are advisory/);
+  assert.doesNotMatch(formatDocAudit(findings), /Fix these with the document tools now/);
+});
+
+test("automatic verification reports new broken references/geometry and ignores pre-existing defects even when blocks move", () => {
+  const before = model([para(0, body, { noteRefs: [{ kind: "footnote", id: "already-missing", num: 1 }] })]);
+  const moved = model([heading(0, "New requested title"), para(1, body, { noteRefs: [{ kind: "footnote", id: "already-missing", num: 1 }] })]);
+  assert.deepEqual(auditDocumentModel(moved, { structuralOnly: true, baseline: before }), []);
+  const broken = structuredClone(moved);
+  broken.blocks[1]!.noteRefs.push({ kind: "footnote", id: "newly-missing", num: 2 });
+  const issues = auditDocumentModel(broken, { structuralOnly: true, baseline: before });
+  assert.equal(issues.length, 1); assert.match(issues[0]!, /Dangling footnote/); assert.match(issues[0]!, /never invent/);
+  const invalid = model([para(0, body)], { section: { ...LETTER, marginLeft: LETTER.pageWidth } });
+  assert.ok(auditDocumentModel(invalid, { structuralOnly: true, baseline: before }).some(i => /Invalid page geometry/.test(i)));
+  assert.deepEqual(auditDocumentModel(invalid, { structuralOnly: true, baseline: invalid }), []);
+});
+
+test("newly detached note content is retained and not auto-deleted to satisfy an audit", () => {
+  const before = model([para(0, body, { noteRefs: [{ kind: "footnote", id: "n1", num: 1 }] })], { footnotes: [{ id: "n1", text: "Known source text." }] });
+  const after = structuredClone(before); after.blocks[0]!.noteRefs = [];
+  const issues = auditDocumentModel(after, { structuralOnly: true, baseline: before });
+  assert.equal(issues.length, 1); assert.match(issues[0]!, /Preserve the note's text/);
+  assert.deepEqual(after.footnotes, before.footnotes);
+});

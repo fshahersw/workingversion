@@ -21,6 +21,7 @@ import type {
 import { PLATFORM_TOOL_CONTRAST, withToolContrast } from "@/lib/agents/tool-contrast";
 
 import { askClarification, type ClarifyQuestion } from "./clarify-card";
+import { deliverOfficeFile } from './file-delivery';
 import {
   dataUrlOf,
   describeImage,
@@ -191,12 +192,14 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
       name: "fetch_page",
       readOnly: true,
       description:
-        "Read a public web page in full (article, opinion, agency rule, court page) from a URL, typically one web_search surfaced. Reading the page beats reasoning from a snippet. Returns title and extracted text.",
+        "Read a public source URL as bounded text excerpts. Prefer primary sources (official filings, company investor relations, agency/court pages). Returns title, source URL, revision and continuation offset; continue only when the needed data is beyond this excerpt. A failed read is not source evidence. Never treat a partial excerpt as a complete table or infer missing values.",
       inputSchema: {
         type: "object",
         properties: {
           url: { type: "string", description: "http(s) URL" },
-          maxChars: { type: "integer", description: "Text limit, default 12000, max 60000" },
+          maxChars: { type: "integer", minimum: 1000, maximum: 24000, description: "Excerpt limit, default 8000; complete lines are preserved." },
+          startChar: { type: "integer", minimum: 0, description: "Continuation offset from the previous result, default 0." },
+          revision: { type: "string", description: "Exact revision from the previous result; required for continuation so changing sources cannot silently mix." },
         },
         required: ["url"],
       },
@@ -245,7 +248,7 @@ function toolDefs(app: PlatformApp, withTemplates: boolean): AgentToolDef[] {
       name: "load_firm_guide",
       readOnly: true,
       description:
-        "Load a Seeger Weiss playbook: firm conventions for a kind of deliverable (citation form, table of authorities, deposition summary, damages tables, MDL status deck, case timeline, firm style). Call with no name to list the guides. Load the relevant guide before drafting or reformatting firm work product.",
+        "Load a Seeger Weiss playbook. For complex creation/editing, native-office-workflow covers planning, bounded edits, verification, recovery and faithful export. Other guides cover citation form, table of authorities, deposition summary, damages tables, MDL status decks, case timelines and firm style. Call with no name to list guides; load only those relevant to the task.",
       inputSchema: {
         type: "object",
         properties: {
@@ -482,16 +485,17 @@ const SYSTEM_PROMPT = `## Platform tools
 - search_firm_knowledge: the firm's knowledge base (matter documents, depositions, expert reports). Use it when the user refers to case facts or prior work; cite document and page.
 - search_library: the user's own Office documents on this platform, with open links.
 - fetch_page: read a source web_search surfaced before quoting it.
-- load_firm_guide: firm conventions for the deliverable at hand; load the matching guide before drafting firm work product.
-- list_templates / apply_template / save_template: start from a firm or saved template when the user wants a standard deliverable; apply it first, then fill the [Bracketed] placeholders from the user's facts.
+- load_firm_guide: load native-office-workflow once for complex multi-stage creation/editing, plus the relevant deliverable guide; do not reload unchanged guides after every edit.
+- Template tools, when supplied: start from a firm or saved template for a standard deliverable; apply it first, then fill the [Bracketed] placeholders from the user's facts. Save a reusable template only when save_template is supplied.
 - ask_clarification: one card, only when a real ambiguity would change the work; otherwise proceed and state your assumption.
-- create_document: a separate Library document (Word, Excel, PowerPoint, PDF) from Markdown; the current document is untouched.`;
+- create_document: create a separate document using exactly the formats and content syntax in the supplied tool schema; the current document is untouched. Editor-specific worksheet exports may be values-only. Use the editor Save/Download controls for its complete native file.`;
 
 export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
   const exclude = new Set(options.exclude ?? []);
   // Contrastive "use for / not for" on every platform tool (src/lib/agents/tool-contrast.ts).
   const tools = withToolContrast(
-    toolDefs(options.app, !!options.templates).filter((t) => !exclude.has(t.name)),
+    toolDefs(options.app, !!options.templates).filter((t) =>
+      !exclude.has(t.name) && (t.name !== "save_template" || !!options.templates?.capture)),
     PLATFORM_TOOL_CONTRAST,
   );
   let taskScope = crypto.randomUUID() as string;
@@ -587,7 +591,7 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         const { officeFetchPageFn } = await import("@/lib/office/tools.functions");
         try {
           const r = await officeFetchPageFn({
-            data: { url, maxChars: Number(input["maxChars"]) || 12_000 },
+            data: { url, maxChars: Number(input["maxChars"]) || 8_000, startChar: input['startChar'] === undefined ? 0 : Number(input['startChar']), ...(typeof input['revision'] === 'string' ? { revision: input['revision'] } : {}) },
           });
           return { output: r.text, mutated: false, summary: `Read ${new URL(url).hostname}` };
         } catch (error) {
@@ -811,14 +815,9 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
           });
           if (r.kind === "pdf") {
             const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
-            const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = r.name;
-            a.click();
-            setTimeout(() => URL.revokeObjectURL(url), 30_000);
+            deliverOfficeFile(new Blob([bytes], { type: 'application/pdf' }), r.name);
             return {
-              output: `Created ${r.name} (${r.size} bytes); the browser downloaded it.`,
+              output: `Created ${r.name} (${r.size} bytes); the file is ready in Prepared downloads.`,
               mutated: false,
               summary: `Created ${r.name}`,
             };

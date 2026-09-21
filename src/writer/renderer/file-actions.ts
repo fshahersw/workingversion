@@ -827,16 +827,17 @@ async function saveOnce(
   try {
     // a mid-stream save would serialize (and write) a truncated document
     const generation = docGeneration
+    const saveOwner = window.desktop
     await waitForFullContent()
     // the wait ended because another document replaced this one: nothing to write
-    if (docGeneration !== generation) return false
+    if (docGeneration !== generation || window.desktop !== saveOwner) return false
     // flush pending in-place table cell / textbox edits into the PM doc first
     window.dispatchEvent(new Event('ai-docs-commit-tables'))
     // identity snapshot: detects edits that arrive while the save is in flight
     const docSnapshot = editor.state.doc
     const selectionPos = editor.state.selection.from
     const bytes = await buildDocBytes(ctx)
-    if (!bytes) return false
+    if (!bytes || docGeneration !== generation || window.desktop !== saveOwner) return false
     const buffer = bytes.buffer.slice(
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength,
@@ -852,8 +853,8 @@ async function saveOnce(
       // Save As keeps the dialog; a new document's first save lands silently in the default
       // folder. The source path identifies the desired password state to snapshot.
       const result = saveAs
-        ? await window.desktop.saveDocxAs(autoName ?? doc.fileName, buffer, doc.filePath)
-        : await window.desktop.saveDocxNew(newDocName ?? autoName ?? doc.fileName, buffer)
+        ? await saveOwner.saveDocxAs(autoName ?? doc.fileName, buffer, doc.filePath)
+        : await saveOwner.saveDocxNew(newDocName ?? autoName ?? doc.fileName, buffer)
       if (!result.ok) {
         if (result.error) {
           ctx.setStatus(t('appSaveFailed', { error: result.error }))
@@ -865,7 +866,7 @@ async function saveOnce(
       passwordIntentPending = result.passwordIntentPending === true
       if (!doc.filePath) pathlessDocSavedPath = savedPath
     } else {
-      const result = await window.desktop.saveDocx(savedPath, buffer, auto)
+      const result = await saveOwner.saveDocx(savedPath, buffer, auto)
       if (!result.ok) {
         // external-modified: the main process already prompted (or the autosave
         // deferred to a manual save) — stay dirty, no second dialog/error banner
@@ -878,7 +879,9 @@ async function saveOnce(
       passwordIntentPending = result.passwordIntentPending === true
     }
     // parse before the identity check: a document opened during this await must not be rewritten
+    if (docGeneration !== generation || window.desktop !== saveOwner) return false
     const reparsed = await parseDocx(bytes)
+    if (docGeneration !== generation || window.desktop !== saveOwner) return false
     if (editor.state.doc !== docSnapshot || passwordIntentPending) {
       // The user kept editing, opened another document or chose another
       // password after the main process captured this save. Keep the live state

@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "auditedCommit": "f06e148fdda93553718621ab3634ce53548d7bfe",
+  "auditDate": "2026-09-21",
+  "scope": "Active Research only. Legacy Frontier observations excluded.",
+  "classification": "Historical offline counterexamples of incorrect behavior, not passing product correctness tests or live performance measurements.",
+  "method": "Actual modules with mocked transports and isolated actual AST functions/classes. Compact selected observations from the read-only audit; machine-specific launchers and raw logs deliberately omitted.",
+  "applicationCodeChanged": false,
+  "awsValidated": false,
+  "liveProviderCalls": 0,
+  "reproductionNetworkCalls": 0,
+  "existingTests": {
+    "passed": 249,
+    "failed": 0,
+    "files": 36,
+    "command": "bun test src/lib/agents src/lib/research-intent.test.ts src/lib/fact-check.test.ts",
+    "caveat": "Recorded at audited commit; not rerun for this documentation handoff. Four initial extraction failures were resolved by adding Python to PATH without application changes."
+  },
+  "observations": {
+    "incompleteToolStreams": [
+      {
+        "case": "max_tokens plus unclosed invalid arguments",
+        "dispatchedCalls": 1,
+        "firstStopReason": "max_tokens",
+        "argumentShape": "empty object after invalid JSON"
+      },
+      {
+        "case": "max_tokens plus closed valid arguments",
+        "dispatchedCalls": 1,
+        "firstStopReason": "max_tokens",
+        "argumentShape": "valid synthetic object"
+      },
+      {
+        "case": "EOF without message stop or block stop",
+        "dispatchedCalls": 1,
+        "firstStopReason": "end_turn",
+        "argumentShape": "valid synthetic object"
+      }
+    ],
+    "contradictoryRoute": {
+      "effortChoice": "conversational",
+      "confidence": 0.95,
+      "needsCurrentInfo": 0.99,
+      "wantsDeliverable": 0.99,
+      "decision": {
+        "confidence": 0.95,
+        "wantsDeliverable": true,
+        "needsCurrentInfo": true,
+        "mode": "conversational",
+        "reason": "conversational (jev)"
+      }
+    },
+    "truncatedRequest": {
+      "fullChars": 3063,
+      "retainedChars": 3000,
+      "substantiveSuffixRetained": false
+    },
+    "sourceRefresh": {
+      "visibleContentRetainedOld": true,
+      "visibleDateRetainedOld": true,
+      "verificationShadowHasNew": true
+    },
+    "isoDateExtractionCount": 0,
+    "wrongSourceAmountReportedVerified": true,
+    "notAddressedCountedSupported": {
+      "checked": 1,
+      "supported": 1
+    },
+    "caseSensitiveUrlCacheCollision": true
+  },
+  "repositoryConfigurationOnly": {
+    "ResearchEffortRouter": "typesafe",
+    "ResearchTopicShift": "typesafe",
+    "TypeSafeModel": "jev-1.13.0",
+    "TypeSafeTimeoutMs": "800",
+    "hostedDefaultModelsWithoutExplicitOverrides": {
+      "research": "us.anthropic.claude-sonnet-5",
+      "fastLoop": "us.anthropic.claude-sonnet-5",
+      "fastWriter": "us.anthropic.claude-sonnet-5"
+    },
+    "deployedValuesVerified": false
+  },
+  "provenance": {
+    "sourceReview": "Research orchestration read-only review, 2026-09-21",
+    "sourceReviewRecordedSha256": "3b8bbc7b80ba3253cf0f3fbe5e8cb29d763a9ae2daffafb631beb2905b117a8c",
+    "originalArtifacts": [
+      "results.json",
+      "probe-results.json",
+      "research-audit-probes-results.json",
+      "cache-trace-result.json",
+      "validation-manifest.json"
+    ],
+    "note": "Names identify original audit records; they are not required files or runnable paths in this portable bundle."
+  }
+}

@@ -19,10 +19,12 @@ import {
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { loadBdaConfig } from "@/lib/config.server";
 import { bucketName, s3 } from "@/lib/data/s3.server";
+import { localSyntheticEnabled } from "../local-development";
 
 let _client: BedrockDataAutomationRuntimeClient | null = null;
 let _clientRegion = "";
 function client(): BedrockDataAutomationRuntimeClient {
+  if (localSyntheticEnabled()) throw new Error("AWS document extraction is unavailable in the local synthetic workspace.");
   const { region } = loadBdaConfig();
   if (!_client || _clientRegion !== region) {
     _client = new BedrockDataAutomationRuntimeClient({ region });

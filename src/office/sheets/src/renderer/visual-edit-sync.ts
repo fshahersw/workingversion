@@ -4,7 +4,8 @@
  * the App component passes a VisualSyncContext built fresh per call so refs
  * and state never go stale.
  */
-import { parseRange } from '../domain/cell-address'
+import { parseRange, rangeCellCount } from '../domain/cell-address'
+import { numericChartCache } from '../domain/chart-cache'
 import {
   applyChartStateEdit,
   refIntersects,
@@ -16,6 +17,7 @@ import {
 import type { InMemoryWorkbookAdapter } from '../domain/in-memory-workbook'
 import type { WorkbookVisualObject } from '../shared/desktop-api'
 import { recordChartEdit, recordVisualEdit, removeVisualAdd, updateVisualAdd } from './edit-journal'
+import { isWorkbookSaveCommitting } from './save-commit-lock'
 import { t } from './i18n/locale'
 import {
   captureVisualJournal,
@@ -49,6 +51,14 @@ export interface VisualSyncContext {
   refreshDemoVisuals: () => void
 }
 
+const syncRuns = new WeakMap<object, { generation: number; running: boolean }>()
+function syncRun(ctx: VisualSyncContext) {
+  const key = ctx.chartSyncRef.current
+  let run = syncRuns.get(key)
+  if (!run) { run = { generation: 0, running: false }; syncRuns.set(key, run) }
+  return run
+}
+
 /// Live chart↔data sync: cell edits touching a series' `c:f` reference
 /// refresh that series' cache after a debounce. Silent by design — no undo
 /// step (undoing the cell edit re-syncs the chart back), no message.
@@ -57,6 +67,12 @@ export function queueChartDataSync(
   sheetId: string,
   bounds: CellBounds,
 ): void {
+  syncRun(ctx).generation++
+  mergeDirty(ctx, sheetId, bounds)
+  scheduleChartSync(ctx)
+}
+
+function mergeDirty(ctx: VisualSyncContext, sheetId: string, bounds: CellBounds): void {
   const previous = ctx.chartSyncRef.current.dirty.get(sheetId)
   ctx.chartSyncRef.current.dirty.set(
     sheetId,
@@ -69,6 +85,9 @@ export function queueChartDataSync(
         }
       : bounds,
   )
+}
+
+function scheduleChartSync(ctx: VisualSyncContext): void {
   if (ctx.chartSyncRef.current.timer) clearTimeout(ctx.chartSyncRef.current.timer)
   ctx.chartSyncRef.current.timer = setTimeout(() => {
     ctx.chartSyncRef.current.timer = null
@@ -77,6 +96,8 @@ export function queueChartDataSync(
 }
 
 async function runChartDataSync(ctx: VisualSyncContext): Promise<void> {
+  const run = syncRun(ctx)
+  if (run.running) return
   const runtime = ctx.univerRef.current
   const workbook = runtime?.univerAPI.getActiveWorkbook()
   if (!runtime || !workbook) return
@@ -84,10 +105,27 @@ async function runChartDataSync(ctx: VisualSyncContext): Promise<void> {
   ctx.chartSyncRef.current.dirty.clear()
   if (dirty.size === 0) return
   const state = ctx.lazyWorkbookRef.current
+  const adapter = ctx.adapterRef.current
+  const generation = run.generation
+  const sameSession = () => ctx.univerRef.current === runtime && ctx.lazyWorkbookRef.current === state &&
+    ctx.adapterRef.current === adapter && runtime.univerAPI.getActiveWorkbook()?.getId() === workbook.getId()
+  const chartEditsBefore = state ? new Map(state.editJournal.chartEdits) : null
+  const visualEditsBefore = state ? new Map(state.editJournal.visualEdits) : null
+  const additionsBefore = state?.editJournal.visualAdds.slice()
+  const sameEntries = <K, V>(before: Map<K, V>, after: Map<K, V>) =>
+    before.size === after.size && [...before].every(([key, value]) => after.get(key) === value)
+  const stillCurrent = () => sameSession() && !isWorkbookSaveCommitting(state) && run.generation === generation && (!state || (
+    sameEntries(chartEditsBefore!, state.editJournal.chartEdits) &&
+    sameEntries(visualEditsBefore!, state.editJournal.visualEdits) &&
+    additionsBefore!.length === state.editJournal.visualAdds.length &&
+    additionsBefore!.every((visual, index) => state.editJournal.visualAdds[index] === visual)))
+  run.running = true
+  try {
   const sheetNames = new Map(
     workbook.getSheets().map((sheet) => [sheet.getSheetId(), sheet.getSheetName()] as const),
   )
   const sheetIdByName = new Map([...sheetNames].map(([id, name]) => [name, id]))
+  let cellsRead = 0
   const touched = (ref: string | undefined): boolean =>
     ref !== undefined &&
     [...dirty].some(([sheetId, bounds]) => {
@@ -101,6 +139,10 @@ async function runChartDataSync(ctx: VisualSyncContext): Promise<void> {
     const sheetId = split ? sheetIdByName.get(split.sheetName) : undefined
     if (!split || sheetId === undefined) return null
     try {
+      const bounds = parseRange(split.range)
+      const count = rangeCellCount(bounds)
+      if ((bounds.startRow !== bounds.endRow && bounds.startColumn !== bounds.endColumn) || count > 1000 || cellsRead + count > 100_000) return null
+      cellsRead += count
       if (state) return (await readChartGridValues(state, runtime, sheetId, split.range)).flat()
       const target = workbook.getSheetBySheetId(sheetId)
       if (!target) return null
@@ -137,7 +179,9 @@ async function runChartDataSync(ctx: VisualSyncContext): Promise<void> {
         })),
       )
   let changed = false
+  const patches: { editKey: string; visualId: string; edit: ChartEditData }[] = []
   for (const { editKey, visualId, chart } of charts) {
+    if (chart.series.length > 24) continue
     const seriesEdits: NonNullable<ChartEditData['series']>[number][] = []
     // A cache-less file vector (no strCache/numCache) reads back as [] —
     // there is nothing to refresh, and "refreshing" it would bake grid
@@ -158,21 +202,20 @@ async function runChartDataSync(ctx: VisualSyncContext): Promise<void> {
       if (wantValues && series.valuesRef && series.values.length > 0) {
         const vector = await readVector(series.valuesRef)
         if (vector) {
-          const values = vector.map((value) => {
-            const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim())
-            return Number.isFinite(numeric) ? numeric : 0
-          })
-          if (JSON.stringify(values) !== JSON.stringify(series.values)) {
-            entry.values = values
+          const cache = numericChartCache(vector)
+          if (cache && (JSON.stringify(cache.values) !== JSON.stringify(series.values) ||
+            JSON.stringify(cache.blanks) !== JSON.stringify(series.blanks ?? []))) {
+            entry.values = cache.values
+            entry.blanks = cache.blanks
             entry.valuesRef = series.valuesRef
           }
         }
       }
-      if (wantCategories && series.categoriesRef && series.categories.length > 0) {
+      if (wantCategories && series.categoriesRef && series.categories.length > 0 && !series.categoryGroups?.length) {
         const vector = await readVector(series.categoriesRef)
         if (vector) {
-          const categories = vector.map((value) => String(value ?? '').slice(0, 255))
-          if (JSON.stringify(categories) !== JSON.stringify(series.categories)) {
+          const categories = vector.map((value) => String(value ?? ''))
+          if (categories.every((value) => value.length <= 1024) && JSON.stringify(categories) !== JSON.stringify(series.categories)) {
             entry.categories = categories
             entry.categoriesRef = series.categoriesRef
           }
@@ -185,7 +228,13 @@ async function runChartDataSync(ctx: VisualSyncContext): Promise<void> {
       continue
     }
     changed = true
-    const edit: ChartEditData = { series: seriesEdits }
+    patches.push({ editKey, visualId, edit: { series: seriesEdits } })
+  }
+  if (!stillCurrent()) {
+    if (sameSession()) for (const [sheetId, bounds] of dirty) mergeDirty(ctx, sheetId, bounds)
+    return
+  }
+  for (const { editKey, visualId, edit } of patches) {
     if (!state) {
       const before = ctx.adapterRef.current.findVisual(visualId)
       if (before) {
@@ -211,6 +260,12 @@ async function runChartDataSync(ctx: VisualSyncContext): Promise<void> {
   if (!changed) return
   if (state) ctx.refreshLazyVisuals(state)
   else ctx.refreshDemoVisuals()
+  } catch {
+    if (sameSession()) ctx.setMessage('Chart refresh is unavailable. Verify the source values before relying on the chart.')
+  } finally {
+    run.running = false
+    if (ctx.chartSyncRef.current.dirty.size) scheduleChartSync(ctx)
+  }
 }
 
 /// The silent chart↔data sync records no undo step, so an undo/redo that
@@ -274,6 +329,7 @@ function applyDemoVisualChange(
 
 /** The chartEditRef implementation. */
 export function applyChartEdit(ctx: VisualSyncContext, editKey: string, edit: ChartEditData): void {
+  if (isWorkbookSaveCommitting(ctx.lazyWorkbookRef.current)) return
   const state = ctx.lazyWorkbookRef.current
   const runtime = ctx.univerRef.current
   if (!runtime) return
@@ -359,6 +415,7 @@ export function applyShapeEdit(
   changes: ShapeEditChanges,
 ): void {
   const state = ctx.lazyWorkbookRef.current
+  if (isWorkbookSaveCommitting(state)) return
   const runtime = ctx.univerRef.current
   if (!runtime) return
   if (!state) {

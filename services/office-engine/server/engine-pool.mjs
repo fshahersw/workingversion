@@ -187,7 +187,52 @@ export class EnginePool {
 
   /** Save the current document bytes as a new revision through the platform API. */
   async persist(record, bytes, operationId) {
-    const res = await fetch(`${this.platformUrl}/api/public/office/engine/docs/${record.docId}/content`, {
+    const url = `${this.platformUrl}/api/public/office/engine/docs/${record.docId}/content`;
+    // A transport error can arrive after the platform committed the revision.
+    // Retry only that ambiguity, once, with the exact same operation and body.
+    // A fresh operation ID would turn a successful save into a version conflict.
+    const platformRequest = async init => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let response;
+        try {
+          response = await fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(60_000) });
+        } catch (error) {
+          if (attempt === 0 && (error instanceof TypeError || error?.name === 'TimeoutError')) continue;
+          throw error;
+        }
+        if (attempt === 0 && [502, 503, 504].includes(response.status)) {
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
+        let result;
+        try { result = await response.json(); }
+        catch (error) {
+          if (response.ok && attempt === 0 && (error instanceof TypeError || error?.name === 'TimeoutError')) continue;
+          reject(response.ok ? 502 : response.status, 'The platform returned an invalid save response.');
+        }
+        if (!response.ok) reject(response.status >= 400 && response.status < 500 ? response.status : 502,
+          result?.error || 'The platform could not store the revision.');
+        return result;
+      }
+    };
+    const confirmedRevision = result => {
+      if (!result || !Number.isSafeInteger(result.version) || result.version !== record.version + 1)
+        reject(502, 'The platform did not confirm the expected saved revision. Reopen before continuing.');
+      return result;
+    };
+    if (bytes.byteLength > 3 * 1024 * 1024) {
+      const input = { expectedVersion: record.version, operationId, size: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex') };
+      const control = method => platformRequest({method,
+        headers:{authorization:`Bearer ${record.token}`,'content-type':'application/json'}, body:JSON.stringify(input)});
+      const grant = await control('POST');
+      // Storage receives only native bytes and the checksum, never the engine JWT.
+      const uploaded = await fetch(grant.url,{method:'PUT',headers:{'x-amz-checksum-sha256':grant.checksum},
+        body:bytes,redirect:'error',signal:AbortSignal.timeout(120_000)});
+      if (!uploaded.ok) reject(502,'The document upload failed. Retry Save.');
+      return confirmedRevision(await control('PUT'));
+    }
+    return confirmedRevision(await platformRequest({
       method: "PUT",
       headers: {
         authorization: `Bearer ${record.token}`,
@@ -196,11 +241,7 @@ export class EnginePool {
         "idempotency-key": operationId,
       },
       body: bytes,
-      signal: AbortSignal.timeout(60_000),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) reject(res.status === 409 ? 409 : 502, body.error || "The platform could not store the revision.");
-    return body;
+    }));
   }
 
   async rpc(actor, sessionId, { channel, args, sequence, operationId }) {

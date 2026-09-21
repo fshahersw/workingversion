@@ -31,6 +31,7 @@ import {
   applyChartStateEdit,
   buildChartVisual,
   CHART_EDIT_TYPES,
+  chartValueAxisFormatError,
   type ChartGridValue,
   type ChartStateEdit,
   type SheetVisual,
@@ -693,6 +694,11 @@ function applyLayoutOp(snapshot: WorkbookSnapshot, op: LayoutOperation): void {
       )
     }
     const chartVisual = visual
+    if (op.valueAxisFormats) {
+      const effective = applyChartStateEdit(chartVisual.chart, op.chartType ? { chartType: op.chartType } : undefined)
+      const error = chartValueAxisFormatError(effective, op.valueAxisFormats)
+      if (error) throw new WorkbookConflictError(error)
+    }
     if (
       op.axisTitles !== undefined &&
       chartVisual.chart.chartTypes.some((type) => /pie|doughnut/i.test(type))
@@ -746,6 +752,7 @@ function applyLayoutOp(snapshot: WorkbookSnapshot, op: LayoutOperation): void {
       ...(op.dataLabels === undefined ? {} : { dataLabels: op.dataLabels }),
       ...(op.grouping === undefined ? {} : { grouping: op.grouping }),
       ...(op.axisTitles === undefined ? {} : { axisTitles: op.axisTitles }),
+      ...(op.valueAxisFormats === undefined ? {} : { valueAxisFormats: op.valueAxisFormats }),
       ...(series.length > 0 ? { series } : {}),
     }
     const chart = applyChartStateEdit(chartVisual.chart, edit)

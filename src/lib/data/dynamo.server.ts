@@ -13,6 +13,7 @@ import {
   type QueryCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { loadDynamoConfig } from "../config.server";
+import { localServiceEndpoint } from "../local-development";
 
 let _doc: DynamoDBDocumentClient | undefined;
 let _docRegion = "";
@@ -23,12 +24,14 @@ export function tableName(): string {
 
 export function doc(): DynamoDBDocumentClient {
   const { region } = loadDynamoConfig();
-  if (!_doc || _docRegion !== region) {
-    const base = new DynamoDBClient({ region });
+  const endpoint = localServiceEndpoint("dynamo");
+  const cacheKey = `${region}:${endpoint ?? "aws"}`;
+  if (!_doc || _docRegion !== cacheKey) {
+    const base = new DynamoDBClient({ region, ...(endpoint ? { endpoint, credentials: { accessKeyId: "localsynthetic", secretAccessKey: "localsynthetic" } } : {}) });
     _doc = DynamoDBDocumentClient.from(base, {
       marshallOptions: { removeUndefinedValues: true },
     });
-    _docRegion = region;
+    _docRegion = cacheKey;
   }
   return _doc;
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { choice, noul, noulAnswer, choiceAnswer, systemOne, TYPESAFE_DEFAULT_MODEL, typesafeConfigured } from "./typesafe.server.ts";
+import { choice, noul, score, validAnswer, noulAnswer, choiceAnswer, systemOne, TYPESAFE_DEFAULT_MODEL, typesafeConfigured } from "./typesafe.server.ts";
 
 const okBody = (answers: Record<string, unknown>, model = "jev-1.13.0") =>
   JSON.stringify({ model, answers, usage: { input_tokens: 120, output_tokens: 12 } });
@@ -143,3 +143,35 @@ test("a response missing a question or with the wrong shape is rejected whole", 
     });
     assert.equal(wrong, null);
   }));
+
+test("finite typed validation rejects wrong heads, candidates, distributions and score bounds", () => {
+  for (const n of [NaN, Infinity, -0.1, 1.1]) assert.equal(validAnswer({ type: "noul", noul: n }, noul("?")), false);
+  assert.equal(validAnswer({ type: "noul", noul: 0.5 }, choice("?", { a: null, b: null })), false);
+  const q = choice("?", { a: null, b: null });
+  const good = { type: "choice", choice: "a", confidence: 0.8, probabilities: { a: 0.9, b: 0.1 } };
+  assert.equal(validAnswer(good, q), true);
+  for (const bad of [{ ...good, choice: "injected" }, { ...good, confidence: NaN }, { ...good, probabilities: { a: 0.9 } }, { ...good, probabilities: { a: 0.2, b: 0.1 } }, { ...good, probabilities: { a: 0.9, b: 0.1, c: 0 } }]) assert.equal(validAnswer(bad, q), false);
+  const scored = { type: "score", score: 0.2, confidence: 0.7, probabilities: { "0": 0.8, "1": 0.2 }, legend: { "0": "A", "1": "B" } };
+  assert.equal(validAnswer(scored, score("?", ["A", "B"])), true);
+  assert.equal(validAnswer({ ...scored, score: 2 }, score("?", ["A", "B"])), false);
+});
+
+test("pre-aborted requests and unserializable state never start a fetch", async () => withKey(async () => {
+  let calls = 0;
+  const fetchImpl = (async () => { calls++; return new Response("{}"); }) as typeof fetch;
+  assert.equal(await systemOne({ purpose: "t", state: "x", questions: { q: noul("?") }, signal: AbortSignal.abort(), fetchImpl }), null);
+  const cycle: Record<string, unknown> = {}; cycle.self = cycle;
+  assert.equal(await systemOne({ purpose: "t", state: cycle, questions: { q: noul("?") }, fetchImpl }), null);
+  assert.equal(calls, 0);
+}));
+
+test("the hard budget includes stalled JSON bodies and transports that ignore abort", async () => withKey(async () => {
+  for (const fetchImpl of [
+    (() => new Promise<Response>(() => {})) as typeof fetch,
+    (async () => ({ ok: true, json: () => new Promise(() => {}) }) as Response) as typeof fetch,
+  ]) {
+    const start = Date.now();
+    assert.equal(await systemOne({ purpose: "t", state: "x", questions: { q: noul("?") }, timeoutMs: 25, fetchImpl }), null);
+    assert.ok(Date.now() - start < 500);
+  }
+}));

@@ -14,8 +14,8 @@
 // revision the first time they are opened.
 // ============================================================================
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
-import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { createHash } from "node:crypto";
+import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { createHash, randomUUID } from "node:crypto";
 import { ulid } from "ulid";
 
 import {
@@ -23,6 +23,7 @@ import {
   doc as dynamo,
   getItem,
   putItem,
+  putItemIfAbsent,
   queryPrefix,
   tableName,
   updateItem,
@@ -48,6 +49,8 @@ import {
   type OfficeRevision,
 } from "./types";
 import { ArchiveError, validateOfficeArchive } from "./validate-archive.server";
+
+import { appendChatAtomically, type OfficeChatAppendInput } from "./chat-persistence";
 
 const userPK = (p: string) => `USER#${p}`;
 const itemSK = (id: string) => `ITEM#${id}`;
@@ -182,9 +185,12 @@ async function getBytes(key: string): Promise<Uint8Array | null> {
 }
 
 /** Full package validation; converts ArchiveError to the OfficeError the routes map. */
-export function assertValidPackage(kind: OfficeKind, bytes: Uint8Array): void {
+export async function assertValidPackage(kind: OfficeKind, bytes: Uint8Array): Promise<void> {
   try {
-    validateOfficeArchive(bytes, kind);
+    if (kind === "pdf") {
+      const { validatePdf } = await import("@/office/pdf/document");
+      await validatePdf(bytes);
+    } else validateOfficeArchive(bytes, kind);
   } catch (err) {
     if (err instanceof ArchiveError) throw new OfficeError(err.status, err.message);
     throw err;
@@ -229,17 +235,28 @@ export async function renameOfficeDoc(
 export async function createOfficeDoc(
   principal: string,
   input: { kind: OfficeKind; name?: string; bytes: Uint8Array; folderId?: string },
+  creation?: { docId: string; operationId: string },
 ): Promise<OfficeDocSummary> {
   assertPrincipal(principal);
-  assertValidPackage(input.kind, input.bytes);
+  await assertValidPackage(input.kind, input.bytes);
+  const docId = creation?.docId ?? ulid();
+  assertDocId(docId);
+  if (creation && !IDEMPOTENCY_KEY.test(creation.operationId)) throw new OfficeError(422, 'A unique operation identifier is required.');
+  const hash = sha256(input.bytes);
+  const folderId = input.folderId && input.folderId !== ROOT_FOLDER ? input.folderId : ROOT_FOLDER;
+  const fingerprint = sha256(Buffer.from(JSON.stringify([input.kind,cleanOfficeName(input.kind,input.name),folderId,hash,creation?.operationId])));
+  const replayCreation = async () => {
+    const existing = await getItem(userPK(principal),itemSK(docId),{consistent:true});
+    if (!existing) return null;
+    if (existing.creationFingerprint !== fingerprint) throw new OfficeError(409, 'This upload identifier already belongs to a different document creation.');
+    return mapSummary(existing);
+  };
+  if (creation) { const replay = await replayCreation(); if (replay) return replay; }
   const existing = await queryPrefix(userPK(principal), "ITEM#");
   if (existing.filter((r) => s(r.type) === "draft").length >= MAX_DOCS_PER_USER) {
     throw new OfficeError(413, `This account has reached ${MAX_DOCS_PER_USER} documents.`);
   }
-  const docId = ulid();
   const now = new Date().toISOString();
-  const hash = sha256(input.bytes);
-  const folderId = input.folderId && input.folderId !== ROOT_FOLDER ? input.folderId : ROOT_FOLDER;
   await putBytes(revisionKey(principal, docId, input.kind, 1, hash), input.bytes, input.kind);
   const row: Item = {
     PK: userPK(principal),
@@ -262,8 +279,15 @@ export async function createOfficeDoc(
     updatedAt: now,
     GSI1PK: `FLD#${principal}#${folderId}`,
     GSI1SK: `ITEM#${now}#${docId}`,
+    ...(creation ? {creationFingerprint:fingerprint} : {}),
   };
-  await putItem(row);
+  if (creation) {
+    if (!await putItemIfAbsent(row)) {
+      const replay = await replayCreation();
+      if (replay) return replay;
+      throw new OfficeError(409,'Document creation changed. Retry the upload.');
+    }
+  } else await putItem(row);
   return mapSummary(row);
 }
 
@@ -308,6 +332,35 @@ export async function grantOfficeRevision(
 
 // --- Save -----------------------------------------------------------------------
 
+type SavedOfficeOperation = { docId: string; operationId: string; sha256: string; expectedVersion: number };
+
+function savedOfficeOperation(row: Item, input: SavedOfficeOperation): (OfficeDocSummary & { replayed: true }) | null {
+  const operations = row.operations as Record<string, { hash: string; version: number }> | undefined;
+  if (!operations || !Object.hasOwn(operations, input.operationId)) return null;
+  const prior = operations[input.operationId];
+  if (!prior || prior.hash !== input.sha256 || prior.version !== input.expectedVersion + 1)
+    throw new OfficeError(409, 'Operation identifier was reused with different content or revision.');
+  const revision = parseRevisions(row.revisions).find(r => r.version === prior.version && r.hash === prior.hash);
+  if (!revision || !Number.isSafeInteger(revision.size) || revision.size < 1)
+    throw new OfficeError(409, 'The saved operation could not be reconciled with its revision. Reopen the document.');
+  // The row may have advanced since this operation. Never return another
+  // revision's size, timestamp, or recovery state with the replayed bytes.
+  return { ...mapSummary(row), version: revision.version, hash: revision.hash,
+    size: revision.size, updatedAt: revision.createdAt, recovery: null, replayed: true };
+}
+
+/** Reconcile a lost commit response without requiring its deleted staging object. */
+export async function getSavedOfficeOperation(
+  principal: string, input: SavedOfficeOperation,
+): Promise<(OfficeDocSummary & { replayed: true }) | null> {
+  assertPrincipal(principal);
+  if (typeof input.operationId !== 'string' || !IDEMPOTENCY_KEY.test(input.operationId) ||
+      typeof input.sha256 !== 'string' || !SHA256_HEX.test(input.sha256) ||
+      !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1)
+    throw new OfficeError(422, 'Invalid saved operation.');
+  return savedOfficeOperation(await loadRow(principal, input.docId), input);
+}
+
 export async function saveOfficeRevision(
   principal: string,
   input: { docId: string; expectedVersion: number; bytes: Uint8Array; operationId: string },
@@ -319,16 +372,12 @@ export async function saveOfficeRevision(
   let row = await loadRow(principal, docId);
   if (isLegacy(row)) row = await convertLegacyRow(principal, row);
   const kind = kindOf(row);
-  assertValidPackage(kind, input.bytes);
+  await assertValidPackage(kind, input.bytes);
 
   const operations = (row.operations as Record<string, { hash: string; version: number }>) ?? {};
   const hash = sha256(input.bytes);
-  const prior = operations[input.operationId];
-  if (prior) {
-    if (prior.hash !== hash)
-      throw new OfficeError(409, "Operation identifier was reused with different content.");
-    return { ...mapSummary(row), version: prior.version, hash: prior.hash, replayed: true };
-  }
+  const replay = savedOfficeOperation(row, { ...input, sha256: hash });
+  if (replay) return replay;
   const current = n(row.version);
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== current) {
     throw new OfficeError(
@@ -402,7 +451,7 @@ export async function putOfficeRecovery(
 ): Promise<{ ok: true }> {
   const row = await loadRow(principal, input.docId);
   const kind = kindOf(row);
-  assertValidPackage(kind, input.bytes);
+  await assertValidPackage(kind, input.bytes);
   if (n(row.version) !== input.baseVersion) {
     throw new OfficeError(409, "The recovery snapshot is based on an older revision.");
   }
@@ -443,8 +492,9 @@ export async function deleteOfficeDoc(
     throw new OfficeError(404, "Document not found.");
   // Objects first, so a failure leaves a retryable row, never an orphaned body.
   await deletePrefix(docPrefix(principal, docId));
-  const chat = await queryPrefix(userPK(principal), `WCHAT#${docId}#`);
-  for (const m of chat) await deleteItem(userPK(principal), s(m.SK));
+  const chat = await queryPrefix(userPK(principal), `WCHAT#${docId}#`, { consistent: true });
+  const operations = await queryPrefix(userPK(principal), `WCHATOP#${docId}#`, { consistent: true });
+  for (const m of [...chat, ...operations]) await deleteItem(userPK(principal), s(m.SK));
   await deleteItem(userPK(principal), itemSK(docId));
   return { ok: true, alreadyDeleted: false };
 }
@@ -465,6 +515,7 @@ function cleanTools(v: unknown): OfficeChatMessage["tools"] {
         name: x.name.slice(0, 80),
         summary: s(x.summary).slice(0, 400),
         ...(x.isError === true ? { isError: true } : {}),
+        ...(x.skipped === true ? { skipped: true } : {}),
         ...(typeof x.input === "string" ? { input: x.input.slice(0, MAX_TOOL_FIELD) } : {}),
         ...(typeof x.output === "string" ? { output: x.output.slice(0, MAX_TOOL_FIELD) } : {}),
       },
@@ -515,39 +566,78 @@ export async function loadOfficeChat(
 export async function appendOfficeChat(
   principal: string,
   docId: string,
-  message: Omit<OfficeChatMessage, "seq" | "ts">,
+  message: OfficeChatAppendInput,
 ): Promise<OfficeChatMessage> {
   await loadRow(principal, docId);
-  const last = await queryPrefix(userPK(principal), `WCHAT#${docId}#`, {
-    scanForward: false,
-    limit: 1,
-  });
-  const seq = n(last[0]?.seq) + 1;
-  const ts = new Date().toISOString();
+  const operationId = message.operationId ?? randomUUID();
+  if (!IDEMPOTENCY_KEY.test(operationId)) throw new OfficeError(422, "A unique operation identifier is required.");
   const tools = cleanTools(message.tools);
   const attachments = cleanAttachments(message.attachments);
-  const item: Item = {
-    PK: userPK(principal),
-    SK: chatSK(docId, seq),
-    entity: "writer_chat",
-    owner: principal,
-    itemId: docId,
-    seq,
-    ts,
-    role: message.role === "assistant" ? "assistant" : "user",
+  const payload = {
+    role: message.role === "assistant" ? "assistant" as const : "user" as const,
     text: s(message.text).slice(0, MAX_CHAT_TEXT),
     ...(tools ? { tools } : {}),
     ...(attachments ? { attachments } : {}),
   };
-  await putItem(item);
-  return {
-    seq,
-    ts,
-    role: item.role as "user" | "assistant",
-    text: item.text as string,
-    ...(tools ? { tools } : {}),
-    ...(attachments ? { attachments } : {}),
+  const hash = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+  const PK = userPK(principal);
+  const operationSK = `WCHATOP#${docId}#${operationId}`;
+  const replay = async (): Promise<OfficeChatMessage | undefined> => {
+    const record = await getItem(PK, operationSK, { consistent: true });
+    if (!record) return undefined;
+    if (record.hash !== hash) throw new OfficeError(409, "Operation identifier was reused with different chat content.");
+    const saved = await getItem(PK, chatSK(docId, n(record.seq)), { consistent: true });
+    if (!saved) throw new OfficeError(409, "The saved chat message is no longer available.");
+    return { ...payload, seq: n(saved.seq), ts: s(saved.ts) };
   };
+  return appendChatAtomically({
+    replay,
+    counter: async () => {
+      const row = await loadRow(principal, docId);
+      if (typeof row.chatSequence === "number") return { current: row.chatSequence, last: row.chatSequence };
+      // Legacy histories have no counter. The first successful transaction migrates it.
+      const last = await queryPrefix(PK, `WCHAT#${docId}#`, { scanForward: false, limit: 1, consistent: true });
+      return { last: n(last[0]?.seq) };
+    },
+    commit: async (seq, expected) => {
+      const result: OfficeChatMessage = { ...payload, seq, ts: new Date().toISOString() };
+      try {
+        await dynamo().send(new TransactWriteCommand({
+          TransactItems: [
+            { Update: {
+              TableName: tableName(), Key: { PK, SK: itemSK(docId) },
+              UpdateExpression: "SET #sequence = :next",
+              ConditionExpression: "attribute_exists(PK) AND #owner = :owner AND #type = :type AND " +
+                (expected === undefined ? "attribute_not_exists(#sequence)" : "#sequence = :expected"),
+              ExpressionAttributeNames: { "#sequence": "chatSequence", "#owner": "owner", "#type": "type" },
+              ExpressionAttributeValues: { ":next": seq, ":owner": principal, ":type": "draft",
+                ...(expected === undefined ? {} : { ":expected": expected }) },
+            } },
+            { Put: {
+              TableName: tableName(),
+              Item: { PK, SK: chatSK(docId, seq), entity: "writer_chat", owner: principal, itemId: docId, ...result },
+              ConditionExpression: "attribute_not_exists(PK)",
+            } },
+            { Put: {
+              TableName: tableName(),
+              Item: { PK, SK: operationSK, entity: "office_chat_operation", owner: principal, itemId: docId, hash, seq },
+              ConditionExpression: "attribute_not_exists(PK)",
+            } },
+          ],
+        }));
+        return result;
+      } catch (error) {
+        // A committed transaction whose response was lost is still a successful append.
+        const saved = await replay();
+        if (saved) return saved;
+        const e = error as { name?: string; CancellationReasons?: Array<{ Code?: string }> };
+        if (e.name === "TransactionConflictException" ||
+          (e.name === "TransactionCanceledException" && e.CancellationReasons?.some(r =>
+            r.Code === "ConditionalCheckFailed" || r.Code === "TransactionConflict"))) return undefined;
+        throw error;
+      }
+    },
+  });
 }
 
 // --- Legacy TipTap drafts -------------------------------------------------------------

@@ -1,4 +1,5 @@
 import type { WorkbookChartEdit } from '../shared/desktop-api'
+import { numericChartPoints } from '../domain/chart-cache'
 
 /// Surgical edits to a chart part (xl/charts/chartN.xml): title text, chart
 /// type conversion within the axis-based family, and series solid colors.
@@ -66,6 +67,7 @@ export function applyChartEdit(chartXml: string, edit: WorkbookChartEdit): strin
   if (edit.grouping !== undefined) xml = setGrouping(xml, edit.grouping)
   if (edit.gridlines !== undefined) xml = setGridlines(xml, edit.gridlines)
   if (edit.valueAxis !== undefined) xml = setValueAxisBounds(xml, edit.valueAxis)
+  if (edit.valueAxisFormats !== undefined) xml = setValueAxisFormats(xml, edit.valueAxisFormats)
   if (edit.gapWidthPct !== undefined) xml = setGapWidth(xml, edit.gapWidthPct)
   if (edit.holeSizePct !== undefined) xml = setHoleSize(xml, edit.holeSizePct)
   if (edit.explosionPct !== undefined) xml = setSeriesExplosion(xml, edit.explosionPct)
@@ -85,6 +87,52 @@ function spliceMatch(xml: string, match: RegExpExecArray, replacement: string): 
 const GRIDLINES_PATTERN = /<c:majorGridlines\/>|<c:majorGridlines>[\s\S]*?<\/c:majorGridlines>/
 
 const VAL_AXIS_PATTERN = /<c:valAx>([\s\S]*?)<\/c:valAx>/
+
+/** Explicit axis number formats. Select by axis side, never XML order (a
+ * scatter plot lists its numeric X axis before its primary Y value axis).
+ * Ambiguous/missing axes fail before any modified XML is returned. */
+export function setValueAxisFormats(chartXml: string, formats: NonNullable<WorkbookChartEdit['valueAxisFormats']>): string {
+  const axes = [...chartXml.matchAll(/<c:valAx>([\s\S]*?)<\/c:valAx>/g)].map((match) => ({
+    match, side: /<c:axPos\b[^>]*\bval="([^"]+)"/.exec(match[1]!)?.[1],
+  }))
+  const selected = new Map<number, string>()
+  for (const [role, format] of Object.entries(formats)) {
+    if (format === undefined) continue
+    if (!format.length || format.length > 64 || /[\u0000-\u001f\u007f]/.test(format)) throw new ChartEditError('Axis number formats must be 1–64 characters without control characters.')
+    const sides = role === 'primary' ? ['l', 'b'] : ['r', 't']
+    let candidates = sides.map((side) => axes.filter((axis) => axis.side === side)).find((matches) => matches.length > 0) ?? []
+    if (role === 'primary' && axes.length === 1) candidates = axes
+    if (role === 'secondary' && axes.length < 2) candidates = []
+    if (candidates.length !== 1) throw new ChartEditError(`Chart has no unambiguous ${role} value axis.`)
+    const index = candidates[0]!.match.index!
+    if (selected.has(index)) throw new ChartEditError('Primary and secondary formats cannot target the same axis.')
+    selected.set(index, format)
+  }
+  let result = chartXml
+  for (const { match } of axes.reverse()) {
+    const format = selected.get(match.index!)
+    if (format === undefined) continue
+    const inner = match[1]!
+    const replacement = `<c:numFmt formatCode="${escapeXmlAttribute(format)}" sourceLinked="0"/>`
+    const existing = /<c:numFmt\b[^>]*\/>|<c:numFmt\b[^>]*>[\s\S]*?<\/c:numFmt>/
+    let edited: string
+    if (existing.test(inner)) edited = inner.replace(existing, () => replacement)
+    else {
+      // CT_ValAx numFmt follows title/gridlines/position and precedes ticks,
+      // shape/text formatting and cross-axis references. Preserve all peers.
+      let anchor: RegExpExecArray | null = null
+      for (const tag of ['title', 'minorGridlines', 'majorGridlines', 'axPos', 'delete', 'scaling', 'axId']) {
+        anchor = new RegExp(`<c:${tag}\\b[^>]*\\/>|<c:${tag}\\b[^>]*>[\\s\\S]*?<\\/c:${tag}>`).exec(inner)
+        if (anchor) break
+      }
+      if (!anchor) throw new ChartEditError('Chart value axis is missing its required elements.')
+      const at = anchor.index + anchor[0].length
+      edited = inner.slice(0, at) + replacement + inner.slice(at)
+    }
+    result = spliceMatch(result, match, `<c:valAx>${edited}</c:valAx>`)
+  }
+  return result
+}
 
 /// Major gridlines on the first value axis on/off. CT_ValAx order: axId,
 /// scaling, delete, axPos, majorGridlines, minorGridlines, title, …
@@ -386,7 +434,7 @@ function buildSeriesReplacement(
             `<c:strCache><c:ptCount val="${categories.length}"/>${catPoints}</c:strCache></c:strRef>`
           : `<c:strLit><c:ptCount val="${categories.length}"/>${catPoints}</c:strLit>`) +
         '</c:cat>'
-  const val = `<c:val>${numDataXml(entry.valuesRef, entry.values)}</c:val>`
+  const val = `<c:val>${numDataXml(entry.valuesRef, entry.values, entry.blanks)}</c:val>`
   return (
     `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>` +
     `<c:tx><c:v>${escapeXmlText(entry.name)}</c:v></c:tx>${spPr}${cat}${val}</c:ser>`
@@ -394,10 +442,10 @@ function buildSeriesReplacement(
 }
 
 /// numRef with cache when a ref is given, numLit otherwise.
-function numDataXml(ref: string | undefined, values: readonly number[]): string {
+function numDataXml(ref: string | undefined, values: readonly number[], blanks?: readonly number[]): string {
   const points =
     `<c:ptCount val="${values.length}"/>` +
-    values.map((value, idx) => `<c:pt idx="${idx}"><c:v>${value}</c:v></c:pt>`).join('')
+    numericChartPoints(values, blanks)
   return ref !== undefined
     ? `<c:numRef><c:f>${escapeXmlText(ref)}</c:f>` +
         `<c:numCache><c:formatCode>General</c:formatCode>${points}</c:numCache></c:numRef>`
@@ -424,7 +472,7 @@ function buildScatterSeriesReplacement(
     numericCategories.every((value) => Number.isFinite(value))
   const xValues = categoriesAreNumeric ? numericCategories : entry.values.map((_, idx) => idx)
   const xVal = `<c:xVal>${numDataXml(categoriesAreNumeric ? entry.categoriesRef : undefined, xValues)}</c:xVal>`
-  const yVal = `<c:yVal>${numDataXml(entry.valuesRef, entry.values)}</c:yVal>`
+  const yVal = `<c:yVal>${numDataXml(entry.valuesRef, entry.values, entry.blanks)}</c:yVal>`
   return (
     `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>` +
     `<c:tx><c:v>${escapeXmlText(entry.name)}</c:v></c:tx>${spPr}${xVal}${yVal}` +
@@ -675,9 +723,7 @@ function setSeriesData(
     }
     if (entry.values !== undefined) {
       const tag = isScatter ? 'yVal' : 'val'
-      const points = entry.values
-        .map((value, idx) => `<c:pt idx="${idx}"><c:v>${value}</c:v></c:pt>`)
-        .join('')
+      const points = numericChartPoints(entry.values, entry.blanks)
       // Keep the original number format: the axis-scale renderer reads it.
       const valPattern = new RegExp(`<c:${tag}/>|<c:${tag}>[\\s\\S]*?</c:${tag}>`)
       const previousVal = valPattern.exec(next)?.[0] ?? ''

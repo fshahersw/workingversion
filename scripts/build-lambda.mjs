@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { readLambdaNativeTarget, assertLambdaBuildHost } from "./lambda-native-target.mjs";
 
 const environment = process.env.LITAI_BUILD_ENVIRONMENT;
 if (environment !== "testing" && environment !== "staging" && environment !== "prod") {
@@ -8,6 +10,9 @@ if (environment !== "testing" && environment !== "staging" && environment !== "p
     "LITAI_BUILD_ENVIRONMENT must be testing, staging, or prod for a Lambda artifact",
   );
 }
+
+const nativeTarget = await readLambdaNativeTarget(process.cwd(), environment);
+assertLambdaBuildHost(nativeTarget);
 
 const corpusUrl = process.env.VITE_CORPUS_URL;
 const corpusKey = process.env.VITE_CORPUS_KEY;
@@ -23,6 +28,8 @@ if (parsedUrl.protocol !== "https:") {
 
 process.env.LITAI_LAMBDA_BUILD = "true";
 process.env.NODE_ENV = "production";
+// A failed/restarted build must not retain a prior success marker for changed output.
+await rm(resolve(process.cwd(), ".output/lambda-build.json"), { force: true });
 
 // Vite 8: the argless programmatic build() builds only the CLIENT environment.
 // The Lambda artifact needs the full app — client + the SSR/server environment
@@ -33,11 +40,15 @@ process.env.NODE_ENV = "production";
 const { createBuilder } = await import("vite");
 const builder = await createBuilder();
 await builder.buildApp();
+// Run with only emitted dependencies, on the exact Linux target that will run it.
+execFileSync(process.execPath, ["scripts/verify-pdf-build.mjs"], { cwd: process.cwd(), env: process.env, stdio: "inherit" });
 
 const metadata = {
   schema: 1,
   environment,
   corpusOrigin: parsedUrl.origin,
+  nativeTarget,
+  pdfArtifactVerified: true,
 };
 const outputPath = resolve(process.cwd(), ".output/lambda-build.json");
 await mkdir(resolve(process.cwd(), ".output"), { recursive: true });

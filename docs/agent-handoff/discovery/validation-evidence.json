@@ -1,0 +1,32 @@
+{
+  "sourceCommit": "f06e148fdda93553718621ab3634ce53548d7bfe",
+  "auditDate": "2026-09-21",
+  "status": "Historical audit evidence, not a new implementation or deployment acceptance run",
+  "applicationChangedDuringAudit": false,
+  "liveAwsOrProviderCallsDuringAudit": 0,
+  "unitTests": {
+    "command": "bun test src/lib/pile src/lib/kb src/lib/review",
+    "passed": 317,
+    "failed": 0,
+    "files": 55,
+    "overlapNote": "The deposition 64-test subset is included, not additional."
+  },
+  "browserTests": {
+    "command": "PLAYWRIGHT_PORT=5197 npx playwright test --config playwright.discovery.config.ts --reporter=line",
+    "passed": 7,
+    "failed": 4,
+    "classification": "Native startup blocked before authentication/Discovery; three explicit unresolved TanStack process.env references; fourth precise cause unconfirmed. No assertion of production failure."
+  },
+  "counterexamples": {
+    "meaning": "Recorded assertions reproduce current defects; passing a reproduction is not passing intended product behavior.",
+    "method": "Actual pure modules or AST-extracted function bodies, fixed synthetic fixtures and in-memory dependency stubs.",
+    "recordedResults": [
+      "deposition-results.json",
+      "ingest-kb-results.json",
+      "review-probe-results.json",
+      "shared-async-results.json"
+    ],
+    "originalScriptsAndRawLogsIncluded": false
+  },
+  "productionValidation": "Not performed; verify effective configuration, model access, migrations, quotas and deployed transport before release."
+}

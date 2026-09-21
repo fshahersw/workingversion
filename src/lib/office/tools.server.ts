@@ -24,7 +24,6 @@ import {
 } from "@/lib/agents/code-interpreter.server";
 import { courtlistenerConfigured, lookupCitations } from "@/lib/agents/courtlistener.server";
 import { generateDocument } from "@/lib/agents/docgen.server";
-import { readPage } from "@/lib/agents/page-read.server";
 
 import { createOfficeDoc } from "./office.server";
 import type { OfficeDocSummary } from "./types";
@@ -662,7 +661,7 @@ export type LibraryHit = OfficeDocSummary & { url: string };
 
 /** Route that opens a Library document in its editor. */
 export function officeDocUrl(doc: Pick<OfficeDocSummary, "kind" | "draftId">): string {
-  return doc.kind === "pptx"
+  return doc.kind === "pdf" ? `/office/pdf/${doc.draftId}` : doc.kind === "pptx"
     ? `/office/slides/${doc.draftId}`
     : doc.kind === "xlsx"
       ? `/office/sheets/${doc.draftId}`
@@ -676,7 +675,7 @@ export async function searchLibrary(
 ): Promise<LibraryHit[]> {
   const { listOfficeDocs } = await import("./office.server");
   const kind =
-    input.kind === "docx" || input.kind === "xlsx" || input.kind === "pptx"
+    input.kind === "docx" || input.kind === "xlsx" || input.kind === "pptx" || input.kind === "pdf"
       ? input.kind
       : undefined;
   const docs = await listOfficeDocs(principal, kind);
@@ -718,17 +717,9 @@ export async function verifyOfficeCitations(text: string): Promise<string> {
 
 // --- Web page -------------------------------------------------------------------------------------------
 
-export async function readOfficePage(url: string, maxChars = 12_000): Promise<string> {
-  // Direct fetch first; a deterministic block (403/429, bot challenge,
-  // consent or JS shell) escalates to the rendering scrapers. PDFs return text.
-  const page = await readPage(String(url ?? ""), {
-    maxChars: Math.min(Math.max(1000, maxChars), 60_000),
-    timeoutMs: 25_000,
-  });
-  const head = [`Title: ${page.title || "(untitled)"}`, `URL: ${page.finalUrl || page.url}`];
-  if (page.note) head.push(`Note: ${page.note}`);
-  if (page.truncated) head.push("Note: the page was longer than the limit; this is the beginning.");
-  return `${head.join("\n")}\n\n${page.text}`;
+export async function readOfficePage(url: string, maxChars = 8_000, startChar = 0, revision?: string): Promise<string> {
+  const { readOfficePublicPage } = await import('./public-page.server');
+  return readOfficePublicPage(String(url ?? ''), { maxChars, startChar, revision });
 }
 
 // --- Cross-app documents -----------------------------------------------------------------------------------

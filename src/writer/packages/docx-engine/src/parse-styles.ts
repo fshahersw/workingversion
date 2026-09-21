@@ -192,9 +192,11 @@ export async function parseStyles(
     }
     styles.set(styleId, {
       styleId,
+      ...(basedOn ? { basedOn } : {}),
       name,
       type,
       headingLevel,
+      headingOutlineOff: outlineOffIds.has(styleId),
       semiHidden: onFlag('w:semiHidden'),
       qFormat: onFlag('w:qFormat'),
       display: type === 'table' ? undefined : styleDisplayOf(styleNode, theme, themeFonts),
@@ -260,6 +262,7 @@ export async function parseStyles(
       parent?.headingLevel
     ) {
       info.headingLevel = parent.headingLevel
+      info.headingLevelInherited = true
     }
     if (info.type === 'paragraph' && !info.numPr && parent?.numPr) info.numPr = parent.numPr
     return info

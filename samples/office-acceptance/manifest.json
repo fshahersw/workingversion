@@ -1,0 +1,33 @@
+{
+  "awsValidated": false,
+  "synthetic": true,
+  "implementationCheckpoint": "b3fd979a4ca06ced9169c4444f66363b6a886675",
+  "files": [
+    {
+      "sha256": "bcb0aedf5bb8c07a5a2c1272eebb32dc400636487964a09f417e239189da6830",
+      "name": "writer-selection-verified.docx",
+      "bytes": 8747
+    },
+    {
+      "sha256": "f5c0a7259d5e0b680c232cba8c206c26aafbab2674eac3d76d336483b2069f9a",
+      "name": "writer-rebuilt-verified.docx",
+      "bytes": 8884
+    },
+    {
+      "sha256": "4c1cc32b06d0ee1612f973ad7814f208335e12f30ee8c0ca74cdd3f17d94caa9",
+      "name": "mock-tesla-2021-2025.xlsx",
+      "bytes": 27967
+    },
+    {
+      "sha256": "5c35debff973f1e4b6dd1be8510e583e3b5c31b23fa5a463b9f23be638ca33d7",
+      "name": "pdf-native-edit-verified.pdf",
+      "bytes": 2402
+    },
+    {
+      "sha256": "7a3b4de995e7d16313f5f3f1803a9b3235948337fea060261aa22ab5e9b4eb5f",
+      "name": "pdf-extract-verified.pdf",
+      "bytes": 1155
+    }
+  ],
+  "microsoftDesktopValidated": false
+}

@@ -2,6 +2,7 @@
 import { officeExtractionPython, extractedPagePython } from "./office-extraction";
 import { interpreterState, withInterpreterOperation } from "./interpreter-context.server";
 import { workspaceUnavailable } from "./interpreter-registry";
+import { localSyntheticEnabled } from "../local-development";
 import {
   drainInterpreterStream,
   type InterpreterContentItem as ContentItem,
@@ -42,6 +43,7 @@ async function baseline(): Promise<void> {
 
 let _client: BedrockAgentCoreClient | null = null;
 function client(): BedrockAgentCoreClient {
+  if (localSyntheticEnabled()) throw new Error("AWS Python execution is unavailable in the local synthetic workspace.");
   // Even a transport failure can follow an executed mutation. SDK retries must
   // not replay executeCode/writeFiles implicitly.
   return (_client ??= new BedrockAgentCoreClient({ region: REGION, maxAttempts: 1 }));

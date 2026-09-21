@@ -4,17 +4,18 @@ import { Link } from "@tanstack/react-router";
 import { FileText, Presentation, Table2 } from "lucide-react";
 import type { ComponentType } from "react";
 
-export type OfficeTab = "drafts" | "sheets" | "slides";
+export type OfficeTab = "drafts" | "sheets" | "slides" | "pdf";
 
 const TABS: ReadonlyArray<{
   id: OfficeTab;
   label: string;
-  to: "/office/drafts" | "/office/sheets" | "/office/slides";
+  to: "/office/drafts" | "/office/sheets" | "/office/slides" | "/office/pdf";
   icon: ComponentType<{ className?: string; strokeWidth?: number }>;
 }> = [
   { id: "drafts", label: "Drafts", to: "/office/drafts", icon: FileText },
   { id: "sheets", label: "Sheets", to: "/office/sheets", icon: Table2 },
   { id: "slides", label: "Slides", to: "/office/slides", icon: Presentation },
+  { id: "pdf", label: "PDF", to: "/office/pdf", icon: FileText },
 ];
 
 export function OfficeTabs({ active, description }: { active: OfficeTab; description: string }) {

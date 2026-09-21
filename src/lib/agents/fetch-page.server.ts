@@ -470,7 +470,7 @@ async function pdfText(
     return {
       text: "",
       truncated: false,
-      note: `This PDF (${pageCount} page${pageCount === 1 ? "" : "s"}) has no extractable text layer (likely a scan). For a court filing, read it via db_read_filing (DocketBird); otherwise look for an HTML or text version of the same document.`,
+      note: `This PDF (${pageCount} page${pageCount === 1 ? "" : "s"}) has no extractable text. It may contain scanned pages or unsupported text encoding; its content has not been reviewed. For a court filing, read it via db_read_filing (DocketBird); otherwise look for an HTML or text version of the same document.`,
     };
   }
   const text = joined.slice(0, maxChars);

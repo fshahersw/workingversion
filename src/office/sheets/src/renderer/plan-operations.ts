@@ -14,7 +14,7 @@ import {
   parseRange,
   rangeCellCount,
 } from '../domain/cell-address'
-import { CHART_EDIT_TYPES, chartDataFromValues } from '../domain/chart-visual'
+import { CHART_EDIT_TYPES, chartDataFromValues, applyChartStateEdit, chartValueAxisFormatError } from '../domain/chart-visual'
 import type { InMemoryWorkbookAdapter } from '../domain/in-memory-workbook'
 import {
   convertToValuesBatchError,
@@ -160,6 +160,13 @@ export function proposeOperations(
           )
           if (!visual) {
             return { ok: false, error: `Unknown chart: ${operation.chartPath}` }
+          }
+          if (operation.valueAxisFormats) {
+            if (!visual.chart) return { ok: false, error: 'Chart axis metadata is unavailable.' }
+            const pending = state.editJournal.chartEdits.get(visual.chartPath ?? visual.id)
+            const effective = applyChartStateEdit(applyChartStateEdit(visual.chart, pending), operation.chartType ? { chartType: operation.chartType } : undefined)
+            const error = chartValueAxisFormatError(effective, operation.valueAxisFormats)
+            if (error) return { ok: false, error }
           }
           // Save-time chart patching fails closed on non-convertible plots;
           // reject here so the user never sees Apply succeed and ⌘S fail.

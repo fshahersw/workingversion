@@ -65,8 +65,15 @@ test("CloudFront caches only immutable assets and preserves authenticated state"
   assert.match(runtime, /PathPattern: \/assets\/\*/);
   assert.match(runtime, /PathPattern: \/assets\/\*[\s\S]*CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6/);
   assert.match(runtime, /DefaultCacheBehavior:[\s\S]*Compress: false/);
-  assert.equal(count(runtime, /PathPattern:/g), 2);
-  assert.match(runtime, /PathPattern: \/engine\/\*/);
+  const behaviors = [...runtime.matchAll(/PathPattern:\s+(\S+)/g)];
+  assert.deepEqual(behaviors.map(match => match[1]), ["/assets/*", "/engine/*", "/archive-api/*", "/workbench-api/*"]);
+  for (let i = 0; i < behaviors.length; i++) {
+    const behavior = behaviors[i]!;
+    const block = runtime.slice(behavior.index, behaviors[i + 1]?.index);
+    const expected = behavior[1] === "/assets/*" ? "658327ea-f89d-4fab-a63d-7e88639e58f6" : "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
+    assert.equal(/CachePolicyId:\s+(\S+)/.exec(block)?.[1], expected, `${behavior[1]} cache policy`);
+    if (behavior[1] !== "/assets/*") assert.match(block, /OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac/);
+  }
 });
 
 test("all streamed API routes emit heartbeats below the CloudFront idle timeout", () => {

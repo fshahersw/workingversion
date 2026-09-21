@@ -149,6 +149,8 @@ export interface ShadowEffect {
 
 /** A run of contiguous same-format text (maps to <a:r>); line breaks/soft returns split into separate runs or paragraphs */
 export interface TextRun {
+  /** Native paragraph-level equation, preserved verbatim on rebuild. */
+  rawXml?: string
   text: string
   bold?: boolean
   /** Run has no explicit b (bold resolved from inheritance); rebuild/patch omits b to keep the master/layout linkage */

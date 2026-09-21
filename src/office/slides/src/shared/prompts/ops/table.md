@@ -119,12 +119,62 @@ Sets one column's width in EMU.
 { "op": "setTableColWidth", "target": { "slide": 0, "el": "e_TABLE" }, "col": 0, "wEmu": 2743200 }
 ```
 
-### setTableStyle (not-ai-callable)
+### setTableStyle
 
-`{edit:TableStyleEdit} — use the edit_table_style tool instead`
+`{styleName} | {styleId?,firstRow?,lastRow?,firstCol?,lastCol?,bandRow?,bandCol?,keepFormatting?,shadingColor?,borderColor?,borderWidthPt?,borderPreset?}`
 
-Header row, banding, shading and border presets. The `edit_table_style` tool
-exposes this with a validated schema.
+Restyles the whole table: apply one fixed-color preset by `styleName`, pick one
+of PowerPoint's 74 built-in styles by `styleId` (gallery name such as
+`"Medium Style 2 - Accent 1"` or its GUID; they follow the deck's theme
+colors), or change individual region flags, cell shading and border lines. A
+preset wins over the other fields; a preset or `styleId` clears direct cell
+fills and borders like PowerPoint's style gallery (`keepFormatting: true`
+keeps them). `read_slide({slideIndex, include_native:true})` shows a table's native style ID and look flags.
+
+| Field                               | Type                  | Notes                                                                                                                                                                                                                                          |
+| ----------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| styleName                           | string                | `none`, `lightGrid`, `zebraBlue`, `zebraGray`, `headerDarkBlue`, `headerOrange`, `noBorder`, `fullBorder`                                                                                                                                      |
+| styleId                             | string                | Built-in gallery name or `{GUID}`: `No Style, No Grid`, `No Style, Table Grid`, `Themed Style 1/2 - Accent N`, `Light Style 1/2/3 [- Accent N]`, `Medium Style 1/2/3/4 [- Accent N]`, `Dark Style 1 [- Accent N]`, `Dark Style 2 [- Accent N]` |
+| firstRow                            | boolean               | Header-row emphasis                                                                                                                                                                                                                            |
+| lastRow, firstCol, lastCol, bandCol | boolean               | Total row, first/last column emphasis, banded columns                                                                                                                                                                                          |
+| bandRow                             | boolean               | Banded rows                                                                                                                                                                                                                                    |
+| keepFormatting                      | boolean               | With `styleId`: keep direct cell fills/borders instead of clearing them                                                                                                                                                                        |
+| shadingColor                        | `#RRGGBB` or `"none"` | Cell fill for every cell                                                                                                                                                                                                                       |
+| borderColor                         | `#RRGGBB`             | Border line color                                                                                                                                                                                                                              |
+| borderWidthPt                       | number (pt)           | Border line width; 0 < pt <= 1584                                                                                                                                                                                                              |
+| borderPreset                        | `"all"` or `"none"`   | Draw all border lines, or clear them                                                                                                                                                                                                           |
+
+```json
+{ "op": "setTableStyle", "target": { "slide": 0, "el": "e_TABLE" }, "styleName": "zebraBlue" }
+```
+
+```json
+{
+  "op": "setTableStyle",
+  "target": { "slide": 0, "el": "e_TABLE" },
+  "styleId": "Medium Style 2 - Accent 1",
+  "firstRow": true,
+  "bandRow": true
+}
+```
+
+```json
+{
+  "op": "setTableStyle",
+  "target": { "slide": 0, "el": "e_TABLE" },
+  "firstRow": true,
+  "borderPreset": "all",
+  "borderColor": "#BFBFBF",
+  "borderWidthPt": 1
+}
+```
+
+Common mistakes
+
+- Passing a color name (`"blue"`): colors are `#RRGGBB`.
+- Do not mix `styleName` with other style fields; send a second explicit operation for additional overrides.
+- A built-in name in `styleName`: gallery names and GUIDs go in `styleId`.
+- Restyling one cell's text: that is `setTableCell` with styled runs, not this op.
 
 ### setChart (not-ai-callable)
 
@@ -132,3 +182,5 @@ exposes this with a validated schema.
 
 Changes a chart's type, data, colors or elements. The `edit_chart` tool exposes
 this with a validated schema.
+
+Border color/width require `borderPreset:"all"`; this explicitly changes all selected borders. `cells:[{row,col}]` restricts shading/borders to existing cells and must accompany one of those edits. Look flags must be booleans.

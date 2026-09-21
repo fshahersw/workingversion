@@ -4,6 +4,7 @@
  * here to apply. Structure mirrors apps/docs: exports embeddable configure/register/start for
  * future shell reuse.
  */
+import { readNativeSlideDetails } from './native-details'
 import {
   clipboard,
   app,
@@ -1423,6 +1424,11 @@ export function registerSlidesIpc(): void {
   // AI batch surface: raw ops arrive as one transaction. The registry validates
   // (guided errors), the executor owns atomicity/rollback/journal; dry-run
   // rehearses the plan without touching the deck or its history.
+  ipcMain.handle('slides:read-native-details', (e, slideIndex: number) => {
+    const session = sessions.get(e.sender.id)
+    if (!session) throw new Error('The active presentation is unavailable.')
+    return readNativeSlideDetails(session.opened, slideIndex)
+  })
   ipcMain.handle('slides:apply-txn', (e, req: ApplyTxnOp): ApplyTxnResult | null => {
     const session = sessions.get(e.sender.id)
     if (!session) return null

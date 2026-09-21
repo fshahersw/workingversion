@@ -17,6 +17,7 @@ import { HttpRequest } from "@smithy/protocol-http";
 import { SignatureV4 } from "@smithy/signature-v4";
 
 import { loadBedrockRegion } from "../config.server";
+import { localSyntheticEnabled } from "../local-development";
 
 // One signer per AWS region/service pair (e.g. "bedrock-agentcore").
 const _signers = new Map<string, SignatureV4>();
@@ -54,6 +55,7 @@ export async function signedAwsFetch(
     region?: string;
   },
 ): Promise<Response> {
+  if (localSyntheticEnabled()) throw new Error("This AWS-backed capability is unavailable in the local synthetic workspace.");
   const u = new URL(url);
   const request = new HttpRequest({
     method: opts.method ?? "POST",

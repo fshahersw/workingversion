@@ -84,16 +84,16 @@ export function createIpcTransport<S>(options: IpcTransportOptions<S>): AgentTra
         clearTimeout(silenceTimer)
         unsubscribe()
       }
-      const fail = (error: string) => {
+      const fail = (error: string, details?: { code?: string; retryable?: boolean }) => {
         if (settled) return
         settle()
-        cb.onError(error)
+        cb.onError(error, details)
       }
       const armSilence = () => {
         clearTimeout(silenceTimer)
         silenceTimer = setTimeout(() => {
           options.cancel(requestId)
-          fail(timeoutText())
+          fail(timeoutText(), { code: 'timeout', retryable: true })
         }, IPC_STREAM_SILENCE_TIMEOUT_MS)
       }
       const unsubscribe = options.onStream((chunk) => {
@@ -132,6 +132,10 @@ export function createIpcTransport<S>(options: IpcTransportOptions<S>): AgentTra
                   : chunk.errorCode === 'overloaded'
                     ? (options.overloadedErrorText?.() ?? chunk.error ?? options.unknownErrorText())
                     : (chunk.error ?? options.unknownErrorText()),
+            chunk.errorCode ? {
+              code: chunk.errorCode,
+              retryable: ['timeout', 'network', 'overloaded'].includes(chunk.errorCode),
+            } : undefined,
           )
         }
       })

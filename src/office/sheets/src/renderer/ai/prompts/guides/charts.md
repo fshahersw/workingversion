@@ -6,6 +6,7 @@
 
 - Works for both imported xlsx files and the demo workbook. In xlsx files, saving (⌘S) writes the chart into the file as a brand-new chart part; demo-workbook charts live in memory (undoable with ⌘Z) and cannot be saved to a file yet.
 - dataRange is the chart's data source (max 2000 cells): if the first row contains text it is treated as series-name headers, and if the first column contains text it is treated as the category axis. **read_range the data first to confirm its shape before proposing** — unloaded cells read back as empty.
+- A wide table charts rows as series. Include its period header row in the chart range. Numeric years are recognized as categories when the corner is blank or explicitly labeled Year, Fiscal year, Period, Metric, or Line item (units may follow in parentheses). Confirm the actual series count: a year/header row must never become a revenue series. For non-adjacent metrics such as annual net income and margin, create from the metric rows then `edit_chart` with `categoriesRange:"B4:F4"` for **each** series, using the actual year-header range. A range containing only the metric rows cannot supply period labels; default 1,2,3 labels are not a verified time axis.
 - At least one numeric column is required, otherwise the operation is rejected. In the demo workbook, formula cells have no cached values (they read back empty) — do not point dataRange at a region of pure formula results.
 - anchorCell is the anchor cell for the chart frame's top-left corner; by default the chart is placed two columns to the right of the data range.
 - title default: the series name for a single series, "Chart Title" for multiple series.
@@ -27,6 +28,7 @@
 - `dataLabels`: "none" | "value" (numeric) | "percent" (percentage, pie) | "category-percent" (name + percentage, pie)
 - `grouping`: "clustered" | "stacked" | "percentStacked" — applies only to column/bar/line/area charts
 - `axisTitles`: {category?, value?} — axis titles, null clears; pie/doughnut charts have no axes, not applicable
+- `valueAxisFormats`: {primary?, secondary?} — explicit Excel number-format strings, 1–64 characters. Use `{op:"edit_chart",chartPath:"<actual path from context>",valueAxisFormats:{primary:"$#,##0",secondary:"0.0%"}}` for a currency/percentage combo. The primary value axis and secondary right value axis are edited independently; omitted fields stay unchanged. `"General"` resets an explicit format. A secondary format requires an actual secondary axis; pie/doughnut have no value axes. Re-read context to verify the recorded formats, then inspect the chart. Never infer percentage-axis formatting from the worksheet's cell format alone.
 - `seriesData`: [{index, name?, valuesRange?:"B2:B13", categoriesRange?:"A2:A13", sheetId?}] — rename a series or **repoint its data ranges** (single row or single column; sheetId defaults to the chart's sheet). On apply, the current worksheet values are synced into the chart cache, and reference formulas are written into the file as well.
 - Change series colors as a whole set (keep one palette) — recoloring a single series breaks visual consistency; follow a high-contrast, low-saturation palette.
 
@@ -47,7 +49,7 @@
 
 - add_chart / edit_chart / add_shape are all layout-class: they can share a batch with content/format operations, but not with structural operations (row/column or sheet insertion/deletion).
 - On apply, changes render on the canvas immediately and are recorded in the edit journal; ⌘S saves them into the file. Edits to existing charts are surgical rewrites — everything else stays byte-for-byte intact.
-- Write data before charting: within a batch you may set_range then add_chart, but add_chart reads **current values** — if the data hasn't been written to the sheet yet, split into two batches (write the data first, apply, then create the chart).
+- Write data before charting: **set_cell/set_range and add_chart must be separate dependent batches** when the chart uses those new values. Charts execute before individual cell writes within a batch, regardless of listed order. Write and read back the data/formula results first, then create the chart. Do not retry a successful chart creation blindly; refresh get_workbook_context and edit its returned id instead.
 
 ## Chart type selection (by data intent)
 

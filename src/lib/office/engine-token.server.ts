@@ -95,10 +95,11 @@ async function signer(): Promise<Signer> {
       }
       const pair = await generateKeyPair("RS256", { modulusLength: 2048 });
       const publicJwk = await exportJWK(pair.publicKey);
+      const devKid = `dev-${Date.now()}`;
       return {
         key: pair.privateKey,
-        kid: `dev-${Date.now()}`,
-        publicJwk: { ...publicJwk, kid: `dev-${Date.now()}`, use: "sig", alg: "RS256" },
+        kid: devKid,
+        publicJwk: { ...publicJwk, kid: devKid, use: "sig", alg: "RS256" },
       };
     })();
     // A transient failure (secret read, throttling) must not poison the

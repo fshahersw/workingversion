@@ -174,6 +174,12 @@ const editChartSchema = z.object({
   dataLabels: z.enum(['none', 'value', 'percent', 'category-percent']).optional(),
   /** bar/line/area stacking; 'clustered' restores side-by-side */
   grouping: z.enum(['clustered', 'stacked', 'percentStacked']).optional(),
+  /** Explicit Excel number formats; General resets to a general format. */
+  valueAxisFormats: z.object({
+    primary: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
+    secondary: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
+  }).strict().refine((formats) => formats.primary !== undefined || formats.secondary !== undefined,
+    { message: 'An axis format edit needs primary or secondary.' }).optional(),
   /** axis-based charts only; null removes that axis title */
   axisTitles: z
     .object({
@@ -1962,12 +1968,13 @@ export function expandToPrimitiveOps(
         (!operation.seriesColors || Object.keys(operation.seriesColors).length === 0) &&
         operation.legend === undefined &&
         operation.axisTitles === undefined &&
+        operation.valueAxisFormats === undefined &&
         operation.dataLabels === undefined &&
         operation.grouping === undefined &&
         (!operation.seriesData || operation.seriesData.length === 0)
       ) {
         throw new Error(
-          'edit_chart needs at least one of title / chartType / seriesColors / legend / dataLabels / grouping / axisTitles / seriesData.',
+          'edit_chart needs at least one of title / chartType / seriesColors / legend / dataLabels / grouping / axisTitles / valueAxisFormats / seriesData.',
         )
       }
       for (const entry of operation.seriesData ?? []) {
@@ -2112,6 +2119,7 @@ export function layoutOpLabel(op: LayoutOperation): string {
           .join(' ')
         parts.push(`series #${entry.index} ${detail}`)
       }
+      for (const [axis, format] of Object.entries(op.valueAxisFormats ?? {})) parts.push(`${axis} value-axis format ${JSON.stringify(format)}`)
       return `Edit chart ${op.chartPath}: ${parts.join(', ')}`
     }
     case 'add_chart':

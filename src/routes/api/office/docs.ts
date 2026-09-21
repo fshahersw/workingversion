@@ -16,7 +16,7 @@ export const Route = createFileRoute("/api/office/docs")({
           const { isOfficeKind } = await import("@/lib/office/types");
           const kind = request.headers.get("x-office-kind");
           if (!isOfficeKind(kind))
-            return Response.json({ error: "X-Office-Kind must be docx or xlsx." }, { status: 400 });
+            return Response.json({ error: "X-Office-Kind must be docx, xlsx, pptx or pdf." }, { status: 400 });
           const bytes = await readPackageBody(request);
           let name = "";
           try {

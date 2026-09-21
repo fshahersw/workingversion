@@ -1,3 +1,6 @@
+import { OrderedChatAppender } from "@/lib/office/chat-persistence";
+import { deliverOfficeFile } from '@/office/shared/file-delivery';
+import { createWriterSaveCoordinator } from './save-request';
 // ============================================================================
 // Platform adapter: implements the Writer renderer's `DesktopApi` (the typed
 // preload surface the Electron build exposes) on top of the Seeger Weiss
@@ -149,6 +152,11 @@ export async function createDocument(
   name: string,
   bytes: ArrayBuffer | Uint8Array,
 ): Promise<WriterDocSummary> {
+  if(bytes.byteLength>3*1024*1024) {
+    const {createLargeOfficeDocument}=await import('@/office/shared/create-transfer');
+    const saved=await createLargeOfficeDocument('docx',name,bytes);
+    return {...saved,kind:'docx'};
+  }
   const body = bytes instanceof Uint8Array ? new Blob([bytes as BlobPart]) : new Blob([bytes]);
   return apiJson<WriterDocSummary>("/docs", {
     method: "POST",
@@ -165,12 +173,7 @@ export async function uploadDocument(file: File): Promise<WriterDocSummary> {
 }
 
 export function downloadBlob(blob: Blob, name: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  deliverOfficeFile(blob, name);
 }
 
 export function pickFiles(accept: string, multiple = false): Promise<File[]> {
@@ -200,8 +203,11 @@ async function fetchMeta(draftId: string): Promise<WriterDocSummary> {
 }
 
 async function openId(id: string): Promise<OpenFileResult> {
+  const owner = state.options;
   const meta = await fetchMeta(id);
-  const response = await api(`/docs/${meta.draftId}/content?version=${meta.version}`);
+  const grant = await apiJson<{ url: string; hash: string }>(`/docs/${meta.draftId}/content?version=${meta.version}&direct=1`);
+  const response = await fetch(grant.url, { credentials: 'omit', cache: 'no-store' });
+  if (!response.ok) throw new Error('The saved document could not be loaded. Reopen to refresh its download link.');
   let data = await response.arrayBuffer();
   let recovered = false;
   if (
@@ -216,6 +222,7 @@ async function openId(id: string): Promise<OpenFileResult> {
       /* fall back to the saved revision */
     }
   }
+  if (state.options !== owner) throw new Error('The document session changed before loading completed.');
   for (const c of streams.values()) c.abort();
   state.document = meta;
   state.dirty = false;
@@ -224,12 +231,13 @@ async function openId(id: string): Promise<OpenFileResult> {
     path: virtualPath(meta),
     name: meta.name,
     data,
-    hash: response.headers.get("X-Writer-Hash") || meta.hash,
+    hash: grant.hash,
     recovered,
   };
 }
 
 async function saveExisting(path: string, data: ArrayBuffer): Promise<{ ok: true }> {
+  const owner = state.options;
   const id = fromPath(path);
   const meta = state.document;
   if (!meta || id !== meta.draftId) throw new Error("The document session changed before saving.");
@@ -238,7 +246,19 @@ async function saveExisting(path: string, data: ArrayBuffer): Promise<{ ok: true
   const key = `${id}:${meta.version}:${hash}`;
   const operation = pendingSaves.get(key) || crypto.randomUUID();
   pendingSaves.set(key, operation);
-  const saved = await apiJson<WriterDocSummary>(`/docs/${id}/content`, {
+  let saved: WriterDocSummary;
+  if (data.byteLength > 3 * 1024 * 1024) {
+    const upload = { expectedVersion: meta.version, operationId: operation, size: data.byteLength, sha256: hash };
+    const prepared = await apiJson<{ url: string; checksum: string }>(`/docs/${id}/content`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(upload),
+    });
+    const put = await fetch(prepared.url, { method: 'PUT', credentials: 'omit',
+      headers: { 'x-amz-checksum-sha256': prepared.checksum }, body: data });
+    if (!put.ok) throw new Error('The document upload failed. Your edits remain open; retry Save.');
+    saved = await apiJson<WriterDocSummary>(`/docs/${id}/content`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(upload),
+    });
+  } else saved = await apiJson<WriterDocSummary>(`/docs/${id}/content`, {
     method: "PUT",
     headers: {
       "Content-Type": DOCX_MIME,
@@ -247,7 +267,7 @@ async function saveExisting(path: string, data: ArrayBuffer): Promise<{ ok: true
     },
     body: data,
   });
-  if (state.document?.draftId === id) {
+  if (state.options === owner && state.document?.draftId === id) {
     state.document = saved;
     state.dirty = false;
     publish();
@@ -261,38 +281,24 @@ async function saveAsNew(
   data: ArrayBuffer,
   ask: boolean,
 ): Promise<{ ok: boolean; path?: string }> {
+  const owner = state.options;
   const chosen = ask ? prompt("Name for the new copy", name) : name;
   if (chosen === null) return { ok: false };
   const saved = await createDocument(chosen, data);
   // The copy opens as its own document; this instance is left as it was.
-  state.options?.navigateTo(saved.draftId);
+  if (state.options === owner) owner?.navigateTo(saved.draftId);
   return { ok: true, path: virtualPath(saved) };
 }
 
 /** Save through the renderer's own close-save flow (used by the header and by downloads). */
-export async function saveNow(): Promise<WriterDocSummary> {
-  if (!state.document) throw new Error("No document is open.");
-  if (!state.dirty) return state.document;
-  await new Promise<void>((resolve, reject) => {
-    const off = on("save-result", (ok: boolean) => {
-      clearTimeout(timer);
-      off();
-      if (ok) resolve();
-      else reject(new Error("Save did not complete."));
-    });
-    const timer = setTimeout(() => {
-      off();
-      reject(new Error("Save timed out. Check the document before retrying."));
-    }, 20_000);
-    emit("close-save");
-  });
-  return state.document!;
-}
+export const saveNow = createWriterSaveCoordinator({ current: () => state.document,
+  owner: () => state.options, dirty: () => state.dirty, request: () => emit('close-save'),
+  onResult: fn => on('save-result', fn), onRetire: fn => on('teardown', fn),
+});
 
 export async function downloadCurrent(): Promise<void> {
   const meta = await saveNow();
-  const response = await api(`/docs/${meta.draftId}/content?version=${meta.version}`);
-  downloadBlob(await response.blob(), meta.name);
+  deliverOfficeFile(`/api/writer/docs/${meta.draftId}/content?version=${meta.version}&download=1`, meta.name);
 }
 
 // --- Attachments (client-side, per session) -----------------------------------------------
@@ -439,6 +445,8 @@ async function streamRequest(r: AiStreamRequest): Promise<void> {
 
 // --- Chat history (per document, separate from Research) -------------------------------------------
 
+const chatAppender = new OrderedChatAppender();
+
 function projectApiFor(draftId: string): ProjectApi {
   const ids = { projectId: draftId, chatId: draftId };
   const unsupported = async (): Promise<never> => {
@@ -458,17 +466,13 @@ function projectApiFor(draftId: string): ProjectApi {
       }));
     },
     appendChat: async (args) => {
-      await appendWriterChatFn({
-        data: {
-          draftId,
-          message: {
-            role: args.role,
-            text: args.text,
-            ...(args.tools ? { tools: args.tools } : {}),
-            ...(args.attachments ? { attachments: args.attachments } : {}),
-          },
-        },
+      const message = structuredClone({
+        role: args.role, text: args.text,
+        ...(args.tools ? { tools: args.tools } : {}),
+        ...(args.attachments ? { attachments: args.attachments } : {}),
       });
+      await chatAppender.append(draftId, operationId =>
+        appendWriterChatFn({ data: { draftId, message: { ...message, operationId } } }));
     },
     rebindChat: async () => ids,
     listProjects: async () => [],
@@ -744,9 +748,9 @@ export function installPlatformAdapter(options: PlatformAdapterOptions): void {
     onAiStream: (h) => on("ai-stream", h),
     onMenuCommand: (h) => on("menu", h),
     onCloseCheck: (h) => on("close-check", h),
-    reportCloseCheck: (value) => setDirty(value.dirty),
+    reportCloseCheck: (value) => { if (state.options === options) setDirty(value.dirty); },
     onCloseSaveRequest: (h) => on("close-save", h),
-    reportCloseSaveResult: (ok) => emit("save-result", ok),
+    reportCloseSaveResult: (ok) => { if (state.options === options) emit("save-result", ok); },
     reportViewMenuState: () => undefined,
   };
   window.desktop = desktopApi;

@@ -1,3 +1,4 @@
+import { MutationOwnership } from '@/lib/office/mutation-ownership'
 import { OfficeTaskControls } from '@/office/shared/OfficeTaskControls'
 import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,AssistantContext,AssistantStarters,AssistantOptions,AssistantIcon,AssistantReplyActions,JumpToLatest,groupMessages,settleRunMessages,scopeLabel} from '@genoffice/ui'
 // sw-assistant-upgrade-v1: UI-only integration; original engines and service boundaries retained.
@@ -5,7 +6,7 @@ import {AssistantHeader,AssistantActivity,AssistantWorking,AssistantReasoning,As
 import { useEffect, useRef, useState } from 'react'
 import type { Editor } from '@tiptap/core'
 import type { Block } from '@genoffice/docx-engine'
-import { AgentLoop, composeSkills, type AgentImage } from '@genoffice/agent-core'
+import { AgentLoop, composeSkills, type AgentImage, type ToolDisplay } from '@genoffice/agent-core'
 import type { AiSettings, AttachmentAddResult, AttachmentMeta } from '../../shared/ipc'
 import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
 import type { PmNode } from '../editor/convert'
@@ -37,7 +38,7 @@ import { useDictation } from './useDictation'
 import { writerSkill } from './sw-skill'
 import { modeName, profileName, publicQuery, type WriterMode, type WriterProfile } from '../../shared/sw-policy'
 import { useI18n, t as tModule, aiLangDirective, type StringKey } from '../i18n/locale'
-import { Markdown } from '@genoffice/ui'
+import { AssistantMessage } from '@genoffice/ui'
 import { AiComposer, AiTypingIndicator } from '@genoffice/ui'
 import { WriterMark } from '../components/WriterHeader'
 import sendEnterOn from '../assets/send-enter-on.png'
@@ -56,11 +57,13 @@ import fileGeneralIcon from '../assets/file-general.png'
 import { IconNewChat, IconSidebarCollapse } from '../components/icons'
 
 interface ToolActivity {
+  display?: ToolDisplay
   id?: string; startedAt?: number; finishedAt?: number; interrupted?: boolean; mutated?: boolean; running?: boolean
   name: string
   summary: string
   /** still executing: rendered as a spinner chip, replaced in place when the tool finishes */
   isError?: boolean
+  skipped?: boolean
   /** Tool output (truncated on the UI side); when set, the row can be expanded for details */
   output?: string
 }
@@ -543,7 +546,7 @@ export function AiPanel({
   /** Tool activity of the whole run (with args/output, accumulated across turns) — for full
       transcript persistence, and so persisting needn't do side effects inside a setState updater */
   const runToolsRef = useRef<
-    Array<{ name: string; summary: string; isError?: boolean; input?: string; output?: string }>
+    Array<{ name: string; summary: string; isError?: boolean; skipped?: boolean; input?: string; output?: string }>
   >([])
 
   // ── Chat-history persistence ────────────────────────────────────────────
@@ -567,6 +570,7 @@ export function AiPanel({
               name: t.name,
               summary: t.summary,
               isError: t.isError,
+              skipped: !!t.skipped,
               output: t.output ? t.output.slice(0, TOOL_OUTPUT_MAX_CHARS) : undefined,
             })),
             // stored metadata only: no thumbnail read for history, the chips render name/size
@@ -611,6 +615,7 @@ export function AiPanel({
       name: string
       summary: string
       isError?: boolean
+  skipped?: boolean
       input?: string
       output?: string
     }>,
@@ -654,17 +659,21 @@ export function AiPanel({
     })
   }
 
+  const ownershipRef = useRef<MutationOwnership<{ doc: unknown; extras: string }> | null>(null)
+  if (!ownershipRef.current) {
+    ownershipRef.current = new MutationOwnership<{ doc: unknown; extras: string }>(
+      () => ({ doc: editorRef.current.state.doc, extras: JSON.stringify(docAccessRef.current?.snapshotExtras?.() ?? null) }),
+      (a, b) => a.doc === b.doc && a.extras === b.extras,
+    )
+  }
+
   const loopRef = useRef<AgentLoop<WriterSnapshot> | null>(null)
   if (!loopRef.current) {
     const numIds = (): NumIds => ({
       bullet: findNumId(blocksRef.current, 'bullet') ?? numIdFallbackRef.current?.bullet ?? null,
       ordered: findNumId(blocksRef.current, 'ordered') ?? numIdFallbackRef.current?.ordered ?? null,
     })
-    loopRef.current = new AgentLoop<WriterSnapshot>({
-      transport: createElectronTransport(() => settingsRef.current),
-      systemSuffix: aiLangDirective,
-      get maxTurns() { return writerProfileRef.current==='thorough'?200:100 },
-      skill: writerSkill(composeSkills('docs+files', '', [
+    const ownedSkill = writerSkill(composeSkills('docs+files', '', [
         createDocsSkill(
           () => editorRef.current,
           numIds,
@@ -672,9 +681,18 @@ export function AiPanel({
           () => commentsAccessRef.current,
           () => hfAccessRef.current,
           () => docAccessRef.current,
+          () => instructionRef.current,
         ),
         createFilesSkill(availableAttachments),
-      ]), () => writerModeRef.current),
+      ]), () => writerModeRef.current)
+    loopRef.current = new AgentLoop<WriterSnapshot>({
+      transport: createElectronTransport(() => settingsRef.current),
+      systemSuffix: aiLangDirective,
+      get maxTurns() { return writerProfileRef.current==='thorough'?200:100 },
+      skill: {
+        ...ownedSkill,
+        executeTool: (...args) => ownershipRef.current!.run(() => ownedSkill.executeTool(...args)),
+      },
       // Full rollback point: the ProseMirror document plus the out-of-editor
       // state (notes, page setup, header/footer) the tools can change.
       captureSnapshot: (): WriterSnapshot => ({
@@ -700,12 +718,13 @@ export function AiPanel({
           if (execution.mutated) {
             // tracking off: accept immediately (same tick, so the yellow never paints);
             // tracking on: revisions stay pending, handled in the Review tab
-            if (!trackChangesRef.current) clearAiHighlights(true)
+            if (!trackChangesRef.current) ownershipRef.current!.run(() => clearAiHighlights(true))
           }
           runToolsRef.current.push({
             name: call.name,
             summary: execution.summary,
             isError: execution.isError,
+            skipped: !!execution.skipped,
             input: safeJsonInput(call.input),
             output: execution.output
               ? execution.output.slice(0, PERSIST_TOOL_FIELD_MAX)
@@ -714,14 +733,17 @@ export function AiPanel({
           patchLastAssistant((last) => {
             // Swap out the running placeholder pushed by onToolStart (parse-fail calls have none)
             const tools = [...(last.tools ?? [])]
-            const pending = tools.findIndex(t => t.id === call.id); if (pending >= 0) tools.splice(pending, 1)
+            const pending = tools.findIndex(t => t.id === call.id)
+            const startedAt = pending >= 0 ? tools[pending]?.startedAt : undefined
+            if (pending >= 0) tools.splice(pending, 1)
             return {
               tools: [
                 ...tools,
-                { id: call.id, mutated: !!execution.mutated, running: false, finishedAt: Date.now(), 
+                { id: call.id, startedAt, display: execution.display, mutated: !!execution.mutated, running: false, finishedAt: Date.now(),
                   name: call.name,
                   summary: execution.summary,
                   isError: execution.isError,
+                  skipped: !!execution.skipped,
                   output: execution.output
                     ? execution.output.slice(0, TOOL_OUTPUT_MAX_CHARS)
                     : undefined,
@@ -766,13 +788,12 @@ export function AiPanel({
           }
         },
         onError: (error) => {
-          // A failed run must not leave a half-applied document: rewind to the
-          // pre-run point (document + notes + page setup) when the run mutated
-          // anything. The rollback point stays on the message so the user can
-          // see what was reverted; there is nothing further to roll back.
+          // A whole-document rewind is safe only while every intervening edit
+          // belongs to this run. Preserve concurrent/ambiguous edits for review.
           const failedSnapshot = runSnapshotRef.current
           let reverted = false
-          if (failedSnapshot) {
+          const rollbackSafe = ownershipRef.current!.canRollback()
+          if (failedSnapshot && rollbackSafe) {
             try {
               restoreSnapshot(failedSnapshot)
               reverted = true
@@ -780,6 +801,9 @@ export function AiPanel({
               /* keep the partial edits rather than fail twice */
             }
           }
+          persistMessage('assistant', `${loopRef.current?.failureCheckpoint ?? error}\n\n${reverted
+            ? "The run's changes were rolled back."
+            : failedSnapshot ? 'Recovery was incomplete. Inspect the current document before continuing.' : 'No document changes were made by this run.'}`, runToolsRef.current)
           setChat(previous => settleRunMessages(previous))
           setChat((prev) => {
             const next = [...prev]
@@ -788,7 +812,8 @@ export function AiPanel({
               next[next.length - 1] = {
                 ...last,
                 streaming: false,
-                error: reverted ? `${error} The run's changes were rolled back.` : error,
+                error: reverted ? `${error} The run's changes were rolled back.` : failedSnapshot && !rollbackSafe
+                  ? `${error} Automatic rollback was skipped to preserve edits made during the run. Review the remaining changes before saving.` : error,
                 tools: last.tools?.filter((tl) => !tl.running),
                 snapshot: reverted ? undefined : (failedSnapshot ?? undefined),
               }
@@ -917,6 +942,7 @@ export function AiPanel({
     instructionRef.current = instruction
     lastInstructionRef.current = instruction
     runToolsRef.current = []
+    ownershipRef.current!.begin()
     runSnapshotRef.current = null
     stickToBottomRef.current = true
     setChat((prev) => [
@@ -1189,7 +1215,7 @@ export function AiPanel({
                 {entry.tools && entry.tools.length > 0 && <AssistantActivity tools={entry.tools} active={!!entry.streaming}/>}
                 {entry.text && (
                   <div dir="auto">
-                    <Markdown text={entry.text} nav={docNav} />
+                    <AssistantMessage role={entry.role} text={entry.text} nav={docNav} />
                   </div>
                 )}
               </div>
@@ -1238,7 +1264,7 @@ export function AiPanel({
                 </span>
               ) : entry.role === 'assistant' ? (
                 <div dir="auto">
-                  <Markdown text={entry.text} nav={docNav} />
+                  <AssistantMessage role={entry.role} text={entry.text} nav={docNav} />
                 </div>
               ) : (
                 <span dir="auto">{entry.text}</span>

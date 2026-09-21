@@ -3258,8 +3258,8 @@ function CategoryGroupBand({
   )
 }
 
-function formatAxisValue(value: number, numberFormat: string | undefined): string {
-  if (numberFormat && numberFormat !== 'General' && !numberFormat.includes('%')) {
+export function formatAxisValue(value: number, numberFormat: string | undefined): string {
+  if (numberFormat && numberFormat !== 'General') {
     try {
       const text = numfmt.format(numberFormat, value, { throws: false })
       if (typeof text === 'string' && text !== '') return text

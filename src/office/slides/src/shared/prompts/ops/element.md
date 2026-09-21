@@ -397,3 +397,91 @@ individual runs are set through `setText` run `link` fields.
 
 Picture or texture fill of a shape. The payload is image bytes or an existing
 media part path, which the model cannot produce; the UI's fill picker uses it.
+
+
+### alignElements
+
+`{els:[ids],mode:"left"|"centerH"|"right"|"top"|"centerV"|"bottom",to?:"selection"|"slide"}`
+
+Lines up several top-level elements on one edge or center line. By default
+the reference is the selection's bounding box (at least two elements);
+`to: "slide"` aligns to the slide edges and accepts a single element. Frames
+are the axis-aligned boxes `read_slide` reports (rotation is ignored, as in
+PowerPoint's Align menu); attached connectors follow.
+
+| Field | Type                                 | Notes                                                                   |
+| ----- | ------------------------------------ | ----------------------------------------------------------------------- |
+| els   | array of element ids                 | Top-level elements only; group children are refused (arrange the group) |
+| mode  | see signature                        | `centerH` = same vertical center line, `centerV` = same horizontal one  |
+| to    | `"selection"` (default) or `"slide"` | Reference box                                                           |
+
+```json
+{
+  "op": "alignElements",
+  "target": { "slide": 0 },
+  "els": ["e_TEXT", "e_SHAPE"],
+  "mode": "left"
+}
+```
+
+Common mistakes
+
+- One element without `to: "slide"`: aligning a single box to itself does nothing.
+- Expecting text inside the box to move: this moves frames; text alignment is `setParagraphFormat`.
+
+
+### distributeElements
+
+`{els:[ids],axis:"horizontal"|"vertical",to?:"selection"|"slide"}`
+
+Spaces elements evenly along one axis. `selection` (default, at least three
+elements) keeps the two outer elements and spreads the gaps between the rest;
+`to: "slide"` gives equal gaps between the slide edges and every element (one
+or more elements). Only the coordinate along `axis` changes.
+
+```json
+{
+  "op": "distributeElements",
+  "target": { "slide": 0 },
+  "els": ["e_TEXT", "e_SHAPE", "e_PICTURE"],
+  "axis": "horizontal"
+}
+```
+
+Common mistakes
+
+- Two elements with the default `to`: there is no gap to even out; align them or pass `to: "slide"`.
+
+
+### setShapeCustomGeometry
+
+`{path:{w,h,cmds:[{op:"M"|"L"|"C"|"Q"|"Z",pts:[…]}]}} — freeform path replacing the shape's geometry (group children: add group)`
+
+Turns a shape into a freeform (PowerPoint "Edit Points"): the preset or
+previous custom geometry is replaced by one closed or open path. `w`/`h` set
+the path coordinate space and normally equal the element's `cx`/`cy` in EMU so
+`pts` are EMU inside the element box. The first command must be `M`; `pts`
+holds 2 numbers for `M`/`L`, 4 for `Q`, 6 for `C`, none for `Z`. Fill, line,
+text and effects are kept.
+
+```json
+{
+  "op": "setShapeCustomGeometry",
+  "target": { "slide": 0, "el": "e_SHAPE" },
+  "path": {
+    "w": 1828800,
+    "h": 914400,
+    "cmds": [
+      { "op": "M", "pts": [0, 914400] },
+      { "op": "L", "pts": [914400, 0] },
+      { "op": "L", "pts": [1828800, 914400] },
+      { "op": "Z", "pts": [] }
+    ]
+  }
+}
+```
+
+Common mistakes
+
+- Pictures, tables, charts and connectors: only text boxes and shapes take a path.
+- Points outside 0..w / 0..h draw outside the element box (allowed, but the selection frame stays the box).

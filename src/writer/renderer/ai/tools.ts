@@ -1,3 +1,8 @@
+import { pictureNode, resolveFloat, insertPosition } from "./floating-ops";
+import { BROWSER_WRITER_TOOLS, executeBrowserWriterTool } from "./browser-tools";
+import { listRevisionEntries } from "./revision-ops";
+import type { AiStyleAccess } from "./style-ops";
+import type { NoteInfo, StyleUpsert } from "@genoffice/docx-engine";
 import { navigateDocument } from "@/lib/writer/document-navigation";
 import { findTextMatches } from "@/lib/writer/text-matches";
 import {
@@ -70,6 +75,7 @@ import {
 const READ_MAX_CHARS = 120_000;
 
 export const AGENT_TOOLS: AgentToolDef[] = [
+  ...BROWSER_WRITER_TOOLS,
   ...["read_document_outline", "search_document"].map(
     (name): AgentToolDef => ({
       name,
@@ -121,7 +127,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     readOnly: true,
     description:
       "Get the latest state of the current document: block list (index|type|content preview), full-text stats (word/character counts) and the current selection. Block indexes change after modifications; call this when you need up-to-date indexes.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    inputSchema: { type: "object", properties: { page: { type: "integer", minimum: 1, description: "Optional visible page number for rendered block mapping; defaults to the current page. This is browser pagination, not Word layout certification." } }, required: [] },
   },
   {
     name: "read_blocks",
@@ -194,7 +200,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
     name: "read_revisions",
     readOnly: true,
     description:
-      "List every pending tracked revision (insertions, deletions, formatting/move/table changes) with kind, author, date, block index and the affected text. Read-only: revisions are accepted/rejected by the user in the Review tab.",
+      "List every pending tracked revision (insertions, deletions, formatting/move/table changes) with kind, author, date, block index and the affected text. Read before selectively accepting/rejecting changes with accept_changes/reject_changes; IDs are positional and must be refreshed after edits.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
@@ -624,7 +630,7 @@ export const AGENT_TOOLS: AgentToolDef[] = [
   {
     name: "insert_footnote",
     description:
-      "CREATE one NEW numbered footnote (or endnote) and anchor its reference mark immediately after a piece of body text. Every call adds another note: calling it twice for the same authority produces a duplicate definition and an orphan, so cite an authority in full ONCE and use a short form (Id., supra) in later notes. Not for: changing an existing note's text (edit the note through read_blocks/replace_blocks on the footnote, or apply_commands replaceAllText scoped to it), moving a mark, or adding a second mark to a note that already exists. afterText is a literal phrase in the document (usually the end of the sentence the note supports, including its closing punctuation — Bluebook puts the reference after the period); when the phrase occurs more than once pass blockIndex or occurrence (the tool refuses an ambiguous anchor). text is the note body (plain text; cite in Bluebook form). Returns the note number. Example: afterText \"was inadequate as a matter of law.\", text \"Hardeman v. Monsanto Co., 997 F.3d 941, 960 (9th Cir. 2021).\"",
+      "CREATE one NEW numbered footnote (or endnote) and anchor its reference mark immediately after a piece of body text. Every call adds another note: calling it twice for the same authority produces a duplicate definition and an orphan, so cite an authority in full ONCE and use a short form (Id., supra) in later notes. Not for: changing an existing note's text (use read_notes then edit_note), moving a mark, or adding a second mark to a note that already exists. afterText is a literal phrase in the document (usually the end of the sentence the note supports, including its closing punctuation — Bluebook puts the reference after the period); when the phrase occurs more than once pass blockIndex or occurrence (the tool refuses an ambiguous anchor). text is the note body (plain text; cite in Bluebook form). Returns the note number. Example: afterText \"was inadequate as a matter of law.\", text \"Hardeman v. Monsanto Co., 997 F.3d 941, 960 (9th Cir. 2021).\"",
     inputSchema: {
       type: "object",
       properties: {
@@ -808,6 +814,7 @@ export interface AiPageSetupAccess {
   };
   /** returns an error message, or null on success */
   set(patch: PageSetupPatch, applyTo: "current" | "all"): string | null;
+  insertBreak?: (type: "nextPage" | "continuous" | "evenPage" | "oddPage", afterBlockIndex: number) => string | null;
 }
 
 /**
@@ -816,7 +823,10 @@ export interface AiPageSetupAccess {
  * numbering and the docx save path match the Insert Footnote ribbon action.
  */
 export interface AiNotesAccess {
-  list(kind: "footnote" | "endnote"): { id: string; text: string }[];
+  list(kind: "footnote" | "endnote"): NoteInfo[];
+  replace?: (kind: "footnote" | "endnote", id: string, next: NoteInfo) => string | null;
+  remove?: (kind: "footnote" | "endnote", id: string) => string | null;
+  protectedMarkBlock?: (kind: "footnote" | "endnote", id: string) => number | null;
   /** insert a new note whose reference mark goes at document position `pos`;
    *  returns the note's number, or an error message */
   insert(kind: "footnote" | "endnote", text: string, pos: number): { num: number } | string;
@@ -841,9 +851,16 @@ export interface DocSnapshotExtras {
   hfRaw?: Record<string, unknown>;
   titlePg?: boolean;
   evenOddHf?: boolean;
+  comments?: CommentInfo[];
+  styleUpserts?: Record<string, StyleUpsert>;
+  watermark?: string | null;
+  trailingStartType?: string | null;
 }
 
 export interface AiDocumentAccess {
+  layout?: (page?: number) => import('./page-context').WriterPageContext | null;
+  styles?: AiStyleAccess;
+  watermark?: { set(text: string | null): string | null };
   pageSetup?: AiPageSetupAccess;
   notes?: AiNotesAccess;
   /** deep copies of the out-of-editor state for a rollback point */
@@ -865,6 +882,8 @@ export interface WriterSnapshot {
  */
 export interface AiCommentsAccess {
   list(): CommentInfo[];
+  add?: (from: number, to: number, text: string) => { id: string } | string;
+  remove?: (id: string) => string | null;
   /** false when the parent thread or its anchor no longer exists */
   reply(parentId: string, text: string): boolean;
   /** false when the thread does not exist */
@@ -951,6 +970,7 @@ function editedExternally(editor: Editor): boolean {
 
 /** tools addressing the document by block index: refused after an external edit until the model re-reads */
 const INDEX_WRITE_SUMMARIES: Record<string, () => string> = {
+  ...Object.fromEntries(BROWSER_WRITER_TOOLS.filter(t=>!t.readOnly).map(t=>[t.name,()=>t.name.replaceAll("_"," ")])),
   insert_content: () => t("aiSumInsertContent"),
   replace_blocks: () => t("aiSumReplaceContent"),
   apply_commands: () => t("aiSumApplyCommands"),
@@ -1566,6 +1586,32 @@ async function insertImageBase64(
   }
 }
 
+async function insertNativePicture(editor: Editor, call: AgentToolCall, signal?: AbortSignal, app?: AiDocumentAccess): Promise<ToolExecution> {
+  const summary = "Insert native picture";
+  const before = editor.state.doc;
+  const position = insertPosition(editor, call.input.afterBlockIndex);
+  if ("error" in position) return fail(summary, position.error);
+  const floating = call.input.float === undefined ? null : resolveFloat(call.input.float);
+  if (floating && "error" in floating) return fail(summary, floating.error);
+  const url = String(call.input.url ?? "").trim();
+  if (!/^https?:\/\//.test(url) && !isPlatformImage(url)) return fail(summary, "Use an approved http(s) image URL or platform-image handle.");
+  try {
+    const fetched = isPlatformImage(url) ? getPlatformImage(url) : await window.desktop.fetchImage(url);
+    if (!fetched) return fail(summary, "Image is unavailable.");
+    const mime = sniffImageMime(fetched.base64);
+    if (!mime) return fail(summary, "Only PNG, JPEG and GIF are supported.");
+    const natural = await imageSizeOf(`data:${mime};base64,${fetched.base64}`);
+    if (signal?.aborted || editor.isDestroyed) return fail(summary, "Stopped before inserting the image.");
+    if (app?.pageSetup?.read().locked) return fail(summary, "The document became read-only; no image was inserted.");
+    if (editor.state.doc !== before) return fail(summary, "Document changed while resolving the image; re-read current block positions. Nothing inserted.");
+    const built = pictureNode({base64:fetched.base64,mime,naturalWidth:natural.width,naturalHeight:natural.height,width:call.input.width,height:call.input.height,...(floating && "float" in floating ? {float:floating.float}:{}),altText:typeof call.input.altText === "string" ? call.input.altText : undefined});
+    if ("error" in built) return fail(summary,built.error);
+    if (!editor.chain().insertContentAt(position.pos,built.node).run()) return fail(summary,"Image insertion was rejected.");
+    markDocSeen(editor);
+    return {output:`Inserted native picture after block ${position.after} (${built.widthPx}×${built.heightPx}px).`,mutated:true,summary};
+  } catch(error) { return fail(summary,error instanceof Error?error.message:String(error)); }
+}
+
 export function executeTool(
   editor: Editor,
   call: AgentToolCall,
@@ -1578,18 +1624,21 @@ export function executeTool(
   app?: AiDocumentAccess,
 ): ToolExecution | Promise<ToolExecution> {
   const scope = frozen && frozen.doc === editor.state.doc ? frozen.scope : null;
+  if (BROWSER_WRITER_TOOLS.some(t=>t.name===call.name && !t.readOnly) && app?.pageSetup?.read().locked) return fail(call.name, "The document is read-only.");
+  if (["write_document","replace_selection"].includes(call.name) && typeof call.input.html === "string") { const error=toolEchoError(call.input.html); if(error) return fail(call.name,error); }
   activeEditor = editor;
   activeNumIds = numIds;
   activeTrack = track;
   const staleSummary = INDEX_WRITE_SUMMARIES[call.name];
   if (staleSummary && editedExternally(editor)) return fail(staleSummary(), STALE_DOC_ERROR);
   if (call.name === "view_page") return viewPage(editor, call);
+  if (call.name === "insert_picture") return insertNativePicture(editor,call,signal,app);
   const settle = (exec: ToolExecution): ToolExecution => {
     const readsDoc = [
       "get_document_context",
       "read_blocks",
       "read_document_outline",
-      "search_document",
+      "search_document", "read_revisions",
     ].includes(call.name);
     if (exec.mutated || (readsDoc && !exec.isError)) markDocSeen(editor);
     return exec;
@@ -1615,6 +1664,8 @@ export function executeTool(
   ) {
     return executeAsyncTool(editor, call, signal);
   }
+  const browser = executeBrowserWriterTool(editor,call,numIds,track,frozen,comments,app);
+  if (browser) return settle(browser);
   return settle(executeSyncTool(editor, call, numIds, track, scope, comments, hf, app));
 }
 
@@ -1647,7 +1698,7 @@ function executeSyncTool(
       return {
         // the still-valid frozen scope keeps the reported selection consistent
         // with what scope:'selection' and cursor-relative inserts will act on
-        output: buildDocumentContext(editor, scope ?? undefined, hf?.read()),
+        output: buildDocumentContext(editor, scope ?? undefined, hf?.read()) + (app?.layout ? `\nRendered page mapping (current browser pagination, not certified Word pagination): ${JSON.stringify(app.layout(typeof call.input.page === "number" ? call.input.page : undefined))}. Blocks spanning more than one page must not be deleted wholesale for a one-page request; use an exact user selection.` : ""),
         mutated: false,
         summary: t("aiSumReadDocContext"),
       };
@@ -2139,7 +2190,7 @@ function executeSyncTool(
 
     case "read_revisions":
       return {
-        output: buildRevisionsContext(editor),
+        output: JSON.stringify(listRevisionEntries(editor.state.doc)),
         mutated: false,
         summary: t("aiSumReadRevisions"),
       };

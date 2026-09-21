@@ -5,6 +5,9 @@
  * path (proving fidelity). Element-level patch regeneration is left for Phase 3.
  */
 import JSZip from 'jszip'
+import { custGeomXml, parseCustGeom, validCustGeomPath, type CustGeomPath } from './custgeom'
+export { validCustGeomPath, type CustGeomPath } from './custgeom'
+export { BUILTIN_TABLE_STYLES, resolveBuiltinTableStyleId } from './table-style'
 import { PackageArchive, relsPathFor, resolveTarget, type Relationship } from './zip'
 import { parseClrMap, parseTheme, type Theme } from './theme'
 import {
@@ -103,6 +106,9 @@ export {
   cNvPrIdsInXml,
   ANIM_EFFECTS,
   ANIM_TRIGGERS,
+  ANIM_DIRECTIONS,
+  isMediaEffect,
+  type AnimDirection,
   type AnimClass,
   type AnimEffectKind,
   type AnimTrigger,
@@ -1037,6 +1043,31 @@ export function setShapePresetGeometry(slide: Slide, elementId: string, prst: st
   return true
 }
 
+export function setShapeCustomGeometry(
+  slide: Slide,
+  elementId: string,
+  geom: CustGeomPath,
+): boolean {
+  if (!validCustGeomPath(geom)) return false
+  const el = slide.elements.find((e) => e.id === elementId)
+  if (!el || (el.type !== 'text' && el.type !== 'shape')) return false
+  const xml = swapGeometryXml(patchedElementXml(el), custGeomXml(geom))
+  if (xml == null) return false
+  el.dirty = el.dirtyTransform = el.dirtyFill = el.dirtyStroke = false
+  el.dirtyPPr = undefined
+  el.anchor.originalXml = xml
+  applyCustomGeometryModel(el as TextElement, xml)
+  slide.structureDirty = true
+  return true
+}
+
+function applyCustomGeometryModel(shape: TextElement, xml: string): void {
+  const { cx, cy } = shape.transform.offset
+  delete shape.presetGeometry
+  delete shape.adjust
+  shape.customGeometry = parseCustGeom(xml, cx, cy)
+}
+
 /** Serialize adjust values as an <a:avLst> ("val" formulas only). */
 function avLstXml(adjust: Record<string, number>): string {
   const gds = Object.entries(adjust)
@@ -1098,7 +1129,7 @@ export function setShapeAdjustValues(
 
 /** Replace <a:prstGeom>/<a:custGeom> in a shape's XML with the new preset; null if no anchor point exists. */
 function swapGeometryXml(xml: string, prst: string): string | null {
-  const geomXml = `<a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom>`
+  const geomXml = prst.startsWith("<a:custGeom>") ? prst : `<a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom>`
   const existing =
     /<a:prstGeom\b[^>]*\/>|<a:prstGeom\b[\s\S]*?<\/a:prstGeom>|<a:custGeom\b[\s\S]*?<\/a:custGeom>/.exec(
       xml,
@@ -2114,21 +2145,40 @@ export function materializeSlide(opened: OpenedPptx, slideIndex: number): Slide 
 
 // ── Connector move-following ────────────────────────────────────────────
 
-/** Connection point index → shape edge midpoint (rectangle approximation: 0 top 1 left 2 bottom 3 right, else center). */
-function connectionPoint(t: Transform, idx: number): { x: number; y: number } {
-  const o = t.offset
-  switch (idx) {
-    case 0:
-      return { x: o.x + o.cx / 2, y: o.y }
-    case 1:
-      return { x: o.x, y: o.y + o.cy / 2 }
-    case 2:
-      return { x: o.x + o.cx / 2, y: o.y + o.cy }
-    case 3:
-      return { x: o.x + o.cx, y: o.y + o.cy / 2 }
-    default:
-      return { x: o.x + o.cx / 2, y: o.y + o.cy / 2 }
+export type ConnectionSide = 'top' | 'left' | 'bottom' | 'right'
+
+// presetShapeDefinitions cxnLst order: most presets list the four edge
+// midpoints as top/left/bottom/right; the ellipse interleaves four diagonal
+// sites, so its edge midpoints sit at even indexes
+const ELLIPSE_SIDES: Record<ConnectionSide, number> = { top: 0, left: 2, bottom: 4, right: 6 }
+const RECT_SIDES: Record<ConnectionSide, number> = { top: 0, left: 1, bottom: 2, right: 3 }
+
+/** Connection-site index of a shape edge midpoint for the element's preset geometry. */
+export function connectionSiteForSide(el: SlideElement, side: ConnectionSide): number {
+  const prst = el.type === 'shape' || el.type === 'picture' ? el.presetGeometry : undefined
+  return (prst === 'ellipse' ? ELLIPSE_SIDES : RECT_SIDES)[side]
+}
+
+/** Connection point index → shape edge midpoint (edge sites of the preset geometry, else center). */
+function connectionPoint(el: SlideElement, idx: number): { x: number; y: number } {
+  const o = el.transform.offset
+  const prst = el.type === 'shape' || el.type === 'picture' ? el.presetGeometry : undefined
+  const sides = prst === 'ellipse' ? ELLIPSE_SIDES : RECT_SIDES
+  if (idx === sides.top) return { x: o.x + o.cx / 2, y: o.y }
+  if (idx === sides.left) return { x: o.x, y: o.y + o.cy / 2 }
+  if (idx === sides.bottom) return { x: o.x + o.cx / 2, y: o.y + o.cy }
+  if (idx === sides.right) return { x: o.x + o.cx, y: o.y + o.cy / 2 }
+  if (prst === 'ellipse' && idx >= 1 && idx <= 7) {
+    // odd ellipse sites are the 45-degree points: inset (1 - 1/sqrt2)/2 of each extent
+    const k = 0.1464
+    const left = idx === 1 || idx === 3
+    const top = idx === 1 || idx === 7
+    return {
+      x: o.x + (left ? o.cx * k : o.cx * (1 - k)),
+      y: o.y + (top ? o.cy * k : o.cy * (1 - k)),
+    }
   }
+  return { x: o.x + o.cx / 2, y: o.y + o.cy / 2 }
 }
 
 /**
@@ -2163,8 +2213,8 @@ export function updateConnectorsForMoved(slide: Slide, movedIds: string[]): numb
     const curEnd = { x: t.flipH ? o.x : o.x + o.cx, y: t.flipV ? o.y : o.y + o.cy }
     const stTarget = cxn.start ? bySpid.get(cxn.start.id) : undefined
     const endTarget = cxn.end ? bySpid.get(cxn.end.id) : undefined
-    const p1 = stTarget ? connectionPoint(stTarget.transform, cxn.start!.idx) : curStart
-    const p2 = endTarget ? connectionPoint(endTarget.transform, cxn.end!.idx) : curEnd
+    const p1 = stTarget ? connectionPoint(stTarget, cxn.start!.idx) : curStart
+    const p2 = endTarget ? connectionPoint(endTarget, cxn.end!.idx) : curEnd
     t.offset = {
       x: Math.round(Math.min(p1.x, p2.x)),
       y: Math.round(Math.min(p1.y, p2.y)),
@@ -4304,6 +4354,27 @@ export function setGroupChildShapePresetGeometry(
   shape.presetGeometry = prst
   delete shape.adjust
   delete shape.customGeometry
+  slide.structureDirty = true
+  return true
+}
+
+export function setGroupChildShapeCustomGeometry(
+  slide: Slide,
+  groupId: string,
+  childId: string,
+  geom: CustGeomPath,
+): boolean {
+  if (!validCustGeomPath(geom)) return false
+  const found = findGroupChild(slide, groupId, childId)
+  const child = found?.child
+  if (!child || (child.type !== 'text' && child.type !== 'shape')) return false
+  let written: string | null = null
+  const ok = patchGroupChildXml(found!.grp, child, (xml) => {
+    written = swapGeometryXml(xml, custGeomXml(geom))
+    return written ?? xml
+  })
+  if (!ok || written == null) return false
+  applyCustomGeometryModel(child as TextElement, written)
   slide.structureDirty = true
   return true
 }

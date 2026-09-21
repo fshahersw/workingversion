@@ -12,6 +12,7 @@ import { dirname, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import JSZip from "jszip";
+import { readLambdaNativeTarget, assertLambdaNativeMetadata, assertLambdaNativePayloads } from "./lambda-native-target.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputPath = resolve(
@@ -113,6 +114,8 @@ async function main() {
   ) {
     throw new Error("Invalid Lambda build metadata");
   }
+  const nativeTarget = await readLambdaNativeTarget(repoRoot, parsedBuildMetadata.environment);
+  assertLambdaNativeMetadata(parsedBuildMetadata, nativeTarget);
 
   const runScriptPath = resolve(repoRoot, "infra/app/runtime/run.sh");
   const runScript = await readFile(runScriptPath);
@@ -131,6 +134,7 @@ async function main() {
   const payloads = await Promise.all(
     files.map(async (file) => ({ ...file, bytes: await readFile(file.source) })),
   );
+  assertLambdaNativePayloads(payloads, nativeTarget);
   const uncompressedBytes =
     runScript.length +
     Buffer.byteLength(buildMetadata, "utf8") +

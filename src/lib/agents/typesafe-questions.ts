@@ -50,18 +50,22 @@ export const THRESHOLDS = {
 // routeTurn (inspect tier, vision check, cache) is unchanged.
 
 export type OfficeTaskClass = "inspect" | "format" | "short_edit" | "draft" | "analyze";
-export type OfficeApp = "writer" | "sheets" | "slides";
+export type OfficeApp = "writer" | "sheets" | "slides" | "pdf";
+export const OFFICE_ROUTING_POLICY_VERSION = "office-route-v3-artifact-mutation";
+export const OFFICE_ROUTING_MAX_CHARS = 12_000;
 
 const EDITOR_LABEL: Record<OfficeApp, string> = {
   writer: "a Word-like document editor",
   sheets: "a spreadsheet editor",
   slides: "a slide deck editor",
+  pdf: "a PDF viewer and editor with page, annotation, and form tools",
 };
 
 export function officeRouteState(app: OfficeApp, instruction: string): Record<string, unknown> {
+  if (instruction.length > OFFICE_ROUTING_MAX_CHARS) throw new RangeError("Office routing request too long; keep main tier");
   return {
     editor: EDITOR_LABEL[app],
-    request: { text: instruction.slice(0, 3_000) },
+    request: { text: instruction },
   };
 }
 
@@ -101,7 +105,17 @@ export function officeRouteQuestions(): Record<string, Question> {
         },
       },
     ),
-    changes_document: noul("Does `request.text` ask for any change to the document's content or appearance?"),
+    changes_document: noul(
+      {
+        question: "Does `request.text` ask the assistant to modify the actual document, spreadsheet, slide deck or PDF open in `editor`?",
+        yes_when: "The request asks to insert, replace, remove, rewrite, format or otherwise change content or appearance in that artifact. A request that mixes a chat answer with an artifact edit still counts as a change.",
+        no_when: "The request only asks to read, summarize, explain, calculate, compare, analyze or answer about the artifact in chat. Producing an answer about the document is not modifying it. Summarizing alone does not request insertion or replacement in the artifact.",
+      },
+      {
+        true: "A change to the editor artifact itself is requested, including inserting a summary or adding a footnote.",
+        false: "Only an answer in chat is requested; no change to the editor artifact itself is requested.",
+      },
+    ),
     needs_legal_judgment: noul(
       "Does carrying out `request.text` require legal analysis or judgment about the substance of the document, rather than reading, editing, or formatting it?",
     ),
@@ -127,7 +141,9 @@ export function decideOfficeClass(res: SystemOneResult | null): OfficeRouteDecis
   if (!a || !OFFICE_CLASSES.has(a.choice as OfficeTaskClass)) return null;
   const cls = a.choice as OfficeTaskClass;
   const heavyMass = (a.probabilities["draft"] ?? 0) + (a.probabilities["analyze"] ?? 0);
-  const legal = noulAnswer(res, "needs_legal_judgment") ?? 0;
+  const legal = noulAnswer(res, "needs_legal_judgment");
+  const changes = noulAnswer(res, "changes_document");
+  if (legal === null || changes === null || !Number.isFinite(a.confidence)) return null;
   if (legal >= THRESHOLDS.officeLegalJudgmentMin) {
     return { taskClass: "analyze", confidence: a.confidence, reason: `legal judgment ${legal.toFixed(2)}` };
   }
@@ -138,7 +154,6 @@ export function decideOfficeClass(res: SystemOneResult | null): OfficeRouteDecis
     return { taskClass: "draft", confidence: a.confidence, reason: `heavy mass ${heavyMass.toFixed(2)}` };
   }
   if (a.confidence < THRESHOLDS.officeRouteMinConfidence) return null; // unsure: let the caller keep its default (main)
-  const changes = noulAnswer(res, "changes_document");
   if (cls === "inspect" && changes !== null && changes >= 0.6) {
     // "read-only" verdict contradicted by the change question: too ambiguous to down-route
     return null;
