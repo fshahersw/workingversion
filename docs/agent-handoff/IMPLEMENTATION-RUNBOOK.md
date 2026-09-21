@@ -1,6 +1,6 @@
-# Research and Discovery implementation runbook
+# Research, Discovery and Workflows implementation runbook
 
-This is a continuation guide for a coding agent working from `codex/office-pdf-quality`. Read the [handoff index](README.md) and applicable detailed audit first. The audits reference `f06e148fdda93553718621ab3634ce53548d7bfe`; inspect the current source and existing edits before acting. Findings may have been fixed since that checkpoint.
+This is a continuation guide for a coding agent working from the delivered default branch, `feat/frontier-ux`. Read the [handoff index](README.md) and applicable detailed audit first. Research/Discovery reference `f06e148fdda93553718621ab3634ce53548d7bfe`; Workflows references `0afb944b739406e1e3327e589431ac16f4ad4eb1`. Inspect current source and existing edits before acting. Findings may have been fixed since those checkpoints. Frontier remains excluded despite the historical branch name.
 
 ## 1. Establish the checkout and validation baseline
 
@@ -69,9 +69,28 @@ Batch independent typed questions over compact complete task state. Preserve exp
 
 Run shadow decisions without delaying the chosen path; use supported durable telemetry if it must outlive a request. Measure gateway/adapter/vendor cold and warm latency and routing accuracy on held-out cases before promotion. Do not replace mechanical calculations or exact checks with Jev calls.
 
+### Packet W: Workflows integrity, recovery and parallel execution
+
+Read the [Workflows overview](workflows/WORKFLOWS-ORCHESTRATION-REVIEW.md) and all three subsystem reports. Trace `WorkflowsPage.tsx`/`AppStudio.tsx` → `api.server.ts` → `repository.server.ts`/`worker.server.ts` → `engine.ts`/`adapter.server.ts` under `src/lib/workflows`, plus the worker infrastructure template. Treat `plan-schema.ts` and `registers.ts` as prepared helpers until an active caller is established.
+
+Implement in this order:
+
+1. Repair source fan-in, direct-parent merge semantics, final-output identity, context selection, atomic skill application, exact docket/Python contracts and lossless report/native export content. Preserve stock triage OR convergence while separating control gates from data edges; a global OR-to-AND change is incorrect.
+2. Separate checkpoint/ownership/transport faults from task failure and user cancellation. Bind stable admission keys to immutable request fingerprints; retain client keys across ambiguous retries. Make outbox processing fair and paginated; reserve model-call slots before dispatch and abort/drain failed pools.
+3. Store outputs once by reference, checkpoint/cache extraction by source/parser/schema/model/task identity, and expose revisioned lightweight status/events. Do not repeatedly serialize all ancestor results or transfer full sources just to show progress.
+4. Add per-node leases and bounded ready-node scheduling, then actual per-file child jobs with per-item retry/coverage and explicit joins. Preserve approval permissions and isolate dependent review gates. Measure shared tenant/model concurrency before increasing caps.
+5. Add resumable plan/execute/verify/repair rounds with progress detection, hard deadlines and request/token budgets. Route compact semantic decisions through the shared AgentCore Jev adapter from Packet E; code remains responsible for authorization, branch readiness, arithmetic, coverage and final completion.
+6. Verify the same final-output manifest through UI → persistence → Writer → reopen → DOCX/PDF/CSV. Paginate presentation without discarding canonical findings. Expose partial coverage and unavailable tools; a completed graph is not proof that all requested findings were verified.
+
+Parallel coding ownership can be split across engine/dataflow, backend durability, tool/export contracts and UI, after agreeing on source/output/job schemas. Give shared schema and budget changes one owner. In particular, do not race multiple workers against whole-run snapshot replacement.
+
+Required regressions: branch-order-invariant source union; false guard plus unconditional predecessor; valid triage merge; ten chained merges with linear growth; 1,201 findings including a critical last row; paired citations and comparison narrative in downloads; Python default execution; lost start response; changed replay payload; checkpoint and cancellation-read faults; 101 persistently due runs; pool failure and 199/200-call race; real per-file execution counts; stale status responses; repeated local DST hour; skill instructions surviving renaming. Preserve the audit's distinction between actual-function synthetic probes and real service integration.
+
+Exit: every selected source and output is accounted for; no false cancellation or silent truncation; completed work survives recovery without duplicate publication; joins are correct under varied completion order; final artifacts match saved content; measured speed improves without lowering coverage/quality. Then use bounded synthetic AWS canaries to verify effective configuration, IAM, model access, queue recovery and provider transport cancellation.
+
 ### Packet F: end-to-end delivery and release
 
-Restore native browser startup before interpreting workflow tests: three audit traces stopped at an unresolved TanStack `process.env.TSS_SERVER_FN_BASE`; a fourth had unresolved startup without a captured identical exception. Inspect framework transforms and resolved client defines. Do not expose server environment through a blanket browser process polyfill. Test the production-built browser bundle separately.
+Restore native Discovery browser startup before interpreting its workflow tests: three audit traces stopped at an unresolved TanStack `process.env.TSS_SERVER_FN_BASE`; a fourth had unresolved startup without a captured identical exception. Inspect framework transforms and resolved client defines. Do not expose server environment through a blanket browser process polyfill. Workflows has a separate recorded catalog-test mismatch; do not assume the Discovery exception explains it. Test the production-built browser bundle separately.
 
 Validate saved/reopened answers, original-file access, source navigation and exports against the same run snapshot. Include partial/unsaved state, revision/model provenance, table/diagram-heavy Office regressions, and safe native types. Release only through the existing authorized environment process with rollback flags and measured quality/performance evidence.
 
@@ -96,6 +115,8 @@ From repository root, with Bun and Python on PATH:
 ```sh
 bun test src/lib/agents src/lib/research-intent.test.ts src/lib/fact-check.test.ts
 bun test src/lib/pile src/lib/kb src/lib/review
+bun test tests/workflows-unit src/lib/workflows
+npx tsc --noEmit --project tsconfig.workflows-tests.json
 ```
 
 Discovery browser suite uses its own Vite instance and refuses to reuse a running development server. Use an unused port and mock API/server-function traffic for synthetic browser tests. Do not run a production build concurrently with the browser suite.
@@ -110,6 +131,14 @@ PowerShell equivalent:
 $env:PLAYWRIGHT_PORT = '5197'
 npx playwright test --config playwright.discovery.config.ts --reporter=line
 ```
+
+The Workflows browser configuration uses port 5175. Ensure it is free and set `CI=1` to prevent reusing an unrelated running app. Its transport fixtures do not establish real AWS or Office save success. Reconcile the stale `Litigation stage`/`Settlement packet readiness` expectation with the current `App category`/mini-app surface before treating the suite as green.
+
+```sh
+CI=1 npx playwright test --config playwright.workflows.config.ts --reporter=line
+```
+
+PowerShell: set `$env:CI = '1'` before the same `npx playwright test` command. Build fake cloud dependencies with network access blocked from process startup. The original abandoned Workflows backend harness made unintended unsuccessful SDK reads and must not be recreated by copying its mocking approach; see [validation evidence](workflows/validation-evidence.json).
 
 Run the existing Office validation commands from its handoff when changing shared model streams, tool dispatch, routing, file delivery or native dependencies. Use the repository build/type/lint checks appropriate to actual changes; separate existing failures and missing local dependencies from regressions. Run checks sequentially where they share generated build state.
 

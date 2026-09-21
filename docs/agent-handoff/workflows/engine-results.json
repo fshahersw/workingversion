@@ -1,0 +1,100 @@
+{
+  "revision": "0afb944b739406e1e3327e589431ac16f4ad4eb1",
+  "syntheticOnly": true,
+  "awsOrProviderCalls": 0,
+  "note": "Assertions reproduce current behavior, not desired correctness.",
+  "branchBypass": {
+    "validGraph": true,
+    "condition": {
+      "branch": false,
+      "value": "no",
+      "expression": "input.selection equals yes"
+    },
+    "guarded": {
+      "status": "completed",
+      "startedAt": "2026-09-21T23:02:37.832Z",
+      "output": {
+        "text": "Guarded work executed"
+      },
+      "endedAt": "2026-09-21T23:02:37.832Z"
+    },
+    "runStatus": "completed",
+    "generatedPlanAlsoAccepted": true
+  },
+  "mergeResponse": {
+    "merged": {
+      "a": {
+        "text": "Finding A"
+      },
+      "b": {
+        "text": "Finding B"
+      }
+    },
+    "final": {
+      "text": "Finding B",
+      "status": "Ready for review"
+    },
+    "runStatus": "completed"
+  },
+  "repeatedMergeGrowth": [
+    {
+      "mergeNumber": 1,
+      "serializedOutputCharacters": 529
+    },
+    {
+      "mergeNumber": 4,
+      "serializedOutputCharacters": 4274
+    },
+    {
+      "mergeNumber": 7,
+      "serializedOutputCharacters": 34234
+    },
+    {
+      "mergeNumber": 10,
+      "serializedOutputCharacters": 273914
+    }
+  ],
+  "multipleReports": {
+    "validGraph": true,
+    "firstReportTitle": "Parties & people",
+    "lastReportTitle": "Source chronology",
+    "finalResponseStartsWith": "Source chronology\n\n1 findings "
+  },
+  "sourceFanIn": [
+    {
+      "nodeOrder": [
+        "a",
+        "b"
+      ],
+      "maximumActiveIndependentCalls": 1,
+      "sourceNames": [
+        "b.txt"
+      ],
+      "coveredDocuments": 1
+    },
+    {
+      "nodeOrder": [
+        "b",
+        "a"
+      ],
+      "maximumActiveIndependentCalls": 1,
+      "sourceNames": [
+        "a.txt"
+      ],
+      "coveredDocuments": 1
+    }
+  ],
+  "forEach": {
+    "enumeratedItems": 3,
+    "downstreamCalls": 1
+  },
+  "waiting": {
+    "runStatus": "waiting",
+    "independentStatus": "pending",
+    "engineStatusWithAlreadyAbortedSignal": "waiting"
+  },
+  "engineShapeOnlyValidation": {
+    "status": "completed",
+    "note": "Custom adapter experiment only; production grounded adapter performs additional source validation."
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "sourceCommit": "0afb944b739406e1e3327e589431ac16f4ad4eb1",
+  "method": "Actual AST-extracted React callback bodies with fixed props and fake network admission. No UI render or live services.",
+  "awsProviderCalls": 0,
+  "skillApplication": {
+    "changes": 2,
+    "firstInstructions": "Preserve source dates and conflicts.",
+    "finalInstructions": "",
+    "finalLabel": "Chronology skill"
+  },
+  "retryAfterLostStartResponse": {
+    "attempts": 2,
+    "distinctAdmissionKeys": 2,
+    "expectedLogicalRuns": 1
+  }
+}

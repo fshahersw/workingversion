@@ -1,0 +1,39 @@
+{
+  "auditedCommit": "0afb944b739406e1e3327e589431ac16f4ad4eb1",
+  "date": "2026-09-21T23:03:04.185Z",
+  "method": "Actual AST declarations of repository/worker with injected in-memory commands; actual engine/schedule. HTTP(S)/fetch explicitly blocked. Counterexample assertions are not correctness passes.",
+  "passed": 5,
+  "networkCalls": 0,
+  "blockedNetworkAttempts": 0,
+  "awsCalls": 0,
+  "providerCalls": 0,
+  "preliminaryHarnessCaveat": "Earlier relocated Bun mocks failed to intercept dependencies. Four failed test paths made unintended DynamoDB read/query transport attempts that stopped at TLS verification; exact SDK wire retry count was not captured. No successful AWS operation was observed. The disabled preliminary harness is not offline validation.",
+  "results": {
+    "changedReplay": {
+      "changedInputsAccepted": true,
+      "returnedOriginalInputs": true
+    },
+    "checkpointFailure": {
+      "status": "failed",
+      "stepStatus": "failed",
+      "error": "synthetic transient checkpoint"
+    },
+    "pollFailure": {
+      "status": "cancelled",
+      "userRequestedCancel": false,
+      "dueIndexPresent": false
+    },
+    "outboxPaging": {
+      "dueRecords": 101,
+      "ticks": 2,
+      "enqueues": 200,
+      "uniqueEnqueued": 100,
+      "lastDueRecordReached": false
+    },
+    "dst": {
+      "first": "2026-11-01T05:30:00Z",
+      "second": "2026-11-01T06:30:00Z",
+      "sameLocalDateAndClockTime": true
+    }
+  }
+}
