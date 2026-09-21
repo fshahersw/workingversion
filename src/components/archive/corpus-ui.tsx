@@ -46,11 +46,20 @@ function ScalarValue({ value }: { value: Scalar }) {
     );
   }
   if (ISO_DATE.test(s)) {
+    // A date-only value ("2026-09-01") parses as UTC midnight; formatting it in
+    // the browser's local zone shifts it a day earlier west of UTC. Format those
+    // in UTC so the calendar date is preserved; keep local time for full timestamps.
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s);
     const d = new Date(s);
     if (!Number.isNaN(d.getTime()))
       return (
         <span className="tabular-nums" title={s}>
-          {d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}
+          {d.toLocaleDateString("en-US", {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+            ...(dateOnly ? { timeZone: "UTC" } : {}),
+          })}
         </span>
       );
   }

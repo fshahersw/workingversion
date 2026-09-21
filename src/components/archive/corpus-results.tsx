@@ -27,13 +27,16 @@ function stringList(value: unknown): string[] {
 function displayDate(value: string | null): string | null {
   if (!value) return null;
   const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleDateString("en-US", {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      });
+  if (Number.isNaN(date.getTime())) return value;
+  // Date-only strings ("2026-09-01") are UTC midnight; format them in UTC so the
+  // calendar day is not shifted back in western time zones. Full timestamps stay local.
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
+  return date.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    ...(dateOnly ? { timeZone: "UTC" } : {}),
+  });
 }
 
 function Stat({ label, value }: { label: string; value: ReactNode }) {
