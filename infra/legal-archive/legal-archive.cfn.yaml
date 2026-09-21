@@ -546,12 +546,18 @@ Resources:
           Weight: 1
       DesiredCount: 1
       TaskDefinition: !Ref ArchiveTaskDefinition
-      HealthCheckGracePeriodSeconds: 120
+      # First create races the instance joining the cluster and the volume
+      # mount; 10 minutes is enough for both. Gateway /health does not wait
+      # on the corpus pull.
+      HealthCheckGracePeriodSeconds: 600
       # One instance: stop the old task, start the new one (about a minute at 03:00).
+      # Circuit breaker off: a first-create with no prior healthy task trips it
+      # in ~2 minutes (no capacity yet, or a single failed start) and leaves
+      # CloudFormation unable to finish the Service resource.
       DeploymentConfiguration:
         MinimumHealthyPercent: 0
         MaximumPercent: 100
-        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+        DeploymentCircuitBreaker: { Enable: false, Rollback: false }
       NetworkConfiguration:
         AwsvpcConfiguration:
           Subnets: [!Ref SubnetId]
