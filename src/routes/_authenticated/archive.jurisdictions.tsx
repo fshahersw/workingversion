@@ -5,7 +5,6 @@ import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { UsCoverageMap } from "@/components/archive/UsCoverageMap";
 import {
-  Caveats,
   CorpusHeader,
   ResultPanel,
   TabBar,
@@ -211,8 +210,7 @@ function JurisdictionsPage() {
                     }
                   />
                 </>
-              )}
-              <Caveats />
+              )}{" "}
             </div>
           </>
         )}

@@ -4,12 +4,7 @@ import { Search } from "lucide-react";
 import { useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
-import {
-  Caveats,
-  CorpusHeader,
-  ResultPanel,
-  UnavailableNotice,
-} from "@/components/archive/corpus-ui";
+import { CorpusHeader, ResultPanel, UnavailableNotice } from "@/components/archive/corpus-ui";
 import { ExploreResults, SearchResults } from "@/components/archive/corpus-results";
 import { getArchiveHealth } from "@/lib/archive/archive.functions";
 import { corpusExplore, corpusSearch } from "@/lib/archive/corpus.functions";
@@ -112,7 +107,6 @@ function SearchPage() {
                 q ? <SearchResults value={data} /> : <ExploreResults value={data} />
               }
             />
-            <Caveats />
           </div>
         )}
       </div>

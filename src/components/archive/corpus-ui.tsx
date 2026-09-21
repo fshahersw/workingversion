@@ -304,22 +304,3 @@ export function ResultPanel({
     </div>
   );
 }
-
-/** The archive's ground rules, shown once per page footer. */
-export function Caveats() {
-  return (
-    <section>
-      <h2 className="text-[13px] font-semibold text-slate-900">
-        Ground rules carried into every answer
-      </h2>
-      <ul className="mt-2 space-y-1.5 text-[12.5px] leading-relaxed text-slate-600">
-        {Object.values(ARCHIVE_CAVEATS).map((c) => (
-          <li key={c} className="flex gap-2">
-            <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-slate-400" />
-            {c}
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}

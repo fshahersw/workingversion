@@ -5,7 +5,6 @@ import { useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import {
-  Caveats,
   CorpusHeader,
   ResultPanel,
   TabBar,
@@ -145,7 +144,6 @@ function CourtsPage() {
                   }
                 }}
               />
-              <Caveats />
             </div>
           </>
         )}
