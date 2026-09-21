@@ -14,9 +14,11 @@ import {
   markDocSeen,
   beginOfficeTask,
   type AiCommentsAccess,
+  type AiDocumentAccess,
   type AiHeaderFooterAccess,
   type FrozenSelection,
 } from "./tools";
+import { auditLiveDocument, formatDocAudit } from "./document-audit";
 
 /**
  * The docx capability as an AgentSkill: document skeleton context, the five
@@ -29,6 +31,7 @@ export function createDocsSkill(
   getTrack?: () => AiTrack | undefined,
   getComments?: () => AiCommentsAccess | undefined,
   getHf?: () => AiHeaderFooterAccess | undefined,
+  getApp?: () => AiDocumentAccess | undefined,
 ): AgentSkill {
   // Selection frozen per run: tools act on the range the prompt described,
   // not on wherever the user's live selection has wandered mid-run. The doc
@@ -58,6 +61,26 @@ export function createDocsSkill(
         frozen,
         getComments?.(),
         getHf?.(),
+        getApp?.(),
       ),
+    // Finish step: after a run that changed the document, audit the model
+    // (footnote parity, faked headings, colored body text, page geometry,
+    // empty/orphan paragraphs, alignment). Findings force ONE corrective turn
+    // (the loop caps verifyResponse retries at one per run), so the agent fixes
+    // its own formatting before the receipt instead of the user finding it.
+    verifyResponse: (_finalText, executed) => {
+      const wrote = executed.some((c) => !READ_ONLY_TOOLS.has(c.name) && c.ok);
+      if (!wrote) return null;
+      let issues: string[];
+      try {
+        issues = auditLiveDocument(getEditor(), getApp?.());
+      } catch {
+        return null; // the audit must never block a run
+      }
+      if (!issues.length) return null;
+      return `Before finishing, the document audit found:${formatDocAudit(issues)}`;
+    },
   };
 }
+
+const READ_ONLY_TOOLS = new Set(AGENT_TOOLS.filter((t) => t.readOnly).map((t) => t.name));

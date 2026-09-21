@@ -1,6 +1,7 @@
 // Server-only readers/writers for the litigation intelligence feed and the
 // corpus-backed signal tabs on the home terminal.
 import { corpusUrl } from "@/lib/corpus";
+import { faviconProxyUrl, shouldSkipFaviconFetch } from "@/lib/favicon-policy";
 import { toRow, type IntelFeed, type IntelRow } from "@/lib/intel-schema";
 import type {
   CorpusSignal,
@@ -209,6 +210,9 @@ export async function loadIntelFeed(input: {
     order: "signal_score.desc,published_at.desc",
     limit: String(Math.min(limit * 4, 500)),
   };
+  // Publish only stories that passed the QA gate. Older/external rows without a
+  // verdict default to "approved" at ingest, so nothing is hidden retroactively.
+  params["review_status"] = "eq.approved";
   if (cats?.length) params["category"] = `in.(${cats.map((c) => `"${c}"`).join(",")})`;
   const q = input.search?.trim();
   if (q) {
@@ -218,16 +222,22 @@ export async function loadIntelFeed(input: {
 
   let rows: Row[] = [];
   try {
-    const latestRuns = await select("corpus_intel_runs", {
-      select: "run_id",
-      order: "generated_at.desc",
-      limit: "1",
-    });
-    const latestRunId = sn(latestRuns[0]?.["run_id"]);
-    if (latestRunId) params["run_id"] = `eq.${latestRunId}`;
+    // Show the best approved items across the rolling window rather than pinning
+    // to a single run: canonical-url dedupe + 90-day retention keep this a clean
+    // rolling feed, and bounded scheduled runs (which review fewer items each)
+    // still render a full terminal.
     rows = await select("corpus_intel_items", params);
   } catch {
-    rows = [];
+    // Tolerate a corpus that has not had the QA migration applied yet: retry
+    // without the review filter so the terminal still populates. Pre-migration
+    // this is the prior (ungated) behavior; once the column exists the filter
+    // above succeeds and the QA gate is live — no deploy-ordering dependency.
+    delete params["review_status"];
+    try {
+      rows = await select("corpus_intel_items", params);
+    } catch {
+      rows = [];
+    }
   }
   const gate = SECTION_KEYWORDS[input.section];
   if (gate && rows.length > 0) {
@@ -251,7 +261,9 @@ export async function loadIntelFeed(input: {
           summary: h.snippet,
           sourceDomain: h.source_domain,
           sourceName: h.source_domain,
-          faviconUrl: h.source_domain ? `https://icons.duckduckgo.com/ip3/${h.source_domain}.ico` : null,
+          // Hosts known to 404 at the icon proxy (courts, agencies) get no URL: the card renders without an icon instead of logging a failed request.
+          faviconUrl:
+            h.source_domain && !shouldSkipFaviconFetch(h.source_domain) ? faviconProxyUrl(h.source_domain) : null,
           imageUrl: h.image_url,
           imageKind: h.image_url ? "editorial" : null,
           imageAlt: null,

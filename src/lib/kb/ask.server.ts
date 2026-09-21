@@ -5,10 +5,43 @@ import {
   KbAskError,
   selectWorkspaceDocuments,
 } from "./ask-selection";
-import { searchKb } from "./search.server";
+import { searchKb, searchKbChunksByDocuments, type KbDocChunks } from "./search.server";
 import { getWorkspace, type WorkspaceDoc } from "./workspace.server";
+import {
+  planRetrieval,
+  RAG_GLOBAL_CHUNK_CAP,
+  RAG_MAX_CHUNKS_PER_DOC,
+  RAG_PACK_CHARS,
+} from "./ask-budget";
 
+/** Flat-retrieval cap when adaptive RAG is disabled (DISCOVERY_ADAPTIVE_RAG=0). */
 const MAX_SOURCE_CHUNKS = 24;
+/** Total retrieved chunks below this triggers one bounded widen of the retrieval. */
+const RETRIEVAL_THIN_TOTAL = 8;
+
+/** Union two per-document chunk sets, keeping the best score per chunk. */
+function mergeDocChunks(a: KbDocChunks[], b: KbDocChunks[]): KbDocChunks[] {
+  const byDoc = new Map<string, Map<number, number>>();
+  for (const set of [a, b]) {
+    for (const d of set) {
+      const m = byDoc.get(d.docId) ?? new Map<number, number>();
+      for (const h of d.hits) m.set(h.chunkId, Math.max(m.get(h.chunkId) ?? 0, h.score));
+      byDoc.set(d.docId, m);
+    }
+  }
+  return [...byDoc.entries()].map(([docId, m]) => ({
+    docId,
+    hits: [...m.entries()].map(([chunkId, score]) => ({ chunkId, score })),
+  }));
+}
+
+/** Flatten per-document hits and keep the globally-highest-scoring `cap`. */
+function topChunks(perDoc: KbDocChunks[], cap: number): { chunkId: number; score: number }[] {
+  return perDoc
+    .flatMap((d) => d.hits)
+    .sort((x, y) => y.score - x.score)
+    .slice(0, cap);
+}
 
 export type KbAskRequest = {
   itemId: string;
@@ -66,8 +99,12 @@ export async function askSavedWorkspace(
 ): Promise<void> {
   const workspace = await getWorkspace(principal, input.itemId);
   if (!workspace) throw new KbAskError("Workspace not found.", 404, true);
-  if (workspace.status !== "ready") {
-    throw new KbAskError("Workspace is not ready to search.", 409, true);
+  // Partial binding: a workspace that is still ingesting (or hit a per-document
+  // failure) can still answer from the documents that HAVE finalized —
+  // `workspace.docs` only contains ready docs, and the client sends the ready
+  // doc-id subset. Block only when nothing is ready yet.
+  if (workspace.status !== "ready" && workspace.docs.length === 0) {
+    throw new KbAskError("Workspace is still indexing; no documents are ready yet.", 409, true);
   }
   // Working Set and Deposition workspaces share the same chunk index and the
   // same answer writer; review tables are queried through their own pipeline.
@@ -85,18 +122,48 @@ export async function askSavedWorkspace(
   }
   const allowedDocIds = new Set(documents.map((doc) => doc.docId));
 
+  const adaptiveRag = process.env["DISCOVERY_ADAPTIVE_RAG"] !== "0";
   let chunkIds: number[];
   let scoreByChunk = new Map<number, number>();
   if (input.sourceChunkIds) {
+    // Follow-up: reuse the passages the prior turn already retrieved.
     chunkIds = [
-      ...new Set(
-        input.sourceChunkIds.filter(
-          (id) => Number.isSafeInteger(id) && id > 0,
-        ),
-      ),
-    ].slice(0, MAX_SOURCE_CHUNKS);
+      ...new Set(input.sourceChunkIds.filter((id) => Number.isSafeInteger(id) && id > 0)),
+    ].slice(0, RAG_GLOBAL_CHUNK_CAP);
     if (!chunkIds.length) throw new KbAskError("Follow-up sources are invalid.");
+  } else if (adaptiveRag) {
+    // Adaptive per-document retrieval: a floor of chunks per document, scaled by
+    // document size/type, capped globally. One bounded widen if coverage is thin.
+    const plan = planRetrieval(
+      documents.map((doc) => ({
+        docId: doc.docId,
+        fileName: doc.fileName,
+        pageCount: doc.pageCount,
+        chunkCount: doc.chunkCount,
+      })),
+    );
+    const retrieve = (docPlan: { docId: string; k: number }[]) =>
+      searchKbChunksByDocuments(principal, {
+        workspaceId: workspace.kbWorkspaceId!,
+        surface: workspace.surface,
+        query: input.query,
+        docPlan,
+        ...(signal ? { signal } : {}),
+      });
+    let perDoc = await retrieve(plan);
+    const total = perDoc.reduce((sum, d) => sum + d.hits.length, 0);
+    if (total < RETRIEVAL_THIN_TOTAL) {
+      const widened = plan.map((p) => ({
+        docId: p.docId,
+        k: Math.min(p.k * 2, RAG_MAX_CHUNKS_PER_DOC),
+      }));
+      perDoc = mergeDocChunks(perDoc, await retrieve(widened));
+    }
+    const top = topChunks(perDoc, RAG_GLOBAL_CHUNK_CAP);
+    chunkIds = top.map((h) => h.chunkId);
+    scoreByChunk = new Map(top.map((h) => [h.chunkId, h.score]));
   } else {
+    // Fallback (DISCOVERY_ADAPTIVE_RAG=0): the proven flat top-K retrieval.
     const hits = await searchKb(principal, {
       workspaceId: workspace.kbWorkspaceId,
       surface: workspace.surface,
@@ -190,6 +257,7 @@ export async function askSavedWorkspace(
         pages: pagesByDoc.get(doc.docId) ?? [],
         files: [{ name: doc.fileName, pageCount: doc.pageCount }],
         instructions,
+        pack: { pages: RAG_GLOBAL_CHUNK_CAP },
       },
       emit,
       signal,
@@ -217,6 +285,7 @@ export async function askSavedWorkspace(
       query: input.query,
       files: fileGroups,
       instructions,
+      pack: { chars: RAG_PACK_CHARS, writerPack: sources.length },
     },
     emit,
     signal,

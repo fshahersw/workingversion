@@ -81,6 +81,9 @@ const RELEVANT = [
 ];
 
 const MAX_SCRAPES = 110;
+/** When a run has a deadline, stop scraping this early so the briefings, QA and
+ *  ingest phases still fit inside the caller's budget. */
+const SCRAPE_RESERVE_MS = 90_000;
 /** Max stories any single outlet can contribute to one run. */
 const DOMAIN_CAP = 6;
 /** Directory pages, firm marketing and award lists are not litigation signals. */
@@ -398,8 +401,14 @@ export type IntelRunResult = {
   editorialImages?: number;
   genericImages?: number;
   analyzed?: number;
+  reviewed?: number;
+  approved?: number;
+  rejected?: number;
+  pending?: number;
+  imagesDropped?: number;
   docketAnalyzed?: number;
   analysisErrors?: string[];
+  qaErrors?: string[];
   searchErrors: string[];
   scrapeErrors: string[];
   ingest?: Record<string, unknown>;
@@ -408,8 +417,19 @@ export type IntelRunResult = {
 };
 
 /** Run one full discovery + enrichment + ingest cycle. */
-export async function runIntelCollection(): Promise<IntelRunResult> {
+export async function runIntelCollection(
+  opts: { deadlineMs?: number; maxScrapes?: number; analyzeCap?: number; reviewCap?: number } = {},
+): Promise<IntelRunResult> {
   const started = Date.now();
+  // The scheduled worker runs this off the HTTP path (a direct async Lambda
+  // invoke, ~900s budget), so a full run fits. `deadlineMs` is only a safety
+  // wall-clock that trims the scrape phase; the briefing/QA caps are explicit
+  // and default to the full run.
+  const deadline =
+    opts.deadlineMs && opts.deadlineMs > 0 ? started + opts.deadlineMs : Number.POSITIVE_INFINITY;
+  const maxScrapes = Math.min(Math.max(opts.maxScrapes ?? MAX_SCRAPES, 0), MAX_SCRAPES);
+  const analyzeCap = Math.min(Math.max(opts.analyzeCap ?? 140, 1), 140);
+  const reviewCap = Math.min(Math.max(opts.reviewCap ?? 150, 1), 150);
   const searchErrors: string[] = [];
   const scrapeErrors: string[] = [];
 
@@ -457,9 +477,12 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
   }
 
   const scrapable = kept.filter((c) => c.category !== "Commentary");
-  const toScrape = firecrawlKey ? scrapable.slice(0, MAX_SCRAPES) : [];
+  const toScrape = firecrawlKey ? scrapable.slice(0, maxScrapes) : [];
   const enrichments = await mapLimit(toScrape, SCRAPE_CONCURRENCY, (c) =>
-    firecrawl(firecrawlKey as string, c.url, scrapeErrors),
+    // Stop enriching as the deadline nears so briefings, QA and ingest still fit.
+    Date.now() > deadline - SCRAPE_RESERVE_MS
+      ? Promise.resolve(null)
+      : firecrawl(firecrawlKey as string, c.url, scrapeErrors),
   );
   const enriched = new Map<string, Enrichment>();
   toScrape.forEach((c, i) => {
@@ -482,7 +505,7 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
         text: e?.markdown?.trim() || e?.description || c.summary,
       };
     }),
-    { cap: 140, batchSize: 4, concurrency: 6 },
+    { cap: analyzeCap, batchSize: 4, concurrency: 6 },
   );
   analysisErrors.push(...aiErrors);
 
@@ -526,6 +549,48 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
     } satisfies IntelItemInput;
   });
 
+  // ---- quality-assurance gate --------------------------------------------
+  // Review the ranked stories before publishing: a text pass judges relevance,
+  // grounding (briefing supported by the extract) and quality, then a vision
+  // pass checks each surviving image. Items are ordered best-first, so the QA
+  // cap covers everything the terminal actually surfaces. Fail-open: a model
+  // outage keeps items visible rather than blanking the feed.
+  const { reviewIntelItems, QA_TEXT_MODEL } = await import("@/lib/intel-qa.server");
+  const {
+    reviews,
+    stats: reviewStats,
+    errors: reviewErrors,
+  } = await reviewIntelItems(
+    items.map((it) => ({
+      key: (it.canonicalUrl as string) || it.url,
+      title: it.title,
+      source: it.domain ?? it.sourceName ?? null,
+      summary: it.summary ?? null,
+      lead: it.analysisLead ?? null,
+      bullets: it.analysisBullets ?? [],
+      text:
+        enriched.get(it.canonicalUrl as string)?.markdown ||
+        enriched.get(it.canonicalUrl as string)?.description ||
+        it.summary ||
+        null,
+      category: it.category,
+      imageUrl: it.image?.url ?? null,
+    })),
+    { cap: reviewCap },
+  );
+  for (const it of items) {
+    const verdict = reviews.get((it.canonicalUrl as string) || it.url);
+    if (!verdict) continue;
+    it.reviewStatus = verdict.status;
+    it.reviewScore = verdict.score;
+    it.reviewReasons = verdict.reasons;
+    it.imageReview = verdict.imageReview;
+    it.reviewerModel = QA_TEXT_MODEL;
+    // A thumbnail that failed the vision gate is dropped; the card falls back to
+    // a favicon while the story itself remains.
+    if (verdict.imageReview === "dropped") it.image = null;
+  }
+
   const feed: IntelFeed = {
     generatedAt: fetchedAt,
     schemaVersion: "intel-v1",
@@ -536,8 +601,15 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
       editorialImages,
       genericImages,
       analyzed: analyses.size,
+      reviewed: reviewStats.reviewed,
+      approved: reviewStats.approved,
+      rejected: reviewStats.rejected,
+      pending: reviewStats.pending,
+      imagesChecked: reviewStats.imagesChecked,
+      imagesDropped: reviewStats.imagesDropped,
+      qaErrors: reviewStats.qaErrors,
     },
-    errors: { search: searchErrors, scrape: scrapeErrors, analysis: analysisErrors },
+    errors: { search: searchErrors, scrape: scrapeErrors, analysis: analysisErrors, qa: reviewErrors },
     retainDays: 90,
     items,
   };
@@ -555,10 +627,16 @@ export async function runIntelCollection(): Promise<IntelRunResult> {
     editorialImages,
     genericImages,
     analyzed: analyses.size,
+    reviewed: reviewStats.reviewed,
+    approved: reviewStats.approved,
+    rejected: reviewStats.rejected,
+    pending: reviewStats.pending,
+    imagesDropped: reviewStats.imagesDropped,
     docketAnalyzed: docket.analyzed,
     searchErrors,
     scrapeErrors,
     analysisErrors,
+    qaErrors: reviewErrors,
     ingest,
     durationMs: Date.now() - started,
   };

@@ -73,6 +73,8 @@ export function streamOrchestrate(
     known_source_refs?: string[];
     memory?: unknown;
     session_id: string;
+    /** Saved conversation id once the first turn has been persisted. */
+    conversation_id?: string;
     history?: HistoryTurn[];
     stream?: boolean;
     matter_id?: string;

@@ -51,6 +51,8 @@ export interface RequestContext {
   currentDateIso: string;
   userMode?: UserMode;
   conversationSummary?: string;
+  /** Cross-chat profile block (anchors + standing preferences); user-memory.server. */
+  userContext?: string;
   recentMessages: ChatMessage[];
   attachments?: AttachmentRef[];
   /** Set when this request resumes after a choice-panel selection (§34). */

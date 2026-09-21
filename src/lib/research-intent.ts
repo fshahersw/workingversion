@@ -213,6 +213,11 @@ const LEGAL_SIGNAL_RE =
 const THINK_RE =
   /\b(compare|contrast|versus|vs\.?|cross[- ]?reference|relationship between|analyze|analysis|assess(ment)?|comprehensive|walk me through|deep dive|breakdown|all (the|of)|every |both |strateg|implications|pros and cons|as well as|and also)\b/i;
 
+/** True when the query carries any legal-research signal (the down-route veto). */
+export function hasLegalSignal(query: string): boolean {
+  return LEGAL_SIGNAL_RE.test(stripClarification(stripQueryFrame(query || "")));
+}
+
 /**
  * Classify how much effort a turn deserves. Pure heuristic, zero latency.
  * `historyTurns` is the count of prior turns (a fresh first turn is never

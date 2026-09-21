@@ -5,9 +5,9 @@ export const MAX_PAGES_PER_FILE = 8000;
 export const MAX_BYTES = 150 * 1024 * 1024;
 export const MAX_FILES = 120;
 /** VL OCR only on empty/noisy pages. Page cap is independent of in-flight parallelism. */
-export const OCR_PAGE_CAP = 1500;
+export const OCR_PAGE_CAP = 9000;
 /** Ceiling on any one file's share of the OCR budget, so file 1 can't starve file 12. */
-export const OCR_MAX_PER_FILE = 400;
+export const OCR_MAX_PER_FILE = 8000;
 export const PDF_PAGE_CONCURRENCY = 8;
 export const FILE_EXTRACT_CONCURRENCY = 4;
 /** Rough decoded-bytes ceiling for files being read at once. */

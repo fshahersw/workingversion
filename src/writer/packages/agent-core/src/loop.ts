@@ -454,6 +454,14 @@ export class AgentLoop<TSnapshot = unknown> {
     this.options.events?.onError?.(error);
   }
 
+  /**
+   * Conversation-level rollback only: drops the failed run's messages from the
+   * model context. It does NOT touch the document. Reverting partial document
+   * mutations is the host's job in events.onError, from the snapshot handed
+   * out as `snapshotBefore` on the run's first mutating tool (Writer restores
+   * the editor JSON + notes/page setup, Sheets restores its pre-run cell
+   * snapshot, Slides restores the engine-side history batch).
+   */
   private rollbackFailedRun(): void {
     this.setDirections([]);
     const msg = this.runUserMsg;

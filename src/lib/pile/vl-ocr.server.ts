@@ -35,7 +35,7 @@ export async function ocrPageImage(imageBase64: string, signal?: AbortSignal): P
             ],
           },
         ],
-        inferenceConfig: { maxTokens: 8192, temperature: 0 },
+        inferenceConfig: { maxTokens: 8192, temperature: 1 },
       }),
       ...(signal ? { signal } : {}),
     },

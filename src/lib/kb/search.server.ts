@@ -37,7 +37,10 @@ export async function rerankPassages(
   });
   const { signedAwsFetch } = await import("@/lib/agents/bedrock-sign.server");
   const res = await signedAwsFetch(
-    "bedrock-agent-runtime",
+    // SigV4 scope for the bedrock-agent-runtime endpoint is service "bedrock";
+    // signing it as "bedrock-agent-runtime" 403s (previously caught + silently
+    // fell back to fused order, degrading rerank).
+    "bedrock",
     `https://bedrock-agent-runtime.${region}.amazonaws.com/rerank`,
     { body, ...(signal ? { signal } : {}) },
   );
@@ -154,5 +157,65 @@ export async function searchKbByDocuments(
       .slice(0, perDocPages)
       .map(([page, score]) => ({ page, score }));
     return { docId, pages };
+  });
+}
+
+export type KbDocChunks = { docId: string; hits: { chunkId: number; score: number }[] };
+
+/**
+ * Per-document CHUNK retrieval for the saved-set RAG Ask: for each document,
+ * run the same pgvector + BM25 fusion scoped to that document, rerank within it,
+ * and return its top-`k` chunk ids. Independent per document so no document is
+ * crowded out; the query is embedded once and documents run in a bounded pool
+ * (6). Degrades to lexical-only if the embedder fails and to fused order if
+ * rerank fails — a per-document failure yields an empty list, never a throw.
+ */
+export async function searchKbChunksByDocuments(
+  sub: string,
+  args: {
+    workspaceId: string;
+    surface: KbSurface;
+    query: string;
+    docPlan: { docId: string; k: number }[];
+    signal?: AbortSignal;
+  },
+): Promise<KbDocChunks[]> {
+  if (!args.docPlan.length) return [];
+  const { embedText } = await import("@/lib/pile/titan.server");
+  const { mapPool } = await import("@/lib/pile/async");
+  const embedding = await embedText(args.query, args.signal).catch(() => null);
+  return mapPool(args.docPlan, 6, async ({ docId, k }): Promise<KbDocChunks> => {
+    if (args.signal?.aborted || k <= 0) return { docId, hits: [] };
+    let hits: KbHit[] = [];
+    try {
+      hits = await hybridSearch({
+        sub,
+        workspaceId: args.workspaceId,
+        surface: args.surface,
+        query: args.query,
+        embedding,
+        match: Math.max(24, k * 3),
+        docIds: [docId],
+      });
+    } catch {
+      return { docId, hits: [] };
+    }
+    if (hits.length > k) {
+      try {
+        const order = await rerankPassages(
+          args.query,
+          hits.map((h) => h.content),
+          k,
+          args.signal,
+        );
+        hits = order
+          .map((i) => hits[i])
+          .filter((h): h is KbHit => Boolean(h))
+          .slice(0, k);
+      } catch {
+        hits = hits.slice(0, k);
+      }
+    }
+    return { docId, hits: hits.map((h) => ({ chunkId: h.chunk_id, score: h.score })) };
   });
 }

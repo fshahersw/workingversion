@@ -70,6 +70,7 @@ Metadata:
           - KbIngestQueueUrl
           - MattersCorpusBucketName
           - MattersSyncSchedule
+          - IntelRefreshSchedule
           - RuntimeSecretRevision
       - Label:
           default: AI and application configuration
@@ -86,7 +87,16 @@ Metadata:
           - OfficeModel
           - OfficeFastModel
           - OfficeInspectModel
+          - OfficeThoroughModel
           - OfficeTiering
+      - Label:
+          default: Router model (TypeSafe Jev)
+        Parameters:
+          - OfficeRouter
+          - ResearchEffortRouter
+          - ResearchTopicShift
+          - TypeSafeModel
+          - TypeSafeTimeoutMs
       - Label:
           default: API, edge, and WAF controls
         Parameters:
@@ -367,6 +377,19 @@ Parameters:
       INGEST_API_KEY, which must exist as a key in the CorpusServiceSecretArn secret.
       Empty disables the schedule, the invoker and the INGEST_API_KEY export.
 
+  IntelRefreshSchedule:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^(rate\\([0-9]+ (minute|minutes|hour|hours|day|days)\\)|cron\\(.+\\))$"
+    ConstraintDescription: An EventBridge schedule expression such as rate(4 hours), or empty.
+    Description: >-
+      When set, a small invoker Lambda calls POST /api/public/intel/run on this
+      schedule to refresh the litigation-intelligence feed (Tavily discovery +
+      Firecrawl enrichment + Bedrock briefings + the QA gate). The route
+      authenticates with INGEST_API_KEY from the CorpusServiceSecretArn secret.
+      The invoker passes a deadline + scrape cap so the run stays inside the
+      API-gateway timeout. Empty disables the schedule and its invoker.
+
   BedrockRegion:
     Type: String
     Default: us-east-1
@@ -431,7 +454,7 @@ Parameters:
     Description: >
       Existing secret containing the runtime's third-party credentials as JSON
       keys: CORPUS_SERVICE_KEY, BRAVE_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY,
-      COURTLISTENER_API_TOKEN, DOCKETBIRD_API_KEY (each key must exist; an empty
+      COURTLISTENER_API_TOKEN, DOCKETBIRD_API_KEY, TYPESAFE_API_KEY (each key must exist; an empty
       value disables that integration. NCBI_API_KEY and OPENFDA_API_KEY may be
       present and empty). CloudFormation resolves each key without accepting
       credentials as plaintext parameters.
@@ -457,11 +480,20 @@ Parameters:
 
   OfficeInspectModel:
     Type: String
-    Default: nvidia.nemotron-super-3-120b
+    Default: ""
     MaxLength: 128
     Description: >
-      Optional text-only inspect/format tier (e.g. nvidia.nemotron-super-3-120b).
-      Empty routes those rounds to the fast tier.
+      Optional text-only inspect/format tier. Empty (default) routes inspect and
+      format rounds to the fast tier (Haiku), the reliable default.
+
+  OfficeThoroughModel:
+    Type: String
+    Default: ""
+    MaxLength: 128
+    Description: >
+      Optional premium tier used only by the Thorough profile (e.g.
+      us.anthropic.claude-opus-4-8). Empty keeps Thorough on the main tier.
+      Must be in the foundation policy's Bedrock allow-list.
 
   OfficeTiering:
     Type: String
@@ -470,6 +502,58 @@ Parameters:
       - "on"
       - "off"
     Description: off sends every Office assistant turn to the main tier.
+
+  OfficeRouter:
+    Type: String
+    Default: bedrock
+    AllowedValues:
+      - bedrock
+      - shadow
+      - typesafe
+    Description: >-
+      Which model classes each Office assistant turn (src/lib/writer/inference.server.ts
+      classifyTask). bedrock = the Haiku one-word router (unchanged). shadow = Haiku
+      decides, TypeSafe Jev is asked in parallel and both verdicts are logged
+      (office_router_shadow) for threshold tuning. typesafe = Jev decides within
+      TypeSafeTimeoutMs, falling back to Haiku then the main tier. Needs the
+      TYPESAFE_API_KEY key in the corpus secret; without it every mode behaves as bedrock.
+
+  ResearchEffortRouter:
+    Type: String
+    Default: heuristic
+    AllowedValues:
+      - heuristic
+      - shadow
+      - typesafe
+    Description: >-
+      Research fast/think/conversational router (src/lib/agents/effort-router.server.ts).
+      heuristic = the regex classifier (unchanged). shadow = heuristic decides, Jev is
+      logged (effort_router_shadow). typesafe = Jev decides; the regex legal-signal veto
+      and the heuristic fallback stay in place.
+
+  ResearchTopicShift:
+    Type: String
+    Default: model
+    AllowedValues:
+      - model
+      - typesafe
+    Description: >-
+      Who judges a topic shift for a standalone question that names a new anchor
+      (src/lib/agents/memory.server.ts resolveQuestion). model = the Haiku rewrite
+      (unchanged). typesafe = a Jev yes/no with an uncertain band that falls back to Haiku.
+
+  TypeSafeModel:
+    Type: String
+    Default: jev-1.13.0
+    Description: >-
+      Pinned TypeSafe model id. Thresholds in src/lib/agents/typesafe-questions.ts were
+      tuned on this version; move deliberately (jev-latest is an alias that shifts on release).
+
+  TypeSafeTimeoutMs:
+    Type: String
+    Default: "800"
+    AllowedPattern: "^[0-9]{3,5}$"
+    Description: Hard wall-clock budget per router call in milliseconds; a late answer is a no-opinion.
 
   WorkflowsEnabled:
     Type: String
@@ -643,6 +727,15 @@ Parameters:
       the environment: Lambda variables are capped at 4 KB). Required with
       OfficeEngineOriginDomain.
 
+  ArchiveAppKeySecretName:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[A-Za-z0-9/_+=.@-]+$"
+    Description: >
+      Name of the dedicated Secrets Manager secret holding {"ARCHIVE_APP_KEY": ...}
+      for the Legal Archive gateway (legal-archive stack). Empty keeps the archive
+      features dark. Requires the Office engine origin, which the archive shares.
+
   AlarmTopicArn:
     Type: String
     Default: ""
@@ -683,6 +776,12 @@ Conditions:
     - !Equals
       - !Ref AlarmTopicArn
       - ""
+  HasLegalArchive: !And
+    - !Condition HasOfficeEngine
+    - !Not
+      - !Equals
+        - !Ref ArchiveAppKeySecretName
+        - ""
   HasOfficeEngine: !And
     - !Not
       - !Equals
@@ -715,6 +814,15 @@ Conditions:
       - !Equals
         - !Ref MattersSyncSchedule
         - ""
+  HasIntelRefresh: !Not
+    - !Equals
+      - !Ref IntelRefreshSchedule
+      - ""
+  # INGEST_API_KEY is exported to the app Lambda when ANY /api/public ingest
+  # consumer is enabled (the matters sync or the intel refresh).
+  HasIngestConsumer: !Or
+    - !Condition HasMattersSync
+    - !Condition HasIntelRefresh
   HasKbIngest: !And
     - !Not
       - !Equals
@@ -731,6 +839,10 @@ Conditions:
   HasOfficeInspectModel: !Not
     - !Equals
       - !Ref OfficeInspectModel
+      - ""
+  HasOfficeThoroughModel: !Not
+    - !Equals
+      - !Ref OfficeThoroughModel
       - ""
   UseBlueDeployment: !Equals
     - !Ref ApiDeploymentSlot
@@ -975,7 +1087,7 @@ Resources:
           # Shared secret for the scheduled matters sync (and the other
           # /api/public ingest routes). Only exported when the sync is enabled.
           INGEST_API_KEY: !If
-            - HasMattersSync
+            - HasIngestConsumer
             - !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:INGEST_API_KEY}}"
             - !Ref AWS::NoValue
           # Bump RuntimeSecretRevision after rotating any key in the runtime
@@ -991,7 +1103,17 @@ Resources:
           OFFICE_MODEL: !Ref OfficeModel
           OFFICE_FAST_MODEL: !Ref OfficeFastModel
           OFFICE_INSPECT_MODEL: !If [HasOfficeInspectModel, !Ref OfficeInspectModel, !Ref AWS::NoValue]
+          OFFICE_THOROUGH_MODEL: !If [HasOfficeThoroughModel, !Ref OfficeThoroughModel, !Ref AWS::NoValue]
           OFFICE_TIERING: !Ref OfficeTiering
+          # TypeSafe Jev router (src/lib/agents/typesafe.server.ts). The key lives in
+          # the corpus secret under TYPESAFE_API_KEY (an empty value disables every
+          # router mode). Routers are hard-capped at TYPESAFE_TIMEOUT_MS and fail open.
+          TYPESAFE_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:TYPESAFE_API_KEY}}"
+          TYPESAFE_MODEL: !Ref TypeSafeModel
+          TYPESAFE_TIMEOUT_MS: !Ref TypeSafeTimeoutMs
+          OFFICE_ROUTER: !Ref OfficeRouter
+          RESEARCH_EFFORT_ROUTER: !Ref ResearchEffortRouter
+          RESEARCH_TOPIC_SHIFT: !Ref ResearchTopicShift
           # Workflows subsystem (src/lib/workflows). Dark unless SW_WORKFLOWS_ENABLED
           # is "true"; queued/scheduled runs need SW_WORKFLOWS_QUEUE_URL (the workflows
           # stack QueueUrl output); Python steps need an AgentCore interpreter id.
@@ -1028,6 +1150,17 @@ Resources:
           OFFICE_ENGINE_PUBLIC_URL: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
           OFFICE_ENGINE_JWT_ISSUER: !If [HasOfficeEngine, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
           OFFICE_ENGINE_JWT_SECRET_ARN: !If [HasOfficeEngine, !Ref OfficeEngineJwtSecretArn, !Ref AWS::NoValue]
+          # Legal Archive + Corpus Workbench (legal-archive stack), reached
+          # server-side through this distribution's /archive-api and
+          # /workbench-api behaviors. LEGAL_ARCHIVE_URL is the distribution
+          # origin (same as the Office engine public URL); ARCHIVE_APP_KEY is the
+          # gateway's second key (src/lib/archive/client.server.ts). Empty key =
+          # archive features dark.
+          LEGAL_ARCHIVE_URL: !If [HasLegalArchive, !Ref OfficeEnginePublicUrl, !Ref AWS::NoValue]
+          ARCHIVE_APP_KEY: !If
+            - HasLegalArchive
+            - !Sub "{{resolve:secretsmanager:${ArchiveAppKeySecretName}:SecretString:ARCHIVE_APP_KEY}}"
+            - !Ref AWS::NoValue
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -1280,6 +1413,138 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt MattersSyncRule.Arn
 
+  IntelRefreshInvokerRole:
+    Type: AWS::IAM::Role
+    Condition: HasIntelRefresh
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Execution role for the scheduled intel-refresh invoker (logs + invoke the app function).
+        must:
+          - Grant only CloudWatch Logs and lambda:InvokeFunction on the app function.
+        mutable: change-with-constraints
+    Properties:
+      RoleName: !Sub "${NamePrefix}-${Environment}-intel-refresh-invoker"
+      Path: !Sub "/lit-ai/${Environment}/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: invoke-app-function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${NamePrefix}-${Environment}-app"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IntelRefreshInvoker:
+    Type: AWS::Lambda::Function
+    Condition: HasIntelRefresh
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Fire the intel-refresh run off the HTTP path via a direct async invoke of the app function.
+        must:
+          - Invoke the app function asynchronously (Event) so the run is not bound by any HTTP/CloudFront timeout (the app Lambda has a 900s timeout).
+          - Route the synthetic API Gateway v1 event to POST /api/public/intel/run; authenticate with the shared ingest key.
+          - Never log the shared secret; log only that the async invoke was accepted.
+        mutable: change-with-constraints
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-${Environment}-intel-refresh-invoker"
+      Description: Scheduled trigger for the litigation-intelligence feed refresh (async direct invoke).
+      Role: !GetAtt IntelRefreshInvokerRole.Arn
+      Runtime: nodejs22.x
+      Architectures:
+        - arm64
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          APP_FUNCTION_NAME: !Sub "${NamePrefix}-${Environment}-app"
+          INGEST_API_KEY: !Sub "{{resolve:secretsmanager:${CorpusServiceSecretArn}:SecretString:INGEST_API_KEY}}"
+          RUNTIME_SECRET_REVISION: !Ref RuntimeSecretRevision
+          DEADLINE_MS: "700000"
+      Code:
+        ZipFile: |
+          "use strict";
+          const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
+          const lambda = new LambdaClient({});
+          exports.handler = async () => {
+            const fn = process.env.APP_FUNCTION_NAME;
+            const key = process.env.INGEST_API_KEY;
+            if (!fn || !key) throw new Error("APP_FUNCTION_NAME and INGEST_API_KEY are required");
+            const body = JSON.stringify({ deadlineMs: Number(process.env.DEADLINE_MS || 700000) });
+            // Minimal API Gateway REST (v1) proxy event so the Lambda Web Adapter
+            // routes it to POST /api/public/intel/run in-process (no CloudFront cap).
+            const event = {
+              resource: "/{proxy+}",
+              path: "/api/public/intel/run",
+              httpMethod: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-ingest-key": key,
+                "user-agent": "litai-intel-refresh-invoker/2.0",
+              },
+              multiValueHeaders: {},
+              queryStringParameters: null,
+              multiValueQueryStringParameters: null,
+              pathParameters: { proxy: "api/public/intel/run" },
+              stageVariables: null,
+              requestContext: {
+                resourcePath: "/{proxy+}",
+                httpMethod: "POST",
+                path: "/api/public/intel/run",
+                stage: "invoke",
+              },
+              body,
+              isBase64Encoded: false,
+            };
+            const res = await lambda.send(new InvokeCommand({
+              FunctionName: fn,
+              InvocationType: "Event",
+              Payload: Buffer.from(JSON.stringify(event)),
+            }));
+            console.log(JSON.stringify({ invoked: fn, statusCode: res.StatusCode }));
+            return { statusCode: res.StatusCode };
+          };
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IntelRefreshRule:
+    Type: AWS::Events::Rule
+    Condition: HasIntelRefresh
+    Properties:
+      Name: !Sub "${NamePrefix}-${Environment}-intel-refresh"
+      Description: Refresh the litigation-intelligence feed (Tavily + Firecrawl + Bedrock briefings + QA gate).
+      ScheduleExpression: !Ref IntelRefreshSchedule
+      State: ENABLED
+      Targets:
+        - Id: invoker
+          Arn: !GetAtt IntelRefreshInvoker.Arn
+
+  IntelRefreshInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasIntelRefresh
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IntelRefreshInvoker
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IntelRefreshRule.Arn
+
   ApiDeploymentBlue:
     Type: AWS::ApiGateway::Deployment
     Condition: UseBlueDeployment
@@ -1464,6 +1729,16 @@ Resources:
             CloudWatchMetricsEnabled: true
             MetricName: !Sub "${NamePrefix}-${Environment}-rate-limit"
             SampledRequestsEnabled: false
+        # Both managed groups skip authenticated Office/Writer binary uploads
+        # (DOCX/XLSX/PPTX/PDF bodies PUT or POSTed under /api/). Those bodies
+        # are DEFLATE-compressed archives whose bytes trip the body-inspecting
+        # rules at random (CrossSiteScripting_BODY blocked the Writer's
+        # 30-second recovery snapshot on every tick, and saves intermittently,
+        # while GenericLFI_BODY / ReactJSRCE_BODY hit other saves). The app
+        # layer already gates these routes: a Cognito session is required for
+        # every non-public /api/ route, bodies are size-capped and validated as
+        # archives before anything is stored. Every other request, including
+        # all JSON APIs and every unauthenticated path, is still inspected.
         - Name: AwsManagedCommon
           Priority: 10
           OverrideAction:
@@ -1476,6 +1751,48 @@ Resources:
                 - Name: SizeRestrictions_BODY
                   ActionToUse:
                     Count: {}
+              ScopeDownStatement:
+                NotStatement:
+                  Statement:
+                    AndStatement:
+                      Statements:
+                        - ByteMatchStatement:
+                            FieldToMatch:
+                              UriPath: {}
+                            PositionalConstraint: STARTS_WITH
+                            SearchString: /api/
+                            TextTransformations:
+                              - Priority: 0
+                                Type: LOWERCASE
+                        - OrStatement:
+                            Statements:
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/vnd.openxmlformats-officedocument
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/pdf
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/octet-stream
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
           VisibilityConfig:
             CloudWatchMetricsEnabled: true
             MetricName: !Sub "${NamePrefix}-${Environment}-common"
@@ -1488,6 +1805,48 @@ Resources:
             ManagedRuleGroupStatement:
               VendorName: AWS
               Name: AWSManagedRulesKnownBadInputsRuleSet
+              ScopeDownStatement:
+                NotStatement:
+                  Statement:
+                    AndStatement:
+                      Statements:
+                        - ByteMatchStatement:
+                            FieldToMatch:
+                              UriPath: {}
+                            PositionalConstraint: STARTS_WITH
+                            SearchString: /api/
+                            TextTransformations:
+                              - Priority: 0
+                                Type: LOWERCASE
+                        - OrStatement:
+                            Statements:
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/vnd.openxmlformats-officedocument
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/pdf
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
+                              - ByteMatchStatement:
+                                  FieldToMatch:
+                                    SingleHeader:
+                                      Name: content-type
+                                  PositionalConstraint: STARTS_WITH
+                                  SearchString: application/octet-stream
+                                  TextTransformations:
+                                    - Priority: 0
+                                      Type: LOWERCASE
           VisibilityConfig:
             CloudWatchMetricsEnabled: true
             MetricName: !Sub "${NamePrefix}-${Environment}-known-bad"
@@ -1616,6 +1975,35 @@ Resources:
                 - GET
                 - HEAD
               Compress: false
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+            - !Ref AWS::NoValue
+          # Legal Archive and Corpus Workbench JSON APIs (legal-archive stack)
+          # share the Office engine ALB origin: the ALB path rule requires the
+          # origin key, and the archive gateway additionally requires the
+          # platform's app key, which only the app's server side sends. Never
+          # cached; GET/HEAD plus the workbench's gated POST /api/handoff.
+          - !If
+            - HasOfficeEngine
+            - PathPattern: /archive-api/*
+              TargetOriginId: OfficeEngineAlb
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [GET, HEAD, OPTIONS]
+              CachedMethods: [GET, HEAD]
+              Compress: true
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy
+            - !Ref AWS::NoValue
+          - !If
+            - HasOfficeEngine
+            - PathPattern: /workbench-api/*
+              TargetOriginId: OfficeEngineAlb
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+              CachedMethods: [GET, HEAD]
+              Compress: true
               CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
               OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
               ResponseHeadersPolicyId: !Ref SecurityResponseHeadersPolicy

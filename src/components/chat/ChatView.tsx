@@ -28,13 +28,15 @@ import {
 } from "./composer-kit";
 import { MicButton } from "./MicButton";
 import { ActivityPanel } from "./ActivityPanel";
+import { composerPlaceholder } from "@/lib/chat/composer-placeholder";
 import { AnswerMarkdown } from "./AnswerMarkdown";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { AnswerActions } from "./AnswerActions";
 import { WorkspaceRail } from "./WorkspaceRail";
 import { StructuredChoicePanel } from "./StructuredChoicePanel";
 import { SkillForm, SlashPalette } from "./SkillMenu";
-import { filterSkills, slashDraft, type ResearchSkill } from "@/lib/research-skills";
+import { ComposerScope, MatterChip } from "./ComposerScope";
+import { filterSkills, slashDraft, type ResearchSkill, type SelectedDoc } from "@/lib/research-skills";
 
 const MIN_LEFT = 45;
 const MAX_LEFT = 75;
@@ -116,6 +118,11 @@ export function ChatView({
   onNewChat,
   sessionId,
   matter,
+  onMatterChange,
+  selectedDocs = [],
+  onDocsChange,
+  focusOnly = false,
+  onFocusOnlyChange,
   conversationId,
 }: {
   messages: Message[];
@@ -136,6 +143,11 @@ export function ChatView({
   onNewChat: () => void;
   sessionId: string;
   matter: MatterScope | null;
+  onMatterChange?: (m: MatterScope | null) => void;
+  selectedDocs?: SelectedDoc[];
+  onDocsChange?: (docs: SelectedDoc[]) => void;
+  focusOnly?: boolean;
+  onFocusOnlyChange?: (v: boolean) => void;
   conversationId: string | null;
 }) {
   const [leftPct, setLeftPct] = useState<number>(() => {
@@ -154,10 +166,23 @@ export function ChatView({
 
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [isMobile, setIsMobile] = useState<boolean>(false);
-  const lastUserId = useMemo(
-    () => [...messages].reverse().find((m) => m.role === "user")?.id,
-    [messages],
-  );
+  const lastUser = useMemo(() => [...messages].reverse().find((m) => m.role === "user"), [messages]);
+  const lastUserId = lastUser?.id;
+  // Composer nudge from context already here (matter label, the last
+  // question's subject); recomputed when a turn lands, never repeated back to
+  // back, and it rotates every couple of days. Pure helper, no storage.
+  const previousPlaceholderRef = useRef<string | null>(null);
+  const placeholder = useMemo(() => {
+    const next = composerPlaceholder({
+      matterLabel: matter?.label ?? null,
+      lastQuestion: lastUser?.text ?? null,
+      turnCount: messages.filter((m) => m.role === "user").length,
+      previous: previousPlaceholderRef.current,
+    });
+    previousPlaceholderRef.current = next;
+    return next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new turn or matter should change the nudge
+  }, [matter?.label, lastUser?.id]);
   const { allSources, sourcesByRef } = useSourceIndex(messages);
   const lastAssistant = useMemo(
     () => [...messages].reverse().find((m) => m.role === "assistant"),
@@ -430,7 +455,7 @@ export function ChatView({
               ref={scrollRef}
               className="wr-app-scroll h-full overflow-y-auto overscroll-contain px-4 pb-[168px] pt-4 sm:px-7 lg:px-8"
             >
-              <div className="mx-auto w-full max-w-[820px]">
+              <div className="mx-auto w-full max-w-[880px]">
                 {messages.map((m, i) => {
                   if (m.role === "user") {
                     return <UserMessage key={m.id} msg={m} />;
@@ -502,6 +527,13 @@ export function ChatView({
                 onStop={onStop}
                 onNewChat={onNewChat}
                 textareaRef={composerRef}
+                matter={matter}
+                onMatterChange={onMatterChange}
+                selectedDocs={selectedDocs}
+                onDocsChange={onDocsChange}
+                focusOnly={focusOnly}
+                onFocusOnlyChange={onFocusOnlyChange}
+                placeholder={placeholder}
               />
             </div>
           </div>
@@ -618,6 +650,13 @@ function ChatComposer({
   onStop,
   onNewChat,
   textareaRef,
+  matter = null,
+  onMatterChange,
+  selectedDocs = [],
+  onDocsChange,
+  focusOnly = false,
+  onFocusOnlyChange,
+  placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -626,6 +665,14 @@ function ChatComposer({
   onStop?: () => void;
   onNewChat: () => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  matter?: MatterScope | null;
+  onMatterChange?: (m: MatterScope | null) => void;
+  selectedDocs?: SelectedDoc[];
+  onDocsChange?: (docs: SelectedDoc[]) => void;
+  focusOnly?: boolean;
+  onFocusOnlyChange?: (v: boolean) => void;
+  /** context-aware nudge from the parent (composerPlaceholder); falls back to the classic prompt */
+  placeholder?: string;
 }) {
   const [mode, setModeRaw] = useState<ComposerMode>(initialMode);
   const setMode = useCallback((m: ComposerMode) => {
@@ -707,6 +754,22 @@ function ChatComposer({
           setSkill(s);
         }}
       />
+      {matter && (
+        <div className="flex justify-end px-2.5 pt-2">
+          <MatterChip
+            matter={matter}
+            onClear={
+              onMatterChange
+                ? () => {
+                    onMatterChange(null);
+                    onDocsChange?.([]);
+                    onFocusOnlyChange?.(false);
+                  }
+                : undefined
+            }
+          />
+        </div>
+      )}
       {skill ? (
         <div className="border-b border-border/60 p-2">
           <SkillForm
@@ -733,12 +796,24 @@ function ChatComposer({
             }
           }}
           rows={1}
-          placeholder={busy ? "Type your next question…" : "Ask a follow-up about MDLs, bellwethers, or precedent…"}
+          placeholder={busy ? "Type your next question…" : placeholder || "Ask a follow-up about MDLs, bellwethers, or precedent…"}
           className="block max-h-[220px] min-h-[44px] w-full resize-none bg-transparent px-1.5 py-1.5 text-[14px] leading-[1.55] placeholder:text-muted-foreground/80 focus:outline-none"
         />
       </div>
       <div className="mt-1 flex items-center justify-between gap-1 border-t border-border/60 px-2 py-1.5">
         <div className="flex items-center gap-1">
+          {onMatterChange && (
+            <ComposerScope
+              matter={matter}
+              onMatterChange={onMatterChange}
+              selectedDocs={selectedDocs}
+              onDocsChange={onDocsChange ?? (() => {})}
+              focusOnly={focusOnly}
+              onFocusOnlyChange={onFocusOnlyChange ?? (() => {})}
+              uploads={files}
+              disabled={busy}
+            />
+          )}
           <ModeDropdown mode={mode} onChange={setMode} disabled={busy} />
           <span className="mx-0.5 h-4 w-px bg-border/70" />
           <button

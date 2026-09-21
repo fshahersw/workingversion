@@ -454,7 +454,7 @@ function AskAIPopover({ source }: { source: Source }) {
           className="ml-auto inline-flex items-center gap-1 text-[10px] text-muted-foreground/70 transition-colors hover:text-brand-orange"
         >
           <Sparkles className="h-2.5 w-2.5" />
-          Ask AI
+          Ask about it
         </button>
       </PopoverTrigger>
       <PopoverContent

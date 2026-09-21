@@ -1,193 +1,125 @@
 # SeegerWeissAI — Architecture Map
 
-Technical companion to `docs/HANDOFF.md`. Covers the research pipeline (the
-current focus), AWS wiring, data layer, the SSE contract, and a file index.
-Accurate as of 2026-09-04; verify file:line against the code before relying on
-specifics.
+Whole-app map for the Seeger Weiss litigation-intelligence platform. Concise by
+design: it orients you to the surfaces, data stores, and serving topology, then
+points at the deeper references. Verify `file:line` against the code before
+relying on any specific — the code is the source of truth.
 
----
+Last updated: 2026-09-18.
 
-## 1. Request flow (research agent)
+## What it is
 
-```
-Browser (ChatView) ──POST /api/orchestrate (SSE)──▶ runResearchAgent()
-                                                        │
-   src/routes/api/orchestrate.ts ──────────────────────┘
-                                                        │
-   src/lib/agents/research-agent.server.ts              │
-     resolve follow-up (only if prior context)          │
-     seed SourceBook from session memory                │
-     ▼                                                  │
-   streamConverseToolLoop()  (bedrock-stream-tools.server.ts)
-     ├─ research turns (Sonnet 5, ConverseStream + toolConfig)
-     │    • model streams a 1-line status → onText → emit "thinking"
-     │    • emits parallel tool_use blocks
-     │    • tools execute in parallel under a budget → emit "tool_call"/"sources"
-     │    • loop until no tool_use, MAX_STEPS, or deadline
-     └─ synthesis turn (no new tools; tools kept on the wire)
-          • streams the final answer → onAnswer → emit "delta"
-     ▼
-   emit "done" + refresh session memory (off the critical path)
-```
+A TanStack Start (React) application: research, discovery/document analysis,
+in-app Office editors, and multi-step workflows for the firm. Single-tenant to
+Seeger Weiss, runs on the firm's own AWS account `475976462949` in `us-east-1`,
+Bedrock for all inference. HIPAA discipline: synthetic data only, no PHI in
+logs/commits; no cost/token figures in the product UI.
 
-- **Single agent, not multi-agent.** One strong model (Sonnet 5) decides its own
-  tool calls and writes the answer. The old router → parallel sub-agents → writer
-  design is retired (see the file index for the dead code).
-- **Streaming end to end.** Research narration and the answer stream on separate
-  channels (`thinking` vs `delta`), so the answer never appears in the thinking
-  box.
-- **Client reducer:** `src/lib/use-chat.ts` consumes the SSE events (RAF-batched
-  text/thinking deltas). `src/components/chat/ChatView.tsx` renders the timeline
-  (`AgentTimeline`), the `ThinkingStream`, and `AnswerMarkdown`.
+## Serving topology
 
-## 2. Bedrock auth (SigV4)
+Browser → CloudFront (+ WAF) → API Gateway → one Lambda running the app via the
+Lambda Web Adapter (LWA) with response streaming (SSE for chat/research/ask).
+CloudFront enforces a ~120s origin timeout, so long jobs run out-of-band (async
+Lambda invoke or a background worker), never inline in a request.
 
-- `src/lib/agents/bedrock-sign.server.ts` — `signedAwsFetch(service, url, opts)`
-  signs a raw HTTPS request with **SigV4** using `@smithy/signature-v4`,
-  `@aws-crypto/sha256-js`, and `@aws-sdk/credential-provider-node` `defaultProvider`.
-  `signedBedrockFetch = signedAwsFetch("bedrock", ...)`. The same signer serves
-  `bedrock` (LLM) and `bedrock-agentcore` (web search).
-- Credentials come from the **default chain**: `AWS_PROFILE` in dev (SSO), an IAM
-  role in prod. **No static keys. No bearer token.** The deprecated
-  `AWS_BEARER_TOKEN_BEDROCK` was removed and must not return.
-- Endpoints: `bedrock-runtime.<region>.amazonaws.com/model/<id>/converse` and
-  `/converse-stream`.
+- App stack: `litai-testing-runtime` (per-env: testing / staging / prod-in-a-
+  separate-account). Deploy with `bun run deploy:testing` (`node
+  scripts/deploy-testing.mjs`); it bundles, uploads a versioned artifact, and
+  updates the CloudFormation stack.
+- Server logic is TanStack **server functions** (`createServerFn` + the
+  `requireAuth` middleware), not a separate API tier.
 
-## 3. Prompt caching
+## Auth and tenancy
 
-Two `cachePoint` placements keep a long tool loop fast and cheap:
+Microsoft Entra ID (OIDC) federated into an Amazon Cognito user pool; native
+Cognito password login is retired, so **Entra is the only IdP** (JIT-provision
+users on the Entra side). Every server function derives the principal as the
+Cognito `sub`. Per-user isolation is enforced three ways off that `sub`:
 
-1. **Stable prefix** — a `cachePoint: { type: "default" }` after the system block
-   and after the tools list. Cached once, reused every turn.
-2. **Moving breakpoint** — `withMessageCache()` appends a `cachePoint` to the
-   **last** message on each turn, so the growing tool-result transcript is read
-   from cache on every later turn (including the synthesis turn). Not persisted
-   into the stored messages, so it does not stack.
+- S3: per-user key prefixes (`uploads/{sub}/…`, `kb/pages/{sub}/…`) in the shared
+  bucket, re-validated on every read/write.
+- Aurora: `FORCE ROW LEVEL SECURITY` with `withPrincipal(sub)` (sets
+  `app.user`; default-deny when unset).
+- DynamoDB: partition key `USER#{sub}`.
 
-Usage frames report `cacheReadInputTokens` / `cacheWriteInputTokens`; verified
-cache reads of 11k-18k tokens per step. Cache reads are ~90% cheaper and do not
-count against rate limits (this is what fixed the earlier 503 throttling).
+## Nav surfaces (`src/routes/_authenticated/`)
 
-## 4. Tools
+- **Home** (`index`) — intel dashboard / terminal.
+- **Research** (`research`) — the research agent chat (SSE `/api/orchestrate`).
+- **Discovery** (`docs`) — the 3-tab document workspace: Working Set, Depositions,
+  Tabular Review.
+- **Library** (`library`) — the user's saved workspaces/files, folder explorer.
+- **Matters** (`matters`) — per-matter views over the docket corpus.
+- **Office** (`office.*`) — in-app Drafts/Writer, Sheets, Slides editors with AI.
+- **Workflows** (`workflows`) — visual multi-step workflow builder + runs.
+- Plus `calendar`, `conversations`, `inspector`, `eval`.
 
-Defined in `src/lib/agents/research-tools.server.ts` (`RESEARCH_TOOLS` +
-`executeResearchTool`). Results funnel into one shared `SourceBook` (`[S#]` ledger).
+## Discovery + Knowledge Base (RAG)
 
-| Tool(s) | Backend | Notes |
-| --- | --- | --- |
-| `search_authorities`, `search_case_law`, `search_regulatory_text`, `search_enforcement_history`, `search_scientific_literature`, `search_technical_environmental`, `search_judicial_parties`, `search_legal_news` | AgentCore IAM gateway `general___WebSearch` (SigV4) | Web search fan-out + rerank (`web-rank.ts`) + recency anchoring. All categories currently route to the one `general` target. |
-| `fetch_page` | plain server fetch (`fetch-page.server.ts`) | URL → clean text + links. No headless browser. Output trimmed; `memoTTL` cached. Biggest accuracy lever after search. |
-| `recap_search`, `recap_docket`, `recap_read` | CourtListener RECAP v4 (`courtlistener.server.ts`) | Token auth (`COURTLISTENER_API_TOKEN`). Free archive. `plain_text` / `filepath_local` PDFs. `memoTTL` cached. |
-| `db_*` (`db_find_case`, `db_docket_sheet`, `db_calendar`, `db_search_filings`, `db_read_filing`, `db_get_case`, `db_graph_ask`) | DocketBird REST (`docketbird.server.ts`) | Key auth (`DOCKETBIRD_API_KEY`). REST, **not** MCP — DocketBird's MCP is OAuth-only, unusable headless. |
+Upload = save + index immediately; there is **no full-text scan** — Ask is
+RAG-only, and a set that is still indexing says so rather than scanning every
+page. Ingest picks a lane per document:
 
-Budget: `callBudget { perTool, total }` + `deadlineMs`. `MAX_STEPS` and the
-deadline live in `research-agent.server.ts`. Persistence rubric forbids the
-"ask an attorney to pull from PACER" cop-out — exhaust DocketBird → RECAP → court
-sites → web first.
+- **sync** — small text docs embed inline in the save request.
+- **text (background)** — larger text docs store their extracted pages and hand
+  embedding to the ingest worker (no Bedrock Data Automation); the save returns
+  immediately and the user is notified when it's ready.
+- **BDA async** — documents with no usable text layer (true scans) go to Bedrock
+  Data Automation for OCR, then the worker embeds the result.
 
-## 5. AgentCore web-search gateways
+Chunks + embeddings live in Aurora Serverless v2 Postgres + pgvector (`sw-kb`,
+database `kb`, schema `kb.*`). Retrieval is adaptive per-document hybrid search
+(pgvector kNN + BM25, RRF-fused) with Cohere rerank, answered by a streamed
+Sonnet-5 writer; partial binding lets a set answer from its ready documents while
+the rest finish. Async-ingest infra is its own stack `litai-testing-kb-ingest`
+(SQS queue + DLQ, worker + scheduled reconciler Lambdas, a DynamoDB job table,
+and EventBridge rules for BDA completion). Design + runbook: `docs/kb/`.
 
-- **In use:** `ClaudeAddinWebSearchIamGateway` — `AWS_IAM` auth, single `general`
-  target (`general___WebSearch`), called via `signedAwsFetch("bedrock-agentcore", ...)`.
-  MCP JSON-RPC 2.0, protocol `2025-03-26`. Overrides: `AGENTCORE_SEARCH_URL`,
-  `AGENTCORE_SEARCH_TOOL`.
-- **Blocked:** `ClaudeOfficeWebSearchGateway` — `CUSTOM_JWT`, 10 specialized
-  category targets, but its authorizer only accepts **Microsoft Entra** tokens
-  (the Office add-in tenant), not our Cognito pool. Needs pending Entra
-  federation. Until then we use the single IAM gateway.
+## Office
 
-## 6. SSE event vocabulary
+In-app Word/Sheets/Slides editors with a tiered AI agent (workhorse → reasoning →
+synthesis), vision, and templates. Heavy document rendering/conversion runs in a
+separate ECS "office engine" service (`litai-testing-office-engine`). The Office
+AI's runtime prompt library lives at `src/office/**/prompts/*.md` (loaded at
+runtime — these are code, not docs).
 
-Emitted by `runResearchAgent`, consumed by `use-chat.ts`. (Event names are
-strings; the shape is compatible with the older backend catalogued in the stale
-`docs/agent-backend.md`.)
+## Research agent
 
-- `run` `{ run_id, query }` — first.
-- `round` `{ round, phase, reasoning, done, dispatch }` — the phase string drives
-  the timeline header (e.g. "Working the record").
-- `agent` `{ round, agent, focus, status }` — the single "research" agent starts.
-- `thinking` `{ round, agent, text }` — live status narration (the `ThinkingStream`).
-- `tool_call` `{ round, agent, tool, query, hits? }` — one per tool use / result.
-- `sources` `{ sources: Source[] }` — the running `SourceBook`.
-- `agent_done` `{ round, agent, summary, count, citations }` — research complete.
-- `writer_start` `{ round, sources }` — flips the UI to the answer; fired on
-  synthesis start.
-- `delta` `{ text }` — the answer, streamed.
-- `done` `{ run_id, status, rounds, source_count }` — last.
-- `memory` `{ memory }` — refreshed session memory.
-- `error` `{ message }`.
+Streamed multi-tool agent over `/api/orchestrate` (web search, PubMed, and
+`matter_corpus_search` over the docket KBs), with a coverage gate and a
+faithfulness/citation verification pass. Full routing/tooling/streaming/prompting
+reference: `referenceforagentarchitecture.md`.
 
-Display metadata (`AGENT_META`, `TOOL_LABELS`, `agentMeta`, `toolLabel`) lives in
-`src/lib/chat-types.ts`. The single agent renders as "Litigation Analyst".
+## Matters / docket corpus
 
-## 7. Data layer
+Followed dockets sync (DocketBird) into S3 and per-matter Amazon Bedrock managed
+Knowledge Bases; Aurora `corpus.*` is the metadata sidecar. The app reaches the
+docket KBs through the `matter_corpus_search` agent tool (Bedrock `Retrieve`).
+This is separate from the Discovery `kb.*` store above.
 
-- **DynamoDB single table `sw-dev-app`** — PK `USER#<cognito-sub>`, SK prefixes for
-  chat history, library, ACLs, and the review pipeline
-  (`RTBL`/`RCOL`/`RROW`/`RCELL`/`RHIST`/`RRUN`, tableId embedded in child ids).
-  ULIDs. Owner-scoped now; sharing is a later phase. See the `seegerweissai-data`
-  memory for the v1 spec.
-- **S3 `sw-dev-seegerweissai-475976462949`** — uploads via presigned PUT/GET; CORS
-  configured. Backs the Library "Uploads" tab.
-- **KMS** — provisioned for encryption.
-- **Supabase** — retained ONLY as an external corpus / vector DB, not the app
-  backend.
+## Models
 
-## 8. Model + permission constraints (important for latency work)
+All inference is Amazon Bedrock in `us-east-1`, selected by env/config (exact IDs
+are volatile — read them from the deployed environment, not from here):
 
-- **The SeegerWeissAI dev app** signs with the `AdministratorAccess-475976462949`
-  profile, so it can invoke any model the account has access to (Sonnet 5 today;
-  first-party Anthropic Haiku would work too).
-- **Bedrock Latency-Optimized Inference is NOT available for Sonnet 5 in
-  us-east-1** (verified: HTTP 400 from `scripts/probe-latency-optimized.ts`).
-- **No Marketplace payment instrument** on the account → no third-party /
-  Marketplace serverless models (e.g. Nvidia Nemotron). Use first-party ON_DEMAND
-  models only. A "Haiku for tool turns" split is technically possible for the dev
-  app (first-party), but carries quality + per-model-cache tradeoffs; not adopted.
-- Separately, the **Claude Desktop 3P in-app** inference uses a narrower
-  `ClaudeBedrockInference` permission set that allows only
-  `us.anthropic.claude-sonnet-5` / `claude-opus-5` / `claude-opus-4-8` (+ global
-  profiles); anything else 403s there. That constraint is for the desktop app, not
-  this dev app.
+- Discovery RAG writer: Sonnet-5 (`BEDROCK_PILE_WRITER_MODEL`).
+- Embeddings: Amazon Titan Text v2. Reranking: Cohere Rerank v3.5.
+- Tiered workhorse / reasoning / synthesis models for research, Office, and
+  workflows are configured per surface.
 
-## 9. Latency profile (measured)
+## Workflows
 
-Deep questions run ~55-60s as one continuous stream. Breakdown: Sonnet 5 TTFT
-~1.4s/turn (model is not the bottleneck), ~5 serial research turns dominated by
-**tool network time** (~25-30s), plus ~16s of fixed synthesis generation. We are
-near the safe on-demand floor. The one remaining safe lever is **per-tool hard
-timeouts** (cap a slow tool at ~8s). Provisioned Throughput is a cost commitment
-that mostly helps concurrency, not single-request wall-clock.
+Visual builder plus durable execution on SQS + Lambda (stack
+`litai-testing-workflows`), gated per environment by `SW_WORKFLOWS_ENABLED`.
 
-## 10. File index (src/lib/agents)
+## Where to go deeper
 
-**Active (research pipeline):**
-- `research-agent.server.ts` — orchestration entry (`runResearchAgent`).
-- `bedrock-stream-tools.server.ts` — `streamConverseToolLoop` (streaming loop +
-  merged synthesis, message caching).
-- `bedrock.server.ts` — Converse types, `converseOnce`, `bedrockEnabled`.
-- `bedrock-sign.server.ts` — SigV4 signer.
-- `research-tools.server.ts` — tool defs + dispatch.
-- `agentcore-search.server.ts` — AgentCore gateway web search.
-- `courtlistener.server.ts` — RECAP client.
-- `fetch-page.server.ts` — URL → text.
-- `docketbird.server.ts` — DocketBird REST.
-- `tools.server.ts` — shared `SourceBook`, category search, `executeTool`.
-- `prompts.ts` — `researchAgentPrompt()` + writing framework + shared style blocks.
-- `memory.server.ts` — session memory (summary, entity ledger, tail, sources).
-- `grounding.server.ts`, `web-rank.ts`, `log.server.ts` — support.
-
-**Also present (other features):** `summarizer.server.ts` (Working Set /
-Discovery), `corpus-v2.server.ts` (corpus/RAG), `anthropic.server.ts`,
-`fireworks.server.ts` (alt providers used elsewhere), `doc-scan.ts`,
-`json-extract.ts`, `verify.server.ts`, `run-state.server.ts`.
-
-**Legacy / dead (retire after in-browser confirmation):**
-- `orchestrator.server.ts` — old router→sub-agent→writer loop. **Caveat:**
-  `research-agent.server.ts` still imports the `OrchestrateInput` and `Emit`
-  **types** from here. Extract those types to a small shared module before
-  deleting.
-- `router.server.ts`, `tavily.server.ts` — old routing + Tavily search.
-
-**Routes:** `src/routes/api/orchestrate.ts` (research SSE), `quick-ask.ts`,
-`followups.ts`, `summarize.ts`.
+- `referenceforagentarchitecture.md` — agent routing, tooling, streaming, prompting.
+- `docs/kb/` — KB architecture (`ARCHITECTURE.md`), operations runbook
+  (`OPERATIONS.md`), overview.
+- `docs/kb-ingest-design.md`, `docs/ingest-contract-v1.md` — ingest/chunking and
+  the corpus ETL contract.
+- `docs/release/DEV-TO-PROD.md` — deploy runbook. `docs/RESEARCH-ENV.md` —
+  research-agent env switches.
+- Module `README.md`s under `db/kb/`, `infra/app/`, `src/lib/auth/`,
+  `src/routes/`, `services/`.

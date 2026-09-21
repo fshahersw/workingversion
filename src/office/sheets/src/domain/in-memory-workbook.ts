@@ -1,4 +1,6 @@
+import { parseDelimited } from '@/lib/sheets/delimited'
 import {
+  computeQueryRange,
   copyTargetBounds,
   expandToPrimitiveOps,
   filteredCopySourceRows,
@@ -9,6 +11,7 @@ import {
   matchableCellText,
   MAX_EXPANDED_CELL_OPS,
   parseWorkbookCommandBatch,
+  queryResultMatrix,
   structuralOpLabel,
   type CellFormatPatch,
   type FormatRangeOperation,
@@ -70,14 +73,23 @@ export interface AuditRecord {
   readonly structuralChangeCount: number
 }
 
+/** Resolves an import_file handle to the file's text; null = unknown handle. */
+export type FileTextResolver = (handle: string) => string | null
+
 export class InMemoryWorkbookAdapter implements WorkbookAdapter {
   private snapshot: WorkbookSnapshot
   private readonly history: WorkbookSnapshot[] = []
   private readonly committedTransactions = new Set<string>()
   private readonly auditLog: AuditRecord[] = []
+  private fileResolver: FileTextResolver | null = null
 
   constructor(snapshot: WorkbookSnapshot) {
     this.snapshot = structuredClone(snapshot)
+  }
+
+  /** The browser file store lives outside the domain; the App injects it. */
+  setFileResolver(resolver: FileTextResolver | null): void {
+    this.fileResolver = resolver
   }
 
   getSnapshot(): WorkbookSnapshot {
@@ -191,6 +203,70 @@ export class InMemoryWorkbookAdapter implements WorkbookAdapter {
             replaceCell(working, targetBefore.id, address, after)
           }
         }
+        continue
+      }
+      if (operation.op === 'query_range' || operation.op === 'import_file') {
+        // Both write a computed block of static values downward from the
+        // anchor. Same per-cell scale as fill/copy on demo workbooks.
+        const anchor = parseAddress(operation.target)
+        let matrix: CellState['value'][][]
+        if (operation.op === 'query_range') {
+          const source = parseRange(operation.source)
+          const sourceSheet = findSheet(working, operation.sourceSheetId ?? operation.sheetId)
+          // Snapshot values only (formula cells read as blank) — the same
+          // values-only contract as the filtered copy on this adapter.
+          const sourceRows: CellState['value'][][] = []
+          for (let row = source.startRow; row <= source.endRow; row += 1) {
+            const cells: CellState['value'][] = []
+            for (let column = source.startColumn; column <= source.endColumn; column += 1) {
+              cells.push(sourceSheet.cells[formatAddress(row, column)]?.value ?? null)
+            }
+            sourceRows.push(cells)
+          }
+          try {
+            matrix = queryResultMatrix(computeQueryRange(operation, sourceRows))
+          } catch (error) {
+            throw new WorkbookConflictError(
+              `query_range: ${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+        } else {
+          const text = this.fileResolver?.(operation.file) ?? null
+          if (text === null) {
+            throw new WorkbookConflictError(
+              `import_file: ${operation.file} is not available in this session — run the Python step again and use the handle from its result.`,
+            )
+          }
+          try {
+            matrix = parseDelimited(text, {
+              ...(operation.delimiter ? { delimiter: operation.delimiter } : {}),
+              ...(operation.asText ? { asText: true } : {}),
+            }).rows
+          } catch (error) {
+            throw new WorkbookConflictError(
+              `import_file: ${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+        }
+        const width = matrix[0]?.length ?? 0
+        if (matrix.length * width > MAX_EXPANDED_CELL_OPS) {
+          throw new WorkbookConflictError(
+            `${operation.op} on an in-memory workbook is limited to ${MAX_EXPANDED_CELL_OPS} result cells per operation (this result is ${matrix.length} × ${width}); ` +
+              (operation.op === 'query_range'
+                ? 'narrow with where, select fewer columns, aggregate with groupBy, or page with limit/offset.'
+                : 'reduce the file in Python first, or work on an imported xlsx file.'),
+          )
+        }
+        const targetBefore = findSheet(working, operation.sheetId)
+        matrix.forEach((rowValues, rowOffset) => {
+          rowValues.forEach((value, columnOffset) => {
+            const address = formatAddress(anchor.row + rowOffset, anchor.column + columnOffset)
+            const before = targetBefore.cells[address] ?? { value: null }
+            const after: CellState = { value }
+            cellChanges.push({ sheetId: targetBefore.id, address, before, after })
+            replaceCell(working, targetBefore.id, address, after)
+          })
+        })
         continue
       }
       if (operation.op === 'convert_to_values') {

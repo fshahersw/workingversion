@@ -13,8 +13,9 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { DepositionAnalysisPane, type AnalysisTab } from "./DepositionAnalysisPane";
-import { DepositionDropPanel } from "./DepositionDropPanel";
+import { DepositionDropPanel, type DepositionDropPanelHandle } from "./DepositionDropPanel";
 import { DepositionExportDialog } from "./DepositionExportDialog";
+import { FileDropZone } from "./FileDropZone";
 import { TranscriptPane } from "./TranscriptPane";
 import {
   AlertDialog,
@@ -133,9 +134,9 @@ export function DepositionView() {
     if (id) void reloadWorkspace(id);
   }, [reloadWorkspace]);
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>("summary");
-  // Whole-document analysis always; the scan-scope toggle ("full / relevant")
-  // and per-transcript scoping were removed to declutter the workspace.
-  const queryOptions = { scope: "full" as const, fileIds: undefined };
+  // Ask scope resolves in the hook: a saved deposition set with a hybrid index
+  // answers from the KB (adaptive RAG); otherwise the full-text scan runs.
+  const queryOptions = { scope: "auto" as const, fileIds: undefined };
   const [mobilePane, setMobilePane] = useState<"transcript" | "analysis">("analysis");
   const [transcriptOpen, setTranscriptOpen] = useState(() =>
     readLayoutPreference(DEPOSITION_TRANSCRIPT_KEY, true),
@@ -150,6 +151,15 @@ export function DepositionView() {
   const workbench = !!active;
   const ingesting = state.phase === "reading" || state.phase === "indexing";
   const analyzing = state.phase === "analyzing";
+  // Whole-tab drop stages transcripts into the intake queue (same type/size
+  // limits as the picker). There is no add-to-open-record path for
+  // depositions, so the zone is inactive once transcripts are being read or
+  // the workbench is open.
+  const dropPanelRef = useRef<DepositionDropPanelHandle>(null);
+  const dropEnabled = !workbench && !ingesting;
+  const onTabDrop = useCallback((dropped: File[]) => {
+    dropPanelRef.current?.addFiles(dropped);
+  }, []);
   const running = Object.values(state.passes).filter((p) => p === "running").length;
   const fileLabel =
     state.transcripts.length > 1
@@ -214,7 +224,13 @@ export function DepositionView() {
   ) : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <FileDropZone
+      onFiles={onTabDrop}
+      disabled={!dropEnabled}
+      label="Drop transcripts to add them to the intake"
+      hint="PDF, DOCX, or TXT transcripts"
+      className="flex h-full min-h-0 flex-col overflow-hidden"
+    >
       {state.error && (
         <div className="mb-2 flex items-start gap-2.5 rounded-lg border border-destructive/25 bg-destructive/5 px-3.5 py-2.5">
           <AlertCircle className="mt-[1px] h-4 w-4 shrink-0 text-destructive" />
@@ -542,7 +558,19 @@ export function DepositionView() {
               transition={{ duration: 0.32, ease: EASE }}
               className="w-full max-w-[820px] pb-6"
             >
-              <DepositionDropPanel onStart={(f, i) => void start(f, i)} busy={false} files={[]} />
+              <DepositionDropPanel
+                ref={dropPanelRef}
+                onStart={(f, i) =>
+                  void (async () => {
+                    // Auto-save + index transcripts on upload so Ask is RAG-ready
+                    // immediately, with no full-text scan fallback.
+                    await start(f, i);
+                    await saveWorkspace();
+                  })()
+                }
+                busy={false}
+                files={[]}
+              />
               <p className="mx-auto mt-3 max-w-2xl text-center text-[12px] leading-relaxed text-muted-foreground">
                 Build a cite-addressable transcript record, then review admissions, conflicts,
                 chronology, exhibits, and connections.
@@ -551,6 +579,6 @@ export function DepositionView() {
           </AnimatePresence>
         </div>
       )}
-    </div>
+    </FileDropZone>
   );
 }

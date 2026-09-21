@@ -741,6 +741,8 @@ export function AiPanel({
   /** This run's rollback batch — carried onto the QC entry when a QC pass
       follows (mid-turn segments never show the action toolbar) */
   const runSnapshotIdRef = useRef<number | null>(null)
+  /** the current run committed at least one deck mutation (drives failed-run auto-rollback) */
+  const runMutatedRef = useRef(false)
 
   const patchLastAssistant = (
     patch: Partial<ChatEntry> | ((last: ChatEntry) => Partial<ChatEntry>),
@@ -1434,6 +1436,7 @@ export function AiPanel({
           patchLastAssistant((last) => ({ tools: [...(last.tools ?? []), activity] }))
         },
         onToolExecuted: ({ call, execution }) => {
+          if (execution.mutated) runMutatedRef.current = true
           const activity: ToolActivity = { id: call.id, mutated: !!execution.mutated, running: false, finishedAt: Date.now(), 
             name: call.name,
             summary: execution.summary,
@@ -1551,12 +1554,31 @@ export function AiPanel({
               })
             })
             .catch(() => {})
-          void finishHistoryBatch().finally(() => {
-            setBusy(false)
-            const resolveQueueRun = queueRunResolverRef.current
-            queueRunResolverRef.current = null
-            resolveQueueRun?.(false)
-          })
+          // A failed run must not leave a half-edited deck: close the batch
+          // (which registers the pre-run snapshot) and restore it when the run
+          // mutated anything. The message says so; its rollback action retires.
+          void finishHistoryBatch()
+            .then(async () => {
+              const id = runSnapshotIdRef.current
+              if (!runMutatedRef.current || id == null) return
+              const restored = await window.slidesApi.aiSnapshotRestore(id)
+              if (!restored) return
+              applyDeckRef.current(restored, Math.min(currentRef.current, restored.length - 1))
+              setChat((prev) =>
+                prev.map((e) =>
+                  e.snapshotId === id
+                    ? { ...e, snapshotId: undefined, error: `${e.error ?? error} The run's changes were rolled back.` }
+                    : e,
+                ),
+              )
+            })
+            .catch(() => {})
+            .finally(() => {
+              setBusy(false)
+              const resolveQueueRun = queueRunResolverRef.current
+              queueRunResolverRef.current = null
+              resolveQueueRun?.(false)
+            })
         },
       },
     })
@@ -1690,6 +1712,7 @@ export function AiPanel({
     runToolsRef.current = []
     streamedTextRef.current = ''
     runSnapshotIdRef.current = null
+    runMutatedRef.current = false
     stickToBottomRef.current = true
     // Internal orchestration prompts (like generate_deck step notes) skip the chat bubble and go only to the model
     const shown = displayText ?? instruction
@@ -1743,6 +1766,7 @@ export function AiPanel({
       runToolsRef.current = []
       streamedTextRef.current = ''
       runSnapshotIdRef.current = null
+    runMutatedRef.current = false
       stickToBottomRef.current = true
       setChat((prev) => [
         ...prev.map((e) =>

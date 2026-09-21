@@ -1,1 +1,4 @@
 infra/app/runtime/run.sh text eol=lf
+
+# Container files must stay LF: a CRLF shebang or nginx directive breaks the image on Linux.
+services/legal-archive/** text eol=lf

@@ -593,6 +593,15 @@ Resources:
                 Action:
                   - s3:PutObject
                 Resource: !Sub "${AppDataBucketArn}/kb/pages/*"
+              - Sid: ReadCanonicalPages
+                # The no-BDA text lane stores browser-extracted page text under
+                # kb/pages/ from the save request; the worker reads it back to
+                # chunk + embed. (BDA-lane pages are produced by the worker
+                # itself, so only the text lane needs this read.)
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${AppDataBucketArn}/kb/pages/*"
               - Sid: ForceRlsDataApi
                 Effect: Allow
                 Action:
@@ -713,9 +722,21 @@ Resources:
                 Effect: Allow
                 Action:
                   - bedrock:InvokeDataAutomationAsync
+                # See StartConfiguredBdaJob: the cross-region profile must be
+                # authorized in every region it routes to (us-east-1/us-east-2/
+                # us-west-1/us-west-2) or the reconciler's restart fails closed.
                 Resource:
                   - !Ref BdaProjectArn
                   - !Ref BdaProfileArn
+                  - !Sub
+                    - "arn:${AWS::Partition}:bedrock:us-east-2:${AWS::AccountId}:${Profile}"
+                    - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+                  - !Sub
+                    - "arn:${AWS::Partition}:bedrock:us-west-1:${AWS::AccountId}:${Profile}"
+                    - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+                  - !Sub
+                    - "arn:${AWS::Partition}:bedrock:us-west-2:${AWS::AccountId}:${Profile}"
+                    - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
               - Sid: ReadQueuedBdaInput
                 Effect: Allow
                 Action:
@@ -967,9 +988,25 @@ Resources:
             Effect: Allow
             Action:
               - bedrock:InvokeDataAutomationAsync
+            # A cross-region data-automation profile (us.data-automation-v1) is
+            # authorized against the profile ARN in EVERY region it can route to,
+            # not just the calling region. For the US profile that is us-east-1,
+            # us-east-2, us-west-1 and us-west-2 (per the AWS "Cross Region support
+            # required for Bedrock Data Automation" table). Granting only the
+            # source-region ARN makes InvokeDataAutomationAsync fail closed with
+            # AccessDenied. The project resource stays single-region.
             Resource:
               - !Ref BdaProjectArn
               - !Ref BdaProfileArn
+              - !Sub
+                - "arn:${AWS::Partition}:bedrock:us-east-2:${AWS::AccountId}:${Profile}"
+                - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+              - !Sub
+                - "arn:${AWS::Partition}:bedrock:us-west-1:${AWS::AccountId}:${Profile}"
+                - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
+              - !Sub
+                - "arn:${AWS::Partition}:bedrock:us-west-2:${AWS::AccountId}:${Profile}"
+                - Profile: !Select [5, !Split [":", !Ref BdaProfileArn]]
           - Sid: CorrelationTableKms
             Effect: Allow
             Action:
@@ -981,6 +1018,15 @@ Resources:
               - CreateIngestKey
               - !GetAtt IngestKmsKey.Arn
               - !Ref IngestKmsKeyArn
+          - Sid: EnqueueTextIngest
+            # The no-BDA text lane enqueues a compact job from the save request
+            # so a large document embeds in the background worker instead of
+            # inside the synchronous request. Queue-CMK access is already granted
+            # by CorrelationTableKms (the queue uses the ingest key).
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt IngestQueue.Arn
 
   IngestDlqAlarm:
     Type: AWS::CloudWatch::Alarm

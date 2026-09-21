@@ -467,5 +467,20 @@ export async function syncFollowedDockets(
       });
     }
   }
+  // New PDFs landed in S3 for these matters — refresh their KB vector index so
+  // matter_corpus_search can retrieve them. Best-effort; never fails the sync.
+  const touched = [
+    ...new Set(results.filter((r) => r.pdfsDownloaded > 0).map((r) => r.matterId).filter(Boolean)),
+  ];
+  if (touched.length) {
+    try {
+      const { triggerMatterIngestion } = await import("./matter-ingest.server");
+      await triggerMatterIngestion(touched);
+    } catch (e) {
+      console.error(
+        `[docket-sync] ingestion trigger failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
   return { results, ms: Date.now() - started };
 }

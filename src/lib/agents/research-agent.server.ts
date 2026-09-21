@@ -9,7 +9,9 @@
 import type { Emit, OrchestrateInput } from "./orchestration-types";
 import { researchAgentPrompt, fastRouterPrompt, fastWriterPrompt, directAnswerPrompt } from "./prompts";
 import { bedrockChat, bedrockEnabled, userText, BEDROCK_AGENT_MODEL } from "./bedrock.server";
-import { classifyEffort, detectDocRequest, type EffortMode } from "@/lib/research-intent";
+import { detectDocRequest, type EffortMode } from "@/lib/research-intent";
+
+import { routeEffort } from "./effort-router.server";
 import {
   applyChoice,
   clarifyEnabled,
@@ -37,6 +39,7 @@ import {
   updateMemory,
   type SessionMemory,
 } from "./memory.server";
+import { loadUserContext, recordUserMemory, type UserContext } from "./user-memory.server";
 
 /** THINK loop + writer model (Sonnet 5 by default; override via BEDROCK_RESEARCH_MODEL).
  *  FAST runs its tool loop on loadFastModel() (Nemotron on dev / opt-in on prod)
@@ -229,8 +232,26 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
   // Session memory (rolling summary, entity ledger, tail, carried sources).
   let memory: SessionMemory = normalizeMemory(input.memory);
   if (!hasContext(memory) && input.history?.length) {
-    memory = { ...memory, tail: input.history.slice(-2).map((h) => ({ role: h.role, content: h.content })) };
+    memory = { ...memory, tail: input.history.slice(-8).map((h) => ({ role: h.role, content: h.content })) };
   }
+  // Cross-chat user memory (anchors + standing preferences from earlier
+  // chats). Started now so the two small DynamoDB reads overlap the classify /
+  // rewrite work below; hard-capped inside loadUserContext so it can never
+  // hold up the turn. Null when there is no verified principal (scripts).
+  const userCtxPromise: Promise<UserContext | null> = input.principal
+    ? loadUserContext(input.principal, {
+        ...(input.conversationId ? { excludeConversationId: input.conversationId } : {}),
+      }).catch(() => null)
+    : Promise.resolve(null);
+  // Fold the refreshed ledger into the user profile. Awaited (briefly) so the
+  // write completes before the streamed response closes on Lambda.
+  const persistUserMemory = async (mem: SessionMemory) => {
+    if (!input.principal) return;
+    await recordUserMemory(input.principal, input.conversationId, {
+      entities: mem.entities.map((e) => ({ label: e.label, kind: e.kind })),
+      preferences: mem.preferences,
+    });
+  };
 
   try {
     // --- Conversational short-circuit -------------------------------------
@@ -239,7 +260,7 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
     // (this also skips the resolve Bedrock call). The fix for "user typed
     // thanks -> full 18-call tool loop". Conservative by design: only an
     // unmistakable social/meta phrasing with no legal signal lands here.
-    const rawDecision = classifyEffort(input.query, memory.tail.length);
+    const rawDecision = await routeEffort(input.query, memory.tail.length, input.signal);
     // The composer's Fast/Think choice persists in localStorage, so a forced mode
     // is the steady state for many users, not a per-message signal. It governs
     // how hard a real question is researched; it must not turn "thanks" into a
@@ -277,6 +298,7 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
       agentLog("run_done", { run: runId, status: "complete", engine: "conversational", answer_chars: convo.length, total_ms: since(runStart) });
       const convMemory = await updateMemory(memory, input.query, convo, [], input.signal);
       emit("memory", { memory: convMemory });
+      await persistUserMemory(convMemory);
       return;
     }
 
@@ -321,16 +343,23 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
     // conversational context, and dropping them here (before `history` is
     // computed below) is what silently defeated the tail injection whenever
     // resolveQuestion misfired topicShift on an empty ledger.
-    if (resolved.topicShift) memory = { ...emptyMemory(), tail: memory.tail, turns: memory.turns };
+    // Standing instructions ("always Bluebook", "NJ only") are about HOW to
+    // answer, not WHAT the chat is about, so they survive a topic shift too.
+    if (resolved.topicShift)
+      memory = { ...emptyMemory(), tail: memory.tail, preferences: memory.preferences, turns: memory.turns };
 
     const memBlock = memoryBlock(memory);
     const history = tailMessages(memory).map((h) => ({ role: h.role, content: h.content }));
     book.seed(memory.sources);
+    const userCtx = await userCtxPromise;
 
     // Effort mode on the STANDALONE query; never fall back to conversational
     // here (a resolved follow-up is a real question). FAST = tighter budget,
     // THINK = the validated full loop, ambiguous defaults to THINK.
-    const decision = classifyEffort(resolved.query, history.length);
+    // The raw decision already covers this query when no rewrite happened;
+    // only a rewritten standalone query is classed again.
+    const decision =
+      resolved.query === input.query ? rawDecision : await routeEffort(resolved.query, history.length, input.signal);
     const autoMode: EffortMode = decision.mode === "conversational" ? "fast" : decision.mode;
     let mode: EffortMode = input.forceMode ?? autoMode;
     // A file deliverable (PDF/Word/Excel report) needs the fuller research +
@@ -362,9 +391,12 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
       q: trunc(input.query, 200),
       history_turns: history.length,
       carried_sources: book.all().length,
+      user_ctx_chars: userCtx?.block.length ?? 0,
     });
 
-    const contextBlock = memBlock;
+    // Cross-chat background first (small, clearly labelled as background),
+    // then this conversation's own working memory.
+    const contextBlock = [userCtx?.block ?? "", memBlock].filter(Boolean).join("\n\n");
     emit("agent", { round: 1, agent: "research", focus: input.query, status: "running" });
 
     // --- The single research loop (Sonnet 5, tools, parallel calls) --------
@@ -829,6 +861,7 @@ export async function runResearchAgent(init: OrchestrateInput, emit: Emit): Prom
     // Refresh session memory off the critical path (answer is already done).
     const nextMemory = await updateMemory(memory, input.query, answerText, sources, input.signal);
     emit("memory", { memory: nextMemory });
+    await persistUserMemory(nextMemory);
   } catch (err) {
     agentError("run_failed", { run: runId, total_ms: since(runStart), error: trunc(errorMessage(err), 240) });
     emit("error", { message: errorMessage(err) });

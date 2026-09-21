@@ -1,6 +1,6 @@
 # Office agent reliability implementation
 
-Scope: the real Seeger Weiss platform, Writer / Sheets / Slides. This increment implements the reliability and document-access work from [the assessment](office-agent-upgrade-assessment-2026-09-12.md). It does not import MCO code or change deployment state. Preserve the pre-existing Discovery changes on this branch.
+Scope: the real Seeger Weiss platform, Writer / Sheets / Slides. This increment implements the reliability and document-access work. It does not import MCO code or change deployment state. Preserve the pre-existing Discovery changes on this branch.
 
 ## Implemented behavior
 

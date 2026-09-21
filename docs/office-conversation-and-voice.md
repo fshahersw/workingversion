@@ -69,7 +69,7 @@ Run `npm test` inside `services/office-voice` for real loopback WebSocket/JWT te
 
 Protocol and lifecycle implementation were checked against [Nova 2 Sonic getting started](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-getting-started.html), [tool configuration](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-tool-configuration.html), [barge-in behavior](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-barge-in.html), and the [official Node WebSocket example](https://github.com/aws-samples/amazon-nova-samples/tree/main/speech-to-speech/amazon-nova-2-sonic/sample-codes/websocket-nodejs).
 
-Continue with `office-agent-reliability.md` for document-tool guarantees and `office-agent-upgrade-assessment-2026-09-12.md` for the broader roadmap. Durable job execution, production live-voice validation, and richer indexed document intelligence remain separate work.
+Continue with `office-agent-reliability.md` for document-tool guarantees. Durable job execution, production live-voice validation, and richer indexed document intelligence remain separate work.
 
 ### Historical local checks (before integration)
 

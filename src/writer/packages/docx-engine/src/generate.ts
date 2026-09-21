@@ -2006,9 +2006,17 @@ export function generateTableModelXml(model: TableModel, originalTableXml?: stri
     model.indentTwips && Math.round(model.indentTwips) !== 0
       ? `<w:tblInd w:w="${Math.round(model.indentTwips)}" w:type="dxa"/>`
       : ''
+  // A table built from scratch carries Word's default cell margins explicitly
+  // (0.08" left/right, none top/bottom): imported documents may lack a default
+  // table style, and without either the text sits flush against the borders in
+  // Word while the editor showed the padded layout. An explicit
+  // model.cellMarTwips replaces this below; an original tblPr keeps its own.
+  const defaultCellMar =
+    '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>' +
+    '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>'
   let tblPr =
     originalTblPr ??
-    `<w:tblPr><w:tblW w:w="${totalWidth}" w:type="dxa"/>${tblInd}${borders}</w:tblPr>`
+    `<w:tblPr><w:tblW w:w="${totalWidth}" w:type="dxa"/>${tblInd}${borders}${defaultCellMar}</w:tblPr>`
   // Table style reference: '' = remove, non-empty = replace/insert (tblStyle is the
   // first tblPr child)
   if (model.tblStyleId !== undefined) {

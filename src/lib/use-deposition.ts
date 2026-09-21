@@ -19,6 +19,7 @@ import {
   type DepositionRecordPassStatus,
 } from "@/lib/kb/deposition-record";
 import { planSaveLane } from "@/lib/kb/ingest-state";
+import { addPendingWorkspace, removePendingWorkspace } from "@/lib/pile/pending-workspaces";
 import { streamSavedWorkspaceAsk, type KbAskSource } from "@/lib/kb/kb-client";
 import {
   deleteWorkspaceFn,
@@ -511,6 +512,15 @@ export function useDeposition() {
       signal: AbortSignal,
     ) => {
       let status = initialStatus;
+      // Track across navigation so the app-level watcher can notify on ready if
+      // the user leaves; cleared below on a terminal in-view result.
+      if (status.status === "saving") {
+        addPendingWorkspace({
+          itemId: initialStatus.itemId,
+          name: savedRef.current.name || depositionWorkspaceName(transcriptsRef.current),
+          surface: "deposition",
+        });
+      }
       for (let poll = 0; status.status === "saving" && poll < SAVE_POLL_MAX; poll++) {
         setSaved({
           status: status.stage === "embedding" ? "embedding" : "queued",
@@ -547,6 +557,7 @@ export function useDeposition() {
       }
       if (status.status === "error") {
         saveAttemptRef.current = null;
+        removePendingWorkspace(initialStatus.itemId);
         setSaved({
           status: "error",
           itemId: initialStatus.itemId,
@@ -560,17 +571,22 @@ export function useDeposition() {
         });
         return;
       }
+      removePendingWorkspace(initialStatus.itemId);
       const docIdByFileId = Object.fromEntries(
         status.documents.flatMap((doc) =>
           doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
         ),
       );
-      const bound = transcriptsRef.current.every((t) => Boolean(docIdByFileId[t.fileId]));
+      const readyCount = transcriptsRef.current.filter((t) => Boolean(docIdByFileId[t.fileId])).length;
+      const bound = readyCount === transcriptsRef.current.length;
       setSaved({
         status: "ready",
         itemId: initialStatus.itemId,
         docIdByFileId,
-        hybridAsk: bound,
+        // Partial binding: hybrid Ask runs whenever at least one transcript is
+        // indexed; the ready subset answers via RAG and the rest via in-tab
+        // retrieval, instead of the whole set falling back until all are ready.
+        hybridAsk: readyCount > 0,
         message: bound
           ? transcriptsRef.current.some(
               (t) =>
@@ -579,7 +595,9 @@ export function useDeposition() {
             )
             ? "Transcript text and analysis can be saved, but an original file upload failed. Keep your original files."
             : null
-          : "Saved, but not every transcript is indexed. Ask uses in-tab retrieval.",
+          : readyCount > 0
+            ? `Ask covers the ${readyCount} indexed transcript${readyCount === 1 ? "" : "s"} so far; the rest are still indexing.`
+            : "Saved, but not indexed yet. Ask uses in-tab retrieval.",
       });
       step({
         id: "save",
@@ -686,7 +704,10 @@ export function useDeposition() {
           ...(sha256 ? { sha256 } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
           ...(bytesKey ? { bytesKey } : {}),
-          pages: plan === "async" ? [] : fp,
+          // Send the transcript text whenever present: the server text lane
+          // indexes it directly (large ones via the worker) and only uses BDA
+          // for a transcript with no extractable text at all.
+          pages: fp,
         };
       });
       if (controller.signal.aborted) return;
@@ -1584,8 +1605,10 @@ export function useDeposition() {
         const transcripts = transcriptsRef.current.filter(
           (t) => !opts.fileIds || opts.fileIds.includes(t.fileId),
         );
+        // Partial binding: RAG the transcripts that ARE indexed; if none are
+        // ready yet, fall back to the in-tab retriever.
         const docIds = transcripts.map((t) => saved.docIdByFileId[t.fileId]).filter(Boolean);
-        if (docIds.length !== transcripts.length) return false;
+        if (!docIds.length) return false;
         const outcome: { streamed: boolean; completed: boolean; softError: string | null } = {
           streamed: false,
           completed: false,
@@ -1639,7 +1662,24 @@ export function useDeposition() {
       };
 
       try {
-        if (opts.scope === "full") {
+        // "auto" (the default) resolves here: a saved deposition set with a
+        // hybrid index answers from the KB (adaptive RAG); otherwise the
+        // in-browser full-text scan runs, unchanged. Explicit scopes override.
+        // Full-text scan is retired: transcripts auto-save + index on upload, so
+        // Ask is RAG-only. Scan stays behind this flag as a dormant fallback.
+        const FULL_TEXT_SCAN_ENABLED = false;
+        const resolvedScope: DiscoveryScope =
+          opts.scope === "full" || opts.scope === "relevant"
+            ? opts.scope
+            : savedRef.current.status === "ready" && savedRef.current.hybridAsk
+              ? "relevant"
+              : "full";
+        if (resolvedScope === "full") {
+          if (!FULL_TEXT_SCAN_ENABLED) {
+            throw new Error(
+              "These transcripts are still indexing — Ask will be ready in a moment. Uploads now index automatically for retrieval.",
+            );
+          }
           lastScan.current = { query, fileIds: opts.fileIds ? [...opts.fileIds] : undefined };
           const selected = transcriptsRef.current.filter(
             (t) => !opts.fileIds || opts.fileIds.includes(t.fileId),

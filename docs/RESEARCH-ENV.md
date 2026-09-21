@@ -19,6 +19,8 @@ task environment (`infra/app/app-runtime.cfn.yaml`).
 | `BEDROCK_COVERAGE_GATE` | on | The post-research coverage audit and its one re-query round. |
 | `BEDROCK_SUBAGENTS` | off | `1` enables the parallel sub-question pool for file deliverables only. |
 | `RESEARCH_BRIEF` | on | `off` hides the research landing's "Since you were here" headlines. |
+| `RESEARCH_USER_MEMORY` | on | `off` disables the cross-chat user memory (per-attorney anchors and standing preferences read at turn start and refreshed after each answer; DynamoDB `USER#<sub>` / `MEMORY#research`). Per-conversation memory is unaffected. |
+| `RESEARCH_USER_MEMORY_LOAD_MS` | `450` | Hard cap on loading that profile plus the recent-chat titles; past it the turn runs without them. |
 
 ## Models and tiers
 

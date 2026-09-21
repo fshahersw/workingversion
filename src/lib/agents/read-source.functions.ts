@@ -27,7 +27,7 @@ export const readSourceFn = createServerFn({ method: "POST" })
     return { url };
   })
   .handler(async ({ data }): Promise<ReadSourceResult> => {
-    const { fetchPage } = await import("@/lib/agents/fetch-page.server");
+    const { readPage: fetchPage } = await import("@/lib/agents/page-read.server");
     try {
       const page = await fetchPage(data.url, { maxChars: READER_MAX_CHARS, timeoutMs: 20_000 });
       const text = page.text.trim();

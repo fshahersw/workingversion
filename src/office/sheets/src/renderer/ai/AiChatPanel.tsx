@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { AiComposer, AiTypingIndicator } from '@genoffice/ui'
 import { GensparkMark } from '../ribbon-icons'
 import type { ChangePlan } from '../../domain/workbook.types'
+import type { RunSnapshot } from '@/lib/sheets/run-snapshot'
 import { ATTACHMENT_IMAGE_EXTS, type AttachmentMeta } from '../../shared/desktop-api'
 import { useI18n, type TFunc } from '../i18n/locale'
 import { Markdown } from '@genoffice/ui'
@@ -210,6 +211,8 @@ export interface AiChatMessage {
   readonly loginRequired?: boolean | undefined
   /** Set when this message reflects an auto-applied plan; renders an inline [Undo] button. */
   readonly autoApplied?: { readonly opCount: number; readonly undoSteps: number } | undefined
+  /** pre-run snapshot of everything the run wrote (file-backed workbooks): the [Undo] restores from it */
+  readonly runSnapshot?: RunSnapshot | undefined
   /** attachments consumed from the composer by this user message (read-only echo chips) */
   readonly attachments?: readonly AttachmentMeta[] | undefined
 }
@@ -236,6 +239,7 @@ export function AiChatPanel({
   onStop,
   onNewChat,
   onUndo,
+  onRollback,
   scopeRange,
   scopeColumns,
   scopeLocked,
@@ -277,6 +281,8 @@ export function AiChatPanel({
   readonly onStop: () => void
   readonly onNewChat: () => void
   readonly onUndo: (steps: number) => void
+  /** restore a run's pre-run snapshot (file-backed workbooks); fallbackSteps = legacy undo depth */
+  readonly onRollback?: (snapshot: RunSnapshot, fallbackSteps: number) => void
   /** A1 notation of the range this run is scoped to, or null when there is no
    *  scope — a resting single-cell selection carries no intent worth showing,
    *  and dismissing the chip clears it until the next selection change */
@@ -599,13 +605,19 @@ export function AiChatPanel({
                     <span className="ai-auto-applied-text">
                       {t('aiAutoApplied', { count: entry.autoApplied.opCount })}
                     </span>
-                    {/* undoSteps 0 = the batch exceeded the undo budget and
-                        kept no stack entry; a forced 1-step undo would revert
-                        the user's own previous action instead. */}
-                    {(entry.autoApplied.undoSteps ?? 1) > 0 && (
+                    {/* A run snapshot restores the pre-run state regardless of
+                        the undo history (a bulk batch dropped from it still
+                        reverts). Without one, undoSteps 0 means the batch kept
+                        no stack entry; a forced 1-step undo would revert the
+                        user's own previous action instead. */}
+                    {(entry.runSnapshot || (entry.autoApplied.undoSteps ?? 1) > 0) && (
                       <button
                         className="ai-undo-btn"
-                        onClick={() => onUndo(Math.max(1, entry.autoApplied?.undoSteps ?? 1))}
+                        onClick={() =>
+                          entry.runSnapshot && onRollback
+                            ? onRollback(entry.runSnapshot, entry.autoApplied?.undoSteps ?? 0)
+                            : onUndo(Math.max(1, entry.autoApplied?.undoSteps ?? 1))
+                        }
                         data-tip={t('aiUndoTitle')}
                       >
                         {t('aiUndo')}

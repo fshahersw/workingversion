@@ -2,13 +2,17 @@ import { bedrockChat, bedrockEnabled, userText } from "@/lib/agents/bedrock.serv
 import {
   BEDROCK_PILE_WRITER_MODEL,
   bedrockClaudeEnabled,
-  streamBedrockClaude,
+  streamWithRetry,
 } from "@/lib/agents/bedrock-claude.server";
 
 import { mapPool } from "@/lib/pile/async";
 import { retryScan } from "@/lib/pile/discovery-scan";
 
 import { ASK_PACK_CHARS, FILE_DIGEST_CONCURRENCY, askBudget } from "./limits";
+
+/** Shared answer budget (tokens shared between reasoning + visible answer on the
+ *  Sonnet-5 thinking path; sized generously so the answer is not starved). */
+const WRITER_MAX_TOKENS = 30000;
 import type { PileHit, PileStructure } from "./types";
 
 export type PileAskEmit = (event: string, data: unknown) => void;
@@ -28,13 +32,15 @@ export async function writePileAnswer(
     files?: { name: string; pageCount: number }[];
     structure?: PileStructure | null;
     instructions?: string | null;
+    /** Optional generous budget override (saved-set RAG passes a per-doc chunk count). */
+    pack?: { pages?: number };
   },
   emit: PileAskEmit,
   signal?: AbortSignal,
 ) {
   if (!bedrockEnabled()) throw new Error("AWS_BEARER_TOKEN_BEDROCK is not configured");
   const pages = input.pages
-    .slice(0, askBudget(input.files?.length ?? 1).singlePack + 4)
+    .slice(0, input.pack?.pages ?? askBudget(input.files?.length ?? 1).singlePack + 4)
     .map((p) => ({
       ...p,
       text: (p.text ?? "").slice(0, 3500),
@@ -87,12 +93,12 @@ export async function writePileAnswer(
   const user = `QUESTION\n${input.query}\n\nRETRIEVED PAGES\n${context}`;
 
   if (bedrockClaudeEnabled()) {
-    await streamBedrockClaude(
+    await streamWithRetry(
       {
         model: BEDROCK_PILE_WRITER_MODEL,
         system,
         messages: [{ role: "user", content: user }],
-        maxTokens: 20000,
+        maxTokens: WRITER_MAX_TOKENS,
         effort: "low",
         ...(signal ? { signal } : {}),
       },
@@ -151,12 +157,12 @@ async function streamWriter(
 ): Promise<string> {
   let out = "";
   if (bedrockClaudeEnabled()) {
-    await streamBedrockClaude(
+    await streamWithRetry(
       {
         model: BEDROCK_PILE_WRITER_MODEL,
         system,
         messages: [{ role: "user", content: user }],
-        maxTokens: 20000,
+        maxTokens: WRITER_MAX_TOKENS,
         effort: "low",
         ...(signal ? { signal } : {}),
       },
@@ -194,11 +200,14 @@ export async function writeMultiFileAnswer(
     hits?: PileHit[];
     structure?: PileStructure | null;
     instructions?: string | null;
+    /** Optional generous budget override (saved-set RAG raises the pack ceiling). */
+    pack?: { chars?: number; writerPack?: number };
   },
   emit: PileAskEmit,
   signal?: AbortSignal,
 ) {
   if (!bedrockEnabled()) throw new Error("AWS_BEARER_TOKEN_BEDROCK is not configured");
+  const packChars = input.pack?.chars ?? ASK_PACK_CHARS;
 
   // Global [S1..Sn] numbering shared by every reader and the writer, so a
   // citation in a per-file digest still points at the right page downstream.
@@ -305,9 +314,9 @@ export async function writeMultiFileAnswer(
   const writerPages = readable.flatMap((f) => f.pages);
   const contextParts: string[] = [];
   let contextChars = 0;
-  for (const p of writerPages.slice(0, budget.writerPack)) {
+  for (const p of writerPages.slice(0, input.pack?.writerPack ?? budget.writerPack)) {
     const part = `[${p.ref}] ${p.fileName} p. ${p.page}${p.ocr ? " (VL OCR)" : ""}\n${p.text.slice(0, 2400)}`;
-    if (contextChars + part.length > ASK_PACK_CHARS) break;
+    if (contextChars + part.length > packChars) break;
     contextParts.push(part);
     contextChars += part.length;
   }
@@ -336,7 +345,7 @@ export async function writeMultiFileAnswer(
     files: fanout.length,
   });
   const user = `QUESTION\n${input.query}\n\nPER-DOCUMENT DIGESTS\n${digestBlock}\n\nRETRIEVED PAGES\n${context}`;
-  if (digestBlock.length + context.length > ASK_PACK_CHARS)
+  if (digestBlock.length + context.length > packChars)
     throw new Error(
       "Retrieved evidence is too large for a single synthesis. Use Full text scan to process it in bounded sections.",
     );

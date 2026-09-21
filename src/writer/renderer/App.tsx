@@ -22,6 +22,7 @@ import {
   BLANK_ORDERED_NUM_ID,
   DEFAULT_SECTION,
   applySectionSettings,
+  nextNoteId,
   verifyProtectionPassword,
   type Block,
   type CommentInfo,
@@ -41,7 +42,12 @@ import {
 import type { AiDocContent, AiSettings, OpenDocxResult } from '../shared/ipc'
 import { WriterHeader } from './components/WriterHeader'
 import { AiPanel, AI_REVISION_AUTHOR } from './ai/AiPanel'
-import type { AiCommentsAccess, AiHeaderFooterAccess } from './ai/tools'
+import {
+  applyPageSetupPatch,
+  type AiCommentsAccess,
+  type AiDocumentAccess,
+  type AiHeaderFooterAccess,
+} from './ai/tools'
 import { applyHfText, hfEditText } from './editor/hf-text'
 import { textColorValue } from './editor/text-color'
 import { AiAskPopover } from './components/AiAskPopover'
@@ -4198,6 +4204,185 @@ export function App() {
     [],
   )
 
+  // Page setup + footnotes for the AI tools (set_page_setup, apply_court_style,
+  // insert_footnote). Same ref-bundle pattern as the header/footer access: the
+  // tool executor holds one stable object, the bundle is refreshed every render,
+  // and writes run the Layout-ribbon / Insert-Footnote code paths.
+  const aiDocCtx = {
+    editor,
+    section,
+    sections,
+    activeSection,
+    footnotes,
+    endnotes,
+    locked: isProtected || readMode,
+  }
+  const aiDocCtxRef = useRef(aiDocCtx)
+  aiDocCtxRef.current = aiDocCtx
+  const aiDocAccess = useMemo<AiDocumentAccess>(
+    () => ({
+      pageSetup: {
+        read: () => {
+          const ctx = aiDocCtxRef.current
+          return {
+            section: ctx.sections[ctx.activeSection]?.settings ?? ctx.section,
+            sectionCount: Math.max(1, ctx.sections.length),
+            activeSection: ctx.activeSection,
+            locked: ctx.locked,
+          }
+        },
+        set: (patch, applyTo) => {
+          // The agent loop runs several write tools in one turn with no render
+          // between them, so state is updated functionally (each call composes
+          // on the previous one) and the ref is mirrored synchronously so the
+          // next call (or a read) in the same turn sees this change.
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked) return 'the document is read-only; page setup cannot be changed'
+          const current = ctx.sections[ctx.activeSection]?.settings ?? ctx.section
+          if (!current) return 'no page section is available'
+          if (applyTo === 'all' && ctx.sections.length > 1) {
+            // The patch is semantic, so each section orients its own paper and
+            // keeps whatever the patch does not mention (a landscape exhibit
+            // section stays landscape when only the margins change).
+            const nextSections = ctx.sections.map((s) => ({
+              ...s,
+              settings: applyPageSetupPatch(s.settings, patch),
+            }))
+            setSections((prev) =>
+              prev.map((s) => ({ ...s, settings: applyPageSetupPatch(s.settings, patch) })),
+            )
+            setSectionsDirty(ctx.sections.map((_, i) => i))
+            setSection((prev) => applyPageSetupPatch(prev ?? current, patch))
+            setSectionDirty(true)
+            aiDocCtxRef.current = {
+              ...ctx,
+              sections: nextSections,
+              section: applyPageSetupPatch(ctx.section ?? current, patch),
+            }
+            return null
+          }
+          // one section (or single-section document): same path as the ribbon
+          const next = applyPageSetupPatch(current, patch)
+          const active = ctx.activeSection
+          setSections((prev) =>
+            prev.map((s, i) => (i === active ? { ...s, settings: applyPageSetupPatch(s.settings, patch) } : s)),
+          )
+          const isLast = ctx.sections.length <= 1 || active === ctx.sections.length - 1
+          if (isLast) {
+            setSection((prev) => applyPageSetupPatch(prev ?? current, patch))
+            setSectionDirty(true)
+          } else {
+            setSectionsDirty((d) => (d.includes(active) ? d : [...d, active]))
+          }
+          aiDocCtxRef.current = {
+            ...ctx,
+            sections: ctx.sections.map((s, i) => (i === active ? { ...s, settings: next } : s)),
+            section: isLast ? next : ctx.section,
+          }
+          return null
+        },
+      },
+      notes: {
+        list: (kind) =>
+          (kind === 'footnote' ? aiDocCtxRef.current.footnotes : aiDocCtxRef.current.endnotes).map(
+            (n) => ({ id: n.id, text: n.text }),
+          ),
+        insert: (kind, text, pos) => {
+          const ctx = aiDocCtxRef.current
+          if (ctx.locked) return 'the document is read-only; notes cannot be inserted'
+          const ed = ctx.editor
+          if (!ed) return 'the editor is not available'
+          if (pos < 0 || pos > ed.state.doc.content.size) return 'the note position is outside the document'
+          const list = kind === 'footnote' ? ctx.footnotes : ctx.endnotes
+          const setList = kind === 'footnote' ? setFootnotes : setEndnotes
+          const id = nextNoteId(list)
+          const num = list.length + 1
+          const ok = ed
+            .chain()
+            .setTextSelection(pos)
+            .insertContent({ type: 'docNoteRef', attrs: { kind, id, num } } as never)
+            .run()
+          if (!ok) return 'the note reference could not be inserted at that position'
+          // Append functionally and mirror into the ref: several insert_footnote
+          // calls in one model turn run before React re-renders, and each must
+          // see the notes the previous one added (distinct id and number).
+          const note = { id, text }
+          setList((prev) => (prev.some((n) => n.id === id) ? prev : [...prev, note]))
+          const nextList = [...list, note]
+          aiDocCtxRef.current =
+            kind === 'footnote' ? { ...ctx, footnotes: nextList } : { ...ctx, endnotes: nextList }
+          setNotesDirty(true)
+          return { num }
+        },
+      },
+      // Rollback point for everything that is NOT in editor.getJSON(): note
+      // text, section list / active page setup, header & footer variants.
+      // Captured before a run's first mutation, restored with the document.
+      snapshotExtras: () => {
+        const ctx = aiDocCtxRef.current
+        const hf = aiHfCtxRef.current
+        const hfRaw: Record<string, unknown> = {}
+        for (const kind of ['header', 'footer'] as const) {
+          for (const view of ['default', 'first', 'even'] as const) {
+            const value = hf.valueOf(kind, view)
+            if (value !== undefined && value !== null) hfRaw[`${kind}:${view}`] = structuredClone(value)
+          }
+        }
+        return {
+          footnotes: structuredClone(ctx.footnotes),
+          endnotes: structuredClone(ctx.endnotes),
+          section: ctx.section ? structuredClone(ctx.section) : null,
+          sections: structuredClone(ctx.sections),
+          headerFooter: aiHfAccess.read(),
+          hfRaw,
+          titlePg: hf.titlePg,
+          evenOddHf: hf.evenOddHf,
+        }
+      },
+      restoreExtras: (extras) => {
+        const notesNow = aiDocCtxRef.current
+        const footnotes = structuredClone(extras.footnotes) as NoteInfo[]
+        const endnotes = structuredClone(extras.endnotes) as NoteInfo[]
+        setFootnotes(footnotes)
+        setEndnotes(endnotes)
+        setNotesDirty(true)
+        const sections = structuredClone(extras.sections) as SectionInfo[]
+        setSections(sections)
+        setSectionsDirty(sections.map((_, i) => i))
+        if (extras.section) {
+          setSection(structuredClone(extras.section))
+          setSectionDirty(true)
+        }
+        aiDocCtxRef.current = {
+          ...notesNow,
+          footnotes,
+          endnotes,
+          sections,
+          section: extras.section ? structuredClone(extras.section) : notesNow.section,
+        }
+        const hf = aiHfCtxRef.current
+        if (extras.hfRaw) {
+          if (typeof extras.titlePg === 'boolean' && extras.titlePg !== hf.titlePg) {
+            setTitlePg(extras.titlePg)
+            setTitlePgDirty(true)
+            hf.titlePg = extras.titlePg
+          }
+          if (typeof extras.evenOddHf === 'boolean' && extras.evenOddHf !== hf.evenOddHf) {
+            setEvenOddHf(extras.evenOddHf)
+            setEvenOddHfDirty(true)
+            hf.evenOddHf = extras.evenOddHf
+          }
+          for (const [key, value] of Object.entries(extras.hfRaw)) {
+            const [kind, view] = key.split(':') as ['header' | 'footer', HfView]
+            hf.commit(kind, structuredClone(value) as never, view)
+            hf.overlay.set(key, structuredClone(value) as never)
+          }
+        }
+      },
+    }),
+    [],
+  )
+
   const ribbonActions = useStableCallbacks({
     allocateNumId: (kind: 'bullet' | 'ordered') => allocateListNumId(kind),
     createListDef: (levels: CustomNumberingLevel[]) => createCustomListDef(levels),
@@ -4549,6 +4734,7 @@ export function App() {
               onQueueConsume={queueConsume}
               commentsAccess={aiCommentsAccess}
               hfAccess={aiHfAccess}
+              docAccess={aiDocAccess}
             />
           </div>
         )}

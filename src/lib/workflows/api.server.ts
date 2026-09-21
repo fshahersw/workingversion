@@ -144,6 +144,20 @@ export async function workflowApi(request: Request) {
         inputsSchema.parse({ text: "", matter: "", selection: "", files });
         return json(files);
       }
+      if (view === "skill") {
+        // Firm skill preset instructions live server-side (skills-instructions.server);
+        // the Builder inspector fetches one to prefill a prompt/agent step.
+        const id = z
+          .string()
+          .min(1)
+          .max(80)
+          .regex(/^[a-z0-9-]+$/)
+          .parse(url.searchParams.get("id"));
+        const { skillInstructions } = await import("./skills-instructions.server");
+        const instructions = skillInstructions(id);
+        if (!instructions) throw new WorkflowError(404, "Unknown skill preset.");
+        return json({ id, instructions });
+      }
       return json(await store.listDefinitions(user));
     }
     assertSameOrigin(

@@ -2,9 +2,70 @@ import { useState } from "react";
 import { ancestors, canConnect } from "./graph";
 import { definition } from "./catalog";
 import { recipeNames } from "./recipes";
+import { request } from "./client";
+import { SKILL_PRESETS, type SkillPreset } from "./skills-index";
 import { WorkspaceChoice } from "./SourcePicker";
 import { Badge, Button, Icon, IconButton, Notice, Tile } from "./ui";
 import type { StepConfig, Workflow, WorkflowStep, ValidationIssue } from "./types";
+
+/** Firm skill presets grouped by practice-area category for the picker's optgroups. */
+const SKILL_GROUPS: { category: string; items: SkillPreset[] }[] = (() => {
+  const byCategory = new Map<string, SkillPreset[]>();
+  for (const preset of SKILL_PRESETS) {
+    const list = byCategory.get(preset.category);
+    if (list) list.push(preset);
+    else byCategory.set(preset.category, [preset]);
+  }
+  return [...byCategory.entries()].map(([category, items]) => ({ category, items }));
+})();
+
+/** Prefill a prompt/agent step's instructions from a vetted firm skill. The full
+ *  instruction body is server-only, so it is fetched on selection. */
+function SkillPicker({ onApply }: { onApply: (title: string, instructions: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <label className="swf-field">
+      Start from a firm skill
+      <select
+        value=""
+        disabled={busy}
+        onChange={async (e) => {
+          const id = e.target.value;
+          e.target.value = "";
+          if (!id) return;
+          const preset = SKILL_PRESETS.find((p) => p.id === id);
+          setBusy(true);
+          setError("");
+          try {
+            const res = await request<{ instructions: string }>(
+              "view=skill&id=" + encodeURIComponent(id),
+            );
+            onApply(preset?.title ?? "", res.instructions);
+          } catch (err) {
+            setError((err as Error).message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <option value="">Choose a vetted skill to prefill instructions…</option>
+        {SKILL_GROUPS.map((g) => (
+          <optgroup key={g.category} label={g.category}>
+            {g.items.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.title}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+      {busy && <small>Loading skill…</small>}
+      {error && <Notice tone="error">{error}</Notice>}
+      <small>Fills the instructions with a firm-authored procedure you can then edit.</small>
+    </label>
+  );
+}
 
 type Props = {
   flow: Workflow;
@@ -332,6 +393,12 @@ export function StepInspector(props: Props) {
                       The approved model is selected by your platform’s server configuration.
                     </small>
                   </label>
+                  <SkillPicker
+                    onApply={(title, instructions) => {
+                      update({ instructions });
+                      if (!step.data.label || step.data.label === d.label) updateData({ label: title });
+                    }}
+                  />
                   {instructionField}
                   <label className="swf-field">
                     Context from earlier steps
@@ -360,6 +427,50 @@ export function StepInspector(props: Props) {
                         </span>
                       )}
                     </div>
+                  </label>
+                  <label className="swf-field">
+                    Model quality
+                    <select
+                      value={config.modelTier || "balanced"}
+                      onChange={(e) =>
+                        update({ modelTier: e.target.value as StepConfig["modelTier"] })
+                      }
+                    >
+                      <option value="fast">Fast · quick drafts</option>
+                      <option value="balanced">Balanced · default</option>
+                      <option value="deep">Deep · most thorough</option>
+                    </select>
+                    <small>
+                      Higher tiers may take longer. The exact model for each tier is set by your
+                      platform.
+                    </small>
+                  </label>
+                  <label className="swf-field">
+                    Response length
+                    <select
+                      value={String(config.maxTokens || 32768)}
+                      onChange={(e) => update({ maxTokens: Number(e.target.value) })}
+                    >
+                      <option value="8192">Standard</option>
+                      <option value="16384">Long</option>
+                      <option value="32768">Maximum</option>
+                    </select>
+                    <small>How much room this step has to write its result.</small>
+                  </label>
+                  <label className="swf-field">
+                    Refinement passes
+                    <select
+                      value={String(config.iterations || 1)}
+                      onChange={(e) => update({ iterations: Number(e.target.value) })}
+                    >
+                      <option value="1">1 · single pass</option>
+                      <option value="2">2 · draft, then revise</option>
+                      <option value="3">3 · revise twice</option>
+                      <option value="4">4 · maximum refinement</option>
+                    </select>
+                    <small>
+                      Extra passes re-check and improve the draft against the same evidence.
+                    </small>
                   </label>
                   {step.data.kind === "agent" && (
                     <label className="swf-field">

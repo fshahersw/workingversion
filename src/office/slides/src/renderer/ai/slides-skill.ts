@@ -11,6 +11,12 @@ import { OP_GROUPS, opGuide, opGuideCatalog, opSignatureIndex } from '../../shar
 import { auditSlideLayout, formatAudit } from './layout-audit'
 import { runLayoutScript, type LayoutScriptElement } from './layout-script'
 import { t } from '../i18n/locale'
+import {
+  DECK_OUTLINE_MAX_CHARS,
+  fitDeckOutline,
+  type OutlineSlide,
+} from '@/lib/office/deck-outline-budget'
+import { SLIDES_TOOL_CONTRAST, withToolContrast } from '@/lib/agents/tool-contrast'
 
 /**
  * Slides capability as an AgentSkill: deck outline context + three tools (read structure /
@@ -18,6 +24,14 @@ import { t } from '../i18n/locale'
  * the main process applies them and returns the new RenderSlide, which applySlide writes
  * back into React state — the same pipeline as manual editing.
  */
+
+/**
+ * Ceiling on ops per apply_ops transaction. The prompt asks for batch edits
+ * "one op per element, page by page", so a 60-page deck legitimately needs more
+ * than the 50 the old description named; 200 covers that while keeping one
+ * transaction reviewable and undoable in a single step.
+ */
+export const APPLY_OPS_MAX = 200
 
 // ── Generation progress events (for the onProgress callback; renderer memory only, never persisted or journaled) ──
 
@@ -811,7 +825,7 @@ const TOOLS: AgentToolDef[] = [
         ops: {
           type: 'array',
           items: { type: 'object' },
-          description: 'The op list, applied in order as one transaction (at most 50)',
+          description: `The op list, applied in order as one transaction (at most ${APPLY_OPS_MAX}; split larger batches page by page)`,
         },
         dry_run: { type: 'boolean', description: 'Validate the plan only; the deck is untouched' },
         isolation: {
@@ -843,6 +857,8 @@ const TOOLS: AgentToolDef[] = [
     },
   },
 ]
+// Contrastive "use for / not for / examples" on every tool (src/lib/agents/tool-contrast.ts).
+TOOLS.splice(0, TOOLS.length, ...withToolContrast(TOOLS, SLIDES_TOOL_CONTRAST))
 
 /** Collect readable text of nodes (including nested group children); returns a list of [sourceId, type, text] */
 /** Find one node by id in the node tree (including groups). */
@@ -1067,8 +1083,12 @@ function buildDeckOutline(slides: RenderSlide[], current: number, selectedIds: s
     })
     lines.push(`User selected elements: ${selectedRefs.join(', ')}`)
   }
-  slides.forEach((slide, i) => {
-    lines.push(`Page ${i + 1} (slideIndex=${i}):`)
+  // Per-page blocks are budgeted like Writer's block list (24k chars): small
+  // decks are emitted exactly as before; big decks keep the current page ± 2
+  // (and the first/last page) in full and show the rest as one summary line
+  // each, then elide the farthest pages behind a read_slide marker. Without
+  // this a 40-page deck put ~35k chars into every user message and history.
+  const pages: OutlineSlide[] = slides.map((slide, i) => {
     const infos = collectNodeInfos(slide.nodes)
     const fillCount = new Map<string, number>()
     for (const n of infos) {
@@ -1078,11 +1098,27 @@ function buildDeckOutline(slides: RenderSlide[], current: number, selectedIds: s
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
       .map(([c, count]) => (count > 1 ? `${c}×${count}` : c))
-    if (mainFills.length > 0) lines.push(`  main fills: ${mainFills.join(' ')}`)
+    const detail: string[] = []
+    if (mainFills.length > 0) detail.push(`  main fills: ${mainFills.join(' ')}`)
     for (const n of infos) {
-      lines.push(`  - ${n.id} | ${n.type}${n.text ? ` | "${preview(n.text)}"` : ''}`)
+      detail.push(`  - ${n.id} | ${n.type}${n.text ? ` | "${preview(n.text)}"` : ''}`)
     }
+    const title = infos.find((n) => n.text)?.text
+    const summary =
+      `  ${title ? `"${preview(title, 40)}" · ` : ''}${infos.length} element${infos.length === 1 ? '' : 's'}` +
+      (mainFills.length ? ` · fills ${mainFills.join(' ')}` : '') +
+      ' (compact; read_slide for elements)'
+    return { header: `Page ${i + 1} (slideIndex=${i}):`, lines: detail, summary }
   })
+  const fitted = fitDeckOutline(pages, { current, maxChars: DECK_OUTLINE_MAX_CHARS })
+  lines.push(...fitted.lines)
+  if (fitted.compacted || fitted.elided) {
+    lines.push(
+      `(Large deck: ${fitted.compacted} page${fitted.compacted === 1 ? '' : 's'} shown compact` +
+        (fitted.elided ? `, ${fitted.elided} not shown` : '') +
+        `; the current page and its neighbours are complete. read_slide(<slideIndex>) before editing any other page.)`,
+    )
+  }
   lines.push('(Use read_slide to see element positions/sizes/colors)')
   return lines.join('\n')
 }
@@ -2549,6 +2585,14 @@ async function executeTool(
       const opsIn = Array.isArray(call.input.ops) ? (call.input.ops as unknown[]) : null
       if (!opsIn || opsIn.length === 0)
         return fail(t('aiFailApplyOps'), 'ops must be a non-empty array')
+      // The description promises a ceiling; enforce it. One transaction of
+      // thousands of ops is unreviewable for the user and un-undoable in one
+      // step; batch changes are sent page by page instead.
+      if (opsIn.length > APPLY_OPS_MAX)
+        return fail(
+          t('aiFailApplyOps'),
+          `${opsIn.length} ops in one call; the limit is ${APPLY_OPS_MAX}. Split the batch (page by page, or by element group) and send several apply_ops calls.`,
+        )
       const pre = preflightOps(opsIn, slides, state)
       if (!('ops' in pre)) return pre
       const r = await window.slidesApi.applyTxn?.({

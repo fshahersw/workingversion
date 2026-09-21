@@ -17,7 +17,7 @@ Everything is in-account (AWS 475976462949, us-east-1), SigV4 default credential
 chain, no external egress (no Voyage, no Groq), HIPAA-disciplined.
 
 Related: [[seegerweissai-discovery-kb]] (current-state map + KB decision),
-[[seegerweissai-bedrock-models]] (model catalog/tiering), `docs/subagent-research-design.md`.
+[[seegerweissai-bedrock-models]] (model catalog/tiering).
 
 ## 0. Decisions (locked)
 

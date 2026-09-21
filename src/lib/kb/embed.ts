@@ -42,14 +42,21 @@ async function mapLimit<T, R>(
   return out;
 }
 
-async function withRetry<T>(fn: () => Promise<T>, tries = 3, baseMs = 500): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, tries = 5, baseMs = 500): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
       return await fn();
     } catch (e) {
       lastErr = e;
-      await new Promise((r) => setTimeout(r, baseMs * 2 ** attempt));
+      if (attempt === tries - 1) break;
+      // Exponential backoff with FULL JITTER (capped): under 20-30 concurrent
+      // saves, Titan throttles in bursts. Jitter stops every retrying embed
+      // from resyncing (thundering herd) and lets a document ride out the
+      // throttle instead of failing -> poisoning the whole workspace -> Ask
+      // silently dropping to full-scan. Total worst-case wait stays < ~10s.
+      const ceiling = Math.min(baseMs * 2 ** attempt, 8000);
+      await new Promise((r) => setTimeout(r, Math.floor(Math.random() * ceiling) + baseMs));
     }
   }
   throw lastErr;

@@ -15,6 +15,7 @@ dist-ssr
 .tanstack/**
 .nitro
 /infra/app/artifacts/
+/infra/legal-archive/artifacts/
 /infra/lambda/kb-ingest/artifacts/
 /.artifacts/kb-ingest/
 /.artifacts/workflows/

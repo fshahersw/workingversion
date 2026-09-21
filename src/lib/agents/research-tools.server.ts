@@ -9,7 +9,10 @@
 // ============================================================================
 import type { ToolDef } from "./anthropic.server";
 import { AGENT_TOOLS, SourceBook, executeTool, type ToolOutcome } from "./tools.server";
-import { fetchPage } from "./fetch-page.server";
+import { sourceNote } from "@/lib/legal/source-registry";
+
+import { readPage } from "./page-read.server";
+import { RESEARCH_TOOL_CONTRAST, withToolContrast } from "./tool-contrast";
 import { memoTTL, toolCacheKey, TOOL_CACHE_TTL_MS } from "./run-state.server";
 import { courtlistenerConfigured, lookupCitations } from "./courtlistener.server";
 import {
@@ -49,7 +52,7 @@ const FETCH_PAGE_TOOL: ToolDef = {
 const VERIFY_CITATIONS_TOOL: ToolDef = {
   name: "verify_citations",
   description:
-    "Verify reporter-style legal citations (e.g. '576 U.S. 644', '2023 WL 12345', F.3d / F. Supp. 3d) against CourtListener's opinion database. Pass a block of TEXT (a paragraph of your draft, or a list of cites) and each citation resolves to a real case or is flagged not-found / ambiguous. Use to CONFIRM a case citation is real before you rely on it. For docket/PACER filings use db_* instead.",
+    "Call before finalizing ANY legal citation. Verifies reporter-style citations (e.g. '576 U.S. 644', '2023 WL 12345', F.3d / F. Supp. 3d) against CourtListener's opinion database: pass a block of TEXT (the paragraph of your answer or draft that carries the cites, or a list of them) and each citation resolves to a real case with its name and link, or is flagged not-found / ambiguous. A citation that does not resolve must not appear in the answer as authority. It confirms existence, not what the case holds — read the source for that.",
   input_schema: {
     type: "object",
     properties: { text: { type: "string", description: "Text containing one or more legal citations to resolve." } },
@@ -191,22 +194,26 @@ const CREATE_DOCUMENT_TOOL: ToolDef = {
   },
 };
 
-/** The full flat tool list the single agent sees. */
-export const RESEARCH_TOOLS: ToolDef[] = [
-  ...AGENT_TOOLS.legal_research, // the single web_search tool (16 category domain-sets + general_web)
-  FETCH_PAGE_TOOL,
-  VERIFY_CITATIONS_TOOL,
-  FDA_SEARCH_TOOL,
-  FED_REGISTER_TOOL,
-  ECFR_TOOL,
-  PUBMED_TOOL,
-  SEC_SEARCH_TOOL,
-  CLINICALTRIALS_TOOL,
-  RUN_PYTHON_TOOL,
-  READ_DOCUMENT_TOOL,
-  CREATE_DOCUMENT_TOOL,
-  ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
-];
+/** The full flat tool list the single agent sees, each description carrying a
+ *  contrastive "use for / not for / examples" block (src/lib/agents/tool-contrast.ts). */
+export const RESEARCH_TOOLS: ToolDef[] = withToolContrast(
+  [
+    ...AGENT_TOOLS.legal_research, // the single web_search tool (16 category domain-sets + general_web)
+    FETCH_PAGE_TOOL,
+    VERIFY_CITATIONS_TOOL,
+    FDA_SEARCH_TOOL,
+    FED_REGISTER_TOOL,
+    ECFR_TOOL,
+    PUBMED_TOOL,
+    SEC_SEARCH_TOOL,
+    CLINICALTRIALS_TOOL,
+    RUN_PYTHON_TOOL,
+    READ_DOCUMENT_TOOL,
+    CREATE_DOCUMENT_TOOL,
+    ...AGENT_TOOLS.docket_research, // db_find_case, db_docket_sheet, db_read_filing, ...
+  ],
+  RESEARCH_TOOL_CONTRAST,
+);
 
 // --- New tool handlers -----------------------------------------------------
 
@@ -214,7 +221,9 @@ async function fetchPageTool(input: Record<string, unknown>, book: SourceBook): 
   const url = str(input["url"]);
   if (!/^https?:\/\//i.test(url)) return { text: "Provide an absolute http(s) url.", hits: 0, refs: [] };
   try {
-    const p = await memoTTL(toolCacheKey("fetch_page", { url }), TOOL_CACHE_TTL_MS, () => fetchPage(url, { maxChars: 6000 }));
+    // readPage climbs direct → Firecrawl → Tavily on a deterministic block
+    // (403/429, bot challenge, consent or JS shell); PDFs come back as text.
+    const p = await memoTTL(toolCacheKey("fetch_page", { url }), TOOL_CACHE_TTL_MS, () => readPage(url, { maxChars: 6000 }));
     if (p.note && !p.text) return { text: `${url}: ${p.note}`, hits: 0, refs: [] };
     if (!p.text.trim()) return { text: `No readable text extracted from ${url} (status ${p.status}).`, hits: 0, refs: [] };
     const src = book.add(
@@ -230,8 +239,13 @@ async function fetchPageTool(input: Record<string, unknown>, book: SourceBook): 
       { fullText: p.text },
     );
     const links = p.links.slice(0, 12).map((l) => `- ${l.text || l.href} — ${l.href}`).join("\n");
+    // Provenance from the public-law source registry (no fetch): tells the
+    // writer whether this is an official source and whether the registry saw
+    // it live, so citations can say so honestly.
+    const provenance = sourceNote(p.finalUrl || url);
+    const note = [provenance, p.note].filter(Boolean).join("; ");
     return {
-      text: `[${src.ref}] ${p.title || p.finalUrl}\n${trunc(p.text, 3500)}${links ? `\n\nLINKS:\n${links}` : ""}`,
+      text: `[${src.ref}] ${p.title || p.finalUrl}${note ? `\n(${note})` : ""}\n${trunc(p.text, 3500)}${links ? `\n\nLINKS:\n${links}` : ""}`,
       hits: 1,
       refs: [src.ref],
     };

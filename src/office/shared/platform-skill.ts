@@ -18,6 +18,8 @@ import type {
   ToolExecution,
 } from "@genoffice/agent-core";
 
+import { PLATFORM_TOOL_CONTRAST, withToolContrast } from "@/lib/agents/tool-contrast";
+
 import { askClarification, type ClarifyQuestion } from "./clarify-card";
 import {
   dataUrlOf,
@@ -487,7 +489,11 @@ const SYSTEM_PROMPT = `## Platform tools
 
 export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
   const exclude = new Set(options.exclude ?? []);
-  const tools = toolDefs(options.app, !!options.templates).filter((t) => !exclude.has(t.name));
+  // Contrastive "use for / not for" on every platform tool (src/lib/agents/tool-contrast.ts).
+  const tools = withToolContrast(
+    toolDefs(options.app, !!options.templates).filter((t) => !exclude.has(t.name)),
+    PLATFORM_TOOL_CONTRAST,
+  );
   let taskScope = crypto.randomUUID() as string;
   const app = options.app;
   const kind = KIND[app];
@@ -530,10 +536,28 @@ export function createPlatformSkill(options: PlatformSkillOptions): AgentSkill {
         const lines = [r.text.trim() || "(no output)"];
         if (images.length)
           lines.push(`Figures produced: ${images.map(describeImage).join("; ")}.`, PLACEMENT[app]);
-        if (r.files.length)
-          lines.push(
-            `Other files written (not embeddable here): ${r.files.map((f) => `${f.name} (${f.size} bytes)`).join(", ")}.`,
+        if (r.files.length) {
+          // Files the sandbox wrote stay in the browser session under a handle
+          // so Sheets can land them in the grid without the model retyping a
+          // single value (import_file). Oversized files come back name-only.
+          const { putPlatformFile, describeFile, isImportableText } = await import(
+            "@/office/shared/file-store"
           );
+          const stored: string[] = [];
+          const nameOnly: string[] = [];
+          for (const f of r.files) {
+            if (f.base64) stored.push(describeFile(putPlatformFile({ name: f.name, base64: f.base64, size: f.size })));
+            else nameOnly.push(`${f.name} (${f.size.toLocaleString("en-US")} bytes, too large to retrieve — write a smaller file)`);
+          }
+          if (stored.length) {
+            lines.push(`Files written: ${stored.join("; ")}.`);
+            if (app === "sheets" && r.files.some((f) => f.base64 && isImportableText(f.name)))
+              lines.push(
+                "To place a CSV/TSV in the workbook, use propose_operations with {op:'import_file', sheetId, target:'<top-left cell>', file:'<platform-file handle>'} — the values are written exactly as the file holds them; do not retype them.",
+              );
+          }
+          if (nameOnly.length) lines.push(`Files not retrieved: ${nameOnly.join("; ")}.`);
+        }
         return {
           output: lines.join("\n"),
           isError: r.isError,

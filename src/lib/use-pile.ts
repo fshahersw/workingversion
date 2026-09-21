@@ -37,6 +37,7 @@ import {
   selectedWorkspaceDocIds,
   withoutSavedWorkspace,
 } from "@/lib/pile/kb-binding";
+import { addPendingWorkspace, removePendingWorkspace } from "@/lib/pile/pending-workspaces";
 import {
   clearLocalPile,
   loadLocalPile,
@@ -553,7 +554,7 @@ export function usePile() {
   }, []);
 
   const start = useCallback(
-    async (incoming: File[], instructions?: string) => {
+    async (incoming: File[], instructions?: string, opts?: { skipOcr?: boolean }) => {
       const files = incoming.filter((f) => fileKind(f) !== null).slice(0, MAX_FILES);
       if (!files.length) {
         setState({
@@ -675,27 +676,31 @@ export function usePile() {
       persistPile(ownerRef.current, built.session, pagesRef.current);
       step({ id: "structure", label: "Structure rail", status: "running" });
 
-      try {
-        const next = await recoverScannedPages({
-          extracted: ok,
-          pages: pagesRef.current,
-          session: built.session,
-          pile: pile(),
-          signal: controller.signal,
-          step,
-        });
-        contentRevisionRef.current += 1;
-        sessionRef.current = next;
-        persistPile(ownerRef.current, next, pagesRef.current);
-        setState((s) => ({ ...s, session: next }));
-      } catch (e) {
-        if (controller.signal.aborted) return;
-        step({
-          id: "ocr",
-          label: "Reading scanned pages",
-          status: "error",
-          detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
-        });
+      // On-device OCR of scanned pages, skipped when the caller routes OCR to
+      // the server (BDA) so the capped inline OCR never runs redundantly.
+      if (!opts?.skipOcr) {
+        try {
+          const next = await recoverScannedPages({
+            extracted: ok,
+            pages: pagesRef.current,
+            session: built.session,
+            pile: pile(),
+            signal: controller.signal,
+            step,
+          });
+          contentRevisionRef.current += 1;
+          sessionRef.current = next;
+          persistPile(ownerRef.current, next, pagesRef.current);
+          setState((s) => ({ ...s, session: next }));
+        } catch (e) {
+          if (controller.signal.aborted) return;
+          step({
+            id: "ocr",
+            label: "Reading scanned pages",
+            status: "error",
+            detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
+          });
+        }
       }
 
       void refreshStructure(pile(), sessionRef.current, step, (structure) => {
@@ -709,10 +714,10 @@ export function usePile() {
   );
 
   const addFiles = useCallback(
-    async (incoming: File[]) => {
+    async (incoming: File[], opts?: { skipOcr?: boolean }) => {
       const sess = sessionRef.current;
       if (!sess || !pagesRef.current.length) {
-        await start(incoming);
+        await start(incoming, undefined, opts);
         return;
       }
 
@@ -849,27 +854,31 @@ export function usePile() {
         detail: `${appended.pages.length} pages · kept on this device`,
       });
 
-      try {
-        const afterOcr = await recoverScannedPages({
-          extracted: ok,
-          pages: pagesRef.current,
-          session: nextSession,
-          pile: pile(),
-          signal: controller.signal,
-          step,
-        });
-        contentRevisionRef.current += 1;
-        sessionRef.current = afterOcr;
-        persistPile(ownerRef.current, afterOcr, pagesRef.current);
-        setState((s) => ({ ...s, session: afterOcr }));
-      } catch (e) {
-        if (controller.signal.aborted) return;
-        step({
-          id: "ocr",
-          label: "Reading scanned pages",
-          status: "error",
-          detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
-        });
+      // On-device OCR of scanned pages, skipped when the caller routes OCR to
+      // the server (BDA) so the capped inline OCR never runs redundantly.
+      if (!opts?.skipOcr) {
+        try {
+          const afterOcr = await recoverScannedPages({
+            extracted: ok,
+            pages: pagesRef.current,
+            session: nextSession,
+            pile: pile(),
+            signal: controller.signal,
+            step,
+          });
+          contentRevisionRef.current += 1;
+          sessionRef.current = afterOcr;
+          persistPile(ownerRef.current, afterOcr, pagesRef.current);
+          setState((s) => ({ ...s, session: afterOcr }));
+        } catch (e) {
+          if (controller.signal.aborted) return;
+          step({
+            id: "ocr",
+            label: "Reading scanned pages",
+            status: "error",
+            detail: e instanceof Error ? e.message : "Scanned pages could not be converted",
+          });
+        }
       }
 
       step({ id: "structure", label: "Structure rail", status: "running" });
@@ -1021,7 +1030,27 @@ export function usePile() {
       step({ id: "ask", label: "Retrieving pages and drafting", status: "running" });
       try {
         const sess = sessionRef.current;
-        if (opts.scope === "full") {
+        // "auto" (the default) resolves here: a saved/indexed set answers from the
+        // KB (adaptive RAG); an unsaved pile keeps the in-browser full-text scan,
+        // byte-for-byte unchanged. Explicit "full"/"relevant" still override.
+        // Full-text scan is retired: uploads auto-save + index, so Ask is
+        // RAG-only. The in-browser scan stays behind this flag as a dormant
+        // emergency fallback (off), to be deleted once auto-index is proven.
+        const FULL_TEXT_SCAN_ENABLED = false;
+        const resolvedScope: DiscoveryScope =
+          opts.scope === "full" || opts.scope === "relevant"
+            ? opts.scope
+            : completeSavedWorkspace(sess)
+              ? "relevant"
+              : "full";
+        if (resolvedScope === "full") {
+          if (!FULL_TEXT_SCAN_ENABLED) {
+            // No indexed documents yet -> the set is still processing. Never
+            // fall back to scanning every page.
+            throw new Error(
+              "These documents are still indexing — Ask will be ready in a moment. Uploads now index automatically for retrieval.",
+            );
+          }
           lastScan.current = {
             query: q,
             opts: { ...opts, fileIds: opts.fileIds ? [...opts.fileIds] : undefined },
@@ -1657,8 +1686,15 @@ export function usePile() {
               }
             });
           }
-          bytesKey = await upload;
-          if (controller.signal.aborted) return;
+          // A document with extractable text takes the text/sync lane, which
+          // never reads the original bytes -- so don't block the save on the
+          // upload. Let it finish in the background (recorded for reload / a
+          // true-scan fallback). Only a text-less scan must wait, since BDA
+          // converts from the bytes.
+          if (fp.length === 0) {
+            bytesKey = await upload;
+            if (controller.signal.aborted) return;
+          }
         }
         const totalChars = fp.reduce((total, page) => total + page.text.length, 0);
         const hasLowQualityExtraction =
@@ -1683,7 +1719,11 @@ export function usePile() {
           ...(sha256 ? { sha256 } : {}),
           ...(blob ? { byteSize: blob.size } : {}),
           ...(bytesKey ? { bytesKey } : {}),
-          pages: plan === "async" ? [] : fp,
+          // Always send the extracted page text when there is any: the server's
+          // text-background lane indexes it directly (no BDA round-trip) and
+          // only falls back to BDA when a document has no extractable text.
+          // Bytes are still uploaded above so a true scan can OCR.
+          pages: fp,
         });
       }
       if (controller.signal.aborted) return;
@@ -1693,15 +1733,22 @@ export function usePile() {
         );
       }
       attempt.submitted = true;
-      const res = await saveWorkspaceFn({
-        data: {
-          requestId: attempt.requestId,
-          name: opts.name,
-          surface: "workingset",
-          folderId: opts.folderId,
-          files,
-        },
-      });
+      // Idempotent auto-retry: the save keys on a stable requestId, so retrying a
+      // transient failure (network / throttle) is a no-op if the first attempt
+      // actually landed, and recovers the set instead of leaving it unindexed.
+      const res = await withRetry(
+        () =>
+          saveWorkspaceFn({
+            data: {
+              requestId: attempt.requestId,
+              name: opts.name,
+              surface: "workingset",
+              folderId: opts.folderId,
+              files,
+            },
+          }),
+        { tries: 3, baseMs: 800, signal: controller.signal },
+      );
       if (controller.signal.aborted) return;
       let status: {
         status: "saving" | "ready" | "error";
@@ -1728,6 +1775,12 @@ export function usePile() {
         documents: res.documents,
         ...(res.errorSummary ? { errorSummary: res.errorSummary } : {}),
       };
+      // Track it as pending across navigation: if the user leaves before it is
+      // ready, the app-level watcher notifies them. Cleared below once this
+      // in-view poll reaches a terminal state (so staying never double-notifies).
+      if (status.status === "saving") {
+        addPendingWorkspace({ itemId: res.itemId, name: opts.name, surface: "workingset" });
+      }
       for (let poll = 0; status.status === "saving" && poll < 180; poll++) {
         const activeStage =
           status.stage === "embedding"
@@ -1739,10 +1792,12 @@ export function usePile() {
           ...current,
           kbSave: {
             status: activeStage,
-            message: `${status.pendingCount} document${status.pendingCount === 1 ? "" : "s"} pending`,
+            message: "Preparing in the background — you can leave; we'll notify you when it's ready.",
           },
         }));
-        await abortableDelay(5_000, controller.signal);
+        // Poll fast at first so a quick index (small docs, warm worker) flips to
+        // ready in ~1s instead of a fixed 5s floor; back off for long jobs.
+        await abortableDelay(poll < 4 ? 1_000 : 5_000, controller.signal);
         const polled = await withRetry(
           () => getWorkspaceStatusFn({ data: { itemId: res.itemId } }),
           { tries: 3, baseMs: 500, signal: controller.signal },
@@ -1752,41 +1807,26 @@ export function usePile() {
         status = polled;
       }
       if (controller.signal.aborted) return;
-      if (status.status === "saving") {
-        setState((current) => ({
-          ...current,
-          kbSave: {
-            status:
-              status.stage === "embedding"
-                ? "embedding"
-                : status.stage === "converting"
-                  ? "converting"
-                  : "queued",
-            message: "Workspace ingest is continuing in the background.",
-          },
-        }));
-        return;
-      }
-      if (status.status === "error") {
-        pendingWorkspaceSaveRef.current = null;
-        setState((current) => ({
-          ...current,
-          kbSave: {
-            status: "error",
-            message: status.errorSummary ?? "Workspace ingest did not complete.",
-          },
-        }));
-        return;
-      }
+      // Reached a terminal state in-view -> the user is still here, so drop the
+      // pending marker; the app-level watcher only fires for sets left mid-save.
+      if (status.status !== "saving") removePendingWorkspace(res.itemId);
+      // Bind the READY documents up front (partial binding): even while the rest
+      // of the set is still ingesting, or after a per-document failure, the ready
+      // docs answer via RAG. Only docs the server reports ready (with a docId)
+      // are bound; unmapped files stay on the full-text scan and the coverage is
+      // surfaced to the user (savedCoverage). This runs regardless of the overall
+      // workspace status so a slow/failed sibling never blocks the ready subset.
       const docIdByFileId = Object.fromEntries(
         status.documents.flatMap((doc) =>
           doc.status === "ready" && doc.docId ? [[doc.clientFileId, doc.docId]] : [],
         ),
       );
+      const readyCount = Object.keys(docIdByFileId).length;
+      const total = session.files.length;
       const bindingComplete = session.files.every((file) => Boolean(docIdByFileId[file.id]));
       const snapshotStillCurrent =
         contentRevisionRef.current === snapshotRevision && sessionRef.current?.id === session.id;
-      if (bindingComplete && snapshotStillCurrent) {
+      if (readyCount > 0 && snapshotStillCurrent) {
         const savedSession: PileSession = {
           ...session,
           savedWorkspace: {
@@ -1799,6 +1839,41 @@ export function usePile() {
         sessionRef.current = savedSession;
         persistPile(ownerRef.current, savedSession, pagesRef.current);
         setState((state) => ({ ...state, session: savedSession }));
+      }
+      if (status.status === "saving") {
+        setState((current) => ({
+          ...current,
+          kbSave: {
+            status:
+              status.stage === "embedding"
+                ? "embedding"
+                : status.stage === "converting"
+                  ? "converting"
+                  : "queued",
+            message:
+              readyCount > 0
+                ? `Indexing — ${readyCount} of ${total} ready; Ask uses the ready documents so far.`
+                : "Workspace ingest is continuing in the background.",
+          },
+        }));
+        return;
+      }
+      if (status.status === "error") {
+        pendingWorkspaceSaveRef.current = null;
+        setState((current) => ({
+          ...current,
+          kbSave:
+            readyCount > 0
+              ? {
+                  status: "saved",
+                  message: `Indexed ${readyCount} of ${total} — some documents failed and are excluded from Ask; re-save to retry them.`,
+                }
+              : {
+                  status: "error",
+                  message: status.errorSummary ?? "Workspace ingest did not complete.",
+                },
+        }));
+        return;
       }
       pendingWorkspaceSaveRef.current = null;
       const caveats = [

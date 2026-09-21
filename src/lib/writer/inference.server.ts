@@ -37,6 +37,9 @@ import {
   retryAfterMsFrom,
   signedBedrockFetch,
 } from "@/lib/agents/bedrock-sign.server";
+import { agentLog } from "@/lib/agents/log.server";
+import { decideOfficeClass, officeRouteQuestions, officeRouteState } from "@/lib/agents/typesafe-questions";
+import { systemOne, typesafeConfigured } from "@/lib/agents/typesafe.server";
 
 export type WriterProfile = "standard" | "thorough";
 export type WriterMode = "write" | "ask" | "review" | "research";
@@ -51,6 +54,15 @@ export const WRITER_MODEL =
   env("WRITER_BEDROCK_MODEL") ||
   env("BEDROCK_RESEARCH_MODEL") ||
   "us.anthropic.claude-sonnet-5";
+
+/**
+ * Premium tier for the Thorough profile (e.g. Opus 4.8). Falls back to the main
+ * model when unset, so standard runs stay on the everyday workhorse (Sonnet 5)
+ * and only the Thorough profile pays for the heavier model. Reasoning model:
+ * no temperature is ever sent (see streamWriterTurn) and adaptive thinking is
+ * applied via thinkingEffort.
+ */
+export const OFFICE_THOROUGH_MODEL = env("OFFICE_THOROUGH_MODEL") || WRITER_MODEL;
 
 /** Fast tier: inspect, format and short-edit rounds. Vision-capable. */
 export const OFFICE_FAST_MODEL =
@@ -115,13 +127,13 @@ function envInt(name: string, fallback: number): number {
  * never cut off. A model that rejects the ceiling gets a smaller retry.
  */
 const MAX_TOKENS: Record<WriterProfile, number> = {
-  standard: envInt("OFFICE_MAX_TOKENS_STANDARD", 32_768),
+  standard: envInt("OFFICE_MAX_TOKENS_STANDARD", 40_960),
   thorough: envInt("OFFICE_MAX_TOKENS_THOROUGH", 65_536),
 };
 
 /** Known hard output ceilings; unknown models start from the profile budget and back off on 400. */
 function modelOutputCap(model: string): number {
-  if (/claude-haiku-4-5|claude-sonnet-4|claude-sonnet-5|claude-opus-5|claude-fable/i.test(model))
+  if (/claude-haiku-4-5|claude-sonnet-4|claude-sonnet-5|claude-opus/i.test(model))
     return 65_536;
   if (/claude-3/i.test(model)) return 8_192;
   if (/nemotron/i.test(model)) return envInt("OFFICE_NEMOTRON_MAX_TOKENS", 32_768);
@@ -212,6 +224,9 @@ const WRITER_READ = [
   "read_attachment",
   "view_page",
   "list_templates",
+  // Deterministic Bluebook form check (browser-side, reads document text only).
+  "check_bluebook_citations",
+  "audit_document",
 ];
 const WRITER_WRITE = [
   ...WRITER_READ,
@@ -225,8 +240,12 @@ const WRITER_WRITE = [
   "insert_image",
   "insert_table",
   "edit_table",
+  "set_table_properties",
   "insert_page_break",
+  "set_page_setup",
   "set_header_footer",
+  "insert_footnote",
+  "apply_court_style",
   "reply_comment",
   "resolve_comment",
   "create_document",
@@ -606,24 +625,24 @@ function heuristicClass(instruction: string): TaskClass | null {
 }
 
 /**
- * Class the run's instruction. Router failures and timeouts return null, and
- * the caller falls back to the main tier (never a weaker one).
+ * Which model classes the run. OFFICE_ROUTER:
+ *   bedrock  (default) the Haiku one-word router below, unchanged.
+ *   shadow   Haiku decides; Jev (TypeSafe) is asked in parallel and the two
+ *            verdicts, latencies and confidence are logged (office_router_shadow)
+ *            so thresholds in typesafe-questions.ts can be tuned on real traffic
+ *            before anything changes for users.
+ *   typesafe Jev decides inside TYPESAFE_TIMEOUT_MS; no opinion or failure
+ *            falls back to Haiku, then to the main tier. Never a weaker tier.
+ * Either non-default mode silently behaves as `bedrock` without TYPESAFE_API_KEY.
  */
-export async function classifyTask(
-  app: OfficeApp,
-  instruction: string,
-  signal?: AbortSignal,
-): Promise<TaskClass | null> {
-  const text = instruction.trim();
-  if (!text) return null;
-  const key = hashKey(app, text);
-  const cached = routeCache.get(key);
-  if (cached) return cached;
-  const quick = heuristicClass(text);
-  if (quick) {
-    cacheRoute(key, quick);
-    return quick;
-  }
+export type OfficeRouterMode = "bedrock" | "shadow" | "typesafe";
+export function officeRouterMode(): OfficeRouterMode {
+  const v = env("OFFICE_ROUTER").toLowerCase();
+  return v === "typesafe" || v === "shadow" ? v : "bedrock";
+}
+
+/** The Haiku one-word router (the pre-TypeSafe path). Null on any failure. */
+async function classifyWithBedrock(app: OfficeApp, text: string, signal?: AbortSignal): Promise<TaskClass | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 4_000);
   const onAbort = () => controller.abort();
@@ -640,7 +659,7 @@ export async function classifyTask(
               content: [{ text: `Editor: ${app}\nRequest:\n${text.slice(0, 3_000)}` }],
             },
           ],
-          inferenceConfig: { maxTokens: 8, temperature: 0 },
+          inferenceConfig: { maxTokens: 8 },
         }),
         signal: controller.signal,
       },
@@ -654,7 +673,6 @@ export async function classifyTask(
       .toLowerCase()
       .replace(/[^a-z_]/g, "");
     if (!TASK_CLASSES.has(word as TaskClass)) return null;
-    cacheRoute(key, word as TaskClass);
     return word as TaskClass;
   } catch {
     return null;
@@ -662,6 +680,107 @@ export async function classifyTask(
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
+}
+
+/** Jev (TypeSafe) typed router: one request, three questions, hard budget. */
+async function classifyWithTypeSafe(
+  app: OfficeApp,
+  text: string,
+  signal?: AbortSignal,
+): Promise<{ taskClass: TaskClass | null; confidence: number | null; reason: string; ms: number }> {
+  const started = Date.now();
+  const res = await systemOne({
+    purpose: "office_route",
+    state: officeRouteState(app, text),
+    questions: officeRouteQuestions(),
+    ...(signal ? { signal } : {}),
+  });
+  const decision = decideOfficeClass(res);
+  return {
+    taskClass: decision?.taskClass ?? null,
+    confidence: decision?.confidence ?? null,
+    reason: decision?.reason ?? (res ? "no opinion" : "unavailable"),
+    ms: Date.now() - started,
+  };
+}
+
+/**
+ * Class the run's instruction. Router failures and timeouts return null, and
+ * the caller falls back to the main tier (never a weaker one).
+ */
+export type ClassifyTaskOptions = {
+  /**
+   * The turn carries image content. Jev is text-only, so an image-bearing
+   * turn never reaches it (in any mode, shadow included: a verdict it made
+   * without seeing the image would be a false comparison); the vision-capable
+   * Bedrock router classes the turn instead. Computed once by routeTurn with
+   * conversationHasImages, the same detector that guards the fast tier.
+   */
+  hasImages?: boolean;
+  /** test seam for the Bedrock router */
+  bedrockRouter?: (app: OfficeApp, text: string, signal?: AbortSignal) => Promise<TaskClass | null>;
+};
+
+/** Which router may class this turn: Jev only for text-only turns when a non-default mode is on and configured. */
+export function jevRouterEligible(mode: OfficeRouterMode, configured: boolean, hasImages: boolean): boolean {
+  return mode !== "bedrock" && configured && !hasImages;
+}
+
+export async function classifyTask(
+  app: OfficeApp,
+  instruction: string,
+  signal?: AbortSignal,
+  opts?: ClassifyTaskOptions,
+): Promise<TaskClass | null> {
+  const text = instruction.trim();
+  if (!text) return null;
+  const key = hashKey(app, text);
+  const cached = routeCache.get(key);
+  if (cached) return cached;
+  const quick = heuristicClass(text);
+  if (quick) {
+    cacheRoute(key, quick);
+    return quick;
+  }
+  const mode = officeRouterMode();
+  const bedrockRouter = opts?.bedrockRouter ?? classifyWithBedrock;
+  const remember = (cls: TaskClass | null): TaskClass | null => {
+    if (cls) cacheRoute(key, cls);
+    return cls;
+  };
+  const hasImages = opts?.hasImages === true;
+  if (!jevRouterEligible(mode, typesafeConfigured(), hasImages)) {
+    if (hasImages && mode !== "bedrock" && typesafeConfigured()) {
+      agentLog("office_router_skip_images", { app, mode });
+    }
+    return remember(await bedrockRouter(app, text, signal));
+  }
+  if (mode === "shadow") {
+    const t0 = Date.now();
+    const [jev, haiku] = await Promise.all([
+      classifyWithTypeSafe(app, text, signal),
+      bedrockRouter(app, text, signal).then((cls) => ({ cls, ms: Date.now() - t0 })),
+    ]);
+    agentLog("office_router_shadow", {
+      app,
+      jev: jev.taskClass ?? "none",
+      haiku: haiku.cls ?? "none",
+      agree: jev.taskClass !== null && jev.taskClass === haiku.cls,
+      jev_ms: jev.ms,
+      haiku_ms: haiku.ms,
+      confidence: jev.confidence === null ? -1 : Math.round(jev.confidence * 100) / 100,
+      reason: jev.reason,
+    });
+    return remember(haiku.cls);
+  }
+  const jev = await classifyWithTypeSafe(app, text, signal);
+  if (jev.taskClass) {
+    agentLog("office_router", { app, via: "typesafe", cls: jev.taskClass, ms: jev.ms, reason: jev.reason });
+    return remember(jev.taskClass);
+  }
+  const haiku = await bedrockRouter(app, text, signal);
+  agentLog("office_router", { app, via: "bedrock_fallback", cls: haiku ?? "none", jev_reason: jev.reason, jev_ms: jev.ms });
+  return remember(haiku);
 }
 
 export type RouteDecision = { model: string; tier: ModelTier; taskClass: TaskClass | null };
@@ -672,15 +791,26 @@ export async function routeTurn(req: {
   profile: WriterProfile;
   messages: readonly AgentMessage[];
   signal?: AbortSignal;
+  /** test seam, passed through to classifyTask */
+  bedrockRouter?: ClassifyTaskOptions["bedrockRouter"];
 }): Promise<RouteDecision> {
-  if (!TIERING_ON || req.profile === "thorough") {
+  if (req.profile === "thorough") {
+    return { model: OFFICE_THOROUGH_MODEL, tier: "main", taskClass: null };
+  }
+  if (!TIERING_ON) {
     return { model: WRITER_MODEL, tier: "main", taskClass: null };
   }
-  const taskClass = await classifyTask(req.app, currentInstruction(req.messages), req.signal);
+  // One image detection for the whole route: it keeps an image-bearing turn
+  // away from the text-only Jev router and, below, away from a fast tier that
+  // cannot see images.
+  const hasImages = conversationHasImages(req.messages);
+  const taskClass = await classifyTask(req.app, currentInstruction(req.messages), req.signal, {
+    hasImages,
+    ...(req.bedrockRouter ? { bedrockRouter: req.bedrockRouter } : {}),
+  });
   if (!taskClass || taskClass === "draft" || taskClass === "analyze") {
     return { model: WRITER_MODEL, tier: "main", taskClass };
   }
-  const hasImages = conversationHasImages(req.messages);
   if (OFFICE_INSPECT_MODEL && INSPECT_CLASSES.has(taskClass)) {
     if (!hasImages || supportsVision(OFFICE_INSPECT_MODEL)) {
       return { model: OFFICE_INSPECT_MODEL, tier: "inspect", taskClass };

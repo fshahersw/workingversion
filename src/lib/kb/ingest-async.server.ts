@@ -479,6 +479,15 @@ export function createAsyncIngestOrchestrator(dependencies: AsyncIngestDependenc
           }),
         );
       } catch (error) {
+        // Bounded diagnosability: the AWS error class (e.g. AccessDeniedException,
+        // ValidationException, ServiceQuotaExceededException) is the one fact that
+        // separates a misconfigured IAM/ARN from a transient transport failure, and
+        // it is otherwise lost behind the terminal summary. Name only -- no message,
+        // object key, principal, or document text enters the log.
+        const startErrorName = (error as { name?: unknown } | undefined)?.name;
+        console.error(
+          `[kb] bda start failed name=${typeof startErrorName === "string" ? startErrorName : "unknown"} terminal=${terminalBdaStartFailure(error)}`,
+        );
         if (terminalBdaStartFailure(error)) {
           await markTerminal(job, "configuration");
           throw new Error(terminalErrorSummary("configuration"));

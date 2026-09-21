@@ -6,6 +6,32 @@
  * (and that the clarification detectors will skip when those fields settle
  * the fork). Invoked from the landing row or as `/` commands in the composer.
  */
+import type { MatterScope } from "@/lib/chat-types";
+
+/** Toolkit categories; array order defines the tab order in the toolkit. */
+export const SKILL_CATEGORIES = [
+  "Case strategy",
+  "Evidence & experts",
+  "Matter intelligence",
+  "Practice tools",
+] as const;
+export type SkillCategory = (typeof SKILL_CATEGORIES)[number];
+
+/** Which toolkit category each skill belongs to (keyed by skill id). */
+export const SKILL_CATEGORY: Record<string, SkillCategory> = {
+  bellwether: "Case strategy",
+  rule702: "Case strategy",
+  limitations: "Case strategy",
+  causation: "Evidence & experts",
+  recall: "Evidence & experts",
+  docket: "Matter intelligence",
+  settlement: "Matter intelligence",
+  intake: "Practice tools",
+};
+
+/** A matter document chosen as a focus source in the composer's Sources popover. */
+export type SelectedDoc = { id: string; title: string };
+
 export type SkillField = {
   id: string;
   label: string;
@@ -206,8 +232,30 @@ export function filterSkills(query: string): ResearchSkill[] {
     (s) =>
       s.slash.startsWith(q) ||
       s.id.startsWith(q) ||
-      s.label.toLowerCase().includes(q),
+      s.label.toLowerCase().includes(q) ||
+      s.hint.toLowerCase().includes(q),
   );
+}
+
+/**
+ * Append a focus-source scope note to a request, mirroring the guided-setup
+ * fold. Matter scoping is real (matter_id reaches the orchestrator), but there
+ * is no backend document-set field, so chosen documents are surfaced to the
+ * model as an attention (or strict) hint in the request text.
+ */
+export function appendSourceScope(
+  text: string,
+  matter: MatterScope | null,
+  selectedDocs: SelectedDoc[],
+  focusOnly: boolean,
+): string {
+  if (!selectedDocs.length) return text.trim();
+  const titles = selectedDocs.map((d) => `“${d.title}”`).join(", ");
+  const where = matter?.label ? ` from the ${matter.label} file` : "";
+  const note = focusOnly
+    ? ` Base the analysis strictly on these documents${where}: ${titles}.`
+    : ` Give particular attention to these documents${where}: ${titles}.`;
+  return `${text}${note}`.replace(/\s+/g, " ").trim();
 }
 
 export function composeSkill(skill: ResearchSkill, values: Record<string, string>): string | null {
@@ -215,6 +263,15 @@ export function composeSkill(skill: ResearchSkill, values: Record<string, string
     if (field.required && !v(values, field.id)) return null;
   }
   return skill.compose(values).replace(/\s+/g, " ").trim();
+}
+
+/** Seed a skill's values so every `select` field starts on its first option. */
+export function initialSkillValues(skill: ResearchSkill): Record<string, string> {
+  const init: Record<string, string> = {};
+  for (const field of skill.fields) {
+    if (field.kind === "select" && field.options?.[0]) init[field.id] = field.options[0].id;
+  }
+  return init;
 }
 
 /** True when the composer text is a slash command still being typed. */

@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { DiscoveryCoverage, DiscoveryScopeControl } from "@/components/docs/DiscoveryCoverage";
+import { DiscoveryCoverage } from "@/components/docs/DiscoveryCoverage";
 import type { DiscoveryScope } from "@/lib/pile/discovery-scan";
 import {
   AlertCircle,
@@ -10,10 +10,11 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DocumentReader } from "./DocumentReader";
-import { DropPanel } from "./DropPanel";
+import { DropPanel, type DropPanelHandle } from "./DropPanel";
+import { FileDropZone } from "./FileDropZone";
 import { IngestProgress } from "./IngestProgress";
 import { ReasoningRail } from "./ReasoningRail";
 import { docTypeOf, fileFormat, RefineRail } from "./RefineRail";
@@ -31,6 +32,7 @@ import { takeWorkspaceHandoff } from "@/lib/kb/workspace-handoff";
 import { flattenFolders, ROOT_FOLDER, type LibraryFolder } from "@/lib/library/folder-tree";
 import { listFoldersFn } from "@/lib/library/folders.functions";
 import { suggestQuestions } from "@/lib/pile/suggest-questions";
+import { savedCoverage } from "@/lib/pile/kb-binding";
 import { pileJob, type PileJobId } from "@/lib/pile/jobs";
 import type { PileFile, PileFileHits } from "@/lib/pile/types";
 import { useSharedPile } from "@/lib/pile-context";
@@ -91,7 +93,9 @@ export function SummarizeView() {
   const [formats, setFormats] = useState<Set<string>>(new Set());
   const [restrictIds, setRestrictIds] = useState<Set<string>>(new Set());
   const [followUp, setFollowUp] = useState(false);
-  const [scope, setScope] = useState<DiscoveryScope>("full");
+  // Ask scope is resolved in the hook: a saved/indexed set answers from the KB
+  // (adaptive RAG); an unsaved pile keeps the full-text scan. "auto" selects.
+  const scope = "auto" as DiscoveryScope;
   const [refineOpen, setRefineOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [readerOpen, setReaderOpen] = useState(false);
@@ -105,6 +109,42 @@ export function SummarizeView() {
   const ingesting = state.phase === "reading" || state.phase === "indexing";
   const busy = ingesting || state.phase === "asking" || state.adding;
   const files = state.session?.files ?? [];
+
+  // Adding documents to an OPEN working set (RefineRail "Add files" and a
+  // whole-tab drop share this): extract structure locally, then upload + save
+  // so the new pages are indexed for Ask. See the RefineRail comment below.
+  const dropPanelRef = useRef<DropPanelHandle>(null);
+  const addToOpenSet = useCallback(
+    (incoming: File[]) => {
+      if (!incoming.length) return;
+      void (async () => {
+        await addFiles(incoming, { skipOcr: true });
+        const base = incoming[0]?.name?.replace(/\.[^.]+$/, "") ?? "Discovery documents";
+        const name = (incoming.length > 1 ? `${base} +${incoming.length - 1} more` : base).slice(
+          0,
+          120,
+        );
+        await saveWorkspace({ name });
+      })();
+    },
+    [addFiles, saveWorkspace],
+  );
+  // Whole-tab drop: before a set is open the files land in the intake queue
+  // (same validation and limits as "Select documents"); once open they are
+  // added to the set.
+  const onTabDrop = useCallback(
+    (dropped: File[]) => {
+      if (!started) dropPanelRef.current?.addFiles(dropped);
+      else addToOpenSet(dropped);
+    },
+    [started, addToOpenSet],
+  );
+  // A saved/indexed set answers from the KB (adaptive RAG); an unsaved pile runs
+  // the full-text scan. Coverage drives the mode label so it reflects what runs,
+  // including a partial set (some documents still indexing).
+  const coverage = savedCoverage(state.session ?? null);
+  const savedSet = coverage.ready > 0;
+  const partialSet = savedSet && coverage.ready < coverage.total;
 
   useEffect(() => {
     writeLayoutPreference(WORKING_SET_FILES_KEY, filesOpen);
@@ -258,7 +298,11 @@ export function SummarizeView() {
         setRestrictIds(new Set());
       }}
       onOpen={openPage}
-      onAddFiles={(incoming) => void addFiles(incoming)}
+      // Discovery uploads always go through the server ingest: extract
+      // structure locally (no capped on-device OCR), then upload + index
+      // (BDA OCRs true scans). saveWorkspace polls to ready and swaps the
+      // complete ingested text back in.
+      onAddFiles={addToOpenSet}
       onClose={() => {
         if (desktopLayout) setFilesOpen(false);
         else setRefineOpen(false);
@@ -299,7 +343,15 @@ export function SummarizeView() {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <FileDropZone
+      onFiles={onTabDrop}
+      disabled={ingesting || state.adding}
+      label={
+        started ? "Drop to add to this working set" : "Drop documents to add them to the intake"
+      }
+      hint="PDF, Word, Excel, PowerPoint, and text — folders are expanded"
+      className="flex h-full min-h-0 flex-col overflow-hidden"
+    >
       {started ? (
         <header className="flex shrink-0 items-center gap-2.5 px-0.5 pb-3">
           <FileStack className="h-3.5 w-3.5 shrink-0 text-brand-navy/45" strokeWidth={1.75} />
@@ -431,7 +483,24 @@ export function SummarizeView() {
               transition={{ duration: 0.32, ease: EASE }}
               className="w-full max-w-[880px]"
             >
-              <DropPanel onStart={(f, i) => void start(f, i)} busy={false} />
+              <DropPanel
+                ref={dropPanelRef}
+                onStart={(f, i) =>
+                  void (async () => {
+                    // Auto-save + index on upload: extract structure locally
+                    // (skipOcr -> no minutes-long on-device OCR; the server
+                    // indexes text and BDA-OCRs true scans), then save so Ask is
+                    // RAG-ready with no full-text scan.
+                    await start(f, i, { skipOcr: true });
+                    const base = f[0]?.name?.replace(/\.[^.]+$/, "") ?? "Working set";
+                    const name = (
+                      f.length > 1 ? `${base} +${f.length - 1} more` : base
+                    ).slice(0, 120);
+                    await saveWorkspace({ name });
+                  })()
+                }
+                busy={false}
+              />
               <p className="mt-3 text-center text-[12px] leading-relaxed text-muted-foreground">
                 Ask questions across a set of documents. Answers are cited to the page. The set is
                 kept on this device until you clear it.
@@ -540,13 +609,19 @@ export function SummarizeView() {
                   </div>
 
                   {mode === "ask" && (
-                    <div className="mt-2">
-                      <DiscoveryScopeControl
-                        scope={scope}
-                        onChange={setScope}
-                        disabled={busy}
-                        count={fileIds?.length ?? files.length}
-                      />
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                      <span className="font-medium text-slate-800">
+                        {savedSet ? "Indexed retrieval" : "Indexing…"}
+                      </span>
+                      <span>
+                        {savedSet
+                          ? partialSet
+                            ? ` · covers ${coverage.ready} of ${coverage.total} indexed documents; the rest are still indexing`
+                            : ` · relevant passages across ${coverage.total} document${coverage.total === 1 ? "" : "s"}`
+                          : ` · preparing ${fileIds?.length ?? files.length} document${
+                              (fileIds?.length ?? files.length) === 1 ? "" : "s"
+                            } for retrieval`}
+                      </span>
                     </div>
                   )}
                   <form
@@ -716,6 +791,6 @@ export function SummarizeView() {
           ) : null}
         </div>
       )}
-    </div>
+    </FileDropZone>
   );
 }

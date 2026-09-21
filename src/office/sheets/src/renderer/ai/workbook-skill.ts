@@ -1,4 +1,5 @@
 import type { AgentSkill } from '@genoffice/agent-core'
+import { SHEETS_TOOL_CONTRAST, withToolContrast } from '@/lib/agents/tool-contrast'
 import basePrompt from './prompts/base.md?raw'
 import { verifySheetsResponse } from './response-verify'
 import {
@@ -7,6 +8,9 @@ import {
   executeWorkbookTool,
   type SheetsSkillDeps,
 } from './tools'
+
+// Contrastive "use for / not for / examples" on every tool (src/lib/agents/tool-contrast.ts).
+const TOOLS = withToolContrast(WORKBOOK_TOOLS, SHEETS_TOOL_CONTRAST)
 
 /**
  * The workbook DSL as an AgentSkill: mirrors createDocsSkill's shape
@@ -22,7 +26,7 @@ export function createWorkbookSkill(deps: SheetsSkillDeps): AgentSkill {
   return {
     id: 'sheets',
     systemPrompt: basePrompt,
-    tools: WORKBOOK_TOOLS,
+    tools: TOOLS,
     buildContext: () => buildWorkbookContext(deps),
     executeTool: (call) => executeWorkbookTool(call, deps),
     verifyResponse: verifySheetsResponse,

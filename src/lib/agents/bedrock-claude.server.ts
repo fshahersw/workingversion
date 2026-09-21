@@ -399,3 +399,53 @@ export async function streamWriter(
     ? streamBedrockClaude({ ...req, model }, handlers)
     : streamBedrockConverse({ ...req, model }, handlers);
 }
+
+/** A throttle / transient Bedrock failure worth one more attempt. */
+function isRetryableBedrock(err: unknown): boolean {
+  if (err instanceof BedrockClaudeError) {
+    if (err.status === 429 || err.status === 503 || err.status === 500) return true;
+  }
+  const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
+  return /throttl|too many requests|rate exceeded|service ?unavailable|timed? ?out|\[429\]|\[503\]/.test(
+    msg,
+  );
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Stream a writer turn with bounded retry on throttling. Critically, it only
+ * retries when the failure happens BEFORE the first visible token — once any
+ * text has streamed to the client a retry would duplicate output, so that case
+ * rethrows. This absorbs the request-time 429 bursts seen when many users Ask
+ * at once, without ever double-writing a partial answer.
+ */
+export async function streamWithRetry(
+  req: BedrockClaudeRequest,
+  handlers: { onText?: (delta: string) => void } = {},
+  opts: { attempts?: number; baseDelayMs?: number } = {},
+): Promise<BedrockClaudeResult> {
+  const attempts = Math.max(1, opts.attempts ?? 3);
+  const base = opts.baseDelayMs ?? 500;
+  let emitted = false;
+  const wrapped = {
+    onText: (delta: string) => {
+      emitted = true;
+      handlers.onText?.(delta);
+    },
+  };
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await streamWriter(req, wrapped);
+    } catch (err) {
+      lastErr = err;
+      const canRetry = !emitted && attempt < attempts - 1 && isRetryableBedrock(err);
+      if (!canRetry) throw err;
+      // Exponential backoff with full jitter, so concurrent asks don't resync.
+      const ceiling = base * 2 ** attempt;
+      await sleep(Math.floor(Math.random() * ceiling) + base);
+    }
+  }
+  throw lastErr;
+}

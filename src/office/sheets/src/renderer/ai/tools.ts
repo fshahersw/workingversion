@@ -502,7 +502,10 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
       '{op:"set_cell",sheetId,address,value} | {op:"set_formula",sheetId,address,formula(starts with =)} | ' +
       '{op:"clear_cell",sheetId,address} | {op:"rename_sheet",sheetId,name}. ' +
       'Field definitions for the remaining operations live in the guides — load_guide before using them: ' +
-      'writing(set_range/fill_range/copy_range/convert_to_values/clear_range/find_replace) | formatting(format_range) | ' +
+      'writing(set_range/fill_range/copy_range/convert_to_values/clear_range/find_replace) | ' +
+      'query(query_range: filter/sort/select/distinct/groupBy+aggregates over a block, computed by the engine and written as values — THE op for "show me the rows where…", "top N by…", "totals by custodian", "unique values of…" on large data; import_file: land a CSV/TSV the Python sandbox wrote, by its platform-file handle) | ' +
+      'finishing(finish_table: LAST op after building or extending any table — fits every column to its real content, wraps prose columns, top-aligns; {sheetId, range incl. header, headerRows?}) | ' +
+      'formatting(format_range) | ' +
       'layout(sort_range/merge_cells/unmerge_cells/set_row_height/set_col_width/set_rows_hidden/set_cols_hidden/set_freeze/set_page_setup) | ' +
       'structure(insert_rows/delete_rows/insert_cols/delete_cols/add_sheet/delete_sheet/' +
       'duplicate_sheet/set_sheet_hidden/move_sheet/protect_sheet) | ' +
@@ -512,7 +515,7 @@ export const WORKBOOK_TOOLS: AgentToolDef[] = [
       'data(set_hyperlink/set_filter/clear_filter/set_filter_criteria/add_conditional_format/' +
       'clear_conditional_formats/set_data_validation/set_note/add_defined_name/delete_defined_name). ' +
       'Limits: structural operations (row/column insert-delete, sheet add/delete/duplicate/move/hide) cannot share a batch with other classes; at most 2000 expanded cell changes — ' +
-      'except the range-level bulk ops fill_range / copy_range / convert_to_values / clear_range / find_replace / sort_range / format_range, which handle up to 200,000 cells in one op ' +
+      'except the range-level bulk ops fill_range / copy_range / query_range / import_file / convert_to_values / clear_range / find_replace / sort_range / format_range, which handle up to 200,000 cells in one op ' +
       '(use fill_range to fill a formula or pattern down a whole column instead of huge set_range batches, ' +
       'copy_range to duplicate a large block once, convert_to_values to freeze formulas into their computed values); ' +
       'sheetId must be an id returned by get_workbook_context.',

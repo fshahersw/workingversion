@@ -1,0 +1,62 @@
+# Gateway in front of the archive (8769) and workbench (8770) containers of the
+# same ECS task. Both upstreams bind 127.0.0.1 and refuse any Host header other
+# than their own loopback authority, so this is the only way in: it rewrites
+# Host, strips the browser origin headers the workbench rejects, and exposes
+# only the JSON API paths.
+#
+# Two keys guard it. The ALB listener rule already required the CloudFront
+# origin key (the request came through the platform distribution and its WAF).
+# This block additionally requires X-Archive-App-Key, known only to the
+# platform's server side: CloudFront forwards viewer headers, so without it any
+# signed-in browser could call the archive directly. ARCHIVE_APP_KEY is
+# rendered in by the image's envsubst entrypoint from the task secret.
+
+map $http_x_archive_app_key $app_key_ok {
+  default 0;
+  "${ARCHIVE_APP_KEY}" 1;
+}
+
+map $request_method $not_get { default 1; GET 0; HEAD 0; }
+
+server {
+  listen 8781 default_server;
+
+  location = /health {
+    access_log off;
+    add_header Content-Type application/json;
+    return 200 '{"ok":true}';
+  }
+
+  # Archive JSON API and served originals. GET only: the archive writes nothing.
+  location ~ ^/archive-api/(api|supplement-files)/ {
+    if ($app_key_ok = 0) { return 403 '{"error":"app key required"}'; }
+    if ($not_get) { return 405; }
+    rewrite ^/archive-api/(.*)$ /$1 break;
+    proxy_pass http://127.0.0.1:8769;
+    proxy_set_header Host 127.0.0.1:8769;
+    proxy_set_header Connection "";
+    proxy_set_header Origin "";
+    proxy_set_header Sec-Fetch-Site "";
+    proxy_set_header Cookie "";
+    proxy_set_header X-Archive-App-Key "";
+  }
+
+  # Workbench JSON API (search, record versions, compare, citations, health).
+  # POST reaches only /api/handoff, which the workbench itself gates.
+  location ~ ^/workbench-api/api/ {
+    if ($app_key_ok = 0) { return 403 '{"error":"app key required"}'; }
+    rewrite ^/workbench-api/(.*)$ /$1 break;
+    proxy_pass http://127.0.0.1:8770;
+    proxy_set_header Host 127.0.0.1:8770;
+    proxy_set_header Connection "";
+    proxy_set_header Origin "";
+    proxy_set_header Sec-Fetch-Site "";
+    proxy_set_header Cookie "";
+    proxy_set_header X-Archive-App-Key "";
+  }
+
+  location / {
+    add_header Content-Type application/json;
+    return 404 '{"error":"not found"}';
+  }
+}

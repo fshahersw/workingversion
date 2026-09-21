@@ -147,6 +147,15 @@ export const Route = createFileRoute("/api/review/cell")({
           const answer = await answerCell(req);
           return Response.json({ ...answer, model: cellModel() });
         } catch (err) {
+          // The pipeline swallows model-chain failures into this 500. Log the
+          // status/model/message (never the document pages) so a recurring
+          // failure is diagnosable from CloudWatch instead of invisible.
+          const e = err as { status?: number; model?: string };
+          console.error(
+            `[api/review/cell] failed status=${e?.status ?? "?"} model=${e?.model ?? "?"} ${
+              err instanceof Error ? err.message : String(err)
+            }`.slice(0, 500),
+          );
           return Response.json(
             { error: err instanceof Error ? err.message : "Cell extraction failed" },
             { status: 500 },

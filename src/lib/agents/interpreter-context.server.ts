@@ -41,6 +41,11 @@ export function interpreterOwner(): string {
   if (!owner) throw new Error("Python requires an authenticated request context.");
   return owner;
 }
+/** The verified principal of the current authenticated request, or null when
+ *  no request context is active (scripts, tests, background jobs). */
+export function currentPrincipal(): string | null {
+  return context.getStore()?.owner ?? null;
+}
 export function interpreterState(): InterpreterState {
   const ctx = context.getStore();
   if (!ctx) throw new Error("Python requires an authenticated request context.");

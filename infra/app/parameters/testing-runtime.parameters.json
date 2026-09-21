@@ -21,11 +21,11 @@
   },
   {
     "ParameterKey": "ArtifactObjectKey",
-    "ParameterValue": "releases/25c17fbbc5d33cd9d4973714a2f447a79befb7a2bebdbe8f8027e3d5f9a5a425/app-runtime.zip"
+    "ParameterValue": "releases/2636d5748bf64cda657529b505818d162e822be1478f7abd74fde9413d059951/app-runtime.zip"
   },
   {
     "ParameterKey": "ArtifactObjectVersion",
-    "ParameterValue": "DK0M6zEBrz8NUlLvu6SYm_SIj5yTxnZw"
+    "ParameterValue": "HSOvHhaOsDh6pTq19_3CzgJkqOYcyymZ"
   },
   {
     "ParameterKey": "Architecture",
@@ -112,6 +112,10 @@
     "ParameterValue": "rate(30 minutes)"
   },
   {
+    "ParameterKey": "IntelRefreshSchedule",
+    "ParameterValue": "rate(4 hours)"
+  },
+  {
     "ParameterKey": "BedrockRegion",
     "ParameterValue": "us-east-1"
   },
@@ -125,11 +129,15 @@
   },
   {
     "ParameterKey": "OfficeInspectModel",
-    "ParameterValue": "nvidia.nemotron-super-3-120b"
+    "ParameterValue": ""
   },
   {
     "ParameterKey": "OfficeTiering",
     "ParameterValue": "on"
+  },
+  {
+    "ParameterKey": "OfficeThoroughModel",
+    "ParameterValue": ""
   },
   {
     "ParameterKey": "BdaProjectArn",
@@ -204,6 +212,10 @@
     "ParameterValue": "arn:aws:secretsmanager:us-east-1:475976462949:secret:litai/testing/office-engine-jwt-U06SZ8"
   },
   {
+    "ParameterKey": "ArchiveAppKeySecretName",
+    "ParameterValue": "litai/testing/legal-archive-app-key"
+  },
+  {
     "ParameterKey": "WorkflowsEnabled",
     "ParameterValue": "true"
   },
@@ -229,6 +241,26 @@
   },
   {
     "ParameterKey": "RuntimeSecretRevision",
-    "ParameterValue": "1789266729455"
+    "ParameterValue": "1789957772086"
+  },
+  {
+    "ParameterKey": "OfficeRouter",
+    "ParameterValue": "typesafe"
+  },
+  {
+    "ParameterKey": "ResearchEffortRouter",
+    "ParameterValue": "typesafe"
+  },
+  {
+    "ParameterKey": "ResearchTopicShift",
+    "ParameterValue": "typesafe"
+  },
+  {
+    "ParameterKey": "TypeSafeModel",
+    "ParameterValue": "jev-1.13.0"
+  },
+  {
+    "ParameterKey": "TypeSafeTimeoutMs",
+    "ParameterValue": "800"
   }
 ]

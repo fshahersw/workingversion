@@ -471,6 +471,34 @@ const DOCKET_TOOL_DEFS: ToolDef[] = [
       required: ["question"],
     },
   },
+  {
+    name: "matter_corpus_search",
+    description:
+      "Semantic search over the FIRM'S OWN INGESTED DOCKET CORPUS for one of its active MDL matters — the full text of the filings the firm has collected and indexed for that matter (a managed per-matter vector knowledge base). Use it to pull on-point passages BY MEANING from a matter's own record: what an order held, how a brief argued a point, an expert's opinion, a defense raised. This is NOT DocketBird — db_* hit the LIVE federal docket for ANY case; this searches only the firm's curated corpus for a KNOWN matter and returns the actual passage TEXT (not just docket lines). Prefer it over db_search_filings when the matter is one of the firm's own and you want the substance of what its filings SAY; it needs no case_id. Pass `matter` (the matter name or MDL — e.g. 'roundup', 'social media adolescent addiction', 'zantac', 'insulin pricing') and `query` (what to find), optionally with 1-2 short alternate angles in `queries` for wider recall (run in parallel, merged + de-duplicated). If the matter is not in the corpus, the tool returns the list of matters that ARE — pick from those.",
+    input_schema: {
+      type: "object",
+      properties: {
+        matter: {
+          type: "string",
+          description:
+            "The matter/MDL to search, by name or number (e.g. 'roundup', 'social media addiction', 'MDL 2924'). Must be one of the firm's ingested matters; the tool lists them if it can't match.",
+        },
+        query: {
+          type: "string",
+          description:
+            "What to find in that matter's filings — a holding, doctrine, expert, defense, fact, or ruling. A phrase or question; the corpus is searched by meaning, not keywords.",
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional 1-2 ALTERNATE phrasings/angles of the same question (a doctrine, a specific order or judge, a party or defense) run IN PARALLEL with `query` and merged + de-duplicated. Widens recall on a single call — keep them short and genuinely distinct, not restatements of `query`.",
+        },
+        limit: { type: "number", description: "Distinct passages to return (default 8, cap 15)." },
+      },
+      required: ["matter", "query"],
+    },
+  },
 ];
 
 export const AGENT_TOOLS: Record<LitAgentKey, ToolDef[]> = {
@@ -495,6 +523,7 @@ export async function executeTool(
   if (name === "db_get_case") return dbGetCase(input, book);
   if (name === "db_calendar") return dbCalendar(input, book);
   if (name === "db_graph_ask") return dbGraphAsk(input, book);
+  if (name === "matter_corpus_search") return matterCorpusSearch(input, book);
   return { text: `Unknown tool "${name}".`, hits: 0, refs: [] };
 }
 
@@ -1359,4 +1388,110 @@ async function dbGraphAsk(input: Record<string, unknown>, book: SourceBook): Pro
     content: trunc(body, 4000),
   });
   return { text: `[${src.ref}] ${body}`, hits: r.num_records, refs: [src.ref] };
+}
+
+// --- Matter corpus (firm's own ingested docket KBs) ------------------------
+
+async function matterCorpusSearch(
+  input: Record<string, unknown>,
+  book: SourceBook,
+): Promise<ToolOutcome> {
+  const query = str(input["query"]);
+  if (query.length < 3) return { text: "query must be at least 3 characters.", hits: 0, refs: [] };
+  const { listMatterKbs, resolveMatterKb, retrieveMatterCorpus } = await import(
+    "./matter-corpus.server"
+  );
+  const available = await listMatterKbs();
+  if (!available.length)
+    return { text: "No matter corpora are available for retrieval yet.", hits: 0, refs: [] };
+  const matterQ = str(input["matter"]);
+  const matter = await resolveMatterKb(matterQ);
+  console.error(
+    `[matter_corpus_search] q=${JSON.stringify(matterQ)} avail=${available.length} matched=${matter?.matterId ?? "NONE"} kb=${matter?.kbId ?? "-"}`,
+  );
+  if (!matter) {
+    const names = available.map((m) => `- ${m.title} (${m.matterId})`).join("\n");
+    return {
+      text: `Could not match "${matterQ}" to an ingested matter. Available matter corpora:\n${names}\n\nRetry with one of these.`,
+      hits: 0,
+      refs: [],
+    };
+  }
+  const k = clamp(input["limit"], 8, 15);
+  const extraQueries = Array.isArray(input["queries"])
+    ? (input["queries"] as unknown[]).map((q) => str(q))
+    : [];
+  let passages;
+  try {
+    passages = await retrieveMatterCorpus(matter.kbId, [query, ...extraQueries], k);
+  } catch (err) {
+    console.error(
+      `[matter_corpus_search] retrieve error kb=${matter.kbId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {
+      text: `Corpus retrieve failed for ${matter.title}: ${trunc(err instanceof Error ? err.message : "error", 200)}`,
+      hits: 0,
+      refs: [],
+    };
+  }
+  console.error(`[matter_corpus_search] kb=${matter.kbId} passages=${passages.length}`);
+  if (!passages.length)
+    return {
+      text: `No passages in the ${matter.title} corpus matched "${query}".`,
+      hits: 0,
+      refs: [],
+    };
+
+  // date_filed rides the KB sidecar as a YYYYMMDD number (see docket-sync); the
+  // other attributes are strings. Fall back cleanly when any are absent.
+  const fmtFiled = (v: unknown): string => {
+    const digits = (
+      typeof v === "number" ? String(v) : typeof v === "string" ? v : ""
+    ).replace(/\D/g, "");
+    return digits.length === 8
+      ? `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
+      : "";
+  };
+  const num = (v: unknown): number => {
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const refs: string[] = [];
+  const lines = passages.map((p, i) => {
+    // Managed-KB chunk metadata: docket_number, entry_number, attachment_number,
+    // doc_type, date_filed (YYYYMMDD number), _document_title (filename). No
+    // free-text title on supabase-sourced docs, so build a docket-style label.
+    const md = p.metadata ?? {};
+    const docketNo = str(md["docket_number"]);
+    const entry = num(md["entry_number"]);
+    const attach = num(md["attachment_number"]);
+    const docType = str(md["doc_type"]);
+    const dateFiled = fmtFiled(md["date_filed"]);
+    const docTitle = str(md["_document_title"]);
+    const ecf = entry > 0 ? `ECF ${entry}${attach > 0 ? `-${attach}` : ""}` : "";
+    const label =
+      [docketNo ? `Dkt. ${docketNo}` : "", ecf, docType && docType !== "other" ? docType : ""]
+        .filter(Boolean)
+        .join(", ") || docTitle;
+    const cite =
+      [matter.title, label || undefined].filter(Boolean).join(" — ") || `${matter.title} filing`;
+    const src = book.add(
+      {
+        citation: cite,
+        authority: "registry",
+        source_type: "filing",
+        section_path: `${p.location || matter.kbId}#${i}`,
+        ...(dateFiled ? { effective_date: dateFiled } : {}),
+        content: trunc(p.text, 1500),
+      },
+      { fullText: p.text },
+    );
+    refs.push(src.ref);
+    return `[${src.ref}] ${cite}${dateFiled ? ` — filed ${dateFiled}` : ""}\n${trunc(p.text, 1400)}`;
+  });
+  return {
+    text: `Matter corpus — ${matter.title} (${passages.length} passages, most relevant first):\n\n${lines.join("\n\n")}`,
+    hits: passages.length,
+    refs,
+  };
 }

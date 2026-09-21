@@ -11,6 +11,13 @@ export type OrchestrateInput = {
   query: string;
   history?: HistoryTurn[];
   memory?: unknown;
+  /** Verified Cognito principal (from request auth, never the client body).
+   *  Enables the cross-chat user memory; absent in scripts and tests. */
+  principal?: string;
+  /** Saved conversation id when the client already has one (second turn on).
+   *  Used to count a chat once in the user memory and to drop it from the
+   *  recent-chats list. Client-supplied, so only ever used as an opaque key. */
+  conversationId?: string;
   signal?: AbortSignal;
   matter?: {
     matter_id: string;

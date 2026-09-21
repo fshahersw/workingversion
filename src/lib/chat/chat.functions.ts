@@ -106,6 +106,30 @@ export const deleteConversationFn = createServerFn({ method: "POST" })
     return deleteConversation(principalOf(context), data.convId);
   });
 
+/** The attorney's cross-chat research memory (anchors + standing preferences).
+ *  Read-only view for a settings/"what do you remember" surface. */
+export const getUserMemoryFn = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async ({ context }) => {
+    const { loadUserMemory } = await import("@/lib/agents/user-memory.server");
+    const mem = await loadUserMemory(principalOf(context));
+    return {
+      anchors: mem.anchors.map((a) => ({ label: a.label, kind: a.kind, chats: a.chats, lastSeen: a.lastSeen })),
+      preferences: mem.preferences.map((p) => ({ text: p.text, chats: p.chats, lastSeen: p.lastSeen })),
+      updatedAt: mem.updatedAt,
+    };
+  });
+
+/** Forget everything carried across chats for this attorney. Per-conversation
+ *  memory (stored on each conversation) is untouched. */
+export const clearUserMemoryFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .handler(async ({ context }) => {
+    const { clearUserMemory } = await import("@/lib/agents/user-memory.server");
+    await clearUserMemory(principalOf(context));
+    return { ok: true as const };
+  });
+
 export const saveOutputFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((d: { convId: string; msgId: string; folderId?: string }) => {

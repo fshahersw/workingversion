@@ -31,6 +31,7 @@ import { streamGrokWriter } from "./frontier-writer.server.ts";
 import { SourceBook } from "./tools.server";
 import { RESEARCH_TOOLS, executeResearchTool } from "./research-tools.server";
 import { normalizeMemory, tailMessages, updateMemory } from "./memory.server";
+import { loadUserContext, recordUserMemory, type UserContext } from "./user-memory.server";
 import { checkFaithfulness, judgeEnabled } from "./faithfulness.server";
 import { checkCitations, factCheck, kindLabel, unverified } from "@/lib/fact-check";
 import { agentError, agentLog, since, trunc } from "./log.server";
@@ -139,6 +140,13 @@ async function streamAndFinish(opts: {
     const memory = normalizeMemory(input.memory);
     const next = await updateMemory(memory, input.query, answerText, sources, input.signal);
     emit("memory", { memory: next });
+    // Same cross-chat profile the legacy loop maintains (user-memory.server).
+    if (input.principal) {
+      await recordUserMemory(input.principal, input.conversationId, {
+        entities: next.entities.map((e) => ({ label: e.label, kind: e.kind })),
+        preferences: next.preferences,
+      });
+    }
   } catch (err) {
     agentError("frontier_memory_failed", { run: runId, error: trunc(errorMessage(err), 160) });
   }
@@ -182,17 +190,42 @@ export async function runFrontierAgent(init: OrchestrateInput, emit: Emit): Prom
     }
   }
 
+  // Cross-chat profile (anchors + standing preferences), same store the
+  // legacy loop reads; capped inside loadUserContext and overlapped with
+  // routing so it never holds up the turn.
+  const userCtxPromise: Promise<UserContext | null> = input.principal
+    ? loadUserContext(input.principal, {
+        ...(input.conversationId ? { excludeConversationId: input.conversationId } : {}),
+      }).catch(() => null)
+    : Promise.resolve(null);
+
+  // Session memory feeds the writer the same way the legacy loop's context
+  // block does: the rolling summary + entity ledger, and the verbatim tail
+  // when the client sent no history (the research client never does).
+  const fromHistory = recentFromHistory(input.history);
+  const recentMessages = fromHistory.length
+    ? fromHistory
+    : tailMessages(memory).map((h) => ({ role: h.role, content: h.content }));
+  const summaryParts = [
+    memory.summary.trim(),
+    memory.entities.length ? `Anchors: ${memory.entities.map((e) => e.label).join("; ")}` : "",
+    memory.preferences.length ? `Standing instructions for this chat: ${memory.preferences.join("; ")}` : "",
+  ].filter(Boolean);
+
   const ctx: RequestContext = {
     requestId: runId,
     conversationId: runId,
     userMessage: input.query,
     currentDateIso: new Date().toISOString().slice(0, 10),
     userMode: toUserMode(input.forceMode),
-    recentMessages: recentFromHistory(input.history),
+    ...(summaryParts.length ? { conversationSummary: summaryParts.join("\n") } : {}),
+    recentMessages,
   };
 
   // Nemotron routing. routeRequest never throws — it degrades to a safe fallback.
   const outcome = await routeRequest(ctx, input.signal ? { signal: input.signal } : {});
+  const userCtx = await userCtxPromise;
+  if (userCtx?.block) ctx.userContext = userCtx.block;
   const route = outcome.route;
   agentLog("frontier_route", {
     run: runId,

@@ -6,9 +6,12 @@ import {
   ChevronLeft,
   ChevronRight,
   FileSearch,
+  Gavel,
   Home,
+  Landmark,
   Library,
   LogOut,
+  MapPin,
   Menu,
   PenLine,
   Search,
@@ -213,6 +216,31 @@ function SidebarInner({
         <NavRow
           item={primaryNav[6]}
           active={pathname.startsWith("/workflows")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+
+        {/* Corpus: the Legal Archive pages */}
+        {expanded && (
+          <p className="mb-1 mt-3 px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+            Corpus
+          </p>
+        )}
+        <NavRow
+          item={{ icon: MapPin, label: "States & Counties", to: "/archive/jurisdictions" }}
+          active={pathname.startsWith("/archive/jurisdictions")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+        <NavRow
+          item={{ icon: Landmark, label: "Federal Law & Agencies", to: "/archive/federal" }}
+          active={pathname.startsWith("/archive/federal")}
+          expanded={expanded}
+          onClick={onNavigate}
+        />
+        <NavRow
+          item={{ icon: Gavel, label: "Courts & Litigation", to: "/archive/courts" }}
+          active={pathname.startsWith("/archive/courts")}
           expanded={expanded}
           onClick={onNavigate}
         />
