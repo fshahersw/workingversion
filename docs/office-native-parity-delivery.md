@@ -43,6 +43,8 @@ The local Fireworks configuration is text-only. It correctly reports unavailable
 
 ## JEV and AWS production path
 
+The subsequent [external agent handoff](office-external-agent-handoff.md) adds the user's requirement to route production TypeSafe calls through AgentCore Gateway. That migration is the first follow-up task; the delivered implementation still uses the direct TypeSafe client.
+
 JEV evaluates three compact routing questions in one request with an 800 ms budget, pinned model, bounded cache and conservative fallback. Observed local JEV calls for the final Writer/PDF fixtures took 338 ms and 416 ms; these are individual observations, not a latency guarantee. It selects the reasoning tier; code owns permissions, exact targets, formulas, validation and write ordering. JEV is probabilistic classification, not a deterministic calculator or an unrestricted autonomous subagent. The production reasoning transport remains signed Bedrock ConverseStream; temporary direct-provider IDs are not remapped into Bedrock IDs. See [routing validation](./office-routing-production-validation.md).
 
 Before release, run the controlled build in the configured Linux/glibc architecture, package the native engine, and verify the intended AWS account's model/profile access, secret configuration, IAM, signed S3 CORS/checksum uploads, revision concurrency and cancellation. Test representative real Word/Excel/PowerPoint/PDF files in the actual desktop applications. These checks remain outstanding because AWS configuration was deferred.

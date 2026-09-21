@@ -44,6 +44,8 @@ Local public web search can use the configured Anthropic key with the provider's
 
 ## Production configuration
 
+**Updated handoff requirement:** the current direct TypeSafe transport below must be migrated to AgentCore Gateway for production. See the [external agent's implementation sequence](office-external-agent-handoff.md#5-first-follow-up-put-jev-behind-agentcore). That migration is not yet implemented or deployed; the local synthetic direct-provider lane remains useful for testing.
+
 Do not deploy `LOCAL_SYNTHETIC_MODE`, `OFFICE_LOCAL_PROVIDER`, local storage endpoints, or the temporary keys. Local mode refuses `NODE_ENV=production`, a nonlocal `APP_ENVIRONMENT`, Lambda and ECS runtime markers. Supplying keys alone never enables synthetic authentication. Requests also require a loopback URL and same-origin browser access. Normal Cognito, SDK credential chains, S3 and DynamoDB behavior remain the production path.
 
 JEV is a router, not a replacement for the document engine or the reasoning model. Set `OFFICE_ROUTER=typesafe` and supply `TYPESAFE_API_KEY` through the existing server secret mechanism to enable it. The code defaults to pinned `jev-1.13.0`, uses an 800 ms classification budget and evaluates task class, whether the saved document changes, and legal judgment. Ambiguous/failed decisions go to the main model. It does not grant tools or bypass write-mode policy.

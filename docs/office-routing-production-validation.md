@@ -12,6 +12,8 @@ The PDF agent's coordinated read-only `pdf_list_annotations` and `pdf_get_guide`
 
 ## JEV usage and production policy
 
+**New production architecture requirement:** move TypeSafe requests behind AgentCore Gateway. The [external agent handoff](office-external-agent-handoff.md#5-first-follow-up-put-jev-behind-agentcore) specifies the adapter, IAM, transport, deadline and verification work. This report describes the current direct transport; it does not claim the gateway migration is complete.
+
 Current [TypeSafe introduction](https://docs.typesafe.ai/introduction) and [fan-out documentation](https://docs.typesafe.ai/patterns/fan-out) describe independent questions evaluated against the same state in one request. Office already sends `task_class`, `changes_document` and `needs_legal_judgment` together. This pass tests that packet rather than adding sequential classifier calls or unsupported generation tasks.
 
 [Confidence](https://docs.typesafe.ai/confidence) is a statistic of the returned probability distribution, not a guarantee that an answer is correct. The [Jev 1.13 limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13) explicitly caution about numerical precision, adversarial state, independent-answer inconsistencies and text generation. Accordingly, code continues to own permissions, target IDs, formulas, arithmetic, schemas and mutation ordering. JEV chooses a model tier; it does not authorize a write, validate an Office file or execute parallel mutations.
