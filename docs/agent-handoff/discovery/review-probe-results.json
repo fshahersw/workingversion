@@ -1,0 +1,38 @@
+{
+  "revision": "f06e148",
+  "syntheticOnly": true,
+  "awsOrProviderCalls": 0,
+  "note": "These assertions reproduce observed defects rather than assert intended correctness.",
+  "staleAutomaticWrite": {
+    "display": "old answer",
+    "cacheKey": "document|column|v1",
+    "runId": "old-run"
+  },
+  "manualOverrideRace": {
+    "before": {
+      "display": "Manual corrected answer",
+      "overridden": true
+    },
+    "after": {
+      "display": "new answer",
+      "overridden": false
+    }
+  },
+  "failedRunCreationReturned": null,
+  "fuzzyCitation": {
+    "source": "The company will not pay damages under this settlement agreement.",
+    "returnedAsVerified": [
+      {
+        "page": 1,
+        "quote": "The company will now pay damages under this settlement agreement.",
+        "fileName": "synthetic.txt"
+      }
+    ]
+  },
+  "csvFormulaContent": "Document,Pages,Answer,Answer — citations,Answer — status\n=1+1,1,\"=SUM(1,2)\",,Answered",
+  "listTruncation": {
+    "sourceItems": 32,
+    "retainedItems": 24,
+    "warningOrUnmatched": []
+  }
+}

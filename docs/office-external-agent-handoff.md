@@ -2,6 +2,8 @@
 
 Prepared September 21, 2026. This is the continuation contract for an external coding agent, with completed work separated from the next tasks. Start from `codex/office-pdf-quality`, which contains four implementation commits through `b3fd979a4ca06ced9169c4444f66363b6a886675`, plus this handoff. Original public baseline: `e595931af932953a0f3ef70e9cfb80a837c001bc`.
 
+For the subsequent Research and Discovery audits and implementation instructions, read the [combined handoff index](agent-handoff/README.md) and [verification runbook](agent-handoff/IMPLEMENTATION-RUNBOOK.md). The owner has designated Frontier Research as legacy and retiring; optimize the active Research pipeline. Shared transport/AgentCore changes must preserve this Office delivery as well as the Research/Discovery contracts.
+
 ## 1. Understand the user's requirements
 
 Improve the existing litigation platform's Writer, Sheets, Slides, and PDF workflows for speed, accurate native editing, long multi-round tasks, useful progress, and reliable Save/Download. Preserve the existing browser editors and AWS Bedrock architecture. Use compact JEV decisions wherever measured classification quality and latency justify them; use deterministic native code for arithmetic, schemas, permissions, targets, formatting and file operations. Independent reads and analyses may run in parallel; dependent changes to a document must be ordered and verified.

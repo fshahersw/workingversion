@@ -1,0 +1,17 @@
+{
+  "commit": "f06e148fdda93553718621ab3634ce53548d7bfe",
+  "syntheticOnly": true,
+  "networkCalls": 0,
+  "retryAfter": {
+    "headerSeconds": 180,
+    "actualDelayMs": 250,
+    "intendedWithCurrent30SecondCapMs": 30000,
+    "protocolDelayMs": 180000
+  },
+  "limiter": {
+    "waitingRequests": 1,
+    "accumulatedWaiters": 9,
+    "retainedAfterAbort": 9,
+    "cleanupOnRelease": true
+  }
+}

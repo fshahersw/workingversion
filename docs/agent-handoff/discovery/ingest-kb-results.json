@@ -1,0 +1,47 @@
+{
+  "commit": "f06e148fdda93553718621ab3634ce53548d7bfe",
+  "date": "2026-09-21T22:43:04.362Z",
+  "providerCalls": 0,
+  "awsCalls": 0,
+  "method": "Actual pure functions/orchestrator body, fixed in-memory dependency stubs. Counterexamples, not live incident counts.",
+  "passed": true,
+  "checks": [
+    {
+      "name": "Segment page indices restart",
+      "observed": [
+        1,
+        2,
+        1,
+        2
+      ],
+      "expectedDocumentPages": 4
+    },
+    {
+      "name": "Whole-document markdown suppresses supplied page anchors",
+      "declaredPages": 2,
+      "anchoredPages": 1
+    },
+    {
+      "name": "One failed BDA segment is silently skipped",
+      "declaredSegments": 2,
+      "returnedPages": 2,
+      "throws": false
+    },
+    {
+      "name": "Transient page-read failure becomes terminal and acknowledged",
+      "ack": "processed",
+      "documentStatus": "error"
+    },
+    {
+      "name": "Character cap does not ensure UTF-8 Data API row bound",
+      "chunkChars": 30000,
+      "utf8Bytes": 90000,
+      "singleWriterPrefixChars": 3500
+    },
+    {
+      "name": "Null embedding succeeds as insert-ready row",
+      "embedding": null,
+      "retry": false
+    }
+  ]
+}
