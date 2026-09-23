@@ -44,6 +44,12 @@ import {
   type RankedResult,
 } from "./web-rank";
 import { semanticRerank } from "./web-rerank.server";
+import {
+  quickWebAnswer,
+  quickAnswerEnabled,
+  renderQuickAnswerBlock,
+  type QuickAnswerSource,
+} from "./web-quick-answer.server";
 
 /** Assigns S1..Sn refs and dedupes sources across the whole run. */
 export class SourceBook {
@@ -170,7 +176,19 @@ function hostOf(url?: string): string {
   }
 }
 
-export type ToolOutcome = { text: string; hits: number; refs: string[]; artifacts?: Artifact[] };
+export type ToolOutcome = {
+  text: string;
+  hits: number;
+  refs: string[];
+  artifacts?: Artifact[];
+  /** Fast, source-grounded synthesis of the results (research web_search only,
+   *  when WEB_QUICK_ANSWER is enabled). Absent otherwise. */
+  quickAnswer?: string;
+};
+
+/** Internal: a category outcome that also carries its ranked sources so the
+ *  fan-out in webSearch can synthesize one quick answer across categories. */
+type CategoryOutcome = ToolOutcome & { sources: QuickAnswerSource[] };
 
 const clamp = (v: unknown, def: number, max: number) => {
   const n = Number(v);
@@ -577,16 +595,18 @@ async function categorySearch(
   input: Record<string, unknown>,
   book: SourceBook,
   opts?: { brave?: boolean; unrestrictedDates?: boolean },
-): Promise<ToolOutcome> {
+): Promise<CategoryOutcome> {
   if (!agentCoreConfigured())
     return {
       text: "Authoritative search is not configured (SEARCH_AWS_ACCESS_KEY_ID / SEARCH_AWS_SECRET_ACCESS_KEY missing).",
       hits: 0,
       refs: [],
+      sources: [],
     };
 
   const query = str(input["query"]);
-  if (query.length < 3) return { text: "Query must be at least 3 characters.", hits: 0, refs: [] };
+  if (query.length < 3)
+    return { text: "Query must be at least 3 characters.", hits: 0, refs: [], sources: [] };
   // Keep, not fetch: we pull a wide candidate pool from the gateway and let
   // the local rerank decide which few reach the prompt.
   const keep = clamp(input["limit"], 6, 10);
@@ -750,7 +770,7 @@ async function categorySearch(
       results = pools.flat();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "search failed";
-      return { text: `${cfg.key} failed: ${trunc(msg, 220)}`, hits: 0, refs: [] };
+      return { text: `${cfg.key} failed: ${trunc(msg, 220)}`, hits: 0, refs: [], sources: [] };
     }
   }
 
@@ -782,7 +802,8 @@ async function categorySearch(
     }
   }
 
-  if (!results.length) return { text: `No ${cfg.key} results for "${query}".`, hits: 0, refs: [] };
+  if (!results.length)
+    return { text: `No ${cfg.key} results for "${query}".`, hits: 0, refs: [], sources: [] };
 
   const seen = seenFor(book);
   // Two-stage selection. (1) A WIDE lexical pass keeps up to 3x the target so
@@ -870,9 +891,11 @@ async function categorySearch(
       text: `No ${cfg.key} result added new on-point material for "${query}" (already-seen or off-topic hits filtered).`,
       hits: 0,
       refs: [],
+      sources: [],
     };
 
   const refs: string[] = [];
+  const sources: QuickAnswerSource[] = [];
   const lines = ranked.map(({ result: r, evidence, date, superseded }) => {
     const src = book.add(
       {
@@ -890,6 +913,17 @@ async function categorySearch(
       { fullText: r.text ?? "" },
     );
     refs.push(src.ref);
+    // Only current (non-superseded) sources ground the quick answer, so the
+    // fast synthesis never leans on a hit the ranker already flagged as stale.
+    if (!superseded) {
+      sources.push({
+        ref: src.ref,
+        title: r.title ?? "",
+        url: r.url ?? "",
+        evidence,
+        ...(date ? { date } : {}),
+      });
+    }
     const stamp = date ? `as of ${date}` : "date: unknown";
     const flag = superseded
       ? " [SUPERSEDED — a newer source on this subject is in this list; prefer it]"
@@ -897,7 +931,7 @@ async function categorySearch(
     return `[${src.ref}] ${r.title ?? ""} — ${r.url ?? ""} (${stamp})${flag}\n${evidence}`;
   });
 
-  return { text: lines.join("\n\n"), hits: ranked.length, refs };
+  return { text: lines.join("\n\n"), hits: ranked.length, refs, sources };
 }
 
 /** ONE model turn -> 1-4 category domain-sets searched in parallel. */
@@ -928,11 +962,28 @@ async function webSearch(
       categorySearch(cfg, { query, queries, limit, published_after: publishedAfter }, book, opts),
     ),
   );
-  return {
-    text: outcomes.map((o, i) => `### ${cfgs[i]!.key}\n${o.text}`).join("\n\n"),
-    hits: outcomes.reduce((n, o) => n + o.hits, 0),
-    refs: outcomes.flatMap((o) => o.refs),
-  };
+  const body = outcomes.map((o, i) => `### ${cfgs[i]!.key}\n${o.text}`).join("\n\n");
+  const refs = outcomes.flatMap((o) => o.refs);
+  const hits = outcomes.reduce((n, o) => n + o.hits, 0);
+
+  // Fast quick answer: research path only, opt-in via WEB_QUICK_ANSWER, and
+  // fail-open. It synthesizes ONE grounded answer across the categories' ranked
+  // sources so the fast tier gets a direct answer before deciding on a full
+  // loop. Any failure/timeout leaves the outcome exactly as it was.
+  if (opts?.brave && quickAnswerEnabled() && hits > 0) {
+    const sources = outcomes.flatMap((o) => o.sources);
+    const answer = await quickWebAnswer({ query, sources });
+    if (answer) {
+      return {
+        text: `${renderQuickAnswerBlock(answer)}\n\n${body}`,
+        hits,
+        refs,
+        quickAnswer: answer.text,
+      };
+    }
+  }
+
+  return { text: body, hits, refs };
 }
 
 // --- DocketBird execution --------------------------------------------------

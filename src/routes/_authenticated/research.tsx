@@ -190,7 +190,7 @@ function ResearchPage() {
                       key={p}
                       type="button"
                       onClick={() => setPane(p)}
-                      className={`rounded px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      className={`rounded px-2.5 py-1 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-card ${
                         pane === p
                           ? "bg-brand-navy text-white"
                           : "text-muted-foreground hover:text-brand-navy"
@@ -417,7 +417,7 @@ function HeroComposer({
               disabled={disabled || !v.trim() || slashSkillPending(v)}
               aria-label="Send"
               title="Send"
-              className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all hover:bg-brand-navy/90 disabled:opacity-40"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-brand-navy text-white shadow-sm transition-all hover:bg-brand-navy/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:opacity-40"
             >
               <ArrowUp className="h-[16px] w-[16px]" strokeWidth={2.4} />
             </button>
