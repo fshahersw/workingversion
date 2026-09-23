@@ -102,6 +102,13 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
+
+  /* Browser surface: tint text selection from the brand hue instead of the
+     stock blue the OS/browser would otherwise paint. */
+  ::selection {
+    background-color: color-mix(in oklab, var(--brand-blue) 22%, transparent);
+    color: var(--brand-navy);
+  }
 }
 
 @keyframes shimmer {

@@ -1,11 +1,13 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
+  ArrowRight,
   Bookmark,
   BookmarkCheck,
   Download,
   FileText,
   FolderInput,
   FolderOpen,
+  Inbox,
   Layers,
   Loader2,
   MessageSquare,
@@ -16,6 +18,7 @@ import {
   Trash2,
   Upload,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -203,7 +206,9 @@ function LibraryPage() {
         {/* Section rail: navigation on the left */}
         <aside className="hidden w-[190px] shrink-0 flex-col border-r border-border/60 bg-muted/30 md:flex">
           <div className="flex h-[46px] shrink-0 items-center px-4">
-            <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-foreground">Library</h1>
+            <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-foreground">
+              Library
+            </h1>
           </div>
           <nav className="wr-app-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4">
             {SECTION_GROUPS.map((g) => (
@@ -371,9 +376,23 @@ function WorkspacesList({ surface, query = "" }: { surface: WorkspaceSurface; qu
         onDelete={folders.remove}
       />
       {!items.length ? (
-        <EmptyState label={emptyLabel} />
+        <EmptyState
+          label={emptyLabel}
+          icon={surface === "deposition" ? Mic : surface === "review" ? Table2 : Layers}
+          action={{
+            label:
+              surface === "deposition"
+                ? "Open Depositions"
+                : surface === "review"
+                  ? "Open Tabular Review"
+                  : "Open Discovery",
+            onClick: () =>
+              void navigate({ to: "/docs", search: { tab: discoveryTabFor(surface) } }),
+          }}
+        />
       ) : !shown.length ? (
         <EmptyState
+          icon={query.trim() ? Search : FolderOpen}
           label={
             query.trim()
               ? `No saved items match "${query.trim()}".`
@@ -493,9 +512,14 @@ function DraftsList({ query = "" }: { query?: string }) {
         onDelete={folders.remove}
       />
       {!items.length ? (
-        <EmptyState label="No drafts yet. Start one from Drafts; it saves as you write." />
+        <EmptyState
+          icon={PenLine}
+          label="No drafts yet. Start one from Drafts; it saves as you write."
+          action={{ label: "Open Drafts", onClick: () => void navigate({ to: "/drafts" }) }}
+        />
       ) : !shown.length ? (
         <EmptyState
+          icon={query.trim() ? Search : FolderOpen}
           label={
             query.trim()
               ? `No drafts match "${query.trim()}".`
@@ -541,7 +565,7 @@ function DraftsList({ query = "" }: { query?: string }) {
                     ? navigate({ to: "/office/slides/$docId", params: { docId: d.draftId } })
                     : d.kind === "pdf"
                       ? navigate({ to: "/office/pdf/$docId", params: { docId: d.draftId } })
-                    : navigate({ to: "/office/drafts/$draftId", params: { draftId: d.draftId } }))
+                      : navigate({ to: "/office/drafts/$draftId", params: { draftId: d.draftId } }))
               }
               className="shrink-0 rounded bg-brand-navy px-2.5 py-1 text-[11.5px] font-medium text-white hover:opacity-90"
             >
@@ -567,8 +591,35 @@ function DraftsList({ query = "" }: { query?: string }) {
   );
 }
 
-function EmptyState({ label }: { label: string }) {
-  return <div className="px-1 py-8 text-center text-[12.5px] text-muted-foreground">{label}</div>;
+function EmptyState({
+  label,
+  icon: Icon = Inbox,
+  action,
+}: {
+  label: string;
+  icon?: LucideIcon;
+  action?: { label: string; onClick: () => void };
+}) {
+  return (
+    <div className="flex flex-col items-center px-6 py-14 text-center">
+      <div className="mb-3 grid size-11 place-items-center rounded-xl border border-border/60 bg-surface text-brand-navy/45">
+        <Icon className="size-5" strokeWidth={1.6} />
+      </div>
+      <p className="max-w-[46ch] text-pretty text-[13px] leading-[1.55] text-muted-foreground">
+        {label}
+      </p>
+      {action ? (
+        <button
+          type="button"
+          onClick={action.onClick}
+          className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-brand-navy px-3 py-1.5 text-[12.5px] font-medium text-white shadow-sm transition-colors hover:bg-brand-navy/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
+          {action.label}
+          <ArrowRight className="size-3.5" strokeWidth={2} />
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 function Loading() {
@@ -623,9 +674,14 @@ function ChatsList({ query = "" }: { query?: string }) {
         onDelete={folders.remove}
       />
       {items.length === 0 ? (
-        <EmptyState label="No conversations yet." />
+        <EmptyState
+          icon={MessageSquare}
+          label="No conversations yet. Kept research chats and their citations land here."
+          action={{ label: "Start research", onClick: () => void navigate({ to: "/research" }) }}
+        />
       ) : shown.length === 0 ? (
         <EmptyState
+          icon={query.trim() ? Search : FolderOpen}
           label={
             query.trim()
               ? `No conversations match "${query.trim()}".`
@@ -852,9 +908,13 @@ function ItemsList({ kind, query = "" }: { kind: ItemKind; query?: string }) {
       {items === null ? (
         <Loading />
       ) : items.length === 0 ? (
-        <EmptyState label={emptyLabel} />
+        <EmptyState
+          icon={isFile ? Upload : kind === "prompt" ? Bookmark : FileText}
+          label={emptyLabel}
+        />
       ) : shown.length === 0 ? (
         <EmptyState
+          icon={query.trim() ? Search : FolderOpen}
           label={
             query.trim()
               ? `No ${isFile ? "uploads" : kind === "prompt" ? "prompts" : "saved outputs"} match "${query.trim()}".`

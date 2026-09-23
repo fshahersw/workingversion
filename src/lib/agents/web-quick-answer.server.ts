@@ -118,10 +118,11 @@ export function formatQuickAnswer(
   if (!cited.length) return null;
 
   // Strip any hallucinated tags that do not resolve, but keep the prose.
-  const cleaned = text.replace(CITATION_RE, (whole, ref: string) =>
-    known.has(ref) ? whole : "",
-  );
-  const normalized = cleaned.replace(/[ \t]{2,}/g, " ").replace(/\s+([.,;:])/g, "$1").trim();
+  const cleaned = text.replace(CITATION_RE, (whole, ref: string) => (known.has(ref) ? whole : ""));
+  const normalized = cleaned
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([.,;:])/g, "$1")
+    .trim();
   if (!normalized) return null;
 
   return { text: normalized, citations: cited };
